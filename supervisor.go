@@ -223,6 +223,9 @@ func (s *Supervisor) Replay(events []Event) {
 				t.Nudges = 0
 			}
 			t.Limited, _ = e.Details["limited"].(bool)
+			if d, _ := e.Details["dialog"].(bool); !d {
+				t.Dialog.Open = false
+			}
 			asks, _ := e.Details["questions"].(bool)
 			done, _ := e.Details["done"].(bool)
 			t.Questions.observeQuestions(asks, done)
@@ -246,6 +249,7 @@ func (s *Supervisor) Replay(events []Event) {
 			if k := detailString(e, "escalation"); k != "" {
 				t.Posted[k] = true // given up on
 				t.replayQuestionsPost(e)
+				t.replayDialog(e)
 			}
 			t.Skipped[detailString(e, "key")] = true
 		case KindError:
@@ -275,6 +279,7 @@ func (s *Supervisor) Replay(events []Event) {
 			case ActEscalate, ActUpdate:
 				t.Posted[detailString(e, "key")] = true
 				t.replayQuestionsPost(e)
+				t.replayDialog(e)
 			case ActOpen:
 				ref := detailString(e, "ref")
 				if ref == "" {
@@ -457,6 +462,9 @@ func (s *Supervisor) step(name string, sess Session) {
 			return
 		}
 	}
+	if ev.Dialog == "" {
+		t.Dialog.Open = false // the dialog episode has ended
+	}
 	state, reason := Classify(t, ev, s.cfg.Policies, now)
 	if s.logObserve(name, t, ev, state, reason, now); s.halt != nil {
 		return
@@ -635,8 +643,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 		case ev.Status.Questions != "":
 			s.escalateQuestions(name, ev.Status.Questions, t, now)
 		case ev.Dialog != "":
-			s.escalate(name, fmt.Sprintf("dialog:%s:%s", name, shortHash(ev.PaneHash)),
-				fmt.Sprintf("%s is stopped at a permission or confirmation dialog (the screen matches %q); agentd will not answer it. Attach and answer it.", name, ev.Dialog), t, now)
+			s.escalateDialog(name, ev.Dialog, t, now)
 		default:
 			s.escalate(name, fmt.Sprintf("tool-wait:%s:%d", name, t.HashSince.Unix()),
 				fmt.Sprintf("%s has shown the same screen since %s with a tool call as its last turn; it is probably waiting at a permission prompt. Attach and answer it.", name, t.HashSince.Format(time.RFC3339)), t, now)
@@ -738,6 +745,29 @@ func (s *Supervisor) escalateQuestions(name, questions string, t *Track, now tim
 	if s.post(name, ActUpdate, fmt.Sprintf("%s:update:%d", key, n), fmt.Sprintf("%s changed its open Questions in STATUS.md; they now read:\n%s", name, questions), t, now,
 		map[string]any{"questions_hash": hash, "update": n}, full) {
 		q.Hash, q.Updates, q.LastUpdate = hash, n, now
+	}
+}
+
+// escalateDialog posts one escalation per dialog episode, keyed to the
+// session rather than the screen, so a dialog whose screen keeps changing
+// is one post, and at most one per DialogEscalationGap.
+func (s *Supervisor) escalateDialog(name, pattern string, t *Track, now time.Time) {
+	dq := &t.Dialog
+	if dq.Open || (!dq.Last.IsZero() && now.Sub(dq.Last) < DialogEscalationGap) {
+		return
+	}
+	n := dq.N + 1
+	if s.post(name, ActEscalate, fmt.Sprintf("dialog:%s:%d", name, n),
+		fmt.Sprintf("%s is stopped at a permission or confirmation dialog (the screen matches %q); agentd will not answer it. Attach and answer it.", name, pattern),
+		t, now, map[string]any{"dialog": n}) {
+		dq.Open, dq.N, dq.Last = true, n, now
+	}
+}
+
+// replayDialog settles a dialog escalation, posted or given up on.
+func (t *Track) replayDialog(e Event) {
+	if n, ok := detailInt(e, "dialog"); ok {
+		t.Dialog.Open, t.Dialog.N, t.Dialog.Last = true, n, e.Time
 	}
 }
 

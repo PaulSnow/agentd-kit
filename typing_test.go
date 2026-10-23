@@ -217,3 +217,42 @@ func TestTrustOnlyInTheStartPhase(t *testing.T) {
 		t.Fatalf("dialog: state = %s, want blocked-on-owner", h.state("dialog"))
 	}
 }
+
+// Dialog escalations are keyed to the session, not the screen: a dialog
+// whose screen keeps changing is one escalation, and a new dialog soon
+// after waits until 30 minutes have passed since the last one, across a
+// restart of agentd.
+func TestDialogEscalationsAreBounded(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.status("s1", working)
+	h.alive("s1", "starting")
+	h.ticks(1, 5*time.Minute)
+	h.tmux.panes["s1"] = "busy"
+	h.ticks(1, 5*time.Minute) // t=10m, working
+	for i := 0; i < 6; i++ {  // t=10m..35m, a spinner changes the screen
+		h.tmux.panes["s1"] = fmt.Sprintf("%s\n✻ Waiting %ds", dialog, i)
+		h.ticks(1, 5*time.Minute)
+	}
+	if len(h.runner.calls) != 1 {
+		t.Fatalf("escalations = %d for one changing dialog", len(h.runner.calls))
+	}
+	h.tmux.panes["s1"] = "busy again"
+	h.ticks(1, 5*time.Minute) // t=40m
+	h.tmux.panes["s1"] = "Run the migration?\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n"
+	h.restart(false)
+	h.ticks(4, 5*time.Minute) // t=45m..60m; the last escalation was at 10m, this one at 45m
+	if len(h.runner.calls) != 2 {
+		t.Fatalf("escalations = %d once 30 minutes passed and a new dialog showed, want 2", len(h.runner.calls))
+	}
+	h.tmux.panes["s1"] = "busy"
+	h.ticks(1, 5*time.Minute)
+	h.tmux.panes["s1"] = dialog
+	h.ticks(1, 5*time.Minute) // t=70m, 25 minutes after the second
+	if len(h.runner.calls) != 2 {
+		t.Fatalf("escalations = %d within 30 minutes, want still 2", len(h.runner.calls))
+	}
+	h.ticks(1, 5*time.Minute) // t=75m
+	if len(h.runner.calls) != 3 {
+		t.Fatalf("escalations = %d 30 minutes after the second, want 3", len(h.runner.calls))
+	}
+}

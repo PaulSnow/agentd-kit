@@ -41,6 +41,7 @@ type Track struct {
 
 	Posted    map[string]bool        // escalation keys already posted, or given up on
 	Questions QuestionsEscalation    // the escalation of the Questions section
+	Dialog    DialogEscalation       // the escalations of dialogs on screen
 	Delivered map[string]string      // delivery keys: MR reference or the reason none was made
 	Skipped   map[string]bool        // skip reasons already logged
 	Failures  map[string][]time.Time // failed tries of a keyed action; retries follow the restart backoff
@@ -62,6 +63,20 @@ type QuestionsEscalation struct {
 	// flood the console.
 	LastUpdate time.Time
 }
+
+// DialogEscalation tracks a session's dialog escalations: one per dialog
+// episode (a dialog showing, whatever its screen does, until a pass sees
+// none), and at most one per DialogEscalationGap. Open follows the observe
+// events; N and Last follow the escalations, so replay rebuilds them.
+type DialogEscalation struct {
+	Open bool      // the dialog now showing has been escalated
+	N    int       // dialog escalations so far, numbering their keys
+	Last time.Time // when the last was posted
+}
+
+// DialogEscalationGap is the least time between two dialog escalations of
+// one session.
+const DialogEscalationGap = 30 * time.Minute
 
 // QuestionsUpdateGap is the least time between two Questions updates of
 // one session.
