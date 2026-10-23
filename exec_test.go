@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
@@ -67,11 +69,11 @@ func TestHungForgeCommandsTimeOut(t *testing.T) {
 		"fetch": func() error { return g.Fetch(t.TempDir()) },
 		"push":  func() error { return f.Push(t.TempDir(), "feature") },
 		"glab find": func() error {
-			_, _, err := f.Find(Repository{Forge: "gitlab", Project: "a/b"}, "feature", "main", "abc")
+			_, err := f.Find(Repository{Forge: "gitlab", Project: "a/b"}, "feature", "main")
 			return err
 		},
 		"gh find": func() error {
-			_, _, err := f.Find(Repository{Forge: "github", Project: "a/b"}, "feature", "main", "abc")
+			_, err := f.Find(Repository{Forge: "github", Project: "a/b"}, "feature", "main")
 			return err
 		},
 		"glab open": func() error {
@@ -117,35 +119,90 @@ func TestTimeoutsConfig(t *testing.T) {
 	}
 }
 
-// The real clients apply the same rule to the forge's reply: an open request
-// on the branch counts, a merged one only when its head commit is HEAD, and a
-// closed one never.
-func TestFindMatchesMergedRequestsByHead(t *testing.T) {
+// The real clients list the open and merged requests on the branch, each
+// with its head commit, and leave out closed ones.
+func TestFindListsOpenAndMergedRequests(t *testing.T) {
 	f := ExecForge{Timeout: 10 * time.Second}
-	shim(t, "glab", `echo '[{"iid":3,"state":"closed","sha":"abc","web_url":"u3"},{"iid":2,"state":"merged","sha":"old","web_url":"u2"},{"iid":1,"state":"merged","sha":"abc","web_url":"u1"}]'`)
-	gl := Repository{Forge: "gitlab", Project: "a/b"}
-	if got, ok, err := f.Find(gl, "feature", "main", "abc"); err != nil || !ok || got.Ref != "!1" {
-		t.Fatalf("gitlab merged at HEAD: %+v %v %v", got, ok, err)
+	shim(t, "glab", `echo '[{"iid":3,"state":"closed","sha":"c","web_url":"u3"},{"iid":2,"state":"merged","sha":"m","web_url":"u2"},{"iid":1,"state":"opened","sha":"o","web_url":"u1"}]'`)
+	got, err := f.Find(Repository{Forge: "gitlab", Project: "a/b"}, "feature", "main")
+	want := []MergeResult{{Ref: "!2", URL: "u2", Head: "m", Merged: true}, {Ref: "!1", URL: "u1", Head: "o"}}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("gitlab: %+v %v", got, err)
 	}
-	if got, ok, err := f.Find(gl, "feature", "main", "new"); err != nil || ok {
-		t.Fatalf("gitlab merged before HEAD counted: %+v %v %v", got, ok, err)
+	shim(t, "gh", `echo '[{"number":3,"state":"CLOSED","headRefOid":"c","url":"u3"},{"number":2,"state":"MERGED","headRefOid":"m","url":"u2"},{"number":1,"state":"OPEN","headRefOid":"o","url":"u1"}]'`)
+	got, err = f.Find(Repository{Forge: "github", Project: "a/b"}, "feature", "main")
+	want = []MergeResult{{Ref: "#2", URL: "u2", Head: "m", Merged: true}, {Ref: "#1", URL: "u1", Head: "o"}}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("github: %+v %v", got, err)
 	}
-	shim(t, "glab", `echo '[{"iid":5,"state":"opened","sha":"old","web_url":"u5"}]'`)
-	if got, ok, err := f.Find(gl, "feature", "main", "new"); err != nil || !ok || got.Ref != "!5" {
-		t.Fatalf("gitlab open request: %+v %v %v", got, ok, err)
-	}
+}
 
-	shim(t, "gh", `echo '[{"number":2,"state":"MERGED","headRefOid":"old","url":"u2"},{"number":1,"state":"MERGED","headRefOid":"abc","url":"u1"}]'`)
-	gh := Repository{Forge: "github", Project: "a/b"}
-	if got, ok, err := f.Find(gh, "feature", "main", "abc"); err != nil || !ok || got.Ref != "#1" {
-		t.Fatalf("github merged at HEAD: %+v %v %v", got, ok, err)
+// gitRun runs real git for a test, with an identity.
+func gitRun(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "init.defaultBranch=main"}, args...)...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
 	}
-	if got, ok, err := f.Find(gh, "feature", "main", "new"); err != nil || ok {
-		t.Fatalf("github merged before HEAD counted: %+v %v %v", got, ok, err)
+	return strings.TrimSpace(string(out))
+}
+
+// After the forge rebases a request before merging, or after the session
+// rebases its branch onto a squash merge, the worktree's commits are in the
+// target as patches with other hashes. They are not ahead, and the target
+// contains the rebased request's head but not the local one.
+func TestAheadDiscountsPatchesAlreadyInTarget(t *testing.T) {
+	root := t.TempDir()
+	origin, wt, other := filepath.Join(root, "origin.git"), filepath.Join(root, "wt"), filepath.Join(root, "other")
+	gitRun(t, root, "init", "-q", "--bare", origin)
+	gitRun(t, root, "clone", "-q", origin, wt)
+	writeFile(t, filepath.Join(wt, "a"), "a\n")
+	gitRun(t, wt, "add", "a")
+	gitRun(t, wt, "commit", "-q", "-m", "base")
+	gitRun(t, wt, "push", "-q", "origin", "main")
+	gitRun(t, wt, "checkout", "-q", "-b", "feature")
+	writeFile(t, filepath.Join(wt, "b"), "b\n")
+	gitRun(t, wt, "add", "b")
+	gitRun(t, wt, "commit", "-q", "-m", "feature one")
+	writeFile(t, filepath.Join(wt, "c"), "c\n")
+	gitRun(t, wt, "add", "c")
+	gitRun(t, wt, "commit", "-q", "-m", "feature two")
+	gitRun(t, wt, "push", "-q", "origin", "feature")
+	local := gitRun(t, wt, "rev-parse", "HEAD")
+
+	// The forge rebases feature onto a moved main and fast-forwards main to it.
+	gitRun(t, root, "clone", "-q", origin, other)
+	writeFile(t, filepath.Join(other, "d"), "d\n")
+	gitRun(t, other, "add", "d")
+	gitRun(t, other, "commit", "-q", "-m", "someone else")
+	gitRun(t, other, "fetch", "-q", "origin", "feature")
+	gitRun(t, other, "cherry-pick", "origin/main..origin/feature")
+	rebased := gitRun(t, other, "rev-parse", "HEAD")
+	gitRun(t, other, "push", "-q", "origin", "main")
+
+	g := ExecGit{Timeout: 30 * time.Second}
+	if err := g.Fetch(wt); err != nil {
+		t.Fatal(err)
 	}
-	shim(t, "gh", `echo '[{"number":7,"state":"OPEN","headRefOid":"old","url":"u7"}]'`)
-	if got, ok, err := f.Find(gh, "feature", "main", "new"); err != nil || !ok || got.Ref != "#7" {
-		t.Fatalf("github open request: %+v %v %v", got, ok, err)
+	if n, err := g.Ahead(wt, "main"); err != nil || n != 0 {
+		t.Fatalf("ahead after a rebase merge = %d, %v; want 0", n, err)
+	}
+	if in, err := g.Contains(wt, rebased, "main"); err != nil || !in {
+		t.Fatalf("contains the rebased head = %v, %v", in, err)
+	}
+	if in, err := g.Contains(wt, local, "main"); err != nil || in {
+		t.Fatalf("contains the local head = %v, %v", in, err)
+	}
+	if in, err := g.Contains(wt, "0123456789012345678901234567890123456789", "main"); err != nil || in {
+		t.Fatalf("contains an unknown commit = %v, %v", in, err)
+	}
+	writeFile(t, filepath.Join(wt, "e"), "e\n")
+	gitRun(t, wt, "add", "e")
+	gitRun(t, wt, "commit", "-q", "-m", "new work")
+	if n, err := g.Ahead(wt, "main"); err != nil || n != 1 {
+		t.Fatalf("ahead with new work = %d, %v; want 1", n, err)
 	}
 }
 

@@ -94,8 +94,10 @@ type fakeGit struct {
 	branch   string
 	branches map[string]string // branch per worktree, over branch
 	ahead    int
+	aheads   map[string]int // ahead per worktree, over ahead
 	subject  string
 	head     string
+	inTarget map[string]bool // commits the target contains
 	fetches  int
 }
 
@@ -107,9 +109,15 @@ func (g *fakeGit) Branch(dir string) (string, error) {
 	}
 	return g.branch, nil
 }
-func (g *fakeGit) Head(string) (string, error)                 { return g.head, nil }
-func (g *fakeGit) Ahead(string, string) (int, error)           { return g.ahead, nil }
-func (g *fakeGit) FirstSubject(string, string) (string, error) { return g.subject, nil }
+func (g *fakeGit) Head(string) (string, error) { return g.head, nil }
+func (g *fakeGit) Ahead(dir, target string) (int, error) {
+	if n, ok := g.aheads[dir]; ok {
+		return n, nil
+	}
+	return g.ahead, nil
+}
+func (g *fakeGit) Contains(dir, sha, target string) (bool, error) { return g.inTarget[sha], nil }
+func (g *fakeGit) FirstSubject(string, string) (string, error)    { return g.subject, nil }
 
 // fakeForge records pushes and opened requests, which stay open. merged are
 // requests merged before the test, with the head commit each carried. fail
@@ -147,18 +155,19 @@ func (f *fakeForge) result(n int) MergeResult {
 	return MergeResult{Ref: fmt.Sprintf("!%d", n), URL: "https://forge.example/mr/" + fmt.Sprint(n)}
 }
 
-func (f *fakeForge) Find(repo Repository, source, target, head string) (MergeResult, bool, error) {
+func (f *fakeForge) Find(repo Repository, source, target string) ([]MergeResult, error) {
+	var found []MergeResult
+	for _, m := range f.merged {
+		if m.source == source && m.target == target {
+			found = append(found, MergeResult{Ref: m.ref, Head: m.head, Merged: true})
+		}
+	}
 	for i, o := range f.opens {
 		if o.Source == source && o.Target == target {
-			return f.result(i + 1), true, nil
+			found = append(found, f.result(i+1))
 		}
 	}
-	for _, m := range f.merged {
-		if m.source == source && m.target == target && m.head == head {
-			return MergeResult{Ref: m.ref}, true, nil
-		}
-	}
-	return MergeResult{}, false, nil
+	return found, nil
 }
 
 type fakeRunner struct {

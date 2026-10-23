@@ -549,24 +549,40 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 		read("head", err)
 		return
 	}
-	// A request that already delivers HEAD is the delivery: the log may have
-	// missed it (a lost reply, a lost log), and a second push after a squash
-	// merge would recreate the branch and open a duplicate. An open request on
-	// the branch counts; a merged one only if it carried HEAD, since a reused
-	// branch name with new commits must be delivered again.
-	if found, exists, err := s.forge.Find(d.Repository, branch, d.Target, head); err != nil {
+	details["head"] = head
+	reqs, err := s.forge.Find(d.Repository, branch, d.Target)
+	if err != nil {
 		read("find", err)
-		return
-	} else if exists {
-		t.Delivered[key] = found.Ref
-		details["outcome"], details["url"], details["branch"] = found.Ref, found.URL, branch
-		s.skipOnce(name, "deliver:"+key+":exists", fmt.Sprintf("%s already has merge request %s; not delivering again", branch, found.Ref), t, details)
 		return
 	}
 	ahead, err := s.git.Ahead(d.Worktree, d.Target)
 	if err != nil {
 		read("ahead", err)
 		return
+	}
+	// A request that already delivers HEAD is the delivery: the log may have
+	// missed it (a lost reply, a lost log), and a second push after a squash
+	// merge would recreate the branch and open a duplicate. An open request on
+	// the branch counts. A merged one counts when it carried HEAD, or when the
+	// target contains its head and HEAD has nothing the target lacks, as after
+	// the forge rebased it before merging. A reused branch name with new
+	// commits is delivered again.
+	for _, r := range reqs {
+		delivers := !r.Merged || r.Head == head
+		if !delivers && ahead == 0 && r.Head != "" {
+			in, err := s.git.Contains(d.Worktree, r.Head, d.Target)
+			if err != nil {
+				read("contains", err)
+				return
+			}
+			delivers = in
+		}
+		if delivers {
+			t.Delivered[key] = r.Ref
+			details["outcome"], details["url"], details["branch"] = r.Ref, r.URL, branch
+			s.skipOnce(name, "deliver:"+key+":exists", fmt.Sprintf("%s already has merge request %s; not delivering again", branch, r.Ref), t, details)
+			return
+		}
 	}
 	if ahead == 0 {
 		t.Delivered[key] = "nothing"
@@ -597,7 +613,7 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 	}
 	mr := MergeRequest{Project: repo.Project, Source: branch, Target: d.Target, Title: title, Description: string(body), Assignee: repo.Assignee}
 	var res MergeResult
-	od := map[string]any{"key": fkey, "delivered": key, "repository": d.Repository, "branch": branch, "target": d.Target, "title": title, "draft": draft}
+	od := map[string]any{"key": fkey, "delivered": key, "repository": d.Repository, "branch": branch, "head": head, "target": d.Target, "title": title, "draft": draft}
 	if s.shadow {
 		s.act(name, ActOpen, od, nil)
 		t.Delivered[key] = "would-open"

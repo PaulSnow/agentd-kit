@@ -688,3 +688,39 @@ func TestConfidentialEscalationIsWithheld(t *testing.T) {
 		t.Fatalf("filtered events = %d, want 1", filtered)
 	}
 }
+
+// The forge rebased the request before merging, so its head is not the
+// worktree's HEAD; the target contains it and HEAD has nothing new, so the
+// merged request is the delivery. A session that rebased onto a squash
+// merge has nothing ahead either, and nothing is delivered again. The
+// delivery records the head it covered.
+func TestRebasedMergesAreNotDeliveredAgain(t *testing.T) {
+	h := newHarness(t, false, "forge", "squash", "more")
+	mr := h.dir + "/mr.md"
+	writeFile(t, mr, "The MR description.\n")
+	for _, n := range []string{"forge", "squash", "more"} {
+		h.status(n, "# Finished\n\nDONE\n")
+		h.deliver(n, Deliver{Repository: "widgets", Worktree: h.dir + "/" + n + "/wt", Target: "main", MRFile: mr})
+	}
+	h.git.branches = map[string]string{h.dir + "/forge/wt": "f-forge", h.dir + "/squash/wt": "f-squash", h.dir + "/more/wt": "f-more"}
+	h.git.aheads = map[string]int{h.dir + "/forge/wt": 0, h.dir + "/squash/wt": 0, h.dir + "/more/wt": 1}
+	h.git.inTarget = map[string]bool{"rebased": true, "rebased-more": true}
+	h.forge.merged = []mergedRequest{
+		{ref: "!50", source: "f-forge", target: "main", head: "rebased"},
+		{ref: "!51", source: "f-squash", target: "main", head: "pre-squash"},
+		{ref: "!52", source: "f-more", target: "main", head: "rebased-more"},
+	}
+	h.ticks(3, 5*time.Minute)
+	tr := func(n string) string { return h.sup.Tracks()[n].Delivered[n+":"+h.dir+"/"+n+"/wt"] }
+	if tr("forge") != "!50" || tr("squash") != "nothing" {
+		t.Fatalf("delivered: forge %q squash %q", tr("forge"), tr("squash"))
+	}
+	if len(h.forge.pushes) != 1 || h.forge.pushes[0] != "f-more" {
+		t.Fatalf("pushes = %v, want only the branch with new work", h.forge.pushes)
+	}
+	for _, e := range h.events() {
+		if detailString(e, "delivered") != "" && (e.Kind == KindSkip || detailString(e, "action") == ActOpen) && detailString(e, "head") != "c0ffee" {
+			t.Fatalf("delivery event without the head it covered: %+v", e)
+		}
+	}
+}
