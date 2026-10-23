@@ -41,7 +41,10 @@ type Policies struct {
 // not kept, the event log is the record. Restart n (counting from zero within the window)
 // waits BackoffInitial doubled n-1 times, capped at BackoffMax; the first
 // restart is immediate. After MaxRestarts within Window the breaker trips:
-// no more restarts, one escalation.
+// no more restarts, one escalation. A restart that fails counts as one. The
+// same backoff and MaxRestarts bound the retries of every other action that
+// fails (an escalation command, a push, a merge request), so they are
+// validated even when restarts are disabled.
 type RestartPolicy struct {
 	Enabled        bool     `json:"enabled"`
 	MaxRestarts    int      `json:"max_restarts"`
@@ -205,16 +208,14 @@ func (c *Config) finish() error {
 		errs = append(errs, errors.New("poll_interval must be positive"))
 	}
 	r := &c.Policies.Restart
-	if r.Enabled {
-		if r.MaxRestarts < 1 {
-			errs = append(errs, errors.New("policies.restart.max_restarts must be at least 1"))
-		}
-		if r.Window.Duration <= 0 || r.BackoffInitial.Duration <= 0 || r.BackoffMax.Duration < r.BackoffInitial.Duration {
-			errs = append(errs, errors.New("policies.restart: window and backoff_initial must be positive and backoff_max at least backoff_initial"))
-		}
-		if len(r.Command) == 0 {
-			errs = append(errs, errors.New("policies.restart.command must not be empty"))
-		}
+	if r.MaxRestarts < 1 {
+		errs = append(errs, errors.New("policies.restart.max_restarts must be at least 1"))
+	}
+	if r.Window.Duration <= 0 || r.BackoffInitial.Duration <= 0 || r.BackoffMax.Duration < r.BackoffInitial.Duration {
+		errs = append(errs, errors.New("policies.restart: window and backoff_initial must be positive and backoff_max at least backoff_initial"))
+	}
+	if r.Enabled && len(r.Command) == 0 {
+		errs = append(errs, errors.New("policies.restart.command must not be empty"))
 	}
 	n := &c.Policies.Nudge
 	if n.Enabled && (n.Stall.Duration <= 0 || n.Max < 0 || n.Settle.Duration < 0 || n.Message == "") {

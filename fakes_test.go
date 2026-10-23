@@ -29,12 +29,13 @@ type fakeTmux struct {
 	alive     map[string]bool
 	panes     map[string]string
 	crash     map[string]bool
+	newErr    map[string]error // NewSession fails with this
 	calls     []call
 	mutations int
 }
 
 func newFakeTmux() *fakeTmux {
-	return &fakeTmux{alive: map[string]bool{}, panes: map[string]string{}, crash: map[string]bool{}}
+	return &fakeTmux{alive: map[string]bool{}, panes: map[string]string{}, crash: map[string]bool{}, newErr: map[string]error{}}
 }
 
 func (f *fakeTmux) HasSession(name string) (bool, error) {
@@ -53,6 +54,9 @@ func (f *fakeTmux) CapturePane(name string, lines int) (string, error) {
 func (f *fakeTmux) NewSession(name, cwd, command string, width, height int) error {
 	f.calls = append(f.calls, call{op: "new-session", name: name, args: []string{cwd, command}})
 	f.mutations++
+	if err := f.newErr[name]; err != nil {
+		return err
+	}
 	if f.crash[name] {
 		return nil
 	}
@@ -119,11 +123,13 @@ func (f *fakeForge) Open(repo Repository, mr MergeRequest, dir string) (MergeRes
 }
 
 type fakeRunner struct {
-	calls   [][]string
-	failing int // fail this many calls first
+	calls    [][]string
+	attempts int
+	failing  int // fail this many calls first
 }
 
 func (r *fakeRunner) Run(argv []string) error {
+	r.attempts++
 	if r.failing > 0 {
 		r.failing--
 		return errors.New("console unreachable")

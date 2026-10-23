@@ -79,8 +79,8 @@ func (s *Supervisor) emit(name, kind string, details map[string]any) {
 }
 
 // act performs one action, or in shadow mode records that it would. It
-// returns whether the action counts as taken.
-func (s *Supervisor) act(name, action string, details map[string]any, do func() error) bool {
+// returns the action's error; nil means the action counts as taken.
+func (s *Supervisor) act(name, action string, details map[string]any, do func() error) error {
 	record := func(kind string, err error) {
 		d := map[string]any{"action": action}
 		for k, v := range details {
@@ -93,14 +93,31 @@ func (s *Supervisor) act(name, action string, details map[string]any, do func() 
 	}
 	if s.shadow {
 		record(KindWould, nil)
-		return true
+		return nil
 	}
 	if err := do(); err != nil {
 		record(KindError, err)
-		return false
+		return err
 	}
 	record(KindAction, nil)
-	return true
+	return nil
+}
+
+// retryDue says whether a keyed action that has failed may be tried again:
+// the first try is immediate, later ones wait the restart policy's backoff.
+func (s *Supervisor) retryDue(t *Track, key string, now time.Time) bool {
+	f := t.Failures[key]
+	if len(f) == 0 {
+		return true
+	}
+	return now.Sub(f[len(f)-1]) >= backoff(len(f), s.cfg.Policies.Restart)
+}
+
+// failed records a failed try of a keyed action and says whether the
+// policy's MaxRestarts tries are used up.
+func (s *Supervisor) failed(t *Track, key string, now time.Time) bool {
+	t.Failures[key] = append(t.Failures[key], now)
+	return len(t.Failures[key]) >= s.cfg.Policies.Restart.MaxRestarts
 }
 
 // skipOnce logs why a policy declined, once per key.
@@ -143,7 +160,17 @@ func (s *Supervisor) Replay(events []Event) {
 			if k := detailString(e, "delivered"); k != "" {
 				t.Delivered[k] = detailString(e, "outcome")
 			}
+			if k := detailString(e, "escalation"); k != "" {
+				t.Posted[k] = true // given up on
+			}
 			t.Skipped[detailString(e, "key")] = true
+		case KindError:
+			if k := detailString(e, "key"); k != "" {
+				t.Failures[k] = append(t.Failures[k], e.Time)
+			}
+			if detailString(e, "action") == ActRestart {
+				t.Restarts = append(t.Restarts, e.Time)
+			}
 		case KindAction, KindWould:
 			if e.Kind == KindWould && !s.shadow {
 				continue
@@ -324,20 +351,20 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 		for i, part := range pol.Restart.Command {
 			cmd[i] = strings.NewReplacer("{brief}", brief, "{status}", status).Replace(part)
 		}
-		ok := s.act(name, ActRestart, map[string]any{"attempt": n + 1, "cwd": sess.Cwd}, func() error {
+		err := s.act(name, ActRestart, map[string]any{"attempt": n + 1, "cwd": sess.Cwd}, func() error {
 			return s.tmux.NewSession(name, sess.Cwd, shellJoin(cmd), pol.Restart.Width, pol.Restart.Height)
 		})
-		if ok {
-			t.Restarts = append(t.Restarts, now)
+		t.Restarts = append(t.Restarts, now) // a failed attempt counts: backoff and the breaker apply to it
+		if err == nil {
 			t.Hash, t.HashSince, t.Observed = "", now, true
 			t.Nudges, t.LastNudge = 0, time.Time{}
 			return Starting
 		}
 	case CrashLooping:
 		key := fmt.Sprintf("crash-loop:%s:%d", name, t.lastRestart().Unix())
-		msg := fmt.Sprintf("%s: tmux session gone again after %d restarts within %s; not restarting it again. Attach, fix the cause, and start it by hand.",
+		msg := fmt.Sprintf("%s: tmux session gone again after %d restart attempts within %s; not restarting it again. Attach, fix the cause, and start it by hand.",
 			name, pol.Restart.MaxRestarts, pol.Restart.Window)
-		s.escalate(name, key, msg, t)
+		s.escalate(name, key, msg, t, now)
 	case UsageLimited:
 		t.Limited = true
 	case Starting:
@@ -352,7 +379,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 		if len(q) > 2000 {
 			q = q[:2000] + "…"
 		}
-		s.escalate(name, key, fmt.Sprintf("%s is blocked on you. Questions from STATUS.md:\n%s", name, q), t)
+		s.escalate(name, key, fmt.Sprintf("%s is blocked on you. Questions from STATUS.md:\n%s", name, q), t, now)
 	case Idle:
 		if !pol.Nudge.Enabled {
 			return state
@@ -361,13 +388,13 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			key := fmt.Sprintf("stalled:%s:%d", name, t.HashSince.Unix())
 			msg := fmt.Sprintf("%s: screen unchanged since %s and %d nudges went unanswered; not nudging again.",
 				name, t.HashSince.Format(time.RFC3339), t.Nudges)
-			s.escalate(name, key, msg, t)
+			s.escalate(name, key, msg, t, now)
 			return state
 		}
 		if !t.LastNudge.IsZero() && now.Sub(t.LastNudge) < pol.Nudge.Stall.Duration {
 			return state
 		}
-		ok := s.act(name, ActNudge, map[string]any{"nudge": t.Nudges + 1, "message": pol.Nudge.Message}, func() error {
+		err := s.act(name, ActNudge, map[string]any{"nudge": t.Nudges + 1, "message": pol.Nudge.Message}, func() error {
 			if err := s.tmux.Type(name, pol.Nudge.Message); err != nil {
 				return err
 			}
@@ -378,7 +405,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			}
 			return nil
 		})
-		if ok {
+		if err == nil {
 			t.Nudges++
 			t.LastNudge = now
 		}
@@ -386,8 +413,10 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 	return state
 }
 
-// escalate posts one decision to the console, once per key.
-func (s *Supervisor) escalate(name, key, message string, t *Track) {
+// escalate posts one decision to the console, once per key. A failing
+// command is retried on the backoff schedule and given up after MaxRestarts
+// tries, with one skip saying so.
+func (s *Supervisor) escalate(name, key, message string, t *Track, now time.Time) {
 	if t.Posted[key] {
 		return
 	}
@@ -398,23 +427,38 @@ func (s *Supervisor) escalate(name, key, message string, t *Track) {
 		t.Posted[key] = true
 		return
 	}
+	if !s.retryDue(t, key, now) {
+		return
+	}
 	argv := make([]string, len(tmpl))
 	for i, part := range tmpl {
 		argv[i] = strings.NewReplacer("{console}", console, "{message}", message).Replace(part)
 	}
-	ok := s.act(name, ActEscalate, map[string]any{"key": key, "console": console, "message": message}, func() error {
+	err := s.act(name, ActEscalate, map[string]any{"key": key, "console": console, "message": message}, func() error {
 		return s.runner.Run(argv)
 	})
-	if ok {
+	if err == nil {
 		t.Posted[key] = true
+		return
+	}
+	if s.failed(t, key, now) {
+		t.Posted[key] = true
+		s.skipOnce(name, key+":gave-up", fmt.Sprintf("escalation command failed %d times; not retrying: %v", len(t.Failures[key]), err), t,
+			map[string]any{"escalation": key, "console": console, "message": message})
 	}
 }
 
 // deliver pushes a finished session's branch and opens a merge request,
-// once per worktree, when the deliver spec is met.
+// once per worktree, when the deliver spec is met. A step that fails is
+// retried on the backoff schedule; after MaxRestarts failures the delivery
+// is given up and escalated once.
 func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, t *Track, now time.Time) {
 	key := name + ":" + d.Worktree
 	if t.Delivered[key] != "" {
+		return
+	}
+	fkey := "deliver:" + key
+	if !s.retryDue(t, fkey, now) {
 		return
 	}
 	details := map[string]any{"delivered": key, "repository": d.Repository, "worktree": d.Worktree, "target": d.Target}
@@ -427,22 +471,39 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 			// Not final: the allow-list may grant the write later, so this is
 			// not recorded as a delivery outcome.
 			s.skipOnce(name, "deliver:"+key+":not-allowed", err.Error(), t, map[string]any{"worktree": d.Worktree, "repository": d.Repository})
-			s.escalate(name, "deliver:"+key+":not-allowed", fmt.Sprintf("%s is DONE but %s; nothing delivered.", name, err), t)
+			s.escalate(name, "deliver:"+key+":not-allowed", fmt.Sprintf("%s is DONE but %s; nothing delivered.", name, err), t, now)
 			return
 		}
 	}
 	if _, err := os.Stat(d.MRFile); err != nil {
 		// Not final: the text may still be written, and the stat is cheap.
 		s.skipOnce(name, "deliver:"+key+":no-mr-text", "DONE but the merge-request text is missing: "+d.MRFile, t, map[string]any{"worktree": d.Worktree, "mr_file": d.MRFile})
-		s.escalate(name, "deliver:"+key+":no-mr-text", fmt.Sprintf("%s is DONE but %s is missing; nothing delivered.", name, d.MRFile), t)
+		s.escalate(name, "deliver:"+key+":no-mr-text", fmt.Sprintf("%s is DONE but %s is missing; nothing delivered.", name, d.MRFile), t, now)
 		return
 	}
-	if !s.act(name, ActFetch, map[string]any{"worktree": d.Worktree}, func() error { return s.git.Fetch(d.Worktree) }) {
+	// fail records a failed step and, when the tries are used up, gives the delivery up.
+	fail := func(step string, err error) {
+		if !s.failed(t, fkey, now) {
+			return
+		}
+		n := len(t.Failures[fkey])
+		t.Delivered[key] = "failed"
+		s.skipOnce(name, fkey+":gave-up", fmt.Sprintf("delivery failed %d times; not retrying", n), t, map[string]any{"delivered": key, "outcome": "failed", "worktree": d.Worktree})
+		s.escalate(name, fkey+":failed", fmt.Sprintf("%s is DONE but delivering %s failed %d times, last at %s: %v. Not retrying; deliver it by hand and run agentd mark-delivered.",
+			name, d.Worktree, n, step, err), t, now)
+	}
+	// read reports a failed read of the worktree the same way.
+	read := func(step string, err error) {
+		s.emit(name, KindError, map[string]any{"key": fkey, "step": step, "error": err.Error()})
+		fail(step, err)
+	}
+	if err := s.act(name, ActFetch, map[string]any{"key": fkey, "worktree": d.Worktree}, func() error { return s.git.Fetch(d.Worktree) }); err != nil {
+		fail("fetch", err)
 		return
 	}
 	clean, err := s.git.Clean(d.Worktree)
 	if err != nil {
-		s.emit(name, KindError, map[string]any{"error": err.Error()})
+		read("status", err)
 		return
 	}
 	if !clean {
@@ -451,12 +512,12 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 	}
 	branch, err := s.git.Branch(d.Worktree)
 	if err != nil {
-		s.emit(name, KindError, map[string]any{"error": err.Error()})
+		read("branch", err)
 		return
 	}
 	ahead, err := s.git.Ahead(d.Worktree, d.Target)
 	if err != nil {
-		s.emit(name, KindError, map[string]any{"error": err.Error()})
+		read("ahead", err)
 		return
 	}
 	if ahead == 0 {
@@ -467,7 +528,7 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 	}
 	title, err := s.git.FirstSubject(d.Worktree, d.Target)
 	if err != nil {
-		s.emit(name, KindError, map[string]any{"error": err.Error()})
+		read("subject", err)
 		return
 	}
 	draft := d.Draft || ev.Status.Questions != ""
@@ -476,33 +537,36 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 	}
 	body, err := os.ReadFile(d.MRFile)
 	if err != nil {
-		s.emit(name, KindError, map[string]any{"error": err.Error()})
+		read("mr-text", err)
 		return
 	}
 	repo := s.cfg.Repositories[d.Repository]
-	if !s.act(name, ActPush, map[string]any{"branch": branch, "repository": d.Repository}, func() error {
+	if err := s.act(name, ActPush, map[string]any{"key": fkey, "branch": branch, "repository": d.Repository}, func() error {
 		return s.forge.PushAllowed(d.Repository, d.Worktree, branch)
-	}) {
+	}); err != nil {
+		fail("push", err)
 		return
 	}
 	mr := MergeRequest{Project: repo.Project, Source: branch, Target: d.Target, Title: title, Description: string(body), Assignee: repo.Assignee}
 	var res MergeResult
-	od := map[string]any{"delivered": key, "repository": d.Repository, "branch": branch, "target": d.Target, "title": title, "draft": draft}
+	od := map[string]any{"key": fkey, "delivered": key, "repository": d.Repository, "branch": branch, "target": d.Target, "title": title, "draft": draft}
 	if s.shadow {
 		s.act(name, ActOpen, od, nil)
 		t.Delivered[key] = "would-open"
 		return
 	}
-	ok := s.act(name, ActOpen, od, func() (err error) {
+	err = s.act(name, ActOpen, od, func() (err error) {
 		res, err = s.forge.OpenAllowed(d.Repository, mr, d.Worktree)
 		if err == nil {
 			od["ref"], od["url"] = res.Ref, res.URL
 		}
 		return err
 	})
-	if ok {
-		t.Delivered[key] = res.Ref
+	if err != nil {
+		fail("open", err)
+		return
 	}
+	t.Delivered[key] = res.Ref
 }
 
 // shellJoin quotes argv for the shell tmux hands a new session's command to.

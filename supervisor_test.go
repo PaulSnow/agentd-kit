@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -24,7 +25,7 @@ func TestCrashLoopStopsAfterNRestartsAndEscalates(t *testing.T) {
 	if got := len(h.runner.calls); got != 1 {
 		t.Fatalf("escalations = %d, want 1", got)
 	}
-	if !strings.Contains(h.runner.calls[0][4], "after 3 restarts") {
+	if !strings.Contains(h.runner.calls[0][4], "after 3 restart attempts") {
 		t.Fatalf("escalation text: %q", h.runner.calls[0][4])
 	}
 	if h.state("mon") != CrashLooping {
@@ -53,6 +54,104 @@ func TestRestartBackoffDoubles(t *testing.T) {
 	want := []time.Duration{0, time.Minute, 3 * time.Minute}
 	if !reflect.DeepEqual(at, want) {
 		t.Fatalf("restart times = %v, want %v", at, want)
+	}
+}
+
+// actionTimes lists when events of a kind and action happened, from the start of the clock.
+func actionTimes(h *harness, kind, action string) []time.Duration {
+	var at []time.Duration
+	start := time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC)
+	for _, e := range h.events() {
+		if e.Kind == kind && detailString(e, "action") == action {
+			at = append(at, e.Time.Sub(start))
+		}
+	}
+	return at
+}
+
+// A restart that fails counts as a restart: attempts follow the backoff
+// schedule, the breaker trips after MaxRestarts of them, and one escalation
+// is posted, instead of a silent retry every pass.
+func TestFailedRestartsCountTowardBreaker(t *testing.T) {
+	h := newHarness(t, false, "mon")
+	h.status("mon", working)
+	h.tmux.newErr["mon"] = errors.New("tmux: server not running")
+	h.ticks(20, 30*time.Second)
+
+	want := []time.Duration{0, time.Minute, 3 * time.Minute}
+	if got := actionTimes(h, KindError, ActRestart); !reflect.DeepEqual(got, want) {
+		t.Fatalf("failed restart attempts at %v, want %v", got, want)
+	}
+	if got := h.tmux.count("new-session", "mon"); got != 3 {
+		t.Fatalf("attempts = %d, want 3", got)
+	}
+	if h.state("mon") != CrashLooping {
+		t.Fatalf("state = %s, want crash-looping", h.state("mon"))
+	}
+	if len(h.runner.calls) != 1 {
+		t.Fatalf("escalations = %d, want 1", len(h.runner.calls))
+	}
+	h.restart(false)
+	h.ticks(24, 5*time.Minute)
+	if got := h.tmux.count("new-session", "mon"); got != 3 {
+		t.Fatalf("attempts = %d after replay, want still 3", got)
+	}
+}
+
+// An escalation command that keeps failing is tried on the backoff schedule
+// and given up after MaxRestarts tries, with one skip saying so; it is not
+// run every pass forever, nor again after a replay.
+func TestFailingEscalationStops(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.status("s1", blocked)
+	h.alive("s1", "waiting")
+	h.runner.failing = 10
+	h.ticks(12*12, 5*time.Minute)
+	if h.runner.attempts != 3 || len(h.runner.calls) != 0 {
+		t.Fatalf("attempts = %d posted = %d, want 3 attempts and nothing posted", h.runner.attempts, len(h.runner.calls))
+	}
+	gaveUp := 0
+	for _, e := range h.events() {
+		if e.Kind == KindSkip && e.Session == "s1" && strings.Contains(detailString(e, "reason"), "failed 3 times") {
+			gaveUp++
+		}
+	}
+	if gaveUp != 1 {
+		t.Fatalf("give-up skips = %d, want 1", gaveUp)
+	}
+	h.restart(false)
+	h.ticks(12, 5*time.Minute)
+	if h.runner.attempts != 3 {
+		t.Fatalf("attempts = %d after replay, want still 3", h.runner.attempts)
+	}
+}
+
+// A merge request that cannot be opened is retried on the backoff schedule,
+// with no second push before a retry is due, and given up after MaxRestarts
+// failures with one escalation.
+func TestFailingOpenIsBounded(t *testing.T) {
+	h := newHarness(t, false, "d")
+	mr := h.dir + "/mr.md"
+	writeFile(t, mr, "The MR description.\n")
+	h.status("d", "# Finished\n\nDONE\n")
+	h.deliver("d", Deliver{Repository: "widgets", Worktree: h.dir + "/d/wt", Target: "main", MRFile: mr})
+	h.forge.fail = errors.New("glab: 502 Bad Gateway")
+	h.ticks(20, 30*time.Second)
+
+	want := []time.Duration{0, time.Minute, 3 * time.Minute}
+	if got := actionTimes(h, KindAction, ActPush); !reflect.DeepEqual(got, want) {
+		t.Fatalf("pushes at %v, want %v", got, want)
+	}
+	if got := h.count(KindError, ActOpen, "d"); got != 3 {
+		t.Fatalf("failed opens = %d, want 3", got)
+	}
+	if len(h.runner.calls) != 1 || !strings.Contains(h.runner.calls[0][4], "failed 3 times") {
+		t.Fatalf("escalations = %v, want one give-up", h.runner.calls)
+	}
+	h.restart(false)
+	h.ticks(24, 5*time.Minute)
+	if got := len(h.forge.pushes); got != 3 {
+		t.Fatalf("pushes = %d after replay, want still 3", got)
 	}
 }
 

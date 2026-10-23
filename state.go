@@ -35,14 +35,15 @@ type Track struct {
 	LastNudge time.Time
 	Limited   bool
 
-	Posted    map[string]bool   // escalation keys already posted
-	Delivered map[string]string // delivery keys: MR reference or the reason none was made
-	Skipped   map[string]bool   // skip reasons already logged
-	LastObs   map[string]any    // last observe details, to log only changes
+	Posted    map[string]bool        // escalation keys already posted, or given up on
+	Delivered map[string]string      // delivery keys: MR reference or the reason none was made
+	Skipped   map[string]bool        // skip reasons already logged
+	Failures  map[string][]time.Time // failed tries of a keyed action; retries follow the restart backoff
+	LastObs   map[string]any         // last observe details, to log only changes
 }
 
 func newTrack() *Track {
-	return &Track{Posted: map[string]bool{}, Delivered: map[string]string{}, Skipped: map[string]bool{}}
+	return &Track{Posted: map[string]bool{}, Delivered: map[string]string{}, Skipped: map[string]bool{}, Failures: map[string][]time.Time{}}
 }
 
 // restartsInWindow counts restarts inside the breaker window.
@@ -121,7 +122,7 @@ func Classify(t *Track, ev Evidence, pol Policies, now time.Time) (State, string
 		}
 		if pol.Restart.Enabled && t.restartsInWindow(now, pol.Restart.Window.Duration) >= pol.Restart.MaxRestarts {
 			t.Breaker = true
-			return CrashLooping, fmt.Sprintf("tmux session gone after %d restarts in %s", pol.Restart.MaxRestarts, pol.Restart.Window)
+			return CrashLooping, fmt.Sprintf("tmux session gone after %d restart attempts in %s", pol.Restart.MaxRestarts, pol.Restart.Window)
 		}
 		return Failed, "tmux session gone and STATUS.md not DONE"
 	}
