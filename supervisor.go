@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Clock is time, so tests can move it.
@@ -683,13 +684,12 @@ func (s *Supervisor) confidentialMatch(texts ...string) int {
 func (s *Supervisor) escalateQuestions(name, questions string, t *Track, now time.Time) {
 	q := &t.Questions
 	hash := shortHash(HashPane(questions))
-	if len(questions) > 2000 {
-		questions = questions[:2000] + "…"
-	}
+	full := questions // screened whole by post, before the cut can hide a match
+	questions = cutUTF8(questions, 2000)
 	key := fmt.Sprintf("questions:%s:%d", name, q.Episode)
 	if !t.Posted[key] {
 		if s.post(name, ActEscalate, key, fmt.Sprintf("%s is blocked on you. Questions from STATUS.md:\n%s", name, questions), t, now,
-			map[string]any{"questions_hash": hash}) {
+			map[string]any{"questions_hash": hash}, full) {
 			q.Hash = hash
 		}
 		return
@@ -699,9 +699,20 @@ func (s *Supervisor) escalateQuestions(name, questions string, t *Track, now tim
 	}
 	n := q.Updates + 1
 	if s.post(name, ActUpdate, fmt.Sprintf("%s:update:%d", key, n), fmt.Sprintf("%s changed its open Questions in STATUS.md; they now read:\n%s", name, questions), t, now,
-		map[string]any{"questions_hash": hash, "update": n}) {
+		map[string]any{"questions_hash": hash, "update": n}, full) {
 		q.Hash, q.Updates = hash, n
 	}
+}
+
+// cutUTF8 cuts text to at most n bytes on a UTF-8 boundary, marking the cut.
+func cutUTF8(text string, n int) string {
+	if len(text) <= n {
+		return text
+	}
+	for n > 0 && !utf8.RuneStart(text[n]) {
+		n--
+	}
+	return text[:n] + "…"
 }
 
 // escalate posts one decision to the console, once per key.
@@ -714,9 +725,10 @@ func (s *Supervisor) escalate(name, key, message string, t *Track, now time.Time
 // retried on the backoff schedule and given up after MaxRestarts tries,
 // with one skip saying so. A message that matches a confidential pattern is
 // replaced, before it is posted or logged, by one that names only the
-// session; one skip records that it was filtered, without the text. extra
-// details go on the events that settle the key.
-func (s *Supervisor) post(name, action, key, message string, t *Track, now time.Time, extra map[string]any) bool {
+// session; one skip records that it was filtered, without the text. Each of
+// also, the uncut text a message was cut from, is screened the same way.
+// extra details go on the events that settle the key.
+func (s *Supervisor) post(name, action, key, message string, t *Track, now time.Time, extra map[string]any, also ...string) bool {
 	if t.Posted[key] {
 		return true
 	}
@@ -726,7 +738,7 @@ func (s *Supervisor) post(name, action, key, message string, t *Track, now time.
 		}
 		return d
 	}
-	if i := s.confidentialMatch(message); i > 0 {
+	if i := s.confidentialMatch(append(also, message)...); i > 0 {
 		var what string
 		what, message = "escalation", fmt.Sprintf("%s needs your attention; the details were withheld because they matched a confidential pattern. Look at the session directly.", name)
 		if action == ActUpdate {

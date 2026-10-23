@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func question(i int) string {
@@ -130,5 +131,35 @@ func TestShadowQuestionUpdates(t *testing.T) {
 	}
 	if got := h.count(KindWould, ActUpdate, "s1"); got != 4 {
 		t.Fatalf("would update = %d, want 4", got)
+	}
+}
+
+// Long Questions are screened whole before they are cut, so a confidential
+// term past the cut is still caught, and the cut falls on a UTF-8
+// boundary.
+func TestLongQuestionsAreScreenedThenCut(t *testing.T) {
+	h := newHarness(t, false, "s1", "s2")
+	h.cfg.ConfidentialPatterns = []string{`Nightingale`}
+	h.restart(false)
+	h.alive("s1", "waiting")
+	h.alive("s2", "waiting")
+	h.status("s1", "# Blocked\n\n## Questions\n1. "+strings.Repeat("x", 2100)+" Nightingale?\n")
+	h.status("s2", "# Blocked\n\n## Questions\n1. "+strings.Repeat("€", 1000)+"\n")
+	h.ticks(2, 5*time.Minute)
+	if len(h.runner.calls) != 2 {
+		t.Fatalf("escalations = %d", len(h.runner.calls))
+	}
+	for _, c := range h.runner.calls {
+		msg := c[4]
+		switch {
+		case strings.HasPrefix(msg, "s1"):
+			if !strings.Contains(msg, "withheld") || strings.Contains(msg, "xxx") {
+				t.Fatalf("s1: a term past the cut was not caught: %.80q", msg)
+			}
+		default:
+			if !utf8.ValidString(msg) || len(msg) > 2100 {
+				t.Fatalf("s2: cut is not on a UTF-8 boundary or too long: %d bytes, valid %v", len(msg), utf8.ValidString(msg))
+			}
+		}
 	}
 }
