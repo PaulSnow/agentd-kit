@@ -160,6 +160,7 @@ type fakeGit struct {
 	ahead    int
 	aheads   map[string]int // ahead per worktree, over ahead
 	subject  string
+	messages string // the commit messages ahead of the target
 	head     string
 	inTarget map[string]bool // commits the target contains
 	remote   string
@@ -190,6 +191,7 @@ func (g *fakeGit) Ahead(dir, target string) (int, error) {
 }
 func (g *fakeGit) Contains(dir, sha, target string) (bool, error) { return g.inTarget[sha], nil }
 func (g *fakeGit) FirstSubject(string, string) (string, error)    { return g.subject, nil }
+func (g *fakeGit) Messages(string, string) (string, error)        { return g.messages, nil }
 
 // fakeForge records pushes and opened requests, which stay open. merged are
 // requests merged before the test, with the head commit each carried. fail

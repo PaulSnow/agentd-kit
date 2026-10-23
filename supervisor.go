@@ -849,6 +849,22 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 		return
 	}
 	details["head"] = head
+	// The branch name and every commit message go to the forge with the
+	// push, so they are screened before anything names them, in the log
+	// or on the forge. Not final: delivery waits for the text or the
+	// patterns to change.
+	messages, err := s.git.Messages(d.Worktree, d.Target)
+	if err != nil {
+		read("messages", err)
+		return
+	}
+	if i := s.confidentialMatch(branch, messages); i > 0 {
+		s.skipOnce(name, "deliver:"+key+":confidential-commits", fmt.Sprintf("the branch name or a commit message ahead of %s matches confidential pattern %d; delivery waits for the owner", d.Target, i), t,
+			map[string]any{"worktree": d.Worktree})
+		s.escalate(name, "deliver:"+key+":confidential-commits", fmt.Sprintf("%s is DONE but its branch name or a commit message ahead of %s matches confidential pattern %d; nothing pushed. Reword the commits or the branch, or change the patterns.",
+			name, d.Target, i), t, now)
+		return
+	}
 	reqs, err := s.forge.Find(d.Repository, branch, d.Target)
 	if err != nil {
 		read("find", err)

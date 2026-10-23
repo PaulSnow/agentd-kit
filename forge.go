@@ -29,6 +29,8 @@ type Git interface {
 	// Contains says whether origin/target contains the commit sha.
 	Contains(dir, sha, target string) (bool, error)
 	FirstSubject(dir, target string) (string, error)
+	// Messages is every commit message, in full, in origin/target..HEAD.
+	Messages(dir, target string) (string, error)
 }
 
 // MergeRequest is what to open on the forge.
@@ -250,6 +252,10 @@ func (g ExecGit) FirstSubject(dir, target string) (string, error) {
 	}
 	lines := strings.SplitN(strings.TrimSpace(out), "\n", 2)
 	return lines[0], nil
+}
+
+func (g ExecGit) Messages(dir, target string) (string, error) {
+	return gitOut(g.Timeout, dir, "log", "--format=%B", "origin/"+target+"..HEAD")
 }
 
 // ExecForge pushes with git and opens with glab or gh, by the repository's
