@@ -149,3 +149,41 @@ func TestUnchangedUnknownIsAbsent(t *testing.T) {
 		t.Fatal("no observe event")
 	}
 }
+
+// mark-delivered over a log whose last line is torn must not glue its record
+// onto the fragment: the next run's replay keeps the delivery, so it is
+// never delivered twice.
+func TestMarkDeliveredAfterTornLineSurvivesReplay(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "events.jsonl")
+	work, wt := filepath.Join(dir, "work"), filepath.Join(dir, "wt")
+	writeFile(t, filepath.Join(work, "STATUS.md"), "DONE\n")
+	writeFile(t, filepath.Join(wt, "README"), "x\n")
+	cfgPath := filepath.Join(dir, "agentd.json")
+	writeFile(t, cfgPath, `{"event_log": "`+logPath+`", "transcript_dir": "",
+		"repositories": {"r": {"forge": "gitlab", "project": "a/b", "allow": ["push", "open"]}},
+		"sessions": {"d": {"workdir": "work", "cwd": "wt", "deliver": [{"repository": "r", "worktree": "wt", "target": "main", "mr_file": "work/mr.md"}]}}}`)
+	writeFile(t, logPath, `{"time":"2026-10-22T00:00:00Z","kind":"start"}`+"\n"+`{"time":"2026-10-22T00:01:00Z","kind":"obs`)
+	if err := markDeliveredCmd([]string{"--config", cfgPath, "d", wt, "!7"}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := OpenLog(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	events, _, err := l.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sup := NewSupervisor(cfg, NewLogWriter(&bytes.Buffer{}), &fakeClock{}, newFakeTmux(), &fakeGit{}, &fakeForge{}, &fakeRunner{}, false)
+	sup.Replay(events)
+	if tr := sup.Tracks()["d"]; tr == nil || tr.Delivered["d:"+wt] != "!7" {
+		t.Fatalf("the mark-delivered record was lost; events %+v", events)
+	}
+}

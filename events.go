@@ -87,7 +87,9 @@ func (l *Log) lock() (func(), error) {
 	return func() { syscall.Flock(fd, syscall.LOCK_UN) }, nil
 }
 
-// Append writes one event as one line and syncs it.
+// Append writes one event as one line and syncs it. It first repairs a
+// torn final line, so the event never lands glued to a fragment that the
+// next run would cut off with it.
 func (l *Log) Append(e Event) error {
 	b, err := json.Marshal(e)
 	if err != nil {
@@ -100,7 +102,17 @@ func (l *Log) Append(e Event) error {
 		return err
 	}
 	defer unlock()
-	if _, err := l.w.Write(append(b, '\n')); err != nil {
+	if l.f != nil {
+		if _, err := l.repairTail(); err != nil {
+			return err
+		}
+	}
+	return l.write(append(b, '\n'))
+}
+
+// write writes and syncs, with the lock held.
+func (l *Log) write(b []byte) error {
+	if _, err := l.w.Write(b); err != nil {
 		return err
 	}
 	if s, ok := l.w.(interface{ Sync() error }); ok {
@@ -109,10 +121,9 @@ func (l *Log) Append(e Event) error {
 	return nil
 }
 
-// Load reads every event in the open log under its lock, and repairs a torn
-// final line so the next append starts a line of its own: a malformed final
-// line is cut off, and a well-formed one missing its newline gets it. It
-// returns the events and the length of the line it cut off.
+// Load reads every event in the open log under its lock, after repairing a
+// torn final line. It returns the events and the length of the torn line it
+// cut off, if any.
 func (l *Log) Load() ([]Event, int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -121,33 +132,65 @@ func (l *Log) Load() ([]Event, int, error) {
 		return nil, 0, err
 	}
 	defer unlock()
+	torn, err := l.repairTail()
+	if err != nil {
+		return nil, 0, err
+	}
 	info, err := l.f.Stat()
 	if err != nil {
 		return nil, 0, err
 	}
-	size := info.Size()
-	events, torn, err := ReadEvents(io.NewSectionReader(l.f, 0, size))
+	events, _, err := ReadEvents(io.NewSectionReader(l.f, 0, info.Size()))
+	return events, torn, err
+}
+
+// repairTail makes the file end at a line boundary, with the lock held. A
+// final line without its newline is a write cut short: one that does not
+// parse is cut off, with a warning event saying how long it was, and one
+// that parses gets its newline. It returns the length cut off.
+func (l *Log) repairTail() (int, error) {
+	info, err := l.f.Stat()
 	if err != nil {
-		return nil, 0, err
+		return 0, err
 	}
-	if torn > 0 {
-		if err := l.f.Truncate(size - int64(torn)); err != nil {
-			return nil, 0, err
+	size := info.Size()
+	start := size // where the final line begins
+	buf := make([]byte, 64*1024)
+	for start > 0 {
+		n := int64(len(buf))
+		if n > start {
+			n = start
 		}
-		size -= int64(torn)
+		if _, err := l.f.ReadAt(buf[:n], start-n); err != nil {
+			return 0, err
+		}
+		if i := bytes.LastIndexByte(buf[:n], '\n'); i >= 0 {
+			start = start - n + int64(i) + 1
+			break
+		}
+		start -= n
 	}
-	if size > 0 {
-		last := make([]byte, 1)
-		if _, err := l.f.ReadAt(last, size-1); err != nil {
-			return nil, 0, err
-		}
-		if last[0] != '\n' {
-			if _, err := l.f.Write([]byte{'\n'}); err != nil {
-				return nil, 0, err
-			}
-		}
+	if start == size {
+		return 0, nil
 	}
-	return events, torn, l.f.Sync()
+	tail := make([]byte, size-start)
+	if _, err := l.f.ReadAt(tail, start); err != nil {
+		return 0, err
+	}
+	var e Event
+	if err := json.Unmarshal(tail, &e); err == nil && e.Kind != "" {
+		return 0, l.write([]byte{'\n'})
+	}
+	if err := l.f.Truncate(start); err != nil {
+		return 0, err
+	}
+	torn := int(size - start)
+	w, err := json.Marshal(Event{Time: time.Now(), Kind: KindWarning, Details: map[string]any{
+		"warning": "dropped a torn final line of the event log", "bytes": torn}})
+	if err != nil {
+		return 0, err
+	}
+	return torn, l.write(append(w, '\n'))
 }
 
 // Close closes the underlying file, if any.

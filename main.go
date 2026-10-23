@@ -105,22 +105,11 @@ func runCmd(args []string) error {
 		return err
 	}
 	defer lock.Close()
-	log, err := OpenLog(cfg.EventLog)
+	log, events, err := openLoaded(cfg.EventLog)
 	if err != nil {
 		return err
 	}
 	defer log.Close()
-	events, torn, err := log.Load()
-	if err != nil {
-		return fmt.Errorf("%s: %w", cfg.EventLog, err)
-	}
-	if torn > 0 {
-		fmt.Fprintf(os.Stderr, "agentd: dropped a torn final line of %d bytes from %s\n", torn, cfg.EventLog)
-		if err := log.Append(Event{Time: time.Now(), Kind: KindWarning, Details: map[string]any{
-			"warning": "dropped a torn final line of the event log", "bytes": torn}}); err != nil {
-			return err
-		}
-	}
 	to := cfg.Timeouts
 	sup := NewSupervisor(cfg, log, RealClock{}, ExecTmux{Timeout: to.Tmux.Duration}, ExecGit{Timeout: to.Forge.Duration},
 		ExecForge{Timeout: to.Forge.Duration}, ExecRunner{Timeout: to.Escalate.Duration}, *shadow)
@@ -156,6 +145,24 @@ func lockInstance(path string) (*os.File, error) {
 		return nil, fmt.Errorf("locking %s: %w", path, err)
 	}
 	return f, nil
+}
+
+// openLoaded opens the event log and reads it through Load, which refuses a
+// corrupt log and repairs a torn last line, saying so on stderr.
+func openLoaded(path string) (*Log, []Event, error) {
+	log, err := OpenLog(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	events, torn, err := log.Load()
+	if err != nil {
+		log.Close()
+		return nil, nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if torn > 0 {
+		fmt.Fprintf(os.Stderr, "agentd: dropped a torn final line of %d bytes from %s\n", torn, path)
+	}
+	return log, events, nil
 }
 
 func statusCmd(args []string) error {
@@ -195,7 +202,7 @@ func markDeliveredCmd(args []string) error {
 	if len(rest) != 3 {
 		return fmt.Errorf("usage: agentd mark-delivered SESSION WORKTREE REF")
 	}
-	log, err := OpenLog(cfg.EventLog)
+	log, _, err := openLoaded(cfg.EventLog)
 	if err != nil {
 		return err
 	}
