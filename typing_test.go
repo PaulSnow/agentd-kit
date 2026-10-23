@@ -276,3 +276,47 @@ func TestShellPaneIsEscalatedOnce(t *testing.T) {
 		t.Fatalf("escalations = %v, want one naming bash", h.runner.calls)
 	}
 }
+
+// The screen is read again just before anything is typed; when it has
+// changed since the pass read it, as when a dialog has just opened, nothing
+// is typed and a skip says why.
+func TestScreenChangedJustBeforeTypingIsNotTyped(t *testing.T) {
+	h := newHarness(t, false, "idle", "trust")
+	h.status("idle", working)
+	h.alive("idle", "static")
+	h.status("trust", working)
+	h.alive("trust", "Do you trust this folder?")
+	// changeBeforeTyping changes name's screen at its second Pane call of
+	// the next pass: the first is the observation, the second the check
+	// before typing.
+	changeBeforeTyping := func(name string) {
+		calls := 0
+		h.tmux.onPane = func(n string) {
+			if n != name {
+				return
+			}
+			if calls++; calls == 2 {
+				h.tmux.panes[n] = dialog
+				h.tmux.onPane = nil
+			}
+		}
+	}
+	changeBeforeTyping("trust")
+	h.ticks(1, 5*time.Minute) // trust's keys are due
+	h.tmux.alive["trust"] = false
+	h.ticks(7, 5*time.Minute) // to 40m, when idle's first nudge is due
+	changeBeforeTyping("idle")
+	h.ticks(1, 5*time.Minute)
+	if got := typed(h, "idle") + typed(h, "trust"); got != 0 {
+		t.Fatalf("typed %d times into a screen that changed", got)
+	}
+	skips := 0
+	for _, e := range h.events() {
+		if e.Kind == KindSkip && strings.Contains(detailString(e, "reason"), "screen changed") {
+			skips++
+		}
+	}
+	if skips != 2 {
+		t.Fatalf("skips = %d, want 2", skips)
+	}
+}

@@ -40,7 +40,8 @@ type fakeTmux struct {
 	exit       map[string]int
 	deadScreen map[string]func() string
 	sticky     map[string]bool
-	chosen     map[string]int // the trust-menu option Enter chose
+	chosen     map[string]int    // the trust-menu option Enter chose
+	onPane     func(name string) // runs when Pane is asked, to change the screen under a caller
 	commands   map[string]string
 	newErr     map[string]error // NewSession fails with this
 	calls      []call
@@ -71,6 +72,9 @@ func (f *fakeTmux) CapturePane(name string, lines int) (string, error) {
 
 func (f *fakeTmux) Pane(name string) (PaneInfo, error) {
 	f.calls = append(f.calls, call{op: "pane", name: name})
+	if f.onPane != nil {
+		f.onPane(name)
+	}
 	if !f.alive[name] {
 		return PaneInfo{}, fmt.Errorf("no session %s", name)
 	}

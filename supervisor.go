@@ -570,7 +570,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 	// The limit has cleared. Only a session that can take a line is told to
 	// go on: never one that is DONE, waits on the owner, or shows a dialog.
 	if t.Limited && ev.Alive && (state == Working || state == Idle) {
-		if s.typeInto(name, ActResume, map[string]any{"message": pol.Nudge.ResumeMessage}, t, func() error {
+		if s.typeInto(name, ActResume, map[string]any{"message": pol.Nudge.ResumeMessage}, t, ev.PaneHash, func() error {
 			return s.tmux.Type(name, pol.Nudge.ResumeMessage)
 		}) == nil {
 			t.Limited = false
@@ -647,7 +647,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 		// keys did not take them, and sending them again could answer
 		// whatever replaced it.
 		if ev.TrustPrompt && ev.PaneHash != t.TrustHash {
-			if s.typeInto(name, ActTrust, map[string]any{"keys": pol.Trust.Keys, "pane_hash": ev.PaneHash}, t, func() error {
+			if s.typeInto(name, ActTrust, map[string]any{"keys": pol.Trust.Keys, "pane_hash": ev.PaneHash}, t, ev.PaneHash, func() error {
 				return s.tmux.Keys(name, pol.Trust.Keys...)
 			}) == nil {
 				t.TrustHash = ev.PaneHash
@@ -677,7 +677,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 		if !t.LastNudge.IsZero() && now.Sub(t.LastNudge) < pol.Nudge.Stall.Duration {
 			return state
 		}
-		err := s.typeInto(name, ActNudge, map[string]any{"nudge": t.Nudges + 1, "message": pol.Nudge.Message}, t, func() error {
+		err := s.typeInto(name, ActNudge, map[string]any{"nudge": t.Nudges + 1, "message": pol.Nudge.Message}, t, ev.PaneHash, func() error {
 			if err := s.tmux.Type(name, pol.Nudge.Message); err != nil {
 				return err
 			}
@@ -722,14 +722,20 @@ func (s *Supervisor) watchCommand(name, cmd string, t *Track, now time.Time) {
 		fmt.Sprintf("%s's pane has run %q, not Claude, since %s; agentd does not type into it. Attach and see what happened.", name, cmd, since.Format(time.RFC3339)), t, now)
 }
 
-// errNotClaude stops a typing action whose pane does not run Claude.
-var errNotClaude = errors.New("the pane does not run Claude")
+// errNotClaude stops a typing action whose pane does not run Claude, and
+// errScreenChanged one whose screen changed after the pass read it.
+var (
+	errNotClaude     = errors.New("the pane does not run Claude")
+	errScreenChanged = errors.New("the screen changed since it was read")
+)
 
 // typeInto performs an action that types or sends keys, only after asking
-// tmux what the pane runs: a pane running anything but a configured Claude
-// command is skipped, once per command, with a skip naming it. The check is
-// a read, so shadow mode makes it too.
-func (s *Supervisor) typeInto(name, action string, details map[string]any, t *Track, do func() error) error {
+// tmux what the pane runs and reading the screen again: a pane running
+// anything but a configured Claude command is skipped, once per command,
+// with a skip naming it, and so is a screen whose hash is no longer seen,
+// the one the decision was made from. The checks are reads, so shadow mode
+// makes them too.
+func (s *Supervisor) typeInto(name, action string, details map[string]any, t *Track, seen string, do func() error) error {
 	if s.halt != nil {
 		return s.halt
 	}
@@ -739,9 +745,23 @@ func (s *Supervisor) typeInto(name, action string, details map[string]any, t *Tr
 		return err
 	}
 	for _, c := range s.cfg.Policies.PaneCommands {
-		if info.Command == c {
-			return s.act(name, action, details, do)
+		if info.Command != c {
+			continue
 		}
+		// The decision was made from the screen this pass read; if it has
+		// changed since, a dialog may have opened, and a typed line or key
+		// would answer it.
+		pane, err := s.tmux.CapturePane(name, PaneLines)
+		if err != nil {
+			s.emit(name, KindError, map[string]any{"action": action, "step": "capture", "error": err.Error()})
+			return err
+		}
+		if now := HashPane(pane); now != seen {
+			s.skipOnce(name, "screen-changed:"+action+":"+shortHash(now), "the screen changed since it was read this pass; not typing", t,
+				map[string]any{"action": action})
+			return errScreenChanged
+		}
+		return s.act(name, action, details, do)
 	}
 	s.skipOnce(name, "pane-command:"+name+":"+info.Command,
 		fmt.Sprintf("pane runs %q, not one of %s; not typing into it", info.Command, strings.Join(s.cfg.Policies.PaneCommands, ", ")), t,
