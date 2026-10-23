@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# The repository gate: formatting, vet and the race-enabled tests.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+command -v go >/dev/null || { echo "check: go is not installed" >&2; exit 1; }
+unformatted=$(gofmt -l .)
+if [ -n "$unformatted" ]; then
+	echo "check: not gofmt-formatted:" >&2
+	echo "$unformatted" >&2
+	exit 1
+fi
+go vet -mod=readonly ./...
+go test -mod=readonly -race ./...
+echo "CHECK PASS"

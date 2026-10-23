@@ -19,7 +19,10 @@ import (
 	"time"
 )
 
-const defaultConfigPath = "~/.config/agentic-kit/agentd.json"
+const defaultConfigPath = "~/.config/agentd-kit/agentd.json"
+
+// version is agentd-kit's release version.
+const version = "1.0.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -36,6 +39,9 @@ func main() {
 		err = configCmd(os.Args[2:])
 	case "mark-delivered":
 		err = markDeliveredCmd(os.Args[2:])
+	case "version", "--version":
+		fmt.Println("agentd", version)
+		return
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -55,6 +61,7 @@ func usage() {
   agentd status [--config PATH] [--log PATH]
   agentd config [--config PATH]
   agentd mark-delivered [--config PATH] [--log PATH] SESSION WORKTREE REF
+  agentd version
 
 run supervises the configured sessions; --shadow observes and logs what it
 would do without acting. status prints the state table from the event log.

@@ -141,7 +141,7 @@ func TestExampleConfigLoads(t *testing.T) {
 	if !filepath.IsAbs(cfg.Sessions["w17"].Deliver[0].MRFile) || !filepath.IsAbs(cfg.EventLog) {
 		t.Fatalf("paths not expanded: %+v", cfg.Sessions["w17"])
 	}
-	if cfg.Policies.Escalate.Command[0] == "~/consoles/route" {
+	if cfg.Policies.Escalate.Command[0] == "~/bin/post-to-console" {
 		t.Fatal("escalate command not expanded")
 	}
 }

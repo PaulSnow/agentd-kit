@@ -147,7 +147,7 @@ const DefaultRestartPrompt = "You were restarted by the supervisor. Continue you
 // plus the backoff and breaker it lacked.
 func DefaultConfig() Config {
 	return Config{
-		EventLog:      "~/.local/state/agentic-kit/agentd/events.jsonl",
+		EventLog:      "~/.local/state/agentd-kit/events.jsonl",
 		PollInterval:  Duration{5 * time.Minute},
 		TranscriptDir: "~/.claude/projects",
 		Policies: Policies{

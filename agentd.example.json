@@ -1,5 +1,5 @@
 {
-  "event_log": "~/.local/state/agentic-kit/agentd/events.jsonl",
+  "event_log": "~/.local/state/agentd-kit/events.jsonl",
   "poll_interval": "5m",
   "transcript_dir": "~/.claude/projects",
   "policies": {
@@ -25,7 +25,7 @@
       "keys": ["Down", "Enter"]
     },
     "escalate": {
-      "command": ["~/consoles/route", "{console}", "--kind", "decision", "{message}"],
+      "command": ["~/bin/post-to-console", "{console}", "--kind", "decision", "{message}"],
       "default_console": "infra"
     }
   },

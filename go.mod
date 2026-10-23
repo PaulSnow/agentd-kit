@@ -1,3 +1,3 @@
-module github.com/PaulSnow/agentic-kit/kit/agentd
+module github.com/PaulSnow/agentd-kit
 
 go 1.21

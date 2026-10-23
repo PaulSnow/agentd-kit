@@ -1,4 +1,8 @@
-# agentd
+# agentd-kit
+
+Version 1.0. `agentd` started as phase 1 of a supervisor inside [agentic-kit](https://github.com/PaulSnow/agentic-kit), a fork of Wolf McNally's agentic-coding-starter, and moved here to be its own product: a service for the whole machine that supervises sessions across many repositories, which does not fit a template that governs one repository. `agentd version` prints the version.
+
+## agentd
 
 `agentd` keeps unattended Claude Code sessions going and delivers their work. The deterministic management, watching, restarting, nudging, delivering and routing, runs in this program and runs the same way every time. A model is called in only for judgment, through escalation. It replaces the Python session supervisor in phases; this is phase 1: the event log, the session state machine and the supervisor's policies.
 
@@ -7,7 +11,7 @@
 `agentd` needs Go 1.21 or newer and nothing else.
 
 ```bash
-cd kit/agentd && go build -o ~/.local/bin/agentd .
+go build -o ~/.local/bin/agentd .
 ```
 
 ```bash
@@ -22,13 +26,13 @@ agentd run
 agentd status
 ```
 
-`run` reads `~/.config/agentic-kit/agentd.json` (`--config` for another file), replays its event log, then passes over every configured session each `poll_interval`. `--shadow` observes everything and acts on nothing: each action is logged as a `would` event instead. `--once` makes one pass. `status` prints one row per session from the event log. `config` prints the resolved configuration. `mark-delivered SESSION WORKTREE REF` records a delivery made before `agentd` took over, so it is never repeated.
+`run` reads `~/.config/agentd-kit/agentd.json` (`--config` for another file), replays its event log, then passes over every configured session each `poll_interval`. `--shadow` observes everything and acts on nothing: each action is logged as a `would` event instead. `--once` makes one pass. `status` prints one row per session from the event log. `config` prints the resolved configuration. `mark-delivered SESSION WORKTREE REF` records a delivery made before `agentd` took over, so it is never repeated.
 
 `run` is meant to live in a tmux session of its own, under `nice -n 19`.
 
 ## Configuration
 
-The configuration is JSON, not the YAML the issue sketched: `agentd` is standard library first, and Go has no YAML parser in it. Features live in the kit; the owner's specifics live outside the repository, in the config file. [`agentd.example.json`](agentd.example.json) shows every field; unset fields take the defaults in `config.go`, which are the Python supervisor's numbers. Relative paths are home-relative, as before; `~` expands.
+The configuration is JSON, not the YAML the issue sketched: `agentd` is standard library first, and Go has no YAML parser in it. Features live in this repository; the owner's specifics live outside it, in the config file. [`agentd.example.json`](agentd.example.json) shows every field; unset fields take the defaults in `config.go`, which are the Python supervisor's numbers. Relative paths are home-relative, as before; `~` expands.
 
 - `repositories`: each forge project `agentd` may write to, with its `forge` (`gitlab` or `github`), `project` path, `allow` list (`push`, `open`; there is no `merge`), the `console` escalations go to, and the `assignee` for opened requests.
 - `sessions`: each tmux session, its `workdir` (holding `BRIEF.md` and `STATUS.md`), its `cwd`, its `repository`, optional `deliver` specs, and an optional `hold` reason that stops delivery.
@@ -62,9 +66,9 @@ One JSONL file, append-only, one line per observation and action: `time`, `sessi
 ## Tests
 
 ```bash
-cd kit/agentd && go test -race ./...
+./bin/check
 ```
 
-The repository gate runs the same command as `test-agentd` inside `./bin/check test` and `./bin/check all`, and fails when Go is missing rather than passing without it.
+`bin/check` runs `gofmt -l`, `go vet` and `go test -race`, and fails when Go is missing rather than passing without it. CI runs the same script on every push.
 
 The tests run the supervisor against a fake tmux, forge, git and clock over simulated hours. Each failure the old tools showed is a test: a crash loop stops after N restarts and escalates; a session blocked on the owner is not nudged; an escalation is posted once; nothing is ever killed; shadow mode never acts.
