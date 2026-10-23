@@ -158,3 +158,21 @@ func TestShadowRestartsAreNotCrashes(t *testing.T) {
 		t.Fatalf("state = %s, would restarts = %d", h.state("gone"), h.count(KindWould, ActRestart, "gone"))
 	}
 }
+
+// A mark-delivered record written while agentd runs is read at its next
+// pass, so the worktree is not delivered again.
+func TestMarkDeliveredAppliesWhileRunning(t *testing.T) {
+	h := newHarness(t, false, "d")
+	mr := h.dir + "/mr.md"
+	h.status("d", "# Finished\n\nDONE\n")
+	h.deliver("d", Deliver{Repository: "widgets", Worktree: h.dir + "/d/wt", Target: "main", MRFile: mr})
+	h.ticks(1, 5*time.Minute) // waits for the merge-request text
+	if err := MarkDelivered(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "d", h.dir+"/d/wt", "!7"); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, mr, "The MR description.\n")
+	h.ticks(3, 5*time.Minute)
+	if len(h.forge.pushes) != 0 || h.sup.Tracks()["d"].Delivered["d:"+h.dir+"/d/wt"] != "!7" {
+		t.Fatalf("pushes %v, delivered %v after mark-delivered", h.forge.pushes, h.sup.Tracks()["d"].Delivered)
+	}
+}

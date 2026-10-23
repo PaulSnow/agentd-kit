@@ -358,7 +358,8 @@ func (s *Supervisor) Pass() error {
 }
 
 // ownerRecords applies what the owner wrote to the event log since the last
-// pass: a clear lifts a session's park while agentd runs.
+// pass: a clear lifts a session's park, and a mark-delivered record settles
+// a delivery, while agentd runs.
 func (s *Supervisor) ownerRecords() {
 	events, off, err := s.log.Tail(s.tailOff)
 	if err != nil {
@@ -367,8 +368,14 @@ func (s *Supervisor) ownerRecords() {
 	}
 	s.tailOff = off
 	for _, e := range events {
-		if _, ok := s.cfg.Sessions[e.Session]; ok && e.Kind == KindClear {
+		if _, ok := s.cfg.Sessions[e.Session]; !ok || detailString(e, "mode") != ModeOwner {
+			continue
+		}
+		switch {
+		case e.Kind == KindClear:
 			s.track(e.Session).clear()
+		case e.Kind == KindAction && detailString(e, "by") == "mark-delivered":
+			s.track(e.Session).Delivered[detailString(e, "delivered")] = detailString(e, "ref")
 		}
 	}
 }
