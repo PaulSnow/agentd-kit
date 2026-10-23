@@ -66,6 +66,22 @@ func TestParseStatusJoinsEveryQuestionsSection(t *testing.T) {
 	}
 }
 
+// Questions are judged per section: two sections that each say "none" ask
+// nothing, a subheading under Questions is part of the question, and a
+// "none" section beside a real one leaves only the real one.
+func TestParseStatusJudgesEachQuestionsSection(t *testing.T) {
+	cases := map[string]string{
+		"# A\n## Questions\nnone\n\n# B\n## Questions\nNone yet.\n":                "",
+		"# A\n## Questions\n### Which config format?\nJSON or YAML?\n## Next\nx\n": "### Which config format?\nJSON or YAML?",
+		"# A\n## Questions\n- none\n# B\n## Questions\n- Which port?\n":            "- Which port?",
+	}
+	for text, want := range cases {
+		if got := ParseStatus(text).Questions; got != want {
+			t.Errorf("%q: questions %q, want %q", text, got, want)
+		}
+	}
+}
+
 func TestTranscriptDirAndLastTurn(t *testing.T) {
 	if got := TranscriptDir("/root", "/home/me/repos/github.com/org/proj.wt"); got != "/root/-home-me-repos-github-com-org-proj-wt" {
 		t.Fatalf("dir = %q", got)

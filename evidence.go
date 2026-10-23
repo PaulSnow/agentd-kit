@@ -56,10 +56,12 @@ func ReadStatus(path string) (StatusEvidence, error) {
 }
 
 // A STATUS.md may hold several Questions sections (one per issue the session
-// works through); every one of them counts, and only their text counts: rules
-// and blank lines around them do not change the escalation key.
-var questionsHeading = regexp.MustCompile(`(?im)^#+\s*Questions\s*$`)
-var anyHeading = regexp.MustCompile(`(?m)^#+\s`)
+// works through). Each is judged on its own: a section that says "none" asks
+// nothing, a section ends only at a heading of its own level or higher (a
+// subheading under it is part of the question), and rules and blank lines
+// around the text do not change the escalation key.
+var questionsHeading = regexp.MustCompile(`(?im)^(#+)\s*Questions\s*$`)
+var anyHeading = regexp.MustCompile(`(?m)^(#+)\s`)
 var thematicBreak = regexp.MustCompile(`^(-{3,}|\*{3,}|_{3,})$`)
 
 // noQuestions matches the ways a session says it has none: "none", "- none",
@@ -84,22 +86,28 @@ func ParseStatus(text string) StatusEvidence {
 	}
 	ev.Done = lines[len(lines)-1] == "DONE"
 	var questions []string
-	for _, loc := range questionsHeading.FindAllStringIndex(text, -1) {
+	for _, loc := range questionsHeading.FindAllStringSubmatchIndex(text, -1) {
+		level := loc[3] - loc[2]
 		body := text[loc[1]:]
-		if next := anyHeading.FindStringIndex(body); next != nil {
-			body = body[:next[0]]
+		for _, h := range anyHeading.FindAllStringSubmatchIndex(body, -1) {
+			if h[3]-h[2] <= level {
+				body = body[:h[0]]
+				break
+			}
 		}
+		var section []string
 		for _, l := range strings.Split(body, "\n") {
 			l = strings.TrimSpace(l)
 			if l == "" || thematicBreak.MatchString(strings.ReplaceAll(l, " ", "")) {
 				continue
 			}
-			questions = append(questions, l)
+			section = append(section, l)
+		}
+		if joined := strings.Join(section, "\n"); joined != "" && !noQuestions.MatchString(joined) {
+			questions = append(questions, joined)
 		}
 	}
-	if body := strings.Join(questions, "\n"); body != "" && !noQuestions.MatchString(body) {
-		ev.Questions = body
-	}
+	ev.Questions = strings.Join(questions, "\n")
 	return ev
 }
 
