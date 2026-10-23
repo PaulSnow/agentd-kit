@@ -4,6 +4,8 @@
 
 ## Running
 
+`agentd` needs Go 1.21 or newer and nothing else.
+
 ```bash
 cd kit/agentd && go build -o ~/.local/bin/agentd .
 ```
@@ -26,7 +28,7 @@ agentd status
 
 ## Configuration
 
-Features live in the kit; the owner's specifics live outside the repository, in the config file. [`agentd.example.json`](agentd.example.json) shows every field; unset fields take the defaults in `config.go`, which are the Python supervisor's numbers. Relative paths are home-relative, as before; `~` expands.
+The configuration is JSON, not the YAML the issue sketched: `agentd` is standard library first, and Go has no YAML parser in it. Features live in the kit; the owner's specifics live outside the repository, in the config file. [`agentd.example.json`](agentd.example.json) shows every field; unset fields take the defaults in `config.go`, which are the Python supervisor's numbers. Relative paths are home-relative, as before; `~` expands.
 
 - `repositories`: each forge project `agentd` may write to, with its `forge` (`gitlab` or `github`), `project` path, `allow` list (`push`, `open`; there is no `merge`), the `console` escalations go to, and the `assignee` for opened requests.
 - `sessions`: each tmux session, its `workdir` (holding `BRIEF.md` and `STATUS.md`), its `cwd`, its `repository`, optional `deliver` specs, and an optional `hold` reason that stops delivery.
@@ -62,5 +64,7 @@ One JSONL file, append-only, one line per observation and action: `time`, `sessi
 ```bash
 cd kit/agentd && go test -race ./...
 ```
+
+The repository gate runs the same command as `test-agentd` inside `./bin/check test` and `./bin/check all`, and fails when Go is missing rather than passing without it.
 
 The tests run the supervisor against a fake tmux, forge, git and clock over simulated hours. Each failure the old tools showed is a test: a crash loop stops after N restarts and escalates; a session blocked on the owner is not nudged; an escalation is posted once; nothing is ever killed; shadow mode never acts.
