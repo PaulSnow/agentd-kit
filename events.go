@@ -228,10 +228,11 @@ func ReadLog(path string) ([]Event, int, error) {
 	return ReadEvents(f)
 }
 
-// ReadEvents parses JSONL events from r. A malformed final line is a write
-// cut short: it is left out and its length in bytes returned, so the caller
-// can warn. A malformed line anywhere else is corruption, and an error: a
-// replay that skipped it could repeat the action it recorded.
+// ReadEvents parses JSONL events from r. A malformed final line without its
+// newline is a write cut short: it is left out and its length in bytes
+// returned, so the caller can warn. Any other malformed line, a complete
+// last line included, is corruption, and an error: a replay that skipped it
+// could repeat the action it recorded.
 func ReadEvents(r io.Reader) ([]Event, int, error) {
 	var events []Event
 	br := bufio.NewReader(r)
@@ -240,12 +241,7 @@ func ReadEvents(r io.Reader) ([]Event, int, error) {
 		if err != nil && err != io.EOF {
 			return nil, 0, fmt.Errorf("reading event log: %w", err)
 		}
-		final := err == io.EOF
-		if !final {
-			if _, perr := br.Peek(1); perr == io.EOF {
-				final = true
-			}
-		}
+		final := err == io.EOF // the line has no newline
 		if len(bytes.TrimSpace(line)) > 0 {
 			var e Event
 			if jerr := json.Unmarshal(line, &e); jerr != nil || e.Kind == "" {

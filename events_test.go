@@ -231,3 +231,22 @@ func TestFailedAppendLeavesNoFragment(t *testing.T) {
 		t.Fatalf("log after the failed append: %d events, torn %d, %v", len(events), torn, err)
 	}
 }
+
+// Only a last line missing its newline is a write cut short. A complete,
+// newline-terminated last line that does not parse, or has no kind, is
+// corruption like a line in the middle, and stops startup.
+func TestCompleteMalformedLastLineIsAnError(t *testing.T) {
+	for name, last := range map[string]string{"unparsable": `{"kind":`, "no kind": `{"time":"2026-10-22T00:01:00Z"}`} {
+		dir := t.TempDir()
+		logPath := filepath.Join(dir, "events.jsonl")
+		writeFile(t, logPath, `{"time":"2026-10-22T00:00:00Z","kind":"start"}`+"\n"+last+"\n")
+		if _, _, err := ReadLog(logPath); err == nil || !strings.Contains(err.Error(), "line 2") {
+			t.Errorf("%s: ReadLog = %v, want an error at line 2", name, err)
+		}
+		cfgPath := filepath.Join(dir, "agentd.json")
+		writeFile(t, cfgPath, `{"event_log": "`+logPath+`", "transcript_dir": ""}`)
+		if err := runCmd([]string{"--config", cfgPath, "--once"}); err == nil {
+			t.Errorf("%s: run started over a corrupt last line", name)
+		}
+	}
+}
