@@ -100,7 +100,7 @@ func runCmd(args []string) error {
 	if *every > 0 {
 		cfg.PollInterval = Duration{*every}
 	}
-	lock, err := lockInstance(cfg.EventLog + ".lock")
+	lock, err := lockInstance(realPath(cfg.EventLog) + ".lock")
 	if err != nil {
 		return err
 	}
@@ -123,6 +123,22 @@ func runCmd(args []string) error {
 	fmt.Fprintf(os.Stderr, "agentd %s: %d sessions, every %s, log %s\n", mode, len(cfg.Sessions), cfg.PollInterval, cfg.EventLog)
 	sup.Run(ctx, *once)
 	return nil
+}
+
+// realPath resolves symlinks in path, so every name for one event log
+// derives one lock. A log not created yet resolves through its directory;
+// failing that, the path is made absolute.
+func realPath(path string) string {
+	if p, err := filepath.EvalSymlinks(path); err == nil {
+		return p
+	}
+	if dir, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
+		return filepath.Join(dir, filepath.Base(path))
+	}
+	if p, err := filepath.Abs(path); err == nil {
+		return p
+	}
+	return path
 }
 
 // lockInstance takes an exclusive lock on path, creating it and its

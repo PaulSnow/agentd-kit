@@ -28,7 +28,7 @@ agentd status
 
 `run` reads `~/.config/agentd-kit/agentd.json` (`--config` for another file), replays its event log, then passes over every configured session each `poll_interval`. `--shadow` observes everything and acts on nothing: each action is logged as a `would` event instead. `--once` makes one pass. `status` prints one row per session from the event log. `config` prints the resolved configuration. `mark-delivered SESSION WORKTREE REF` records a delivery made before `agentd` took over, so it is never repeated.
 
-`run` is meant to live in a tmux session of its own, under `nice -n 19`. Only one `run` may use an event log: it holds an exclusive lock on the log's path plus `.lock` (by default `~/.local/state/agentd-kit/events.jsonl.lock`), and a second `run` exits with an error naming that file.
+`run` is meant to live in a tmux session of its own, under `nice -n 19`. Only one `run` may use an event log: it holds an exclusive lock on the log's path, with symlinks resolved, plus `.lock` (by default `~/.local/state/agentd-kit/events.jsonl.lock`), and a second `run` exits with an error naming that file.
 
 ## Configuration
 
