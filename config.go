@@ -107,14 +107,16 @@ type NudgePolicy struct {
 	ResumeMessage string   `json:"resume_message"`
 }
 
-// UsageLimitPolicy recognises the usage-limit message on screen. While it
-// shows, the session is left alone; when it clears, ResumeMessage is typed.
+// UsageLimitPolicy recognises the usage-limit message on the visible screen
+// by Pattern, a regular expression. While it shows, the session is left
+// alone; when it clears, ResumeMessage is typed.
 type UsageLimitPolicy struct {
 	Pattern string `json:"pattern"`
 }
 
 // TrustPolicy answers the folder-trust prompt a fresh Claude Code session
-// shows, by sending Keys.
+// shows, recognised on the visible screen by Pattern, a regular expression,
+// by sending Keys.
 type TrustPolicy struct {
 	Enabled bool     `json:"enabled"`
 	Pattern string   `json:"pattern"`
@@ -229,7 +231,7 @@ func DefaultConfig() Config {
 				ResumeMessage: "Continue with your brief; the usage limit has reset.",
 			},
 			UsageLimit:   UsageLimitPolicy{Pattern: `(?i)limit reached.{0,80}reset|out of extra usage`},
-			Trust:        TrustPolicy{Enabled: true, Pattern: "trust this folder", Keys: []string{"Down", "Enter"}},
+			Trust:        TrustPolicy{Enabled: true, Pattern: `(?i)trust (the files in )?this folder`, Keys: []string{"Down", "Enter"}},
 			Escalate:     EscalatePolicy{},
 			Dialog:       DialogPolicy{Patterns: []string{`Do you want to`, `❯\s*1\.`, `(?i)enter to confirm`}},
 			PaneCommands: []string{"claude"},
@@ -320,6 +322,9 @@ func (c *Config) finish(base string) error {
 	}
 	if c.Policies.Trust.Enabled && (c.Policies.Trust.Pattern == "" || len(c.Policies.Trust.Keys) == 0) {
 		errs = append(errs, errors.New("policies.trust_prompt needs a pattern and keys"))
+	}
+	if _, err := regexp.Compile(c.Policies.Trust.Pattern); err != nil {
+		errs = append(errs, fmt.Errorf("policies.trust_prompt.pattern: %w", err))
 	}
 	for name, repo := range c.Repositories {
 		if repo.Forge != "gitlab" && repo.Forge != "github" {

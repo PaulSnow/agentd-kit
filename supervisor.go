@@ -78,7 +78,7 @@ func NewSupervisor(cfg *Config, log *Log, clock Clock, tmux Tmux, git Git, forge
 		tracks:  map[string]*Track{},
 		tailOff: log.Size(),
 		limitRe: regexp.MustCompile(cfg.Policies.UsageLimit.Pattern),
-		trustRe: regexp.MustCompile(regexp.QuoteMeta(cfg.Policies.Trust.Pattern)),
+		trustRe: regexp.MustCompile(cfg.Policies.Trust.Pattern),
 		dialogs: dialogs,
 
 		confidential: confidential,
