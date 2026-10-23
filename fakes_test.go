@@ -244,10 +244,30 @@ func (f *fakeForge) Find(repo Repository, source, target string) ([]MergeResult,
 	return found, nil
 }
 
+// fakeRunner runs escalations and gates. A gate exits gateExit, or fails to
+// run with gateErr; onGate runs during it, to change the tree under it.
 type fakeRunner struct {
 	calls    [][]string
 	attempts int
 	failing  int // fail this many calls first
+	gates    []gateRun
+	gateExit int
+	gateErr  error
+	onGate   func()
+}
+
+type gateRun struct {
+	dir     string
+	argv    []string
+	timeout time.Duration
+}
+
+func (r *fakeRunner) Gate(dir string, argv []string, timeout time.Duration) (int, error) {
+	r.gates = append(r.gates, gateRun{dir, argv, timeout})
+	if r.onGate != nil {
+		r.onGate()
+	}
+	return r.gateExit, r.gateErr
 }
 
 func (r *fakeRunner) Run(argv []string) error {
@@ -283,7 +303,7 @@ func newHarness(t *testing.T, shadow bool, names ...string) *harness {
 	cfg.Policies.Escalate.Command = []string{"route", "{console}", "--kind", "decision", "{message}"}
 	cfg.Policies.Escalate.DefaultConsole = "infra"
 	cfg.Repositories = map[string]Repository{
-		"widgets":  {Forge: "gitlab", Project: "example-org/widgets", Allow: []string{"push", "open"}, Console: "widgets"},
+		"widgets":  {Forge: "gitlab", Project: "example-org/widgets", Allow: []string{"push", "open"}, Console: "widgets", Gate: []string{"./bin/check"}},
 		"readonly": {Forge: "gitlab", Project: "example-org/readonly", Allow: nil},
 	}
 	cfg.Sessions = map[string]Session{}

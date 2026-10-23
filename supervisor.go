@@ -914,6 +914,9 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 		return
 	}
 	repo := s.cfg.Repositories[d.Repository]
+	if !s.gate(name, key, fkey, d, repo, head, t, fail) {
+		return
+	}
 	if err := s.act(name, ActPush, map[string]any{"key": fkey, "branch": branch, "repository": d.Repository}, func() error {
 		return s.forge.PushAllowed(d.Repository, d.Worktree, head, branch)
 	}); err != nil {
@@ -940,6 +943,61 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 		return
 	}
 	t.Delivered[key] = res.Ref
+}
+
+// gate runs the repository's gate in the worktree on HEAD and says whether
+// delivery may push: the gate exited 0 and the tree is still the one it
+// ran on, HEAD unmoved and clean. Its command, commit, exit status and
+// duration go on the gate's event. A failing gate is a failed delivery step;
+// a tree that changed under it is skipped, and the next pass gates the new
+// tree. Shadow mode logs the gate it would run and runs none.
+func (s *Supervisor) gate(name, key, fkey string, d Deliver, repo Repository, head string, t *Track, fail func(string, error)) bool {
+	if len(repo.Gate) == 0 { // refused at load; never deliver ungated
+		s.skipOnce(name, "deliver:"+key+":no-gate", fmt.Sprintf("repository %s has no gate; not delivering", d.Repository), t, map[string]any{"worktree": d.Worktree})
+		return false
+	}
+	timeout := repo.GateTimeout.Duration
+	if timeout <= 0 {
+		timeout = s.cfg.Timeouts.Forge.Duration
+	}
+	gd := map[string]any{"key": fkey, "command": repo.Gate, "sha": head, "worktree": d.Worktree}
+	err := s.act(name, ActGate, gd, func() error {
+		start := s.clock.Now()
+		exit, err := s.runner.Gate(d.Worktree, repo.Gate, timeout)
+		gd["duration_s"] = s.clock.Now().Sub(start).Seconds()
+		if err != nil {
+			return err
+		}
+		gd["exit"] = exit
+		if exit != 0 {
+			return fmt.Errorf("gate %s exited %d", strings.Join(repo.Gate, " "), exit)
+		}
+		return nil
+	})
+	if err != nil {
+		if s.halt == nil {
+			fail("gate", err)
+		}
+		return false
+	}
+	if s.shadow {
+		return true
+	}
+	now, err := s.git.Head(d.Worktree)
+	if err == nil && now == head {
+		var clean bool
+		if clean, err = s.git.Clean(d.Worktree); err == nil && clean {
+			return true
+		}
+	}
+	if err != nil {
+		s.emit(name, KindError, map[string]any{"key": fkey, "step": "after gate", "error": err.Error()})
+		fail("after gate", err)
+		return false
+	}
+	s.skipOnce(name, "deliver:"+key+":moved:"+head, fmt.Sprintf("the tree changed while the gate ran on %s; not pushing it, the next pass gates the new tree", shortHash(head)), t,
+		map[string]any{"worktree": d.Worktree, "sha": head, "head": now})
+	return false
 }
 
 // MarkDelivered records a delivery made by other means, as the action event

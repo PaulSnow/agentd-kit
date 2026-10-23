@@ -46,13 +46,16 @@
       "project": "example-org/widgets",
       "allow": ["push", "open"],
       "console": "widgets",
-      "assignee": "123456"
+      "assignee": "123456",
+      "gate": ["./bin/check"],
+      "gate_timeout": "20m"
     },
     "gadgets": {
       "forge": "github",
       "project": "example-org/gadgets",
       "allow": ["push", "open"],
-      "console": "gadgets"
+      "console": "gadgets",
+      "gate": ["make", "test"]
     }
   },
   "sessions": {

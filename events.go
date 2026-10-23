@@ -56,6 +56,7 @@ const (
 	ActFetch    = "fetch"
 	ActPush     = "push"
 	ActOpen     = "open"
+	ActGate     = "gate"
 	ActEscalate = "escalate"
 	ActUpdate   = "update" // the open Questions escalation's text changed
 )

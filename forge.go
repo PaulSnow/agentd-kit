@@ -391,9 +391,12 @@ func openGitHub(timeout time.Duration, repo Repository, mr MergeRequest, dir str
 	return MergeResult{Ref: ref, URL: url}, nil
 }
 
-// Runner runs the escalation command.
+// Runner runs the escalation command and the delivery gate.
 type Runner interface {
 	Run(argv []string) error
+	// Gate runs argv in dir, bounded by timeout, and returns its exit
+	// status; err is a gate that could not run or did not finish.
+	Gate(dir string, argv []string, timeout time.Duration) (int, error)
 }
 
 // ExecRunner runs a command, bounded by Timeout, and reports its failure output.
@@ -408,4 +411,19 @@ func (r ExecRunner) Run(argv []string) error {
 		return fmt.Errorf("%s: %w: %s", argv[0], err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// Gate runs the gate in the worktree. A relative command such as
+// ./bin/check is the worktree's own. Its output is not kept: the exit
+// status is the result, and the output may hold anything.
+func (r ExecRunner) Gate(dir string, argv []string, timeout time.Duration) (int, error) {
+	if len(argv) == 0 {
+		return 0, fmt.Errorf("no gate command")
+	}
+	_, err := runTimed(timeout, dir, nil, true, argv[0], argv[1:]...)
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		return exit.ExitCode(), nil
+	}
+	return 0, err
 }

@@ -136,6 +136,12 @@ type Repository struct {
 	Allow    []string `json:"allow"`
 	Console  string   `json:"console"`
 	Assignee string   `json:"assignee"`
+	// Gate is the argv agentd runs in the worktree, on the exact commit,
+	// before it pushes; delivery pushes only when it exits 0. A repository
+	// that allows push must have one. GateTimeout bounds it, by default
+	// the forge timeout.
+	Gate        []string `json:"gate"`
+	GateTimeout Duration `json:"gate_timeout"`
 }
 
 // Session is one tmux session running Claude Code. Workdir holds BRIEF.md
@@ -315,6 +321,12 @@ func (c *Config) finish(base string) error {
 			if a != "push" && a != "open" {
 				errs = append(errs, fmt.Errorf("repositories.%s.allow: %q is not push or open", name, a))
 			}
+			if a == "push" && len(repo.Gate) == 0 {
+				errs = append(errs, fmt.Errorf("repositories.%s allows push but has no gate: nothing is delivered without one", name))
+			}
+		}
+		if repo.GateTimeout.Duration < 0 {
+			errs = append(errs, fmt.Errorf("repositories.%s.gate_timeout must not be negative", name))
 		}
 	}
 	for name, s := range c.Sessions {
