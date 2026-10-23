@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -98,11 +99,14 @@ func (a AllowedForge) OpenAllowed(repo string, mr MergeRequest, dir string) (Mer
 }
 
 // runTimed runs a command in dir and returns its standard output, or its
-// combined output when combined is set. A command still running after timeout
-// is killed, and so is anything holding its output open a second later; the
-// error then says it timed out, and is never an *exec.ExitError, so a hung
-// command cannot pass for one that answered no. env is added to agentd's own
-// environment.
+// combined output when combined is set. The command runs in a process group
+// of its own; if it is still running after timeout the whole group is killed,
+// so a child it started (an ssh under git, a pager) dies with it, and its
+// output pipes are closed a second later even if something still holds them.
+// A command that failed after the deadline gets an error saying it timed
+// out, never an *exec.ExitError, so a hung command cannot pass for one that
+// answered no; one that succeeded just as the deadline passed is a success.
+// env is added to agentd's own environment.
 func runTimed(timeout time.Duration, dir string, env []string, combined bool, name string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -111,6 +115,8 @@ func runTimed(timeout time.Duration, dir string, env []string, combined bool, na
 	if env != nil {
 		cmd.Env = append(os.Environ(), env...)
 	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = time.Second
 	var out []byte
 	var err error
@@ -119,7 +125,7 @@ func runTimed(timeout time.Duration, dir string, env []string, combined bool, na
 	} else {
 		out, err = cmd.Output()
 	}
-	if ctx.Err() != nil {
+	if err != nil && ctx.Err() != nil {
 		return out, fmt.Errorf("%s timed out after %s and was killed", name, timeout)
 	}
 	return out, err

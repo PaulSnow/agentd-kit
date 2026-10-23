@@ -1,9 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -141,5 +146,43 @@ func TestFindMatchesMergedRequestsByHead(t *testing.T) {
 	shim(t, "gh", `echo '[{"number":7,"state":"OPEN","headRefOid":"old","url":"u7"}]'`)
 	if got, ok, err := f.Find(gh, "feature", "main", "new"); err != nil || !ok || got.Ref != "#7" {
 		t.Fatalf("github open request: %+v %v %v", got, ok, err)
+	}
+}
+
+// gone says whether pid has exited: no such process, or a zombie waiting
+// for whoever adopted it to reap it.
+func gone(pid int) bool {
+	if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+		return true
+	}
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return true
+	}
+	fields := strings.Fields(string(stat[bytes.LastIndexByte(stat, ')')+1:]))
+	return len(fields) > 0 && fields[0] == "Z"
+}
+
+// A timeout kills the command's whole process group, not just the command:
+// a child it started, here a sleep in the background, does not outlive it.
+func TestTimeoutKillsTheProcessGroup(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	shim(t, "git", "sleep 4242 &\necho $! > "+pidFile+"\nwait")
+	err := quick(t, "fetch", func() error { return ExecGit{Timeout: 300 * time.Millisecond}.Fetch(t.TempDir()) })
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("fetch error = %v, want a timeout", err)
+	}
+	b, rerr := os.ReadFile(pidFile)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	t.Cleanup(func() { syscall.Kill(pid, syscall.SIGKILL) })
+	deadline := time.Now().Add(3 * time.Second)
+	for !gone(pid) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the background sleep %d outlived the timeout", pid)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
