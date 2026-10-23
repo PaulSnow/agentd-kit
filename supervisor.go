@@ -199,11 +199,15 @@ func (s *Supervisor) skipOnce(name, key, reason string, t *Track, details map[st
 // never share state. In shadow mode the would events count as if taken, so
 // the shadow keeps its own counters.
 func (s *Supervisor) Replay(events []Event) {
+	started := "" // the mode of the latest start event
 	for _, e := range events {
 		if e.Session == "" {
+			if e.Kind == KindStart {
+				started = detailString(e, "mode")
+			}
 			continue
 		}
-		if m := detailString(e, "mode"); m != s.mode() && m != ModeOwner {
+		if m := eventMode(e, started); m != s.mode() && m != ModeOwner {
 			continue
 		}
 		t := s.track(e.Session)
@@ -278,6 +282,20 @@ func (s *Supervisor) Replay(events []Event) {
 			}
 		}
 	}
+}
+
+// eventMode is the mode an event was written in. Events written before
+// events carried a mode have none: such an event belongs to the run that
+// wrote the start event before it, and a mark-delivered record is the
+// owner's.
+func eventMode(e Event, started string) string {
+	if m := detailString(e, "mode"); m != "" {
+		return m
+	}
+	if detailString(e, "by") == "mark-delivered" {
+		return ModeOwner
+	}
+	return started
 }
 
 // replayQuestionsPost settles a Questions escalation or update: posted, or
