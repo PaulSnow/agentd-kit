@@ -529,6 +529,7 @@ func TestNotAllowedDoesNotLatch(t *testing.T) {
 	}
 
 	h.cfg.Repositories["readonly"] = Repository{Forge: "gitlab", Project: "example-org/readonly", Allow: []string{"push", "open"}}
+	h.git.remote = "git@gitlab.example.com:example-org/readonly.git"
 	h.restart(false)
 	h.ticks(3, 5*time.Minute)
 	if len(h.forge.pushes) != 1 || len(h.forge.opens) != 1 {

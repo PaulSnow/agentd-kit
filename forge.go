@@ -20,6 +20,8 @@ type Git interface {
 	Clean(dir string) (bool, error)
 	Branch(dir string) (string, error)
 	Head(dir string) (string, error)
+	// RemoteURL is the URL of the worktree's origin.
+	RemoteURL(dir string) (string, error)
 	// Ahead counts the commits on HEAD whose changes origin/target lacks:
 	// a commit the target already has as a patch, rebased or cherry-picked
 	// under another hash, does not count.
@@ -48,11 +50,12 @@ type MergeResult struct {
 }
 
 // Forge performs writes on a forge. It can push and open; it cannot merge.
-// Find is its one read: the open and merged requests from a branch, each
-// with its head commit. Closed ones are left out, since the branch may be
+// Find is its one read: the open and merged requests from a branch of the
+// project itself, forks left out, each with its head commit. Closed ones are left out, since the branch may be
 // delivered again; the supervisor decides which, if any, delivers HEAD.
 type Forge interface {
-	Push(dir, branch string) error
+	// Push sends commit sha to the remote branch.
+	Push(dir, sha, branch string) error
 	Open(repo Repository, mr MergeRequest, dir string) (MergeResult, error)
 	Find(repo Repository, source, target string) ([]MergeResult, error)
 }
@@ -78,11 +81,43 @@ func (a AllowedForge) allowed(repo string, write string) error {
 }
 
 // PushAllowed pushes if the repository allows it.
-func (a AllowedForge) PushAllowed(repo, dir, branch string) error {
+func (a AllowedForge) PushAllowed(repo, dir, sha, branch string) error {
 	if err := a.allowed(repo, "push"); err != nil {
 		return err
 	}
-	return a.Forge.Push(dir, branch)
+	return a.Forge.Push(dir, sha, branch)
+}
+
+// originIs says whether a git remote URL names project on a forge: an
+// https or ssh URL, or git's scp-like user@host:path form, whose path, less
+// a trailing .git, is the project path. Forge paths ignore case. A local
+// path names no forge project.
+func originIs(remote, project string) bool {
+	var path string
+	if strings.Contains(remote, "://") {
+		u, err := url.Parse(remote)
+		if err != nil || u.Host == "" {
+			return false
+		}
+		path = u.Path
+	} else {
+		i := strings.Index(remote, ":")
+		if i <= 0 || strings.Contains(remote[:i], "/") {
+			return false
+		}
+		path = remote[i+1:]
+	}
+	path = strings.TrimSuffix(strings.Trim(path, "/"), ".git")
+	return path != "" && strings.EqualFold(path, project)
+}
+
+// redactRemote drops any credentials from a remote URL, so it can be logged.
+func redactRemote(remote string) string {
+	if u, err := url.Parse(remote); err == nil && u.User != nil {
+		u.User = nil
+		return u.String()
+	}
+	return remote
 }
 
 // Find lists the open and merged requests from source to target in a
@@ -180,6 +215,11 @@ func (g ExecGit) Head(dir string) (string, error) {
 	return strings.TrimSpace(out), err
 }
 
+func (g ExecGit) RemoteURL(dir string) (string, error) {
+	out, err := gitOut(g.Timeout, dir, "remote", "get-url", "origin")
+	return strings.TrimSpace(out), err
+}
+
 func (g ExecGit) Ahead(dir, target string) (int, error) {
 	out, err := gitOut(g.Timeout, dir, "rev-list", "--count", "--right-only", "--cherry-pick", "origin/"+target+"...HEAD")
 	if err != nil {
@@ -217,8 +257,10 @@ func (g ExecGit) FirstSubject(dir, target string) (string, error) {
 // configuration can make it merge.
 type ExecForge struct{ Timeout time.Duration }
 
-func (f ExecForge) Push(dir, branch string) error {
-	_, err := gitOut(f.Timeout, dir, "push", "-q", "-u", "origin", branch)
+// Push sends exactly sha, the commit the supervisor checked, never
+// whatever HEAD has become since.
+func (f ExecForge) Push(dir, sha, branch string) error {
+	_, err := gitOut(f.Timeout, dir, "push", "-q", "origin", sha+":refs/heads/"+branch)
 	return err
 }
 
@@ -243,7 +285,9 @@ func (f ExecForge) Find(repo Repository, source, target string) ([]MergeResult, 
 }
 
 // findGitLab lists the project's merge requests from source to target in
-// every state and keeps the open and merged ones, with their head commit (sha).
+// every state and keeps the open and merged ones, with their head commit
+// (sha). A request from a fork, whose source project is not the target
+// project, is left out: a same-named branch elsewhere is not this delivery.
 func findGitLab(timeout time.Duration, repo Repository, source, target string) ([]MergeResult, error) {
 	proj := strings.ReplaceAll(repo.Project, "/", "%2F")
 	path := "projects/" + proj + "/merge_requests?state=all&per_page=50&source_branch=" + url.QueryEscape(source) + "&target_branch=" + url.QueryEscape(target)
@@ -256,12 +300,17 @@ func findGitLab(timeout time.Duration, repo Repository, source, target string) (
 		State  string `json:"state"`
 		SHA    string `json:"sha"`
 		WebURL string `json:"web_url"`
+		Source int    `json:"source_project_id"`
+		Target int    `json:"target_project_id"`
 	}
 	if err := json.Unmarshal(out, &resp); err != nil {
 		return nil, fmt.Errorf("glab: unreadable reply: %w", err)
 	}
 	var found []MergeResult
 	for _, r := range resp {
+		if r.Source != r.Target {
+			continue
+		}
 		if r.State == "opened" || r.State == "merged" {
 			found = append(found, MergeResult{Ref: "!" + strconv.Itoa(r.IID), URL: r.WebURL, Head: r.SHA, Merged: r.State == "merged"})
 		}
@@ -269,10 +318,11 @@ func findGitLab(timeout time.Duration, repo Repository, source, target string) (
 	return found, nil
 }
 
-// findGitHub is findGitLab for GitHub, where the head commit is headRefOid.
+// findGitHub is findGitLab for GitHub, where the head commit is headRefOid
+// and a fork's request is cross-repository.
 func findGitHub(timeout time.Duration, repo Repository, source, target string) ([]MergeResult, error) {
 	out, err := runTimed(timeout, "", nil, false, "gh", "pr", "list", "-R", repo.Project, "--head", source, "--base", target,
-		"--state", "all", "--json", "number,url,state,headRefOid")
+		"--state", "all", "--json", "number,url,state,headRefOid,isCrossRepository")
 	if err != nil {
 		return nil, fmt.Errorf("gh: %s", exitMessage(err))
 	}
@@ -281,12 +331,16 @@ func findGitHub(timeout time.Duration, repo Repository, source, target string) (
 		State  string `json:"state"`
 		Head   string `json:"headRefOid"`
 		URL    string `json:"url"`
+		Fork   bool   `json:"isCrossRepository"`
 	}
 	if err := json.Unmarshal(out, &resp); err != nil {
 		return nil, fmt.Errorf("gh: unreadable reply: %w", err)
 	}
 	var found []MergeResult
 	for _, r := range resp {
+		if r.Fork {
+			continue
+		}
 		if r.State == "OPEN" || r.State == "MERGED" {
 			found = append(found, MergeResult{Ref: "#" + strconv.Itoa(r.Number), URL: r.URL, Head: r.Head, Merged: r.State == "MERGED"})
 		}

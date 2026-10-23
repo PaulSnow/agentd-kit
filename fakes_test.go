@@ -162,6 +162,8 @@ type fakeGit struct {
 	subject  string
 	head     string
 	inTarget map[string]bool // commits the target contains
+	remote   string
+	remotes  map[string]string // origin URL per worktree, over remote
 	fetches  int
 }
 
@@ -174,6 +176,12 @@ func (g *fakeGit) Branch(dir string) (string, error) {
 	return g.branch, nil
 }
 func (g *fakeGit) Head(string) (string, error) { return g.head, nil }
+func (g *fakeGit) RemoteURL(dir string) (string, error) {
+	if u, ok := g.remotes[dir]; ok {
+		return u, nil
+	}
+	return g.remote, nil
+}
 func (g *fakeGit) Ahead(dir, target string) (int, error) {
 	if n, ok := g.aheads[dir]; ok {
 		return n, nil
@@ -189,6 +197,7 @@ func (g *fakeGit) FirstSubject(string, string) (string, error)    { return g.sub
 // fails, as a forge whose reply could not be read would.
 type fakeForge struct {
 	pushes         []string
+	pushedSHAs     []string
 	opens          []MergeRequest
 	merged         []mergedRequest
 	fail           error
@@ -199,8 +208,9 @@ type mergedRequest struct {
 	ref, source, target, head string
 }
 
-func (f *fakeForge) Push(dir, branch string) error {
+func (f *fakeForge) Push(dir, sha, branch string) error {
 	f.pushes = append(f.pushes, branch)
+	f.pushedSHAs = append(f.pushedSHAs, sha)
 	return nil
 }
 
@@ -287,7 +297,8 @@ func newHarness(t *testing.T, shadow bool, names ...string) *harness {
 		t.Fatal(err)
 	}
 	h := &harness{t: t, dir: dir, cfg: &cfg, clock: &fakeClock{now: time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC)},
-		tmux: newFakeTmux(), git: &fakeGit{clean: true, branch: "feature", ahead: 2, subject: "Add the feature", head: "c0ffee"},
+		tmux: newFakeTmux(), git: &fakeGit{clean: true, branch: "feature", ahead: 2, subject: "Add the feature", head: "c0ffee",
+			remote: "git@gitlab.example.com:example-org/widgets.git"},
 		forge: &fakeForge{}, runner: &fakeRunner{}, buf: &bytes.Buffer{}}
 	h.sup = NewSupervisor(h.cfg, NewLogWriter(h.buf), h.clock, h.tmux, h.git, h.forge, h.runner, shadow)
 	return h

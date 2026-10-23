@@ -801,6 +801,20 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 		s.emit(name, KindError, map[string]any{"key": fkey, "step": step, "error": err.Error()})
 		fail(step, err)
 	}
+	// Push only to the configured project: a worktree whose origin is a fork
+	// or another project would deliver somewhere the allow-list never named.
+	// Not final: the origin may be fixed.
+	remote, err := s.git.RemoteURL(d.Worktree)
+	if err != nil {
+		read("remote", err)
+		return
+	}
+	if project := s.cfg.Repositories[d.Repository].Project; !originIs(remote, project) {
+		shown := redactRemote(remote)
+		s.skipOnce(name, "deliver:"+key+":origin:"+shortHash(HashPane(remote)), fmt.Sprintf("worktree's origin %s is not the project %s; not delivering", shown, project), t,
+			map[string]any{"worktree": d.Worktree, "origin": shown})
+		return
+	}
 	if err := s.actRead(name, ActFetch, map[string]any{"key": fkey, "worktree": d.Worktree}, func() error { return s.git.Fetch(d.Worktree) }); err != nil {
 		fail("fetch", err)
 		return
@@ -901,7 +915,7 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 	}
 	repo := s.cfg.Repositories[d.Repository]
 	if err := s.act(name, ActPush, map[string]any{"key": fkey, "branch": branch, "repository": d.Repository}, func() error {
-		return s.forge.PushAllowed(d.Repository, d.Worktree, branch)
+		return s.forge.PushAllowed(d.Repository, d.Worktree, head, branch)
 	}); err != nil {
 		fail("push", err)
 		return
