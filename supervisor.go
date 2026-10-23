@@ -1044,7 +1044,13 @@ func (s *Supervisor) gate(name, key, fkey string, d Deliver, repo Repository, he
 	}
 	timeout := repo.GateTimeout.Duration
 	if timeout <= 0 {
-		timeout = s.cfg.Timeouts.Forge.Duration
+		timeout = DefaultGateTimeout
+	}
+	// Failures count against the commit: a deterministic failure is given
+	// up on that commit, and a new commit gets fresh tries.
+	gkey := fkey + ":gate:" + head
+	if len(t.Failures[gkey]) >= s.cfg.Policies.Restart.MaxRestarts || !s.retryDue(t, gkey, s.clock.Now()) {
+		return false
 	}
 	config, err := s.git.ConfigHash(d.Worktree)
 	if err != nil {
@@ -1052,23 +1058,32 @@ func (s *Supervisor) gate(name, key, fkey string, d Deliver, repo Repository, he
 		fail("config", err)
 		return false
 	}
-	gd := map[string]any{"key": fkey, "command": repo.Gate, "sha": head, "worktree": d.Worktree}
+	gd := map[string]any{"key": gkey, "command": repo.Gate, "sha": head, "worktree": d.Worktree}
 	err = s.act(name, ActGate, gd, func() error {
 		start := s.clock.Now()
-		exit, err := s.runner.Gate(d.Worktree, repo.Gate, timeout)
+		exit, output, err := s.runner.Gate(d.Worktree, repo.Gate, gateEnv(repo), timeout)
 		gd["duration_s"] = s.clock.Now().Sub(start).Seconds()
+		if err == nil && exit != 0 {
+			err = fmt.Errorf("gate %s exited %d", strings.Join(repo.Gate, " "), exit)
+			gd["exit"] = exit
+		}
 		if err != nil {
+			// The end of its output says why, unless it is confidential.
+			if output = strings.ToValidUTF8(output[max(0, len(output)-2000):], ""); s.confidentialMatch(output) > 0 {
+				output = "(withheld: matches a confidential pattern)"
+			}
+			gd["output"] = output
 			return err
 		}
-		gd["exit"] = exit
-		if exit != 0 {
-			return fmt.Errorf("gate %s exited %d", strings.Join(repo.Gate, " "), exit)
-		}
+		gd["exit"] = 0
 		return nil
 	})
 	if err != nil {
-		if s.halt == nil {
-			fail("gate", err)
+		if s.halt == nil && s.failed(t, gkey, s.clock.Now()) {
+			n := len(t.Failures[gkey])
+			s.skipOnce(name, gkey+":gave-up", fmt.Sprintf("the gate failed %d times on %s; not retrying that commit", n, shortHash(head)), t, map[string]any{"worktree": d.Worktree, "sha": head})
+			s.escalate(name, gkey+":failed", fmt.Sprintf("%s is DONE but its gate failed %d times on %s, last: %v. Nothing is pushed; a new commit is gated afresh.",
+				name, n, shortHash(head), err), t, s.clock.Now())
 		}
 		return false
 	}

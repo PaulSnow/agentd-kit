@@ -291,6 +291,7 @@ type fakeRunner struct {
 	gateExit int
 	gateErr  error
 	onGate   func()
+	gateEnv  []string // the environment the last gate ran with
 }
 
 type gateRun struct {
@@ -299,12 +300,13 @@ type gateRun struct {
 	timeout time.Duration
 }
 
-func (r *fakeRunner) Gate(dir string, argv []string, timeout time.Duration) (int, error) {
+func (r *fakeRunner) Gate(dir string, argv, env []string, timeout time.Duration) (int, string, error) {
 	r.gates = append(r.gates, gateRun{dir, argv, timeout})
+	r.gateEnv = env
 	if r.onGate != nil {
 		r.onGate()
 	}
-	return r.gateExit, r.gateErr
+	return r.gateExit, "gate output", r.gateErr
 }
 
 func (r *fakeRunner) Run(argv []string) error {

@@ -185,14 +185,10 @@ func (a AllowedForge) OpenAllowed(repo string, mr MergeRequest, dir string) (Mer
 func runTimed(timeout time.Duration, dir string, env []string, combined bool, name string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Dir = dir
+	cmd := groupCommand(ctx, dir, name, args...)
 	if env != nil {
 		cmd.Env = append(os.Environ(), env...)
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	cmd.WaitDelay = time.Second
 	var out []byte
 	var err error
 	if combined {
@@ -205,6 +201,35 @@ func runTimed(timeout time.Duration, dir string, env []string, combined bool, na
 	}
 	return out, err
 }
+
+// groupCommand makes a command that runs in dir in a process group of its
+// own, so that when ctx ends the whole group is killed, and whose output
+// pipes are closed a second later even if something still holds them.
+func groupCommand(ctx context.Context, dir, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = time.Second
+	return cmd
+}
+
+// tailBuffer keeps the last max bytes written to it.
+type tailBuffer struct {
+	max int
+	b   []byte
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.b = append(t.b, p...)
+	if len(t.b) > t.max {
+		t.b = append([]byte(nil), t.b[len(t.b)-t.max:]...)
+	}
+	return len(p), nil
+}
+
+// GateOutputMax is how much of a gate's output, its end, is kept.
+const GateOutputMax = 64 * 1024
 
 // gitEnv turns off every way git could stop to ask for credentials: an
 // unattended fetch or push must fail, not wait for a human.
@@ -471,7 +496,7 @@ type Runner interface {
 	Run(argv []string) error
 	// Gate runs argv in dir, bounded by timeout, and returns its exit
 	// status; err is a gate that could not run or did not finish.
-	Gate(dir string, argv []string, timeout time.Duration) (int, error)
+	Gate(dir string, argv, env []string, timeout time.Duration) (exit int, output string, err error)
 }
 
 // ExecRunner runs a command, bounded by Timeout, and reports its failure output.
@@ -488,17 +513,27 @@ func (r ExecRunner) Run(argv []string) error {
 	return nil
 }
 
-// Gate runs the gate in the worktree. A relative command such as
-// ./bin/check is the worktree's own. Its output is not kept: the exit
-// status is the result, and the output may hold anything.
-func (r ExecRunner) Gate(dir string, argv []string, timeout time.Duration) (int, error) {
+// Gate runs the gate in the worktree with exactly env, nothing inherited,
+// in a process group of its own killed at timeout. A relative command such
+// as ./bin/check is the worktree's own. The last GateOutputMax bytes of its
+// combined output are kept.
+func (r ExecRunner) Gate(dir string, argv, env []string, timeout time.Duration) (int, string, error) {
 	if len(argv) == 0 {
-		return 0, fmt.Errorf("no gate command")
+		return 0, "", fmt.Errorf("no gate command")
 	}
-	_, err := runTimed(timeout, dir, nil, true, argv[0], argv[1:]...)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := groupCommand(ctx, dir, argv[0], argv[1:]...)
+	cmd.Env = env
+	out := &tailBuffer{max: GateOutputMax}
+	cmd.Stdout, cmd.Stderr = out, out
+	err := cmd.Run()
+	if err != nil && ctx.Err() != nil {
+		return 0, string(out.b), fmt.Errorf("gate timed out after %s and was killed", timeout)
+	}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {
-		return exit.ExitCode(), nil
+		return exit.ExitCode(), string(out.b), nil
 	}
-	return 0, err
+	return 0, string(out.b), err
 }

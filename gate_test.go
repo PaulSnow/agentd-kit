@@ -24,7 +24,7 @@ func TestDeliveryRunsTheGateFirst(t *testing.T) {
 	h := newHarness(t, false, "d")
 	doneWithDelivery(t, h, "d")
 	h.ticks(2, 5*time.Minute)
-	want := []gateRun{{h.dir + "/d/wt", []string{"./bin/check"}, 2 * time.Minute}}
+	want := []gateRun{{h.dir + "/d/wt", []string{"./bin/check"}, 10 * time.Minute}}
 	if !reflect.DeepEqual(h.runner.gates, want) {
 		t.Fatalf("gates = %+v, want %+v", h.runner.gates, want)
 	}
@@ -50,7 +50,8 @@ func TestDeliveryRunsTheGateFirst(t *testing.T) {
 }
 
 // A failing gate stops the push; it is retried on the backoff schedule and
-// given up, with one escalation, after MaxRestarts failures.
+// given up, with one escalation, after MaxRestarts failures on that commit.
+// A new commit gets fresh tries.
 func TestFailingGateIsNotPushed(t *testing.T) {
 	h := newHarness(t, false, "d")
 	doneWithDelivery(t, h, "d")
@@ -64,6 +65,46 @@ func TestFailingGateIsNotPushed(t *testing.T) {
 	}
 	if len(h.runner.calls) != 1 || !strings.Contains(h.runner.calls[0][4], "gate") {
 		t.Fatalf("escalations = %v", h.runner.calls)
+	}
+	h.git.head, h.runner.gateExit = "beef", 0
+	h.ticks(1, 5*time.Minute)
+	if len(h.forge.pushedSHAs) != 1 || h.forge.pushedSHAs[0] != "beef" {
+		t.Fatalf("pushes = %v after a new commit passed the gate", h.forge.pushedSHAs)
+	}
+}
+
+// The gate runs with a scrubbed environment: PATH, HOME, LANG, TMPDIR and
+// the repository's allow-list, never an agent socket, a token or Claude's
+// settings; an allow-list naming one of those is refused at load.
+func TestGateEnvironmentIsScrubbed(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
+	t.Setenv("GITLAB_TOKEN", "glpat-secret")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-secret")
+	t.Setenv("GOFLAGS", "-mod=readonly")
+	t.Setenv("EDITOR", "vi")
+	h := newHarness(t, false, "d")
+	r := h.cfg.Repositories["widgets"]
+	r.GateEnv = []string{"GOFLAGS"}
+	h.cfg.Repositories["widgets"] = r
+	doneWithDelivery(t, h, "d")
+	h.ticks(1, 5*time.Minute)
+	env := strings.Join(h.runner.gateEnv, "\n")
+	for _, want := range []string{"PATH=", "HOME=", "GOFLAGS=-mod=readonly"} {
+		if !strings.Contains(env, want) {
+			t.Fatalf("gate environment lacks %s:\n%s", want, env)
+		}
+	}
+	for _, bad := range []string{"SSH_AUTH_SOCK", "GITLAB_TOKEN", "CLAUDE_", "EDITOR"} {
+		if strings.Contains(env, bad) {
+			t.Fatalf("gate environment carries %s:\n%s", bad, env)
+		}
+	}
+	for _, name := range []string{"SSH_AUTH_SOCK", "GITLAB_TOKEN", "CLAUDE_CONFIG_DIR"} {
+		path := filepath.Join(t.TempDir(), "c.json")
+		writeFile(t, path, `{"repositories": {"r": {"forge": "gitlab", "project": "a/b", "gate": ["make"], "gate_env": ["`+name+`"]}}}`)
+		if _, err := LoadConfig(path); err == nil {
+			t.Errorf("gate_env %s was accepted", name)
+		}
 	}
 }
 
@@ -122,14 +163,23 @@ func TestExecGate(t *testing.T) {
 	if err := os.Chmod(filepath.Join(dir, "bin", "check"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	exit, err := ExecRunner{}.Gate(dir, []string{"./bin/check"}, 10*time.Second)
+	writeFile(t, filepath.Join(dir, "bin", "loud"), "#!/bin/sh\nhead -c 300000 /dev/zero | tr '\\0' x\necho END\nenv\n")
+	if err := os.Chmod(filepath.Join(dir, "bin", "loud"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exit, _, err := ExecRunner{}.Gate(dir, []string{"./bin/check"}, []string{"PATH=" + os.Getenv("PATH")}, 10*time.Second)
 	if err != nil || exit != 3 {
 		t.Fatalf("gate = %d, %v", exit, err)
+	}
+	t.Setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
+	_, out, err := ExecRunner{}.Gate(dir, []string{"./bin/loud"}, []string{"PATH=" + os.Getenv("PATH"), "ONLY=this"}, 10*time.Second)
+	if err != nil || len(out) > 64*1024 || !strings.Contains(out, "END") || !strings.Contains(out, "ONLY=this") || strings.Contains(out, "SSH_AUTH_SOCK") {
+		t.Fatalf("output: %d bytes, %v; env shown: %v", len(out), err, strings.Contains(out, "SSH_AUTH_SOCK"))
 	}
 	if b, _ := os.ReadFile(filepath.Join(dir, "ran")); strings.TrimSpace(string(b)) != dir {
 		t.Fatalf("gate ran in %q", b)
 	}
-	if _, err := (ExecRunner{}).Gate(dir, []string{"sleep", "30"}, 100*time.Millisecond); err == nil || !strings.Contains(err.Error(), "timed out") {
+	if _, _, err := (ExecRunner{}).Gate(dir, []string{"sleep", "30"}, []string{"PATH=" + os.Getenv("PATH")}, 100*time.Millisecond); err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("hung gate: %v", err)
 	}
 }

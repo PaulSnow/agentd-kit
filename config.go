@@ -159,9 +159,12 @@ type Repository struct {
 	// Gate is the argv agentd runs in the worktree, on the exact commit,
 	// before it pushes; delivery pushes only when it exits 0. A repository
 	// that allows push must have one. GateTimeout bounds it, by default
-	// the forge timeout.
+	// DefaultGateTimeout. It runs with PATH, HOME, LANG and TMPDIR and the
+	// variables GateEnv names, nothing else; no agent socket, token or
+	// Claude setting may be named.
 	Gate        []string `json:"gate"`
 	GateTimeout Duration `json:"gate_timeout"`
+	GateEnv     []string `json:"gate_env"`
 }
 
 // Session is one tmux session running Claude Code. Workdir holds BRIEF.md
@@ -364,6 +367,14 @@ func (c *Config) finish(base string) error {
 		if repo.GateTimeout.Duration < 0 {
 			errs = append(errs, fmt.Errorf("repositories.%s.gate_timeout must not be negative", name))
 		}
+		if repo.GateTimeout.Duration == 0 {
+			repo.GateTimeout = Duration{DefaultGateTimeout}
+		}
+		for _, v := range repo.GateEnv {
+			if secretEnv(v) || v == "" || strings.Contains(v, "=") {
+				errs = append(errs, fmt.Errorf("repositories.%s.gate_env: %q may not be passed to a gate", name, v))
+			}
+		}
 	}
 	for name, a := range c.Accounts {
 		if a.ConfigDir == "" && a.TokenFile == "" {
@@ -448,6 +459,29 @@ func checkTokenFile(p string) error {
 		return fmt.Errorf("%s is blank", p)
 	}
 	return nil
+}
+
+// DefaultGateTimeout bounds a gate whose repository sets no gate_timeout.
+const DefaultGateTimeout = 10 * time.Minute
+
+// gateBaseEnv are the variables every gate gets, when agentd has them.
+var gateBaseEnv = []string{"PATH", "HOME", "LANG", "TMPDIR"}
+
+// secretEnv says whether a variable must never reach a gate: the ssh
+// agent's socket, any token, any Claude setting.
+func secretEnv(name string) bool {
+	return name == "SSH_AUTH_SOCK" || strings.HasSuffix(name, "_TOKEN") || strings.HasPrefix(name, "CLAUDE_")
+}
+
+// gateEnv is the environment a gate for r runs with.
+func gateEnv(r Repository) []string {
+	var env []string
+	for _, name := range append(append([]string{}, gateBaseEnv...), r.GateEnv...) {
+		if v, ok := os.LookupEnv(name); ok && !secretEnv(name) {
+			env = append(env, name+"="+v)
+		}
+	}
+	return env
 }
 
 // expandPath resolves ~ to the home directory and a relative path against
