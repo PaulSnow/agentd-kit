@@ -57,7 +57,15 @@ type QuestionsEscalation struct {
 	Episode int    // escalations opened so far; the open one's number
 	Hash    string // short hash of the text last posted, or "" before the first post
 	Updates int    // updates posted in this episode
+	// LastUpdate is when the session's last update was posted; the next
+	// waits QuestionsUpdateGap, so a session rewording every pass does not
+	// flood the console.
+	LastUpdate time.Time
 }
+
+// QuestionsUpdateGap is the least time between two Questions updates of
+// one session.
+const QuestionsUpdateGap = 30 * time.Minute
 
 // observeQuestions opens or closes the escalation from what STATUS.md asks.
 func (q *QuestionsEscalation) observeQuestions(asks, done bool) {

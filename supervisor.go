@@ -289,7 +289,7 @@ func (t *Track) replayQuestionsPost(e Event) {
 	}
 	t.Questions.Hash = h
 	if n, ok := detailInt(e, "update"); ok {
-		t.Questions.Updates = n
+		t.Questions.Updates, t.Questions.LastUpdate = n, e.Time
 	}
 }
 
@@ -679,7 +679,7 @@ func (s *Supervisor) confidentialMatch(texts ...string) int {
 
 // escalateQuestions posts the session's open Questions once per episode,
 // and each later change of their text as one short update, at most one per
-// pass. Both carry the hash of the text they cover, so replay knows which
+// pass and one per QuestionsUpdateGap, carrying the text current then. Both carry the hash of the text they cover, so replay knows which
 // text the console has seen.
 func (s *Supervisor) escalateQuestions(name, questions string, t *Track, now time.Time) {
 	q := &t.Questions
@@ -694,13 +694,13 @@ func (s *Supervisor) escalateQuestions(name, questions string, t *Track, now tim
 		}
 		return
 	}
-	if hash == q.Hash {
+	if hash == q.Hash || (!q.LastUpdate.IsZero() && now.Sub(q.LastUpdate) < QuestionsUpdateGap) {
 		return
 	}
 	n := q.Updates + 1
 	if s.post(name, ActUpdate, fmt.Sprintf("%s:update:%d", key, n), fmt.Sprintf("%s changed its open Questions in STATUS.md; they now read:\n%s", name, questions), t, now,
 		map[string]any{"questions_hash": hash, "update": n}, full) {
-		q.Hash, q.Updates = hash, n
+		q.Hash, q.Updates, q.LastUpdate = hash, n, now
 	}
 }
 

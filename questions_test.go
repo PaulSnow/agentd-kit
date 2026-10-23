@@ -20,7 +20,7 @@ func TestRewordedQuestionsPostUpdatesNotEscalations(t *testing.T) {
 	h.alive("s1", "waiting")
 	for i := 0; i < 5; i++ {
 		h.status("s1", question(i))
-		h.ticks(3, 5*time.Minute)
+		h.ticks(7, 5*time.Minute)
 	}
 	if got := h.count(KindAction, ActEscalate, "s1"); got != 1 {
 		t.Fatalf("escalations = %d, want 1", got)
@@ -119,7 +119,7 @@ func TestShadowQuestionUpdates(t *testing.T) {
 	h.alive("s1", "waiting")
 	for i := 0; i < 5; i++ {
 		h.status("s1", question(i))
-		h.ticks(3, 5*time.Minute)
+		h.ticks(7, 5*time.Minute)
 	}
 	h.restart(true)
 	h.ticks(6, 5*time.Minute)
@@ -161,5 +161,34 @@ func TestLongQuestionsAreScreenedThenCut(t *testing.T) {
 				t.Fatalf("s2: cut is not on a UTF-8 boundary or too long: %d bytes, valid %v", len(msg), utf8.ValidString(msg))
 			}
 		}
+	}
+}
+
+// Questions reworded every pass post at most one update per 30 minutes,
+// always with the text current when it is posted, and the bound holds
+// across a restart of agentd.
+func TestQuestionUpdatesAreBounded(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.alive("s1", "waiting")
+	for i := 0; i < 24; i++ { // two hours, a new wording every pass
+		h.status("s1", question(i))
+		h.ticks(1, 5*time.Minute)
+	}
+	if got := h.count(KindAction, ActUpdate, "s1"); got != 4 {
+		t.Fatalf("updates = %d in two hours, want 4", got)
+	}
+	last := h.runner.calls[len(h.runner.calls)-1][4]
+	if !strings.Contains(last, "wording 19)") {
+		t.Fatalf("last update is not the text current when posted: %q", last)
+	}
+	h.status("s1", question(99))
+	h.restart(false)
+	h.ticks(1, 5*time.Minute) // 25 minutes after the last update
+	if got := h.count(KindAction, ActUpdate, "s1"); got != 4 {
+		t.Fatalf("updates = %d after a restart, want the bound to hold", got)
+	}
+	h.ticks(1, 5*time.Minute)
+	if got := h.count(KindAction, ActUpdate, "s1"); got != 5 {
+		t.Fatalf("updates = %d once 30 minutes passed, want 5", got)
 	}
 }
