@@ -192,9 +192,8 @@ func TestExampleConfigLoads(t *testing.T) {
 // would keep a crashed session alive and take the nudges meant for Claude.
 func TestDefaultRestartCommandEndsWithClaude(t *testing.T) {
 	cmd := DefaultConfig().Policies.Restart.Command
-	last := cmd[len(cmd)-1]
-	if !strings.HasPrefix(last, "claude ") || !strings.HasSuffix(last, "\"") {
-		t.Fatalf("restart command does not end with the claude invocation: %q", last)
+	if cmd[2] != `exec claude "$1"` {
+		t.Fatalf("restart command does not end with the claude invocation: %q", cmd)
 	}
 	for _, part := range cmd {
 		if strings.Contains(part, "exec bash") {
@@ -212,8 +211,8 @@ func TestDefaultRestartCommandKeepsPermissions(t *testing.T) {
 			t.Fatalf("default restart command bypasses permissions: %q", part)
 		}
 	}
-	if last := DefaultConfig().Policies.Restart.Command[2]; !strings.HasPrefix(last, "claude \"") || strings.Contains(last, "--continue") {
-		t.Fatalf("default restart command is not a fresh claude with a prompt: %q", last)
+	if cmd := strings.Join(DefaultConfig().Policies.Restart.Command, " "); !strings.Contains(cmd, `claude "$1"`) || strings.Contains(cmd, "--continue") {
+		t.Fatalf("default restart command is not a fresh claude with a prompt: %q", cmd)
 	}
 	path := filepath.Join(t.TempDir(), "c.json")
 	writeFile(t, path, `{"policies": {"restart": {"command": ["bash", "-lic", "claude --dangerously-skip-permissions --continue"]}}}`)

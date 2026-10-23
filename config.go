@@ -209,7 +209,8 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 
 // DefaultRestartPrompt is what a restarted session is told. It starts with
 // a fresh context, so it is pointed at its files. {brief} and {status} are
-// substituted.
+// substituted. The default command passes it to bash as its own argument,
+// $1, so the paths are data whatever characters they hold.
 const DefaultRestartPrompt = "You were restarted by the supervisor with a fresh context. Read your brief, {brief}, and your progress, {status}, then continue from where {status} says you are."
 
 // DefaultConfig carries the policies of the Python supervisor this replaces,
@@ -228,10 +229,9 @@ func DefaultConfig() Config {
 				Window:         Duration{time.Hour},
 				BackoffInitial: Duration{time.Minute},
 				BackoffMax:     Duration{30 * time.Minute},
-				Command: []string{"bash", "-lic",
-					"claude \"" + DefaultRestartPrompt + "\""},
-				Width:  220,
-				Height: 50,
+				Command:        []string{"bash", "-lic", `exec claude "$1"`, "agentd", DefaultRestartPrompt},
+				Width:          220,
+				Height:         50,
 			},
 			Nudge: NudgePolicy{
 				Enabled: true,

@@ -2,6 +2,9 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -122,5 +125,50 @@ func TestDefaultRestartIsFresh(t *testing.T) {
 		if strings.Contains(cmd, "--continue") || !strings.Contains(cmd, h.dir+"/s1/BRIEF.md") || !strings.Contains(cmd, h.dir+"/s1/STATUS.md") {
 			t.Fatalf("restart command = %q", cmd)
 		}
+	}
+}
+
+// The default restart command carries the brief and status paths as data:
+// a workdir whose name holds quotes or $( ) reaches Claude's prompt intact
+// and runs nothing.
+func TestRestartPromptPathsAreQuoted(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	weird := filepath.Join(h.dir, `we"ird $(touch pwned) 'dir`)
+	if err := os.MkdirAll(weird, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := h.cfg.Sessions["s1"]
+	s.Workdir = weird
+	h.cfg.Sessions["s1"] = s
+	h.status("s1", working)
+	writeFile(t, filepath.Join(weird, "STATUS.md"), working)
+	h.ticks(1, 5*time.Minute)
+	var line string
+	for _, c := range h.tmux.calls {
+		if c.op == "new-session" {
+			line = c.args[1]
+		}
+	}
+	bin, home := t.TempDir(), t.TempDir()
+	got := filepath.Join(h.dir, "prompt")
+	writeFile(t, filepath.Join(bin, "claude"), "#!/bin/sh\nprintf '%s' \"$1\" > '"+got+"'\n")
+	if err := os.Chmod(filepath.Join(bin, "claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", "-c", line)
+	cmd.Dir = h.dir
+	cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + home}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("restart command failed: %v: %s", err, out)
+	}
+	b, err := os.ReadFile(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), filepath.Join(weird, "BRIEF.md")) || !strings.Contains(string(b), filepath.Join(weird, "STATUS.md")) {
+		t.Fatalf("prompt = %q", b)
+	}
+	if _, err := os.Stat(filepath.Join(h.dir, "pwned")); err == nil {
+		t.Fatal("the workdir's name ran as a command")
 	}
 }
