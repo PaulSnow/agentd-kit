@@ -78,7 +78,7 @@ func NewSupervisor(cfg *Config, log *Log, clock Clock, tmux Tmux, git Git, forge
 		tracks:  map[string]*Track{},
 		tailOff: log.Size(),
 		limitRe: regexp.MustCompile(cfg.Policies.UsageLimit.Pattern),
-		trustRe: regexp.MustCompile(cfg.Policies.Trust.Pattern),
+		trustRe: regexp.MustCompile(`^(?:` + cfg.Policies.Trust.Pattern + `)$`),
 		dialogs: dialogs,
 
 		confidential: confidential,
@@ -345,6 +345,18 @@ func (s *Supervisor) ownerRecords() {
 	}
 }
 
+// questionLine says whether a line of screen, less its indent and any box
+// border, is wholly the trust prompt's question: the same words quoted in a
+// diff, a dialog's body or a session's output sit inside other text.
+func questionLine(re *regexp.Regexp, screen string) bool {
+	for _, line := range strings.Split(screen, "\n") {
+		if re.MatchString(strings.Trim(line, " \t│┃|")) {
+			return true
+		}
+	}
+	return false
+}
+
 // deadPaneLine is tmux's own line on a dead pane, which carries the time.
 var deadPaneLine = regexp.MustCompile(`(?m)^Pane is dead.*$`)
 
@@ -388,7 +400,7 @@ func (s *Supervisor) observe(name string, sess Session) (Evidence, error) {
 			return ev, err
 		}
 		ev.Limited = s.limitRe.MatchString(screen)
-		ev.TrustPrompt = s.cfg.Policies.Trust.Enabled && s.trustRe.MatchString(screen)
+		ev.TrustPrompt = s.cfg.Policies.Trust.Enabled && questionLine(s.trustRe, screen)
 		for _, re := range s.dialogs {
 			if re.MatchString(screen) {
 				ev.Dialog = re.String()

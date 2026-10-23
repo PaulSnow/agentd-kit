@@ -28,7 +28,7 @@
     },
     "trust_prompt": {
       "enabled": true,
-      "pattern": "(?i)trust (the files in )?this folder",
+      "pattern": "(?i)(do you )?trust (the files in )?this folder\\??",
       "keys": ["Enter"]
     },
     "dialog": {

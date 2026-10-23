@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -181,5 +182,38 @@ func TestTrustAndLimitPatternsAreRegexps(t *testing.T) {
 		if _, err := LoadConfig(path); err == nil {
 			t.Errorf("%s: a pattern that does not compile was accepted", name)
 		}
+	}
+}
+
+// The trust prompt is answered only in a session's start phase, and only
+// when its own question line is on screen. A permission dialog whose body
+// quotes the question, a diff that contains it, and a working session whose
+// output prints it get no keys.
+func TestTrustOnlyInTheStartPhase(t *testing.T) {
+	h := newHarness(t, false, "dialog", "diff", "working")
+	for _, n := range []string{"dialog", "diff", "working"} {
+		h.status(n, working)
+		h.alive(n, "starting up")
+	}
+	h.alive("diff", "Edit README.md\n+ Do you trust this folder?\n- old line\n")
+	h.ticks(1, 5*time.Minute)
+	h.tmux.panes["dialog"] = "busy"
+	h.tmux.panes["working"] = "busy"
+	h.ticks(1, 5*time.Minute)
+	if h.state("dialog") != Working || h.state("working") != Working {
+		t.Fatalf("states: dialog %s working %s, want both working", h.state("dialog"), h.state("working"))
+	}
+	h.tmux.panes["dialog"] = "Write notes.md\nDo you trust this folder?\nDo you want to create notes.md?\n❯ 1. Yes\n  2. No\n"
+	for i := 0; i < 6; i++ {
+		h.tmux.panes["working"] = fmt.Sprintf("test output %d\nDo you trust this folder?\n", i)
+		h.ticks(1, 5*time.Minute)
+	}
+	for _, n := range []string{"dialog", "diff", "working"} {
+		if got := h.tmux.count("keys", n); got != 0 {
+			t.Fatalf("%s: key sends = %d", n, got)
+		}
+	}
+	if h.state("dialog") != BlockedOnOwner {
+		t.Fatalf("dialog: state = %s, want blocked-on-owner", h.state("dialog"))
 	}
 }
