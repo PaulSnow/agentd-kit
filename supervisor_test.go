@@ -351,8 +351,9 @@ func TestNoBroadKill(t *testing.T) {
 }
 
 // Shadow mode observes everything and acts on nothing: no tmux writes, no
-// fetch, push or merge request, no escalation command. It still logs what it
-// would do, with the same breaker and once-per-key rules.
+// push or merge request, no escalation command. It fetches, which writes
+// nothing the remote sees. It still logs what it would do, with the same
+// breaker and once-per-key rules.
 func TestShadowNeverActs(t *testing.T) {
 	h := newHarness(t, true, "mon", "idle", "blocked", "done", "trust")
 	h.status("mon", working)
@@ -373,16 +374,16 @@ func TestShadowNeverActs(t *testing.T) {
 	if h.tmux.mutations != 0 {
 		t.Fatalf("tmux mutations = %d", h.tmux.mutations)
 	}
-	if h.git.fetches != 0 || len(h.forge.pushes) != 0 || len(h.forge.opens) != 0 {
-		t.Fatalf("forge touched: fetches %d pushes %v opens %v", h.git.fetches, h.forge.pushes, h.forge.opens)
+	if len(h.forge.pushes) != 0 || len(h.forge.opens) != 0 {
+		t.Fatalf("forge written: pushes %v opens %v", h.forge.pushes, h.forge.opens)
 	}
 	if len(h.runner.calls) != 0 {
 		t.Fatalf("escalation command ran: %v", h.runner.calls)
 	}
-	if got := h.count(KindAction, "", ""); got != 0 {
-		t.Fatalf("action events = %d in shadow mode", got)
+	if got, fetches := h.count(KindAction, "", ""), h.count(KindAction, ActFetch, ""); got != fetches {
+		t.Fatalf("action events = %d in shadow mode, only %d of them fetches", got, fetches)
 	}
-	wants := map[string]int{ActRestart: 3, ActNudge: 3, ActFetch: 1, ActPush: 1, ActOpen: 1}
+	wants := map[string]int{ActRestart: 3, ActNudge: 3, ActPush: 1, ActOpen: 1}
 	for action, want := range wants {
 		if got := h.count(KindWould, action, ""); got != want {
 			t.Fatalf("would %s = %d, want %d", action, got, want)

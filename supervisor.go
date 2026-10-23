@@ -78,8 +78,21 @@ func (s *Supervisor) track(name string) *Track {
 // Tracks exposes the memory for the status command and tests.
 func (s *Supervisor) Tracks() map[string]*Track { return s.tracks }
 
+// mode is the mode this run tags its events with.
+func (s *Supervisor) mode() string {
+	if s.shadow {
+		return ModeShadow
+	}
+	return ModeLive
+}
+
 func (s *Supervisor) emit(name, kind string, details map[string]any) {
-	e := Event{Time: s.clock.Now(), Session: name, Kind: kind, Details: details}
+	d := make(map[string]any, len(details)+1)
+	for k, v := range details {
+		d[k] = v
+	}
+	d["mode"] = s.mode()
+	e := Event{Time: s.clock.Now(), Session: name, Kind: kind, Details: d}
 	if err := s.log.Append(e); err != nil {
 		fmt.Fprintf(os.Stderr, "agentd: event log: %v\n", err)
 	}
@@ -88,6 +101,16 @@ func (s *Supervisor) emit(name, kind string, details map[string]any) {
 // act performs one action, or in shadow mode records that it would. It
 // returns the action's error; nil means the action counts as taken.
 func (s *Supervisor) act(name, action string, details map[string]any, do func() error) error {
+	return s.perform(name, action, details, s.shadow, do)
+}
+
+// actRead performs an action that writes nothing anyone else sees, a fetch,
+// in shadow mode too, so the shadow decides from current refs.
+func (s *Supervisor) actRead(name, action string, details map[string]any, do func() error) error {
+	return s.perform(name, action, details, false, do)
+}
+
+func (s *Supervisor) perform(name, action string, details map[string]any, would bool, do func() error) error {
 	record := func(kind string, err error) {
 		d := map[string]any{"action": action}
 		for k, v := range details {
@@ -98,7 +121,7 @@ func (s *Supervisor) act(name, action string, details map[string]any, do func() 
 		}
 		s.emit(name, kind, d)
 	}
-	if s.shadow {
+	if would {
 		record(KindWould, nil)
 		return nil
 	}
@@ -140,11 +163,16 @@ func (s *Supervisor) skipOnce(name, key, reason string, t *Track, details map[st
 	s.emit(name, KindSkip, d)
 }
 
-// Replay rebuilds the per-session memory from the event log. In shadow mode
-// the would events count as if taken, so the shadow keeps its own counters.
+// Replay rebuilds the per-session memory from the event log. A run reads
+// only the events of its own mode, plus the owner's records: live and shadow
+// never share state. In shadow mode the would events count as if taken, so
+// the shadow keeps its own counters.
 func (s *Supervisor) Replay(events []Event) {
 	for _, e := range events {
 		if e.Session == "" {
+			continue
+		}
+		if m := detailString(e, "mode"); m != s.mode() && m != ModeOwner {
 			continue
 		}
 		t := s.track(e.Session)
@@ -224,11 +252,7 @@ func (t *Track) replayQuestionsPost(e Event) {
 
 // Run passes until the context ends.
 func (s *Supervisor) Run(ctx context.Context, once bool) {
-	mode := "live"
-	if s.shadow {
-		mode = "shadow"
-	}
-	s.emit("", KindStart, map[string]any{"mode": mode, "sessions": s.cfg.SessionNames()})
+	s.emit("", KindStart, map[string]any{"sessions": s.cfg.SessionNames()})
 	for {
 		s.Pass()
 		if once {
@@ -590,7 +614,7 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 		s.emit(name, KindError, map[string]any{"key": fkey, "step": step, "error": err.Error()})
 		fail(step, err)
 	}
-	if err := s.act(name, ActFetch, map[string]any{"key": fkey, "worktree": d.Worktree}, func() error { return s.git.Fetch(d.Worktree) }); err != nil {
+	if err := s.actRead(name, ActFetch, map[string]any{"key": fkey, "worktree": d.Worktree}, func() error { return s.git.Fetch(d.Worktree) }); err != nil {
 		fail("fetch", err)
 		return
 	}
@@ -719,7 +743,8 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 
 // MarkDelivered records a delivery made by other means, as the action event
 // deliver would have written, so the worktree is never delivered again. The
-// worktree must be one of the session's deliver specs.
+// worktree must be one of the session's deliver specs. It is the owner's
+// record of the world, so live and shadow runs both read it.
 func MarkDelivered(cfg *Config, log *Log, now time.Time, session, worktree, ref string) error {
 	sess, ok := cfg.Sessions[session]
 	if !ok {
@@ -739,7 +764,7 @@ func MarkDelivered(cfg *Config, log *Log, now time.Time, session, worktree, ref 
 		return fmt.Errorf("the merge request reference must not be empty")
 	}
 	return log.Append(Event{Time: now, Session: session, Kind: KindAction, Details: map[string]any{
-		"action": ActOpen, "delivered": session + ":" + worktree, "ref": ref, "by": "mark-delivered"}})
+		"action": ActOpen, "delivered": session + ":" + worktree, "ref": ref, "by": "mark-delivered", "mode": ModeOwner}})
 }
 
 // shellJoin quotes argv for the shell tmux hands a new session's command to.

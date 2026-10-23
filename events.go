@@ -36,6 +36,14 @@ const (
 	KindWarning    = "warning"    // agentd itself noticed something: a torn log line dropped
 )
 
+// Modes, in the mode detail every event carries. A run replays only the
+// events of its own mode, and the owner's: live and shadow never share state.
+const (
+	ModeLive   = "live"
+	ModeShadow = "shadow"
+	ModeOwner  = "owner" // an owner's record, such as mark-delivered, read by both
+)
+
 // Action names, used in the details of action and would events.
 const (
 	ActRestart  = "restart"
