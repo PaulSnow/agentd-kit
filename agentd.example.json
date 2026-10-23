@@ -2,6 +2,11 @@
   "event_log": "~/.local/state/agentd-kit/events.jsonl",
   "poll_interval": "5m",
   "transcript_dir": "~/.claude/projects",
+  "timeouts": {
+    "tmux": "10s",
+    "forge": "2m",
+    "escalate": "2m"
+  },
   "policies": {
     "restart": {
       "enabled": true,

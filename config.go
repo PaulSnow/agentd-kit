@@ -20,9 +20,20 @@ type Config struct {
 	EventLog      string                `json:"event_log"`
 	PollInterval  Duration              `json:"poll_interval"`
 	TranscriptDir string                `json:"transcript_dir"`
+	Timeouts      Timeouts              `json:"timeouts"`
 	Policies      Policies              `json:"policies"`
 	Repositories  map[string]Repository `json:"repositories"`
 	Sessions      map[string]Session    `json:"sessions"`
+}
+
+// Timeouts bound every external command agentd runs. A command still
+// running at its timeout is killed and its action fails with an error event;
+// the pass goes on. Tmux bounds each tmux call, Forge each git, glab and gh
+// call, Escalate the escalation command.
+type Timeouts struct {
+	Tmux     Duration `json:"tmux"`
+	Forge    Duration `json:"forge"`
+	Escalate Duration `json:"escalate"`
 }
 
 // Policies are the supervisor's rules, as data. Every number the Python
@@ -150,6 +161,7 @@ func DefaultConfig() Config {
 		EventLog:      "~/.local/state/agentd-kit/events.jsonl",
 		PollInterval:  Duration{5 * time.Minute},
 		TranscriptDir: "~/.claude/projects",
+		Timeouts:      Timeouts{Tmux: Duration{10 * time.Second}, Forge: Duration{2 * time.Minute}, Escalate: Duration{2 * time.Minute}},
 		Policies: Policies{
 			Restart: RestartPolicy{
 				Enabled:        true,
@@ -206,6 +218,9 @@ func (c *Config) finish() error {
 	var errs []error
 	if c.PollInterval.Duration <= 0 {
 		errs = append(errs, errors.New("poll_interval must be positive"))
+	}
+	if c.Timeouts.Tmux.Duration <= 0 || c.Timeouts.Forge.Duration <= 0 || c.Timeouts.Escalate.Duration <= 0 {
+		errs = append(errs, errors.New("timeouts: tmux, forge and escalate must be positive"))
 	}
 	r := &c.Policies.Restart
 	if r.MaxRestarts < 1 {

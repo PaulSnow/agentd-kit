@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Git reads a worktree. Fetch is its one write to the worktree's refs.
@@ -89,13 +92,43 @@ func (a AllowedForge) OpenAllowed(repo string, mr MergeRequest, dir string) (Mer
 	return a.Forge.Open(a.Repos[repo], mr, dir)
 }
 
-// ExecGit runs git in a directory.
-type ExecGit struct{}
-
-func gitOut(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+// runTimed runs a command in dir and returns its standard output, or its
+// combined output when combined is set. A command still running after timeout
+// is killed, and so is anything holding its output open a second later; the
+// error then says it timed out, and is never an *exec.ExitError, so a hung
+// command cannot pass for one that answered no. env is added to agentd's own
+// environment.
+func runTimed(timeout time.Duration, dir string, env []string, combined bool, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
-	out, err := cmd.Output()
+	if env != nil {
+		cmd.Env = append(os.Environ(), env...)
+	}
+	cmd.WaitDelay = time.Second
+	var out []byte
+	var err error
+	if combined {
+		out, err = cmd.CombinedOutput()
+	} else {
+		out, err = cmd.Output()
+	}
+	if ctx.Err() != nil {
+		return out, fmt.Errorf("%s timed out after %s and was killed", name, timeout)
+	}
+	return out, err
+}
+
+// gitEnv turns off every way git could stop to ask for credentials: an
+// unattended fetch or push must fail, not wait for a human.
+var gitEnv = []string{"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "SSH_ASKPASS=", "GCM_INTERACTIVE=never"}
+
+// ExecGit runs git in a directory, each call bounded by Timeout.
+type ExecGit struct{ Timeout time.Duration }
+
+func gitOut(timeout time.Duration, dir string, args ...string) (string, error) {
+	out, err := runTimed(timeout, dir, gitEnv, false, "git", args...)
 	if err != nil {
 		return "", fmt.Errorf("git %s in %s: %s", strings.Join(args, " "), dir, exitMessage(err))
 	}
@@ -111,31 +144,31 @@ func exitMessage(err error) string {
 	return err.Error()
 }
 
-func (ExecGit) Fetch(dir string) error {
-	_, err := gitOut(dir, "fetch", "-q", "origin")
+func (g ExecGit) Fetch(dir string) error {
+	_, err := gitOut(g.Timeout, dir, "fetch", "-q", "origin")
 	return err
 }
 
-func (ExecGit) Clean(dir string) (bool, error) {
-	out, err := gitOut(dir, "status", "--porcelain")
+func (g ExecGit) Clean(dir string) (bool, error) {
+	out, err := gitOut(g.Timeout, dir, "status", "--porcelain")
 	return strings.TrimSpace(out) == "", err
 }
 
-func (ExecGit) Branch(dir string) (string, error) {
-	out, err := gitOut(dir, "rev-parse", "--abbrev-ref", "HEAD")
+func (g ExecGit) Branch(dir string) (string, error) {
+	out, err := gitOut(g.Timeout, dir, "rev-parse", "--abbrev-ref", "HEAD")
 	return strings.TrimSpace(out), err
 }
 
-func (ExecGit) Ahead(dir, target string) (int, error) {
-	out, err := gitOut(dir, "rev-list", "--count", "origin/"+target+"..HEAD")
+func (g ExecGit) Ahead(dir, target string) (int, error) {
+	out, err := gitOut(g.Timeout, dir, "rev-list", "--count", "origin/"+target+"..HEAD")
 	if err != nil {
 		return 0, err
 	}
 	return strconv.Atoi(strings.TrimSpace(out))
 }
 
-func (ExecGit) FirstSubject(dir, target string) (string, error) {
-	out, err := gitOut(dir, "log", "--reverse", "--format=%s", "origin/"+target+"..HEAD")
+func (g ExecGit) FirstSubject(dir, target string) (string, error) {
+	out, err := gitOut(g.Timeout, dir, "log", "--reverse", "--format=%s", "origin/"+target+"..HEAD")
 	if err != nil {
 		return "", err
 	}
@@ -144,30 +177,31 @@ func (ExecGit) FirstSubject(dir, target string) (string, error) {
 }
 
 // ExecForge pushes with git and opens with glab or gh, by the repository's
-// forge. It has no merge method, so no configuration can make it merge.
-type ExecForge struct{}
+// forge, each call bounded by Timeout. It has no merge method, so no
+// configuration can make it merge.
+type ExecForge struct{ Timeout time.Duration }
 
-func (ExecForge) Push(dir, branch string) error {
-	_, err := gitOut(dir, "push", "-q", "-u", "origin", branch)
+func (f ExecForge) Push(dir, branch string) error {
+	_, err := gitOut(f.Timeout, dir, "push", "-q", "-u", "origin", branch)
 	return err
 }
 
-func (ExecForge) Open(repo Repository, mr MergeRequest, dir string) (MergeResult, error) {
+func (f ExecForge) Open(repo Repository, mr MergeRequest, dir string) (MergeResult, error) {
 	switch repo.Forge {
 	case "gitlab":
-		return openGitLab(repo, mr, dir)
+		return openGitLab(f.Timeout, repo, mr, dir)
 	case "github":
-		return openGitHub(repo, mr, dir)
+		return openGitHub(f.Timeout, repo, mr, dir)
 	}
 	return MergeResult{}, fmt.Errorf("unknown forge %q", repo.Forge)
 }
 
-func (ExecForge) Find(repo Repository, source, target string) (MergeResult, bool, error) {
+func (f ExecForge) Find(repo Repository, source, target string) (MergeResult, bool, error) {
 	switch repo.Forge {
 	case "gitlab":
-		return findGitLab(repo, source, target)
+		return findGitLab(f.Timeout, repo, source, target)
 	case "github":
-		return findGitHub(repo, source, target)
+		return findGitHub(f.Timeout, repo, source, target)
 	}
 	return MergeResult{}, false, fmt.Errorf("unknown forge %q", repo.Forge)
 }
@@ -175,10 +209,10 @@ func (ExecForge) Find(repo Repository, source, target string) (MergeResult, bool
 // findGitLab lists the project's merge requests from source to target in
 // every state and returns the first that is open or merged; a closed one
 // does not count, since the branch may be delivered again.
-func findGitLab(repo Repository, source, target string) (MergeResult, bool, error) {
+func findGitLab(timeout time.Duration, repo Repository, source, target string) (MergeResult, bool, error) {
 	proj := strings.ReplaceAll(repo.Project, "/", "%2F")
 	path := "projects/" + proj + "/merge_requests?state=all&per_page=50&source_branch=" + url.QueryEscape(source) + "&target_branch=" + url.QueryEscape(target)
-	out, err := exec.Command("glab", "api", path).Output()
+	out, err := runTimed(timeout, "", nil, false, "glab", "api", path)
 	if err != nil {
 		return MergeResult{}, false, fmt.Errorf("glab: %s", exitMessage(err))
 	}
@@ -198,9 +232,9 @@ func findGitLab(repo Repository, source, target string) (MergeResult, bool, erro
 	return MergeResult{}, false, nil
 }
 
-func findGitHub(repo Repository, source, target string) (MergeResult, bool, error) {
-	out, err := exec.Command("gh", "pr", "list", "-R", repo.Project, "--head", source, "--base", target,
-		"--state", "all", "--json", "number,url,state").Output()
+func findGitHub(timeout time.Duration, repo Repository, source, target string) (MergeResult, bool, error) {
+	out, err := runTimed(timeout, "", nil, false, "gh", "pr", "list", "-R", repo.Project, "--head", source, "--base", target,
+		"--state", "all", "--json", "number,url,state")
 	if err != nil {
 		return MergeResult{}, false, fmt.Errorf("gh: %s", exitMessage(err))
 	}
@@ -220,7 +254,7 @@ func findGitHub(repo Repository, source, target string) (MergeResult, bool, erro
 	return MergeResult{}, false, nil
 }
 
-func openGitLab(repo Repository, mr MergeRequest, dir string) (MergeResult, error) {
+func openGitLab(timeout time.Duration, repo Repository, mr MergeRequest, dir string) (MergeResult, error) {
 	proj := strings.ReplaceAll(repo.Project, "/", "%2F")
 	args := []string{"api", "-X", "POST", "projects/" + proj + "/merge_requests",
 		"-f", "source_branch=" + mr.Source, "-f", "target_branch=" + mr.Target,
@@ -228,9 +262,7 @@ func openGitLab(repo Repository, mr MergeRequest, dir string) (MergeResult, erro
 	if mr.Assignee != "" {
 		args = append(args, "-f", "assignee_id="+mr.Assignee)
 	}
-	cmd := exec.Command("glab", args...)
-	cmd.Dir = dir
-	out, err := cmd.Output()
+	out, err := runTimed(timeout, dir, nil, false, "glab", args...)
 	if err != nil {
 		return MergeResult{}, fmt.Errorf("glab: %s", exitMessage(err))
 	}
@@ -244,7 +276,7 @@ func openGitLab(repo Repository, mr MergeRequest, dir string) (MergeResult, erro
 	return MergeResult{Ref: "!" + strconv.Itoa(resp.IID), URL: resp.WebURL}, nil
 }
 
-func openGitHub(repo Repository, mr MergeRequest, dir string) (MergeResult, error) {
+func openGitHub(timeout time.Duration, repo Repository, mr MergeRequest, dir string) (MergeResult, error) {
 	args := []string{"pr", "create", "-R", repo.Project, "--head", mr.Source, "--base", mr.Target,
 		"--title", mr.Title, "--body", mr.Description}
 	if mr.Assignee != "" {
@@ -253,9 +285,7 @@ func openGitHub(repo Repository, mr MergeRequest, dir string) (MergeResult, erro
 	if strings.HasPrefix(mr.Title, "Draft: ") {
 		args = append(args, "--draft")
 	}
-	cmd := exec.Command("gh", args...)
-	cmd.Dir = dir
-	out, err := cmd.Output()
+	out, err := runTimed(timeout, dir, nil, false, "gh", args...)
 	if err != nil {
 		return MergeResult{}, fmt.Errorf("gh: %s", exitMessage(err))
 	}
@@ -272,14 +302,14 @@ type Runner interface {
 	Run(argv []string) error
 }
 
-// ExecRunner runs a command and reports its failure output.
-type ExecRunner struct{}
+// ExecRunner runs a command, bounded by Timeout, and reports its failure output.
+type ExecRunner struct{ Timeout time.Duration }
 
-func (ExecRunner) Run(argv []string) error {
+func (r ExecRunner) Run(argv []string) error {
 	if len(argv) == 0 {
 		return fmt.Errorf("no command")
 	}
-	out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput()
+	out, err := runTimed(r.Timeout, "", nil, true, argv[0], argv[1:]...)
 	if err != nil {
 		return fmt.Errorf("%s: %w: %s", argv[0], err, strings.TrimSpace(string(out)))
 	}

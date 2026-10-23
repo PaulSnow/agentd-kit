@@ -34,6 +34,7 @@ agentd status
 
 The configuration is JSON, not the YAML the issue sketched: `agentd` is standard library first, and Go has no YAML parser in it. Features live in this repository; the owner's specifics live outside it, in the config file. [`agentd.example.json`](agentd.example.json) shows every field; unset fields take the defaults in `config.go`, which are the Python supervisor's numbers. Relative paths are home-relative, as before; `~` expands.
 
+- `timeouts`: how long one external command may run: `tmux` (default `10s`) for each tmux call, `forge` (default `2m`) for each git, glab and gh call, `escalate` (default `2m`) for the escalation command. A command still running is killed and its action fails with an `error` event; the pass goes on. git runs with `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never` and empty `GIT_ASKPASS` and `SSH_ASKPASS`, so it fails rather than waiting for credentials.
 - `repositories`: each forge project `agentd` may write to, with its `forge` (`gitlab` or `github`), `project` path, `allow` list (`push`, `open`; there is no `merge`), the `console` escalations go to, and the `assignee` for opened requests.
 - `sessions`: each tmux session, its `workdir` (holding `BRIEF.md` and `STATUS.md`), its `cwd`, its `repository`, optional `deliver` specs, and an optional `hold` reason that stops delivery.
 - `policies.restart`: restart a gone session with `command` (by default `claude --continue` under a login shell); exponential backoff from `backoff_initial` to `backoff_max`; after `max_restarts` within `window` the breaker trips, restarts stop and one escalation is posted. The breaker clears when the session is next seen alive. The command ends with Claude itself, so the tmux session ends when Claude exits and the policy sees it; a crashed session's last screen is not kept, and the event log is the record of what happened.
@@ -61,6 +62,7 @@ One JSONL file, append-only, one line per observation and action: `time`, `sessi
 - Every forge write goes through one client wrapped with the per-repository allow-list. It can push and open; there is no merge call to authorize.
 - Escalations and deliveries are keyed and posted once, across restarts of `agentd`. Before pushing, the forge is asked for an existing open or merged request on the branch; one found is recorded as the delivery, so a lost reply or a lost log never opens a duplicate. `mark-delivered` accepts only a worktree named in the session's deliver specs.
 - A failed action is not retried every pass: retries follow the restart backoff and stop after `max_restarts` tries, with one skip or escalation saying so.
+- Every external command runs under a timeout and is killed when it hangs; a hung tmux is an error, never taken for a gone session.
 - Shadow mode performs no tmux write, no fetch, push or open, and runs no escalation command.
 
 ## Tests

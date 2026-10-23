@@ -110,7 +110,9 @@ func runCmd(args []string) error {
 		return err
 	}
 	defer log.Close()
-	sup := NewSupervisor(cfg, log, RealClock{}, ExecTmux{}, ExecGit{}, ExecForge{}, ExecRunner{}, *shadow)
+	to := cfg.Timeouts
+	sup := NewSupervisor(cfg, log, RealClock{}, ExecTmux{Timeout: to.Tmux.Duration}, ExecGit{Timeout: to.Forge.Duration},
+		ExecForge{Timeout: to.Forge.Duration}, ExecRunner{Timeout: to.Escalate.Duration}, *shadow)
 	sup.Replay(events)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

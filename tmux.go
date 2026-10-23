@@ -35,11 +35,11 @@ func target(name string) (string, error) {
 	return "=" + name + ":", nil
 }
 
-// ExecTmux runs the tmux binary.
-type ExecTmux struct{}
+// ExecTmux runs the tmux binary, each call bounded by Timeout.
+type ExecTmux struct{ Timeout time.Duration }
 
-func (ExecTmux) run(args ...string) (string, error) {
-	out, err := exec.Command("tmux", args...).CombinedOutput()
+func (t ExecTmux) run(args ...string) (string, error) {
+	out, err := runTimed(t.Timeout, "", nil, true, "tmux", args...)
 	return string(out), err
 }
 
