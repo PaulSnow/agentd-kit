@@ -36,6 +36,11 @@ type Supervisor struct {
 	runner Runner
 	shadow bool
 
+	// halt is the first failed append of the pass. Once set, nothing more
+	// is done until the next pass: an action whose record could be lost
+	// could be repeated after a replay.
+	halt error
+
 	tracks       map[string]*Track
 	limitRe      *regexp.Regexp
 	trustRe      *regexp.Regexp
@@ -95,11 +100,17 @@ func (s *Supervisor) emit(name, kind string, details map[string]any) {
 	e := Event{Time: s.clock.Now(), Session: name, Kind: kind, Details: d}
 	if err := s.log.Append(e); err != nil {
 		fmt.Fprintf(os.Stderr, "agentd: event log: %v\n", err)
+		if s.halt == nil {
+			s.halt = fmt.Errorf("event log append failed; stopping this pass: %w", err)
+		}
 	}
 }
 
-// act performs one action, or in shadow mode records that it would. It
-// returns the action's error; nil means the action counts as taken.
+// act performs one action, or in shadow mode records that it would. The
+// intent is recorded before the action and the outcome after; when a record
+// cannot be written the pass stops, and an action whose intent was not
+// recorded is not taken. It returns the action's error; nil means the action
+// counts as taken.
 func (s *Supervisor) act(name, action string, details map[string]any, do func() error) error {
 	return s.perform(name, action, details, s.shadow, do)
 }
@@ -111,6 +122,9 @@ func (s *Supervisor) actRead(name, action string, details map[string]any, do fun
 }
 
 func (s *Supervisor) perform(name, action string, details map[string]any, would bool, do func() error) error {
+	if s.halt != nil {
+		return s.halt
+	}
 	record := func(kind string, err error) {
 		d := map[string]any{"action": action}
 		for k, v := range details {
@@ -124,6 +138,9 @@ func (s *Supervisor) perform(name, action string, details map[string]any, would 
 	if would {
 		record(KindWould, nil)
 		return nil
+	}
+	if record(KindIntent, nil); s.halt != nil {
+		return s.halt
 	}
 	if err := do(); err != nil {
 		record(KindError, err)
@@ -250,29 +267,39 @@ func (t *Track) replayQuestionsPost(e Event) {
 	}
 }
 
-// Run passes until the context ends.
-func (s *Supervisor) Run(ctx context.Context, once bool) {
+// Run passes until the context ends. A pass stopped by a failed append is
+// reported and the next pass tries again; with once, its error is returned.
+func (s *Supervisor) Run(ctx context.Context, once bool) error {
 	s.emit("", KindStart, map[string]any{"sessions": s.cfg.SessionNames()})
 	for {
-		s.Pass()
+		err := s.Pass()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "agentd: %v\n", err)
+		}
 		if once {
-			break
+			s.emit("", KindStop, map[string]any{"reason": "once"})
+			return err
 		}
 		select {
 		case <-ctx.Done():
 			s.emit("", KindStop, map[string]any{"reason": ctx.Err().Error()})
-			return
+			return nil
 		case <-time.After(s.cfg.PollInterval.Duration):
 		}
 	}
-	s.emit("", KindStop, map[string]any{"reason": "once"})
 }
 
-// Pass observes and acts on every session once.
-func (s *Supervisor) Pass() {
+// Pass observes and acts on every session once. When an append to the
+// event log fails it stops, acting on nothing more, and returns the error.
+func (s *Supervisor) Pass() error {
+	s.halt = nil
 	for _, name := range s.cfg.SessionNames() {
+		if s.halt != nil {
+			break
+		}
 		s.step(name, s.cfg.Sessions[name])
 	}
+	return s.halt
 }
 
 func (s *Supervisor) observe(name string, sess Session) (Evidence, error) {
@@ -309,7 +336,9 @@ func (s *Supervisor) step(name string, sess Session) {
 		return
 	}
 	state, reason := Classify(t, ev, s.cfg.Policies, now)
-	s.logObserve(name, t, ev, state, reason, now)
+	if s.logObserve(name, t, ev, state, reason, now); s.halt != nil {
+		return
+	}
 	t.Questions.observeQuestions(ev.Status.Questions != "", ev.Status.Done)
 	state = s.actOn(name, sess, t, ev, state, now)
 	if state != t.State {

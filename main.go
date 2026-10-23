@@ -121,8 +121,7 @@ func runCmd(args []string) error {
 		mode = "shadow"
 	}
 	fmt.Fprintf(os.Stderr, "agentd %s: %d sessions, every %s, log %s\n", mode, len(cfg.Sessions), cfg.PollInterval, cfg.EventLog)
-	sup.Run(ctx, *once)
-	return nil
+	return sup.Run(ctx, *once)
 }
 
 // realPath resolves symlinks in path, so every name for one event log

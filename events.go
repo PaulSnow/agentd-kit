@@ -29,6 +29,7 @@ const (
 	KindStop       = "stop"       // agentd stopped
 	KindObserve    = "observe"    // evidence for a session changed
 	KindTransition = "transition" // the session's state changed
+	KindIntent     = "intent"     // an action is about to be taken; its outcome follows
 	KindAction     = "action"     // an action was taken
 	KindWould      = "would"      // shadow mode: the action that would have been taken
 	KindSkip       = "skip"       // an action a policy declined, with the reason
