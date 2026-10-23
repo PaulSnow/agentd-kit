@@ -55,8 +55,12 @@ func ReadStatus(path string) (StatusEvidence, error) {
 	return ParseStatus(string(b)), nil
 }
 
+// A STATUS.md may hold several Questions sections (one per issue the session
+// works through); every one of them counts, and only their text counts: rules
+// and blank lines around them do not change the escalation key.
 var questionsHeading = regexp.MustCompile(`(?im)^#+\s*Questions\s*$`)
 var anyHeading = regexp.MustCompile(`(?m)^#+\s`)
+var thematicBreak = regexp.MustCompile(`^(-{3,}|\*{3,}|_{3,})$`)
 
 // noQuestions matches the ways a session says it has none: "none", "- none",
 // "(none yet)", "None.", "n/a".
@@ -79,15 +83,22 @@ func ParseStatus(text string) StatusEvidence {
 		ev.Head = ev.Head[:160]
 	}
 	ev.Done = lines[len(lines)-1] == "DONE"
-	if loc := questionsHeading.FindStringIndex(text); loc != nil {
+	var questions []string
+	for _, loc := range questionsHeading.FindAllStringIndex(text, -1) {
 		body := text[loc[1]:]
 		if next := anyHeading.FindStringIndex(body); next != nil {
 			body = body[:next[0]]
 		}
-		body = strings.TrimSpace(body)
-		if body != "" && !noQuestions.MatchString(body) {
-			ev.Questions = body
+		for _, l := range strings.Split(body, "\n") {
+			l = strings.TrimSpace(l)
+			if l == "" || thematicBreak.MatchString(strings.ReplaceAll(l, " ", "")) {
+				continue
+			}
+			questions = append(questions, l)
 		}
+	}
+	if body := strings.Join(questions, "\n"); body != "" && !noQuestions.MatchString(body) {
+		ev.Questions = body
 	}
 	return ev
 }

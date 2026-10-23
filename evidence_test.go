@@ -38,12 +38,31 @@ func TestParseStatus(t *testing.T) {
 		{"# T\n## Questions\nNone of the tests pass.\n", false, true, "# T"},
 		{"# T\n## Questions\n1. Which version?\n## Next\n", false, true, "# T"},
 		{"# T\n### questions\nWhat now?\nDONE\n", true, true, "# T"},
+		{"# T\n## Questions\n\n---\n\n# Next issue\n", false, false, "# T"},
 	}
 	for _, c := range cases {
 		ev := ParseStatus(c.text)
 		if ev.Done != c.done || (ev.Questions != "") != c.questions || ev.Head != c.head {
 			t.Errorf("%q: done %v questions %q head %q", c.text, ev.Done, ev.Questions, ev.Head)
 		}
+	}
+}
+
+// A session that works through several issues keeps a Questions section per
+// issue; all of them are the session's questions, and a rule or a new section
+// added after one must not change what the questions are.
+func TestParseStatusJoinsEveryQuestionsSection(t *testing.T) {
+	before := "# A\n## Questions\n- first?\n"
+	after := before + "\n---\n\n# B\nwork\n## Questions\n- second?\n"
+	if got := ParseStatus(before).Questions; got != "- first?" {
+		t.Fatalf("before: %q", got)
+	}
+	if got := ParseStatus(after).Questions; got != "- first?\n- second?" {
+		t.Fatalf("after: %q", got)
+	}
+	ruled := before + "\n***\n\n# B\nwork\n"
+	if got := ParseStatus(ruled).Questions; got != "- first?" {
+		t.Fatalf("a rule after the section changed the questions: %q", got)
 	}
 }
 
