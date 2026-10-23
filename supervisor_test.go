@@ -359,7 +359,7 @@ func TestNoBroadKill(t *testing.T) {
 // Shadow mode observes everything and acts on nothing: no tmux writes, no
 // push or merge request, no escalation command. It fetches, which writes
 // nothing the remote sees. It still logs what it would do, with the same
-// crash parking and once-per-key rules.
+// once-per-key rules.
 func TestShadowNeverActs(t *testing.T) {
 	h := newHarness(t, true, "mon", "idle", "blocked", "done", "trust")
 	h.status("mon", working)
@@ -389,7 +389,7 @@ func TestShadowNeverActs(t *testing.T) {
 	if got, fetches := h.count(KindAction, "", ""), h.count(KindAction, ActFetch, ""); got != fetches {
 		t.Fatalf("action events = %d in shadow mode, only %d of them fetches", got, fetches)
 	}
-	wants := map[string]int{ActRestart: 2, ActNudge: 3, ActPush: 1, ActOpen: 1}
+	wants := map[string]int{ActNudge: 3, ActPush: 1, ActOpen: 1}
 	for action, want := range wants {
 		if got := h.count(KindWould, action, ""); got != want {
 			t.Fatalf("would %s = %d, want %d", action, got, want)
@@ -399,11 +399,16 @@ func TestShadowNeverActs(t *testing.T) {
 	if got := h.count(KindWould, ActTrust, ""); got != 1 {
 		t.Fatalf("would trust = %d, want 1", got)
 	}
-	// crash loop, blocked question, exhausted nudges: one each
-	if got := h.count(KindWould, ActEscalate, ""); got != 3 {
-		t.Fatalf("would escalate = %d, want 3", got)
+	// A would-be restart starts nothing, so it is retried on the backoff and
+	// never seen to crash.
+	if got := h.count(KindWould, ActRestart, "mon"); got < 3 || h.count(KindCrash, "", "") != 0 {
+		t.Fatalf("would restart = %d, crashes = %d", got, h.count(KindCrash, "", ""))
 	}
-	if h.state("mon") != CrashLooping || h.state("blocked") != BlockedOnOwner || h.state("done") != Done {
+	// blocked question, exhausted nudges: one each
+	if got := h.count(KindWould, ActEscalate, ""); got != 2 {
+		t.Fatalf("would escalate = %d, want 2", got)
+	}
+	if h.state("mon") != Failed || h.state("blocked") != BlockedOnOwner || h.state("done") != Done {
 		t.Fatalf("states: mon %s blocked %s done %s", h.state("mon"), h.state("blocked"), h.state("done"))
 	}
 }

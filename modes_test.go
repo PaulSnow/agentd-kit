@@ -141,3 +141,20 @@ func kindFor(shadow bool) string {
 	}
 	return KindAction
 }
+
+// A restart shadow mode only would have made starts nothing, so the session
+// still gone at the next pass has not crashed: shadow logs no crash and
+// never parks it, before or after a replay.
+func TestShadowRestartsAreNotCrashes(t *testing.T) {
+	h := newHarness(t, true, "gone")
+	h.status("gone", working)
+	h.ticks(12*12, 5*time.Minute)
+	h.restart(true)
+	h.ticks(12, 5*time.Minute)
+	if got := h.count(KindCrash, "", "gone"); got != 0 {
+		t.Fatalf("crash events = %d in shadow", got)
+	}
+	if h.state("gone") == CrashLooping || h.count(KindWould, ActRestart, "gone") < 4 {
+		t.Fatalf("state = %s, would restarts = %d", h.state("gone"), h.count(KindWould, ActRestart, "gone"))
+	}
+}

@@ -262,7 +262,9 @@ func (s *Supervisor) Replay(events []Event) {
 			switch detailString(e, "action") {
 			case ActRestart:
 				t.Restarts = append(t.Restarts, e.Time)
-				t.Hash, t.HashSince, t.Observed, t.Live = "", e.Time, true, true
+				if e.Kind == KindAction { // a would-be restart started nothing
+					t.Hash, t.HashSince, t.Observed, t.Live = "", e.Time, true, true
+				}
 			case ActNudge:
 				t.Nudges++
 				t.LastNudge = e.Time
@@ -590,6 +592,11 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			return state
 		}
 		t.Restarts = append(t.Restarts, now) // a failed attempt counts toward the backoff
+		if s.shadow {
+			// Nothing was started, so the session still gone next pass has
+			// not crashed: it is not live, and stays failed.
+			return state
+		}
 		if err == nil {
 			t.Hash, t.HashSince, t.Observed, t.Live = "", now, true, true
 			t.Nudges, t.LastNudge, t.Limited = 0, time.Time{}, false
