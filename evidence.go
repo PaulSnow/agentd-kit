@@ -86,12 +86,25 @@ func ParseStatus(text string) StatusEvidence {
 		ev.Head = ev.Head[:160]
 	}
 	ev.Done = lines[len(lines)-1] == "DONE"
-	var questions, section []string
+	q, closed := parseQuestions(text, true)
+	if !closed {
+		q, _ = parseQuestions(text, false)
+	}
+	ev.Questions = q
+	return ev
+}
+
+// parseQuestions joins the Questions sections of text. With fences set,
+// lines inside code fences are content; closed is false when a fence is
+// still open at the end, which is a typo the caller reads again without
+// fences rather than a block that swallows every later heading.
+func parseQuestions(text string, fences bool) (questions string, closed bool) {
+	var found, section []string
 	level := 0  // the open Questions section's heading level, or 0 outside one
 	fence := "" // the fence the line is inside, such as "```", or ""
 	flush := func() {
 		if joined := strings.Join(section, "\n"); joined != "" && !noQuestions.MatchString(joined) {
-			questions = append(questions, joined)
+			found = append(found, joined)
 		}
 		section = nil
 	}
@@ -108,7 +121,7 @@ func ParseStatus(text string) StatusEvidence {
 				continue
 			}
 		}
-		if f, rest := fenceOf(line); f != "" {
+		if f, rest := fenceOf(line); fences && f != "" {
 			if fence == "" {
 				fence = f
 			} else if f[0] == fence[0] && len(f) >= len(fence) && strings.TrimSpace(rest) == "" {
@@ -122,8 +135,7 @@ func ParseStatus(text string) StatusEvidence {
 		section = append(section, l)
 	}
 	flush()
-	ev.Questions = strings.Join(questions, "\n")
-	return ev
+	return strings.Join(found, "\n"), fence == ""
 }
 
 // fenceOf returns the code fence a line starts with, a run of three or more

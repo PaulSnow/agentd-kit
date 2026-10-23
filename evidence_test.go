@@ -99,6 +99,18 @@ func TestParseStatusIgnoresHeadingsInFences(t *testing.T) {
 	}
 }
 
+// A fence left open to the end of the file is a typo, not a code block that
+// swallows every later heading: the text is read again without fences.
+func TestParseStatusUnclosedFence(t *testing.T) {
+	text := "# A\n## Questions\n```\nWhich port?\n## Next\nnot a question\n"
+	if got := ParseStatus(text).Questions; got != "```\nWhich port?" {
+		t.Fatalf("questions %q", got)
+	}
+	if got := ParseStatus("# A\n```\n## Questions\nWhich port?\n").Questions; got != "Which port?" {
+		t.Fatalf("questions after an unclosed fence %q", got)
+	}
+}
+
 func TestTranscriptDirAndLastTurn(t *testing.T) {
 	if got := TranscriptDir("/root", "/home/me/repos/github.com/org/proj.wt"); got != "/root/-home-me-repos-github-com-org-proj-wt" {
 		t.Fatalf("dir = %q", got)
