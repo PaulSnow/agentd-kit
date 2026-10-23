@@ -559,7 +559,7 @@ func TestRestartedSessionComesBack(t *testing.T) {
 		t.Fatalf("state = %s", h.state("s1"))
 	}
 	for _, c := range h.tmux.calls {
-		if c.op == "new-session" && !strings.Contains(c.args[1], "claude --dangerously-skip-permissions --continue") {
+		if c.op == "new-session" && !strings.Contains(c.args[1], "claude --continue") {
 			t.Fatalf("restart command = %q", c.args[1])
 		}
 	}

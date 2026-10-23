@@ -162,6 +162,29 @@ func TestDefaultRestartCommandEndsWithClaude(t *testing.T) {
 	}
 }
 
+// The compiled default never bypasses Claude Code's permission prompts; an
+// owner who wants that writes the flag into their own restart command, and
+// it is kept.
+func TestDefaultRestartCommandKeepsPermissions(t *testing.T) {
+	for _, part := range DefaultConfig().Policies.Restart.Command {
+		if strings.Contains(part, "dangerously") {
+			t.Fatalf("default restart command bypasses permissions: %q", part)
+		}
+	}
+	if last := DefaultConfig().Policies.Restart.Command[2]; !strings.HasPrefix(last, "claude --continue \"") {
+		t.Fatalf("default restart command does not continue the session: %q", last)
+	}
+	path := filepath.Join(t.TempDir(), "c.json")
+	writeFile(t, path, `{"policies": {"restart": {"command": ["bash", "-lic", "claude --dangerously-skip-permissions --continue"]}}}`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Policies.Restart.Command[2]; got != "claude --dangerously-skip-permissions --continue" {
+		t.Fatalf("configured command = %q", got)
+	}
+}
+
 func TestConfigRefusesMistakes(t *testing.T) {
 	cases := map[string]string{
 		"unknown field":       `{"sessions": {"s": {"workdir": "w", "cwd": "c", "typo": 1}}}`,
