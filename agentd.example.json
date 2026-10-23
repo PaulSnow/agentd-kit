@@ -58,10 +58,20 @@
       "gate": ["make", "test"]
     }
   },
+  "accounts": {
+    "work": {
+      "config_dir": "~/.claude-work"
+    },
+    "spare": {
+      "config_dir": "~/.claude-spare",
+      "token_file": "~/.config/agentd-kit/spare.token"
+    }
+  },
   "sessions": {
     "w17": {
       "workdir": "~/work-17",
       "cwd": "~/repos/widgets-wt/17",
+      "account": "work",
       "repository": "widgets",
       "deliver": [
         {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -394,8 +395,12 @@ func (s *Supervisor) observe(name string, sess Session) (Evidence, error) {
 			}
 		}
 	}
-	if s.cfg.TranscriptDir != "" {
-		ev.Transcript = ReadTranscript(TranscriptDir(s.cfg.TranscriptDir, sess.Cwd))
+	if root := s.cfg.TranscriptDir; root != "" {
+		// An account with its own config directory keeps its transcripts there.
+		if a := s.cfg.Accounts[sess.Account]; sess.Account != "" && a.ConfigDir != "" {
+			root = filepath.Join(a.ConfigDir, "projects")
+		}
+		ev.Transcript = ReadTranscript(TranscriptDir(root, sess.Cwd))
 	}
 	return ev, nil
 }
@@ -536,11 +541,19 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 		for i, part := range pol.Restart.Command {
 			cmd[i] = strings.NewReplacer("{brief}", brief, "{status}", status).Replace(part)
 		}
-		err := s.act(name, ActRestart, map[string]any{"attempt": n + 1, "cwd": sess.Cwd, "respawn": ev.PaneDead}, func() error {
+		line, err := s.launchLine(sess, cmd)
+		if err != nil {
+			// Not final, and not a crash: the owner may fix the account.
+			// There is no fallback to another account.
+			s.skipOnce(name, "account:"+name, "not restarting: "+err.Error(), t, map[string]any{"account": sess.Account})
+			s.escalate(name, "account:"+name, fmt.Sprintf("%s is gone and cannot be restarted under its account: %v. Fix the account; agentd will not use another.", name, err), t, now)
+			return state
+		}
+		err = s.act(name, ActRestart, map[string]any{"attempt": n + 1, "cwd": sess.Cwd, "respawn": ev.PaneDead, "account": sess.Account, "command": line}, func() error {
 			if ev.PaneDead {
-				return s.tmux.Respawn(name, sess.Cwd, shellJoin(cmd))
+				return s.tmux.Respawn(name, sess.Cwd, line)
 			}
-			return s.tmux.NewSession(name, sess.Cwd, shellJoin(cmd), pol.Restart.Width, pol.Restart.Height)
+			return s.tmux.NewSession(name, sess.Cwd, line, pol.Restart.Width, pol.Restart.Height)
 		})
 		if s.halt != nil {
 			return state
@@ -1051,6 +1064,41 @@ func ClearSession(cfg *Config, log *Log, now time.Time, session string) error {
 		return fmt.Errorf("session %q is not configured", session)
 	}
 	return log.Append(Event{Time: now, Session: session, Kind: KindClear, Details: map[string]any{"by": "clear", "mode": ModeOwner}})
+}
+
+// launchLine is the shell command line that runs argv for sess under its
+// account: CLAUDE_CONFIG_DIR for its config directory, and for a token
+// account CLAUDE_CODE_OAUTH_TOKEN, read from the token file by the shell as
+// the command launches. The token is never in agentd's memory, the log, or
+// any process's arguments, where other users could see it. A token file
+// that is missing, not a regular file, empty, or readable by group or
+// others is refused: the session is not started under any account.
+func (s *Supervisor) launchLine(sess Session, argv []string) (string, error) {
+	line := shellJoin(argv)
+	if sess.Account == "" {
+		return line, nil
+	}
+	acct, ok := s.cfg.Accounts[sess.Account]
+	if !ok {
+		return "", fmt.Errorf("account %q is not configured", sess.Account)
+	}
+	var env []string
+	if acct.ConfigDir != "" {
+		env = append(env, "CLAUDE_CONFIG_DIR="+shellJoin([]string{acct.ConfigDir}))
+	}
+	if acct.TokenFile != "" {
+		info, err := os.Stat(acct.TokenFile)
+		switch {
+		case err != nil:
+			return "", fmt.Errorf("account %s: token file: %w", sess.Account, err)
+		case !info.Mode().IsRegular() || info.Size() == 0:
+			return "", fmt.Errorf("account %s: token file %s is not a non-empty regular file", sess.Account, acct.TokenFile)
+		case info.Mode().Perm()&0o077 != 0:
+			return "", fmt.Errorf("account %s: token file %s is readable by others (mode %04o); make it 0600", sess.Account, acct.TokenFile, info.Mode().Perm())
+		}
+		env = append(env, `CLAUDE_CODE_OAUTH_TOKEN="$(cat `+shellJoin([]string{acct.TokenFile})+`)"`)
+	}
+	return strings.Join(append(env, line), " "), nil
 }
 
 // shellJoin quotes argv for the shell tmux hands a new session's command to.

@@ -27,7 +27,16 @@ type Config struct {
 	ConfidentialPatterns []string              `json:"confidential_patterns"`
 	Policies             Policies              `json:"policies"`
 	Repositories         map[string]Repository `json:"repositories"`
+	Accounts             map[string]Account    `json:"accounts"`
 	Sessions             map[string]Session    `json:"sessions"`
+}
+
+// Account is a Claude login a session runs under: its config directory,
+// its OAuth token file, or both. The token file holds the token; agentd
+// never holds it, and the file must be readable by its owner only.
+type Account struct {
+	ConfigDir string `json:"config_dir"`
+	TokenFile string `json:"token_file"`
 }
 
 // Timeouts bound every external command agentd runs. A command still
@@ -145,11 +154,13 @@ type Repository struct {
 }
 
 // Session is one tmux session running Claude Code. Workdir holds BRIEF.md
-// and STATUS.md; Cwd is where the session runs. Hold, when set, stops
+// and STATUS.md; Cwd is where the session runs; Account, when set, is the
+// Claude login it is restarted under, and there is no fallback to another. Hold, when set, stops
 // delivery with that reason until the owner clears it.
 type Session struct {
 	Workdir    string    `json:"workdir"`
 	Cwd        string    `json:"cwd"`
+	Account    string    `json:"account"`
 	Repository string    `json:"repository"`
 	Deliver    []Deliver `json:"deliver"`
 	Hold       string    `json:"hold"`
@@ -329,7 +340,20 @@ func (c *Config) finish(base string) error {
 			errs = append(errs, fmt.Errorf("repositories.%s.gate_timeout must not be negative", name))
 		}
 	}
+	for name, a := range c.Accounts {
+		if a.ConfigDir == "" && a.TokenFile == "" {
+			errs = append(errs, fmt.Errorf("accounts.%s needs a config_dir, a token_file, or both", name))
+		}
+		a.ConfigDir = path("accounts."+name+".config_dir", a.ConfigDir)
+		a.TokenFile = path("accounts."+name+".token_file", a.TokenFile)
+		c.Accounts[name] = a
+	}
 	for name, s := range c.Sessions {
+		if s.Account != "" {
+			if _, ok := c.Accounts[s.Account]; !ok {
+				errs = append(errs, fmt.Errorf("sessions.%s.account %q is not in accounts", name, s.Account))
+			}
+		}
 		if !sessionName.MatchString(name) {
 			errs = append(errs, fmt.Errorf("sessions: %q is not a plain tmux session name", name))
 		}
