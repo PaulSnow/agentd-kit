@@ -36,7 +36,9 @@ type Policies struct {
 }
 
 // RestartPolicy restarts a session whose tmux session is gone and whose
-// STATUS.md is not DONE. Restart n (counting from zero within the window)
+// STATUS.md is not DONE. Command ends with Claude itself, so the tmux
+// session ends when Claude exits and the policy sees it; its last screen is
+// not kept, the event log is the record. Restart n (counting from zero within the window)
 // waits BackoffInitial doubled n-1 times, capped at BackoffMax; the first
 // restart is immediate. After MaxRestarts within Window the breaker trips:
 // no more restarts, one escalation.
@@ -153,7 +155,7 @@ func DefaultConfig() Config {
 				BackoffInitial: Duration{time.Minute},
 				BackoffMax:     Duration{30 * time.Minute},
 				Command: []string{"bash", "-lic",
-					"claude --dangerously-skip-permissions --continue \"" + DefaultRestartPrompt + "\"; exec bash"},
+					"claude --dangerously-skip-permissions --continue \"" + DefaultRestartPrompt + "\""},
 				Width:  220,
 				Height: 50,
 			},

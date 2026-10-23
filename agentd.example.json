@@ -8,7 +8,10 @@
       "max_restarts": 3,
       "window": "1h",
       "backoff_initial": "1m",
-      "backoff_max": "30m"
+      "backoff_max": "30m",
+      "command": ["bash", "-lic", "claude --dangerously-skip-permissions --continue \"You were restarted by the supervisor. Continue your brief, {brief}, from where you were; your progress is in {status}.\""],
+      "width": 220,
+      "height": 50
     },
     "nudge": {
       "enabled": true,

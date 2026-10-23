@@ -30,7 +30,7 @@ Features live in the kit; the owner's specifics live outside the repository, in 
 
 - `repositories`: each forge project `agentd` may write to, with its `forge` (`gitlab` or `github`), `project` path, `allow` list (`push`, `open`; there is no `merge`), the `console` escalations go to, and the `assignee` for opened requests.
 - `sessions`: each tmux session, its `workdir` (holding `BRIEF.md` and `STATUS.md`), its `cwd`, its `repository`, optional `deliver` specs, and an optional `hold` reason that stops delivery.
-- `policies.restart`: restart a gone session with `claude --continue`; exponential backoff from `backoff_initial` to `backoff_max`; after `max_restarts` within `window` the breaker trips, restarts stop and one escalation is posted. The breaker clears when the session is next seen alive.
+- `policies.restart`: restart a gone session with `command` (by default `claude --continue` under a login shell); exponential backoff from `backoff_initial` to `backoff_max`; after `max_restarts` within `window` the breaker trips, restarts stop and one escalation is posted. The breaker clears when the session is next seen alive. The command ends with Claude itself, so the tmux session ends when Claude exits and the policy sees it; a crashed session's last screen is not kept, and the event log is the record of what happened.
 - `policies.nudge`: type `message` into a session whose screen has not changed for `stall`, at most `max` times per idle episode, then escalate once. A session with open Questions is never nudged.
 - `policies.usage_limit`: the screen pattern that means wait; when it clears, `resume_message` is typed once.
 - `policies.trust_prompt`: the pattern and keys that answer the folder-trust prompt.

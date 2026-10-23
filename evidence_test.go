@@ -146,6 +146,22 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 }
 
+// The default restart command ends with Claude itself, so the tmux session
+// ends when Claude exits and the restart policy sees it. A trailing shell
+// would keep a crashed session alive and take the nudges meant for Claude.
+func TestDefaultRestartCommandEndsWithClaude(t *testing.T) {
+	cmd := DefaultConfig().Policies.Restart.Command
+	last := cmd[len(cmd)-1]
+	if !strings.HasPrefix(last, "claude ") || !strings.HasSuffix(last, "\"") {
+		t.Fatalf("restart command does not end with the claude invocation: %q", last)
+	}
+	for _, part := range cmd {
+		if strings.Contains(part, "exec bash") {
+			t.Fatalf("restart command keeps a shell after claude: %q", part)
+		}
+	}
+}
+
 func TestConfigRefusesMistakes(t *testing.T) {
 	cases := map[string]string{
 		"unknown field":       `{"sessions": {"s": {"workdir": "w", "cwd": "c", "typo": 1}}}`,
