@@ -647,3 +647,44 @@ func TestReusedBranchDeliversNewCommits(t *testing.T) {
 		t.Fatalf("pushes %v opens %d, want the new commits on feature-newer delivered once", h.forge.pushes, len(h.forge.opens))
 	}
 }
+
+// Text that matches a confidential pattern is never posted: the escalation
+// names the session and says the details were withheld, and the log records
+// that it was filtered without the text itself.
+func TestConfidentialEscalationIsWithheld(t *testing.T) {
+	h := newHarness(t, false, "s1", "s2")
+	h.cfg.ConfidentialPatterns = []string{`(?i)project\s+nightingale`}
+	h.restart(false)
+	h.status("s1", "# Blocked\n\n## Questions\n1. May the Project  Nightingale launch date go in the release notes?\n")
+	h.alive("s1", "waiting")
+	h.status("s2", blocked)
+	h.alive("s2", "waiting")
+	h.ticks(6, 5*time.Minute)
+
+	if len(h.runner.calls) != 2 {
+		t.Fatalf("escalations = %v, want one per session", h.runner.calls)
+	}
+	for _, c := range h.runner.calls {
+		msg := c[4]
+		switch {
+		case strings.HasPrefix(msg, "s1"):
+			if strings.Contains(strings.ToLower(msg), "nightingale") || !strings.Contains(msg, "withheld") {
+				t.Fatalf("s1 escalation leaked or did not say it was withheld: %q", msg)
+			}
+		case !strings.Contains(msg, "Which version gates the fields?"):
+			t.Fatalf("s2 escalation was filtered: %q", msg)
+		}
+	}
+	if strings.Contains(strings.ToLower(h.buf.String()), "nightingale") {
+		t.Fatal("the event log carries the confidential text")
+	}
+	filtered := 0
+	for _, e := range h.events() {
+		if e.Kind == KindSkip && e.Session == "s1" && detailString(e, "filtered") != "" {
+			filtered++
+		}
+	}
+	if filtered != 1 {
+		t.Fatalf("filtered events = %d, want 1", filtered)
+	}
+}

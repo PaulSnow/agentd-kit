@@ -17,13 +17,17 @@ import (
 // watches. The owner's copy lives outside the repository; agentd.example.json
 // beside this file shows the shape.
 type Config struct {
-	EventLog      string                `json:"event_log"`
-	PollInterval  Duration              `json:"poll_interval"`
-	TranscriptDir string                `json:"transcript_dir"`
-	Timeouts      Timeouts              `json:"timeouts"`
-	Policies      Policies              `json:"policies"`
-	Repositories  map[string]Repository `json:"repositories"`
-	Sessions      map[string]Session    `json:"sessions"`
+	EventLog      string   `json:"event_log"`
+	PollInterval  Duration `json:"poll_interval"`
+	TranscriptDir string   `json:"transcript_dir"`
+	Timeouts      Timeouts `json:"timeouts"`
+	// ConfidentialPatterns are regular expressions for text agentd must never
+	// post. An escalation whose text matches one is replaced by a generic
+	// message naming the session.
+	ConfidentialPatterns []string              `json:"confidential_patterns"`
+	Policies             Policies              `json:"policies"`
+	Repositories         map[string]Repository `json:"repositories"`
+	Sessions             map[string]Session    `json:"sessions"`
 }
 
 // Timeouts bound every external command agentd runs. A command still
@@ -242,6 +246,11 @@ func (c *Config) finish(base string) error {
 	n := &c.Policies.Nudge
 	if n.Enabled && (n.Stall.Duration <= 0 || n.Max < 0 || n.Settle.Duration < 0 || n.Message == "") {
 		errs = append(errs, errors.New("policies.nudge: stall must be positive, max and settle non-negative, message non-empty"))
+	}
+	for i, p := range c.ConfidentialPatterns {
+		if _, err := regexp.Compile(p); err != nil {
+			errs = append(errs, fmt.Errorf("confidential_patterns[%d]: %w", i, err))
+		}
 	}
 	if _, err := regexp.Compile(c.Policies.UsageLimit.Pattern); err != nil {
 		errs = append(errs, fmt.Errorf("policies.usage_limit.pattern: %w", err))

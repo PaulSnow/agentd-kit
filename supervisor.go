@@ -36,14 +36,19 @@ type Supervisor struct {
 	runner Runner
 	shadow bool
 
-	tracks  map[string]*Track
-	limitRe *regexp.Regexp
-	trustRe *regexp.Regexp
+	tracks       map[string]*Track
+	limitRe      *regexp.Regexp
+	trustRe      *regexp.Regexp
+	confidential []*regexp.Regexp
 }
 
 // NewSupervisor wires the supervisor. The forge is wrapped with the
 // repository allow-list here, so no caller can reach it unwrapped.
 func NewSupervisor(cfg *Config, log *Log, clock Clock, tmux Tmux, git Git, forge Forge, runner Runner, shadow bool) *Supervisor {
+	var confidential []*regexp.Regexp
+	for _, p := range cfg.ConfidentialPatterns {
+		confidential = append(confidential, regexp.MustCompile(p))
+	}
 	return &Supervisor{
 		cfg:     cfg,
 		log:     log,
@@ -56,6 +61,8 @@ func NewSupervisor(cfg *Config, log *Log, clock Clock, tmux Tmux, git Git, forge
 		tracks:  map[string]*Track{},
 		limitRe: regexp.MustCompile(cfg.Policies.UsageLimit.Pattern),
 		trustRe: regexp.MustCompile(regexp.QuoteMeta(cfg.Policies.Trust.Pattern)),
+
+		confidential: confidential,
 	}
 }
 
@@ -417,10 +424,20 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 
 // escalate posts one decision to the console, once per key. A failing
 // command is retried on the backoff schedule and given up after MaxRestarts
-// tries, with one skip saying so.
+// tries, with one skip saying so. A message that matches a confidential
+// pattern is replaced, before it is posted or logged, by one that names only
+// the session; one skip records that it was filtered, without the text.
 func (s *Supervisor) escalate(name, key, message string, t *Track, now time.Time) {
 	if t.Posted[key] {
 		return
+	}
+	for i, re := range s.confidential {
+		if re.MatchString(message) {
+			s.skipOnce(name, key+":filtered", fmt.Sprintf("escalation text matched confidential pattern %d; posted a generic message instead", i+1), t,
+				map[string]any{"filtered": key})
+			message = fmt.Sprintf("%s needs your attention; the details were withheld because they matched a confidential pattern. Look at the session directly.", name)
+			break
+		}
 	}
 	console := s.cfg.Console(name)
 	tmpl := s.cfg.Policies.Escalate.Command

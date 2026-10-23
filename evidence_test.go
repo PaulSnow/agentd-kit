@@ -234,6 +234,7 @@ func TestConfigRefusesMistakes(t *testing.T) {
 		"bad duration":        `{"poll_interval": "soon"}`,
 		"deliver without mr":  `{"repositories": {"r": {"forge": "gitlab", "project": "a/b"}}, "sessions": {"s": {"workdir": "w", "cwd": "c", "deliver": [{"repository": "r", "worktree": "x", "target": "main"}]}}}`,
 		"backoff max too low": `{"policies": {"restart": {"backoff_initial": "10m", "backoff_max": "1m"}}}`,
+		"bad confidential":    `{"confidential_patterns": ["(unclosed"]}`,
 	}
 	for name, text := range cases {
 		path := filepath.Join(t.TempDir(), "c.json")

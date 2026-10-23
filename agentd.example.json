@@ -2,6 +2,7 @@
   "event_log": "~/.local/state/agentd-kit/events.jsonl",
   "poll_interval": "5m",
   "transcript_dir": "~/.claude/projects",
+  "confidential_patterns": ["(?i)embargoed", "(?i)customer:\\s*\\w+"],
   "timeouts": {
     "tmux": "10s",
     "forge": "2m",
