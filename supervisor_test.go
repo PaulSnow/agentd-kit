@@ -327,8 +327,8 @@ func TestDoneDeliversOnce(t *testing.T) {
 	if got := h.sup.Tracks()["d1"].Delivered; got["d1:"+h.dir+"/d1/wt"] != "!1" && got["d1:"+h.dir+"/d1/wt"] != "!2" {
 		t.Fatalf("delivered = %v", got)
 	}
-	if got := h.sup.Tracks()["d3"].Delivered; got["d3:"+h.dir+"/d3/wt"] != "not-allowed" {
-		t.Fatalf("readonly delivered = %v", got)
+	if got := h.sup.Tracks()["d3"].Delivered; len(got) != 0 {
+		t.Fatalf("a refused delivery latched: %v", got)
 	}
 	notAllowed := 0
 	for _, c := range h.runner.calls {
@@ -341,6 +341,34 @@ func TestDoneDeliversOnce(t *testing.T) {
 	}
 	if got := h.count(KindSkip, "", "d4"); got != 1 {
 		t.Fatalf("hold skips = %d, want 1", got)
+	}
+}
+
+// A repository that allows no writes is refused and escalated once, but the
+// refusal does not latch: once the allow-list grants push and open, the next
+// pass after a replay delivers exactly once.
+func TestNotAllowedDoesNotLatch(t *testing.T) {
+	h := newHarness(t, false, "d")
+	mr := h.dir + "/mr.md"
+	writeFile(t, mr, "The MR description.\n")
+	h.status("d", "# Finished\n\nDONE\n")
+	h.deliver("d", Deliver{Repository: "readonly", Worktree: h.dir + "/d/wt", Target: "main", MRFile: mr})
+	h.ticks(2, 5*time.Minute)
+	if len(h.runner.calls) != 1 || !strings.Contains(h.runner.calls[0][4], "does not allow push") {
+		t.Fatalf("escalations = %v, want one refusal", h.runner.calls)
+	}
+	if len(h.forge.pushes) != 0 || len(h.sup.Tracks()["d"].Delivered) != 0 {
+		t.Fatalf("pushes %v delivered %v while refused", h.forge.pushes, h.sup.Tracks()["d"].Delivered)
+	}
+
+	h.cfg.Repositories["readonly"] = Repository{Forge: "gitlab", Project: "example-org/readonly", Allow: []string{"push", "open"}}
+	h.restart(false)
+	h.ticks(3, 5*time.Minute)
+	if len(h.forge.pushes) != 1 || len(h.forge.opens) != 1 {
+		t.Fatalf("pushes %v opens %d after the allow-list changed, want one each", h.forge.pushes, len(h.forge.opens))
+	}
+	if got := h.sup.Tracks()["d"].Delivered["d:"+h.dir+"/d/wt"]; got != "!1" {
+		t.Fatalf("delivered = %q", got)
 	}
 }
 

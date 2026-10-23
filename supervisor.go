@@ -424,9 +424,9 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 	}
 	for _, write := range []string{"push", "open"} {
 		if err := s.forge.allowed(d.Repository, write); err != nil {
-			t.Delivered[key] = "not-allowed"
-			details["outcome"] = "not-allowed"
-			s.skipOnce(name, "deliver:"+key+":not-allowed", err.Error(), t, details)
+			// Not final: the allow-list may grant the write later, so this is
+			// not recorded as a delivery outcome.
+			s.skipOnce(name, "deliver:"+key+":not-allowed", err.Error(), t, map[string]any{"worktree": d.Worktree, "repository": d.Repository})
 			s.escalate(name, "deliver:"+key+":not-allowed", fmt.Sprintf("%s is DONE but %s; nothing delivered.", name, err), t)
 			return
 		}
