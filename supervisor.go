@@ -748,12 +748,7 @@ func (s *Supervisor) post(name, action, key, message string, t *Track, now time.
 			map[string]any{"filtered": key})
 	}
 	console := s.cfg.Console(name)
-	tmpl := s.cfg.Policies.Escalate.Command
-	if len(tmpl) == 0 {
-		s.skipOnce(name, key, "no escalate command configured", t, with(map[string]any{"escalation": key, "message": message}))
-		t.Posted[key] = true
-		return true
-	}
+	tmpl := s.cfg.Policies.Escalate.Command // never empty: refused at load
 	if !s.retryDue(t, key, now) {
 		return false
 	}

@@ -283,14 +283,15 @@ func TestConfigRefusesMissingDirsAndTildeUser(t *testing.T) {
 
 func TestConfigRefusesMistakes(t *testing.T) {
 	cases := map[string]string{
-		"unknown field":       `{"sessions": {"s": {"workdir": "w", "cwd": "c", "typo": 1}}}`,
-		"merge in allow":      `{"repositories": {"r": {"forge": "gitlab", "project": "a/b", "allow": ["merge"]}}}`,
-		"unknown repository":  `{"sessions": {"s": {"workdir": "w", "cwd": "c", "repository": "nope"}}}`,
-		"pattern name":        `{"sessions": {"w1*": {"workdir": "w", "cwd": "c"}}}`,
-		"bad duration":        `{"poll_interval": "soon"}`,
-		"deliver without mr":  `{"repositories": {"r": {"forge": "gitlab", "project": "a/b"}}, "sessions": {"s": {"workdir": "w", "cwd": "c", "deliver": [{"repository": "r", "worktree": "x", "target": "main"}]}}}`,
-		"backoff max too low": `{"policies": {"restart": {"backoff_initial": "10m", "backoff_max": "1m"}}}`,
-		"bad confidential":    `{"confidential_patterns": ["(unclosed"]}`,
+		"unknown field":         `{"sessions": {"s": {"workdir": "w", "cwd": "c", "typo": 1}}}`,
+		"merge in allow":        `{"repositories": {"r": {"forge": "gitlab", "project": "a/b", "allow": ["merge"]}}}`,
+		"unknown repository":    `{"sessions": {"s": {"workdir": "w", "cwd": "c", "repository": "nope"}}}`,
+		"pattern name":          `{"sessions": {"w1*": {"workdir": "w", "cwd": "c"}}}`,
+		"bad duration":          `{"poll_interval": "soon"}`,
+		"deliver without mr":    `{"repositories": {"r": {"forge": "gitlab", "project": "a/b"}}, "sessions": {"s": {"workdir": "w", "cwd": "c", "deliver": [{"repository": "r", "worktree": "x", "target": "main"}]}}}`,
+		"backoff max too low":   `{"policies": {"restart": {"backoff_initial": "10m", "backoff_max": "1m"}}}`,
+		"bad confidential":      `{"confidential_patterns": ["(unclosed"]}`,
+		"sessions, no escalate": `{"sessions": {"s": {"workdir": ".", "cwd": "."}}}`,
 	}
 	for name, text := range cases {
 		path := filepath.Join(t.TempDir(), "c.json")

@@ -161,7 +161,7 @@ func TestMarkDeliveredAfterTornLineSurvivesReplay(t *testing.T) {
 	writeFile(t, filepath.Join(work, "STATUS.md"), "DONE\n")
 	writeFile(t, filepath.Join(wt, "README"), "x\n")
 	cfgPath := filepath.Join(dir, "agentd.json")
-	writeFile(t, cfgPath, `{"event_log": "`+logPath+`", "transcript_dir": "",
+	writeFile(t, cfgPath, `{"event_log": "`+logPath+`", "transcript_dir": "", "policies": {"escalate": {"command": ["post", "{message}"]}},
 		"repositories": {"r": {"forge": "gitlab", "project": "a/b", "allow": ["push", "open"], "gate": ["./bin/check"]}},
 		"sessions": {"d": {"workdir": "work", "cwd": "wt", "deliver": [{"repository": "r", "worktree": "wt", "target": "main", "mr_file": "work/mr.md"}]}}}`)
 	writeFile(t, logPath, `{"time":"2026-10-22T00:00:00Z","kind":"start"}`+"\n"+`{"time":"2026-10-22T00:01:00Z","kind":"obs`)
