@@ -82,6 +82,23 @@ func TestParseStatusJudgesEachQuestionsSection(t *testing.T) {
 	}
 }
 
+// Lines inside a fenced code block are content, never headings: a shell
+// comment in a question's snippet does not end the section, and a
+// Questions heading inside a fence does not start one (issue #2).
+func TestParseStatusIgnoresHeadingsInFences(t *testing.T) {
+	cases := map[string]string{
+		"# A\n## Questions\n```sh\n# build first\nmake\n```\nIs that right?\n## Next\nx\n": "```sh\n# build first\nmake\n```\nIs that right?",
+		"# A\n## Questions\n~~~\n# only a comment\n~~~\n":                                  "~~~\n# only a comment\n~~~",
+		"# A\n```\n## Questions\nnot a question\n```\n":                                    "",
+		"# A\n## Questions\n````\n```\n# still code\n````\nAfter?\n# B\n":                  "````\n```\n# still code\n````\nAfter?",
+	}
+	for text, want := range cases {
+		if got := ParseStatus(text).Questions; got != want {
+			t.Errorf("%q: questions %q, want %q", text, got, want)
+		}
+	}
+}
+
 func TestTranscriptDirAndLastTurn(t *testing.T) {
 	if got := TranscriptDir("/root", "/home/me/repos/github.com/org/proj.wt"); got != "/root/-home-me-repos-github-com-org-proj-wt" {
 		t.Fatalf("dir = %q", got)

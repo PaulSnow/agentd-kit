@@ -59,9 +59,10 @@ func ReadStatus(path string) (StatusEvidence, error) {
 // works through). Each is judged on its own: a section that says "none" asks
 // nothing, a section ends only at a heading of its own level or higher (a
 // subheading under it is part of the question), and rules and blank lines
-// around the text do not change the escalation key.
-var questionsHeading = regexp.MustCompile(`(?im)^(#+)\s*Questions\s*$`)
-var anyHeading = regexp.MustCompile(`(?m)^(#+)\s`)
+// around the text do not change the escalation key. Lines inside a fenced
+// code block are content, never headings.
+var questionsHeading = regexp.MustCompile(`(?i)^(#+)\s*Questions\s*$`)
+var anyHeading = regexp.MustCompile(`^(#+)\s`)
 var thematicBreak = regexp.MustCompile(`^(-{3,}|\*{3,}|_{3,})$`)
 
 // noQuestions matches the ways a session says it has none: "none", "- none",
@@ -85,30 +86,63 @@ func ParseStatus(text string) StatusEvidence {
 		ev.Head = ev.Head[:160]
 	}
 	ev.Done = lines[len(lines)-1] == "DONE"
-	var questions []string
-	for _, loc := range questionsHeading.FindAllStringSubmatchIndex(text, -1) {
-		level := loc[3] - loc[2]
-		body := text[loc[1]:]
-		for _, h := range anyHeading.FindAllStringSubmatchIndex(body, -1) {
-			if h[3]-h[2] <= level {
-				body = body[:h[0]]
-				break
-			}
-		}
-		var section []string
-		for _, l := range strings.Split(body, "\n") {
-			l = strings.TrimSpace(l)
-			if l == "" || thematicBreak.MatchString(strings.ReplaceAll(l, " ", "")) {
-				continue
-			}
-			section = append(section, l)
-		}
+	var questions, section []string
+	level := 0  // the open Questions section's heading level, or 0 outside one
+	fence := "" // the fence the line is inside, such as "```", or ""
+	flush := func() {
 		if joined := strings.Join(section, "\n"); joined != "" && !noQuestions.MatchString(joined) {
 			questions = append(questions, joined)
 		}
+		section = nil
 	}
+	for _, line := range strings.Split(text, "\n") {
+		if fence == "" {
+			if m := questionsHeading.FindStringSubmatch(line); m != nil && (level == 0 || len(m[1]) <= level) {
+				flush()
+				level = len(m[1])
+				continue
+			}
+			if m := anyHeading.FindStringSubmatch(line); m != nil && level > 0 && len(m[1]) <= level {
+				flush()
+				level = 0
+				continue
+			}
+		}
+		if f, rest := fenceOf(line); f != "" {
+			if fence == "" {
+				fence = f
+			} else if f[0] == fence[0] && len(f) >= len(fence) && strings.TrimSpace(rest) == "" {
+				fence = ""
+			}
+		}
+		l := strings.TrimSpace(line)
+		if level == 0 || l == "" || thematicBreak.MatchString(strings.ReplaceAll(l, " ", "")) {
+			continue
+		}
+		section = append(section, l)
+	}
+	flush()
 	ev.Questions = strings.Join(questions, "\n")
 	return ev
+}
+
+// fenceOf returns the code fence a line starts with, a run of three or more
+// backticks or tildes indented at most three spaces, and the text after it.
+func fenceOf(line string) (string, string) {
+	l := strings.TrimLeft(line, " ")
+	if len(line)-len(l) > 3 {
+		return "", ""
+	}
+	for _, c := range []byte{'`', '~'} {
+		n := 0
+		for n < len(l) && l[n] == c {
+			n++
+		}
+		if n >= 3 {
+			return l[:n], l[n:]
+		}
+	}
+	return "", ""
 }
 
 // HashPane hashes screen text, so the log never carries the screen itself.
