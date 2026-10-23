@@ -215,7 +215,7 @@ func newHarness(t *testing.T, shadow bool, names ...string) *harness {
 	cfg.Sessions = map[string]Session{}
 	for _, n := range names {
 		cfg.Sessions[n] = Session{Workdir: filepath.Join(dir, n), Cwd: filepath.Join(dir, n, "wt"), Repository: "widgets"}
-		if err := os.MkdirAll(filepath.Join(dir, n), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(dir, n, "wt"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}

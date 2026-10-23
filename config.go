@@ -222,11 +222,25 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 // finish expands paths against base, the config file's directory, and
-// validates every field a policy depends on. It refuses rather than guessing.
+// validates every field a policy depends on. It refuses rather than guessing:
+// a ~user path, which it does not expand, and a session directory that does
+// not exist, so a mis-resolved path fails at start, not at the first restart.
 func (c *Config) finish(base string) error {
-	c.EventLog = expandPath(c.EventLog, base)
-	c.TranscriptDir = expandPath(c.TranscriptDir, base)
 	var errs []error
+	path := func(field, p string) string {
+		if strings.HasPrefix(p, "~") && p != "~" && !strings.HasPrefix(p, "~/") {
+			errs = append(errs, fmt.Errorf("%s: %q: ~user paths are not supported; write the full path", field, p))
+			return p
+		}
+		return expandPath(p, base)
+	}
+	isDir := func(field, p string) {
+		if info, err := os.Stat(p); err != nil || !info.IsDir() {
+			errs = append(errs, fmt.Errorf("%s: directory %s does not exist", field, p))
+		}
+	}
+	c.EventLog = path("event_log", c.EventLog)
+	c.TranscriptDir = path("transcript_dir", c.TranscriptDir)
 	if c.PollInterval.Duration <= 0 {
 		errs = append(errs, errors.New("poll_interval must be positive"))
 	}
@@ -278,8 +292,12 @@ func (c *Config) finish(base string) error {
 		if s.Workdir == "" || s.Cwd == "" {
 			errs = append(errs, fmt.Errorf("sessions.%s needs workdir and cwd", name))
 		}
-		s.Workdir = expandPath(s.Workdir, base)
-		s.Cwd = expandPath(s.Cwd, base)
+		if s.Workdir != "" && s.Cwd != "" {
+			s.Workdir = path("sessions."+name+".workdir", s.Workdir)
+			s.Cwd = path("sessions."+name+".cwd", s.Cwd)
+			isDir("sessions."+name+".workdir", s.Workdir)
+			isDir("sessions."+name+".cwd", s.Cwd)
+		}
 		if s.Repository != "" {
 			if _, ok := c.Repositories[s.Repository]; !ok {
 				errs = append(errs, fmt.Errorf("sessions.%s.repository %q is not in repositories", name, s.Repository))
@@ -293,14 +311,14 @@ func (c *Config) finish(base string) error {
 			if d.Worktree == "" || d.Target == "" || d.MRFile == "" {
 				errs = append(errs, fmt.Errorf("sessions.%s.deliver[%d] needs worktree, target and mr_file", name, i))
 			}
-			d.Worktree = expandPath(d.Worktree, base)
-			d.MRFile = expandPath(d.MRFile, base)
+			d.Worktree = path(fmt.Sprintf("sessions.%s.deliver[%d].worktree", name, i), d.Worktree)
+			d.MRFile = path(fmt.Sprintf("sessions.%s.deliver[%d].mr_file", name, i), d.MRFile)
 		}
 		c.Sessions[name] = s
 	}
 	// A bare command name is left for PATH to find; a path is expanded.
 	if cmd := c.Policies.Escalate.Command; len(cmd) > 0 && (strings.HasPrefix(cmd[0], "~") || strings.Contains(cmd[0], "/")) {
-		cmd[0] = expandPath(cmd[0], base)
+		cmd[0] = path("policies.escalate.command", cmd[0])
 	}
 	return errors.Join(errs...)
 }

@@ -157,6 +157,13 @@ func TestLogRoundTrip(t *testing.T) {
 }
 
 func TestExampleConfigLoads(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, d := range []string{"work-17", "repos/widgets-wt/17", "work-42", "repos/gadgets"} {
+		if err := os.MkdirAll(filepath.Join(home, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	cfg, err := LoadConfig("agentd.example.json")
 	if err != nil {
 		t.Fatal(err)
@@ -220,6 +227,8 @@ func TestDefaultRestartCommandKeepsPermissions(t *testing.T) {
 func TestConfigPathsAreRelativeToTheConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "conf", "agentd.json")
+	writeFile(t, filepath.Join(dir, "conf", "work", "mr.md"), "")
+	writeFile(t, filepath.Join(dir, "repo", "README"), "")
 	writeFile(t, path, `{
 		"event_log": "state/events.jsonl",
 		"transcript_dir": "~/transcripts",
@@ -251,6 +260,24 @@ func TestConfigPathsAreRelativeToTheConfig(t *testing.T) {
 	writeFile(t, path, `{"policies": {"escalate": {"command": ["post-to-console", "{message}"]}}}`)
 	if cfg, err := LoadConfig(path); err != nil || cfg.Policies.Escalate.Command[0] != "post-to-console" {
 		t.Fatalf("bare command name: %v %v", cfg, err)
+	}
+}
+
+// A session whose workdir or cwd does not exist is refused at load, naming
+// the session and the path, rather than failing at its first restart; and
+// ~user, which agentd does not expand, is refused rather than read as a
+// directory beside the config.
+func TestConfigRefusesMissingDirsAndTildeUser(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "work", "STATUS.md"), "")
+	path := filepath.Join(dir, "agentd.json")
+	writeFile(t, path, `{"sessions": {"s1": {"workdir": "work", "cwd": "no-such-repo"}}}`)
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "s1") || !strings.Contains(err.Error(), filepath.Join(dir, "no-such-repo")) {
+		t.Fatalf("missing cwd: %v", err)
+	}
+	writeFile(t, path, `{"event_log": "~bob/events.jsonl"}`)
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "~bob") {
+		t.Fatalf("~user path: %v", err)
 	}
 }
 
