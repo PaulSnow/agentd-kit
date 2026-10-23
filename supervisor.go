@@ -608,7 +608,7 @@ func MarkDelivered(cfg *Config, log *Log, now time.Time, session, worktree, ref 
 	if !ok {
 		return fmt.Errorf("session %q is not configured", session)
 	}
-	worktree = expandPath(worktree)
+	worktree = expandPath(worktree, "")
 	known := false
 	for _, d := range sess.Deliver {
 		if d.Worktree == worktree {

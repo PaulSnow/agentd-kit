@@ -51,21 +51,21 @@
   },
   "sessions": {
     "w17": {
-      "workdir": "work-17",
-      "cwd": "repos/widgets-wt/17",
+      "workdir": "~/work-17",
+      "cwd": "~/repos/widgets-wt/17",
       "repository": "widgets",
       "deliver": [
         {
           "repository": "widgets",
-          "worktree": "repos/widgets-wt/17",
+          "worktree": "~/repos/widgets-wt/17",
           "target": "main",
-          "mr_file": "work-17/mr-description.md"
+          "mr_file": "~/work-17/mr-description.md"
         }
       ]
     },
     "g42": {
-      "workdir": "work-42",
-      "cwd": "repos/gadgets",
+      "workdir": "~/work-42",
+      "cwd": "~/repos/gadgets",
       "repository": "gadgets",
       "hold": "Delivery waits for the owner's design review (2026-10-22)"
     }

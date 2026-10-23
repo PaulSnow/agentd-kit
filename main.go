@@ -78,12 +78,12 @@ func loadConfigFlag(fs *flag.FlagSet, args []string) (*Config, *string, error) {
 	if err := fs.Parse(args); err != nil {
 		return nil, nil, err
 	}
-	cfg, err := LoadConfig(expandPath(*configPath))
+	cfg, err := LoadConfig(expandPath(*configPath, ""))
 	if err != nil {
 		return nil, nil, err
 	}
 	if *logPath != "" {
-		cfg.EventLog = expandPath(*logPath)
+		cfg.EventLog = expandPath(*logPath, "")
 	}
 	return cfg, logPath, nil
 }

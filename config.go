@@ -195,8 +195,13 @@ func DefaultConfig() Config {
 var sessionName = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // LoadConfig reads path over the defaults, expands paths, and validates.
+// Relative paths in the file are relative to the file's directory.
 func LoadConfig(path string) (*Config, error) {
 	cfg := DefaultConfig()
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -206,17 +211,17 @@ func LoadConfig(path string) (*Config, error) {
 	if err := dec.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	if err := cfg.finish(); err != nil {
+	if err := cfg.finish(filepath.Dir(path)); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return &cfg, nil
 }
 
-// finish expands paths against the home directory and validates every field
-// a policy depends on. It refuses rather than guessing.
-func (c *Config) finish() error {
-	c.EventLog = expandPath(c.EventLog)
-	c.TranscriptDir = expandPath(c.TranscriptDir)
+// finish expands paths against base, the config file's directory, and
+// validates every field a policy depends on. It refuses rather than guessing.
+func (c *Config) finish(base string) error {
+	c.EventLog = expandPath(c.EventLog, base)
+	c.TranscriptDir = expandPath(c.TranscriptDir, base)
 	var errs []error
 	if c.PollInterval.Duration <= 0 {
 		errs = append(errs, errors.New("poll_interval must be positive"))
@@ -264,8 +269,8 @@ func (c *Config) finish() error {
 		if s.Workdir == "" || s.Cwd == "" {
 			errs = append(errs, fmt.Errorf("sessions.%s needs workdir and cwd", name))
 		}
-		s.Workdir = expandPath(s.Workdir)
-		s.Cwd = expandPath(s.Cwd)
+		s.Workdir = expandPath(s.Workdir, base)
+		s.Cwd = expandPath(s.Cwd, base)
 		if s.Repository != "" {
 			if _, ok := c.Repositories[s.Repository]; !ok {
 				errs = append(errs, fmt.Errorf("sessions.%s.repository %q is not in repositories", name, s.Repository))
@@ -279,34 +284,39 @@ func (c *Config) finish() error {
 			if d.Worktree == "" || d.Target == "" || d.MRFile == "" {
 				errs = append(errs, fmt.Errorf("sessions.%s.deliver[%d] needs worktree, target and mr_file", name, i))
 			}
-			d.Worktree = expandPath(d.Worktree)
-			d.MRFile = expandPath(d.MRFile)
+			d.Worktree = expandPath(d.Worktree, base)
+			d.MRFile = expandPath(d.MRFile, base)
 		}
 		c.Sessions[name] = s
 	}
-	if len(c.Policies.Escalate.Command) > 0 {
-		c.Policies.Escalate.Command[0] = expandPath(c.Policies.Escalate.Command[0])
+	// A bare command name is left for PATH to find; a path is expanded.
+	if cmd := c.Policies.Escalate.Command; len(cmd) > 0 && (strings.HasPrefix(cmd[0], "~") || strings.Contains(cmd[0], "/")) {
+		cmd[0] = expandPath(cmd[0], base)
 	}
 	return errors.Join(errs...)
 }
 
-// expandPath resolves ~ and makes a relative path home-relative, as the Python
-// supervisor's sessions.json did. Absolute paths pass through.
-func expandPath(p string) string {
+// expandPath resolves ~ to the home directory and a relative path against
+// base, or against the working directory when base is "" (a path given on
+// the command line). Absolute paths pass through.
+func expandPath(p, base string) string {
 	if p == "" || filepath.IsAbs(p) {
 		return p
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return p
+		}
+		return filepath.Join(home, p[1:])
+	}
+	if base == "" {
+		if abs, err := filepath.Abs(p); err == nil {
+			return abs
+		}
 		return p
 	}
-	if p == "~" {
-		return home
-	}
-	if strings.HasPrefix(p, "~/") {
-		return filepath.Join(home, p[2:])
-	}
-	return filepath.Join(home, p)
+	return filepath.Join(base, p)
 }
 
 // SessionNames returns the configured session names in a stable order.

@@ -185,6 +185,46 @@ func TestDefaultRestartCommandKeepsPermissions(t *testing.T) {
 	}
 }
 
+// Relative paths in a config file name places beside it, wherever agentd
+// runs from; ~ is still the home directory, and a bare command name is left
+// for PATH to find.
+func TestConfigPathsAreRelativeToTheConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "conf", "agentd.json")
+	writeFile(t, path, `{
+		"event_log": "state/events.jsonl",
+		"transcript_dir": "~/transcripts",
+		"policies": {"escalate": {"command": ["bin/post", "{console}", "{message}"]}},
+		"repositories": {"r": {"forge": "gitlab", "project": "a/b"}},
+		"sessions": {"s": {"workdir": "work", "cwd": "../repo", "deliver": [{"repository": "r", "worktree": "../repo", "target": "main", "mr_file": "work/mr.md"}]}}
+	}`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, _ := os.UserHomeDir()
+	conf := filepath.Join(dir, "conf")
+	s := cfg.Sessions["s"]
+	got := map[string]string{
+		"event_log": cfg.EventLog, "transcript_dir": cfg.TranscriptDir, "escalate": cfg.Policies.Escalate.Command[0],
+		"workdir": s.Workdir, "cwd": s.Cwd, "worktree": s.Deliver[0].Worktree, "mr_file": s.Deliver[0].MRFile,
+	}
+	want := map[string]string{
+		"event_log": filepath.Join(conf, "state", "events.jsonl"), "transcript_dir": filepath.Join(home, "transcripts"),
+		"escalate": filepath.Join(conf, "bin", "post"), "workdir": filepath.Join(conf, "work"), "cwd": filepath.Join(dir, "repo"),
+		"worktree": filepath.Join(dir, "repo"), "mr_file": filepath.Join(conf, "work", "mr.md"),
+	}
+	for k, w := range want {
+		if got[k] != w {
+			t.Errorf("%s = %q, want %q", k, got[k], w)
+		}
+	}
+	writeFile(t, path, `{"policies": {"escalate": {"command": ["post-to-console", "{message}"]}}}`)
+	if cfg, err := LoadConfig(path); err != nil || cfg.Policies.Escalate.Command[0] != "post-to-console" {
+		t.Fatalf("bare command name: %v %v", cfg, err)
+	}
+}
+
 func TestConfigRefusesMistakes(t *testing.T) {
 	cases := map[string]string{
 		"unknown field":       `{"sessions": {"s": {"workdir": "w", "cwd": "c", "typo": 1}}}`,

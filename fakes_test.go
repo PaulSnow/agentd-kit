@@ -210,7 +210,7 @@ func newHarness(t *testing.T, shadow bool, names ...string) *harness {
 			t.Fatal(err)
 		}
 	}
-	if err := cfg.finish(); err != nil {
+	if err := cfg.finish(dir); err != nil {
 		t.Fatal(err)
 	}
 	h := &harness{t: t, dir: dir, cfg: &cfg, clock: &fakeClock{now: time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC)},
