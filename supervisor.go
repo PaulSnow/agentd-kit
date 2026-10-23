@@ -286,6 +286,9 @@ func (s *Supervisor) logObserve(name string, t *Track, ev Evidence, state State,
 		"trust":     ev.TrustPrompt,
 		"head":      ev.Status.Head,
 	}
+	if s.confidentialMatch(ev.Status.Head) > 0 {
+		d["head"] = "(withheld: matches a confidential pattern)"
+	}
 	if ev.Alive {
 		d["pane_hash"] = ev.PaneHash
 		d["pane_since"] = t.HashSince.Format(time.RFC3339Nano)
@@ -422,6 +425,19 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 	return state
 }
 
+// confidentialMatch returns the number, from 1, of the first confidential
+// pattern that matches any of texts, or 0.
+func (s *Supervisor) confidentialMatch(texts ...string) int {
+	for i, re := range s.confidential {
+		for _, text := range texts {
+			if re.MatchString(text) {
+				return i + 1
+			}
+		}
+	}
+	return 0
+}
+
 // escalate posts one decision to the console, once per key. A failing
 // command is retried on the backoff schedule and given up after MaxRestarts
 // tries, with one skip saying so. A message that matches a confidential
@@ -431,13 +447,10 @@ func (s *Supervisor) escalate(name, key, message string, t *Track, now time.Time
 	if t.Posted[key] {
 		return
 	}
-	for i, re := range s.confidential {
-		if re.MatchString(message) {
-			s.skipOnce(name, key+":filtered", fmt.Sprintf("escalation text matched confidential pattern %d; posted a generic message instead", i+1), t,
-				map[string]any{"filtered": key})
-			message = fmt.Sprintf("%s needs your attention; the details were withheld because they matched a confidential pattern. Look at the session directly.", name)
-			break
-		}
+	if i := s.confidentialMatch(message); i > 0 {
+		s.skipOnce(name, key+":filtered", fmt.Sprintf("escalation text matched confidential pattern %d; posted a generic message instead", i), t,
+			map[string]any{"filtered": key})
+		message = fmt.Sprintf("%s needs your attention; the details were withheld because they matched a confidential pattern. Look at the session directly.", name)
 	}
 	console := s.cfg.Console(name)
 	tmpl := s.cfg.Policies.Escalate.Command
@@ -602,6 +615,16 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 	body, err := os.ReadFile(d.MRFile)
 	if err != nil {
 		read("mr-text", err)
+		return
+	}
+	// Text bound for the forge that matches a confidential pattern is not
+	// sent. Not final: delivery waits for the owner to change the text or
+	// the patterns.
+	if i := s.confidentialMatch(title, string(body)); i > 0 {
+		s.skipOnce(name, "deliver:"+key+":confidential", fmt.Sprintf("merge request title or text matches confidential pattern %d; delivery waits for the owner", i), t,
+			map[string]any{"worktree": d.Worktree, "mr_file": d.MRFile})
+		s.escalate(name, "deliver:"+key+":confidential", fmt.Sprintf("%s is DONE but its merge request title or text (%s) matches confidential pattern %d; nothing delivered. Change the text or the patterns.",
+			name, d.MRFile, i), t, now)
 		return
 	}
 	repo := s.cfg.Repositories[d.Repository]

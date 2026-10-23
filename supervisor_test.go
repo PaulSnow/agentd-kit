@@ -724,3 +724,41 @@ func TestRebasedMergesAreNotDeliveredAgain(t *testing.T) {
 		}
 	}
 }
+
+// The confidential patterns cover the STATUS.md first line the log keeps,
+// and the merge-request title and text sent to the forge: a match is not
+// delivered, is skipped once and escalated without the text, and is
+// delivered once the text no longer matches.
+func TestConfidentialMergeRequestIsNotDelivered(t *testing.T) {
+	h := newHarness(t, false, "d", "s")
+	h.cfg.ConfidentialPatterns = []string{`Nightingale`}
+	h.restart(false)
+	mr := h.dir + "/mr.md"
+	writeFile(t, mr, "Ships the Nightingale launch page.\n")
+	h.status("d", "# Nightingale page\n\nDONE\n")
+	h.deliver("d", Deliver{Repository: "widgets", Worktree: h.dir + "/d/wt", Target: "main", MRFile: mr})
+	h.status("s", working)
+	h.alive("s", "busy")
+	h.git.subject = "Add the Nightingale page"
+	h.git.branches = map[string]string{h.dir + "/s/wt": "other"}
+	h.ticks(4, 5*time.Minute)
+
+	if len(h.forge.pushes) != 0 || len(h.forge.opens) != 0 {
+		t.Fatalf("pushes %v opens %d of confidential text", h.forge.pushes, len(h.forge.opens))
+	}
+	if strings.Contains(h.buf.String(), "Nightingale") {
+		t.Fatalf("the event log carries the confidential text:\n%s", h.buf.String())
+	}
+	if got := h.count(KindSkip, "", "d"); got != 1 {
+		t.Fatalf("skips = %d, want 1", got)
+	}
+	if len(h.runner.calls) != 1 || strings.Contains(h.runner.calls[0][4], "Nightingale") || !strings.Contains(h.runner.calls[0][4], "confidential") {
+		t.Fatalf("escalations = %v, want one naming the filter, not the text", h.runner.calls)
+	}
+	writeFile(t, mr, "Ships the launch page.\n")
+	h.git.subject = "Add the launch page"
+	h.ticks(1, 5*time.Minute)
+	if len(h.forge.opens) != 1 {
+		t.Fatalf("opens = %d once the text was cleaned, want 1", len(h.forge.opens))
+	}
+}
