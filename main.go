@@ -11,10 +11,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 )
@@ -98,6 +100,11 @@ func runCmd(args []string) error {
 	if *every > 0 {
 		cfg.PollInterval = Duration{*every}
 	}
+	lock, err := lockInstance(cfg.EventLog + ".lock")
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 	events, bad, err := ReadLog(cfg.EventLog)
 	if err != nil {
 		return err
@@ -123,6 +130,28 @@ func runCmd(args []string) error {
 	fmt.Fprintf(os.Stderr, "agentd %s: %d sessions, every %s, log %s\n", mode, len(cfg.Sessions), cfg.PollInterval, cfg.EventLog)
 	sup.Run(ctx, *once)
 	return nil
+}
+
+// lockInstance takes an exclusive lock on path, creating it and its
+// directory, without waiting. Two runs over one event log would each act on
+// its sessions and double every restart, nudge and delivery; the second is
+// refused. The lock lasts until the file is closed or the process exits.
+func lockInstance(path string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("another agentd run holds %s", path)
+		}
+		return nil, fmt.Errorf("locking %s: %w", path, err)
+	}
+	return f, nil
 }
 
 func statusCmd(args []string) error {
