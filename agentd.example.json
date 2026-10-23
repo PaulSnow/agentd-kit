@@ -29,7 +29,7 @@
     "trust_prompt": {
       "enabled": true,
       "pattern": "(?i)trust (the files in )?this folder",
-      "keys": ["Down", "Enter"]
+      "keys": ["Enter"]
     },
     "dialog": {
       "patterns": ["Do you want to", "❯\\s*1\\.", "(?i)enter to confirm"]

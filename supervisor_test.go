@@ -431,7 +431,8 @@ func TestUsageLimitWaitsThenResumes(t *testing.T) {
 	}
 }
 
-// The folder-trust prompt is answered.
+// The folder-trust prompt is answered with its first option, Yes: Claude
+// Code preselects it, and the second is "No, exit".
 func TestTrustPromptIsAnswered(t *testing.T) {
 	h := newHarness(t, false, "s1")
 	h.status("s1", working)
@@ -439,6 +440,9 @@ func TestTrustPromptIsAnswered(t *testing.T) {
 	h.ticks(3, 5*time.Minute)
 	if got := h.tmux.count("keys", "s1"); got != 1 {
 		t.Fatalf("key sends = %d, want 1", got)
+	}
+	if got := h.tmux.chosen["s1"]; got != 1 {
+		t.Fatalf("trust menu option chosen = %d, want 1, Yes", got)
 	}
 	if h.state("s1") != Working {
 		t.Fatalf("state = %s", h.state("s1"))

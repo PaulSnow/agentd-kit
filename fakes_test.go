@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -41,6 +40,7 @@ type fakeTmux struct {
 	exit       map[string]int
 	deadScreen map[string]func() string
 	sticky     map[string]bool
+	chosen     map[string]int // the trust-menu option Enter chose
 	commands   map[string]string
 	newErr     map[string]error // NewSession fails with this
 	calls      []call
@@ -50,7 +50,7 @@ type fakeTmux struct {
 func newFakeTmux() *fakeTmux {
 	return &fakeTmux{alive: map[string]bool{}, panes: map[string]string{}, history: map[string]string{}, crash: map[string]bool{},
 		remain: map[string]bool{}, dead: map[string]bool{}, exit: map[string]int{}, deadScreen: map[string]func() string{},
-		sticky: map[string]bool{}, commands: map[string]string{}, newErr: map[string]error{}}
+		sticky: map[string]bool{}, chosen: map[string]int{}, commands: map[string]string{}, newErr: map[string]error{}}
 }
 
 func (f *fakeTmux) HasSession(name string) (bool, error) {
@@ -134,11 +134,35 @@ func (f *fakeTmux) Type(name, text string) error {
 	return nil
 }
 
+// Keys works the trust prompt's menu as Claude Code does: option 1 is
+// preselected, Down and Up move, Enter chooses. Choosing 1 trusts the
+// folder; choosing 2 ("No, exit") ends the session. A sticky prompt
+// ignores the keys.
 func (f *fakeTmux) Keys(name string, keys ...string) error {
 	f.calls = append(f.calls, call{op: "keys", name: name, args: keys})
 	f.mutations++
-	if !f.sticky[name] {
-		f.panes[name] = strings.ReplaceAll(f.panes[name], "trust this folder", "trusted")
+	if f.sticky[name] {
+		return nil
+	}
+	sel := 1
+	for _, k := range keys {
+		switch k {
+		case "Down":
+			if sel < 2 {
+				sel++
+			}
+		case "Up":
+			if sel > 1 {
+				sel--
+			}
+		case "Enter":
+			f.chosen[name] = sel
+			if sel == 2 {
+				f.alive[name] = false
+				return nil
+			}
+			f.panes[name] = "trusted; Claude Code is starting"
+		}
 	}
 	return nil
 }

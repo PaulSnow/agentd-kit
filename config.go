@@ -116,7 +116,9 @@ type UsageLimitPolicy struct {
 
 // TrustPolicy answers the folder-trust prompt a fresh Claude Code session
 // shows, recognised on the visible screen by Pattern, a regular expression,
-// by sending Keys.
+// by sending Keys. The prompt's menu preselects option 1, "Yes, proceed"
+// (or "Yes, I trust this folder"); option 2 is "No, exit". So the default
+// is Enter alone: a Down first would choose to exit.
 type TrustPolicy struct {
 	Enabled bool     `json:"enabled"`
 	Pattern string   `json:"pattern"`
@@ -231,7 +233,7 @@ func DefaultConfig() Config {
 				ResumeMessage: "Continue with your brief; the usage limit has reset.",
 			},
 			UsageLimit:   UsageLimitPolicy{Pattern: `(?i)limit reached.{0,80}reset|out of extra usage`},
-			Trust:        TrustPolicy{Enabled: true, Pattern: `(?i)trust (the files in )?this folder`, Keys: []string{"Down", "Enter"}},
+			Trust:        TrustPolicy{Enabled: true, Pattern: `(?i)trust (the files in )?this folder`, Keys: []string{"Enter"}},
 			Escalate:     EscalatePolicy{},
 			Dialog:       DialogPolicy{Patterns: []string{`Do you want to`, `❯\s*1\.`, `(?i)enter to confirm`}},
 			PaneCommands: []string{"claude"},
