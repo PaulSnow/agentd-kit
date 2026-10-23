@@ -43,6 +43,9 @@ type Supervisor struct {
 	// is done until the next pass: an action whose record could be lost
 	// could be repeated after a replay.
 	halt error
+	// tailOff is how far into the event log this run has read, so each
+	// pass picks up what the owner wrote meanwhile: agentd clear.
+	tailOff int64
 
 	tracks       map[string]*Track
 	limitRe      *regexp.Regexp
@@ -71,6 +74,7 @@ func NewSupervisor(cfg *Config, log *Log, clock Clock, tmux Tmux, git Git, forge
 		runner:  runner,
 		shadow:  shadow,
 		tracks:  map[string]*Track{},
+		tailOff: log.Size(),
 		limitRe: regexp.MustCompile(cfg.Policies.UsageLimit.Pattern),
 		trustRe: regexp.MustCompile(regexp.QuoteMeta(cfg.Policies.Trust.Pattern)),
 		dialogs: dialogs,
@@ -203,6 +207,9 @@ func (s *Supervisor) Replay(events []Event) {
 		t := s.track(e.Session)
 		switch e.Kind {
 		case KindObserve:
+			if alive, _ := e.Details["alive"].(bool); alive {
+				t.Live = true
+			}
 			t.Observed = true
 			t.Hash = detailString(e, "pane_hash")
 			if since, err := time.Parse(time.RFC3339Nano, detailString(e, "pane_since")); err == nil && !since.Equal(t.HashSince) {
@@ -218,7 +225,14 @@ func (s *Supervisor) Replay(events []Event) {
 			}
 		case KindTransition:
 			t.State, t.Since = State(detailString(e, "to")), e.Time
-			t.Breaker = t.State == CrashLooping
+		case KindCrash:
+			c := Crash{Exit: -1, Screen: detailString(e, "screen_hash")}
+			if n, ok := detailInt(e, "exit"); ok {
+				c.Exit = n
+			}
+			t.noteCrash(c, s.cfg.Policies.Restart.MaxCrashes)
+		case KindClear:
+			t.clear()
 		case KindSkip:
 			if k := detailString(e, "delivered"); k != "" {
 				t.Delivered[k] = detailString(e, "outcome")
@@ -242,7 +256,7 @@ func (s *Supervisor) Replay(events []Event) {
 			switch detailString(e, "action") {
 			case ActRestart:
 				t.Restarts = append(t.Restarts, e.Time)
-				t.Hash, t.HashSince, t.Observed = "", e.Time, true
+				t.Hash, t.HashSince, t.Observed, t.Live = "", e.Time, true, true
 			case ActNudge:
 				t.Nudges++
 				t.LastNudge = e.Time
@@ -303,6 +317,7 @@ func (s *Supervisor) Run(ctx context.Context, once bool) error {
 // event log fails it stops, acting on nothing more, and returns the error.
 func (s *Supervisor) Pass() error {
 	s.halt = nil
+	s.ownerRecords()
 	for _, name := range s.cfg.SessionNames() {
 		if s.halt != nil {
 			break
@@ -312,11 +327,49 @@ func (s *Supervisor) Pass() error {
 	return s.halt
 }
 
+// ownerRecords applies what the owner wrote to the event log since the last
+// pass: a clear lifts a session's park while agentd runs.
+func (s *Supervisor) ownerRecords() {
+	events, off, err := s.log.Tail(s.tailOff)
+	if err != nil {
+		s.emit("", KindError, map[string]any{"step": "reading owner records", "error": err.Error()})
+		return
+	}
+	s.tailOff = off
+	for _, e := range events {
+		if _, ok := s.cfg.Sessions[e.Session]; ok && e.Kind == KindClear {
+			s.track(e.Session).clear()
+		}
+	}
+}
+
+// deadPaneLine is tmux's own line on a dead pane, which carries the time.
+var deadPaneLine = regexp.MustCompile(`(?m)^Pane is dead.*$`)
+
 func (s *Supervisor) observe(name string, sess Session) (Evidence, error) {
-	var ev Evidence
+	ev := Evidence{Exit: -1}
 	alive, err := s.tmux.HasSession(name)
 	if err != nil {
 		return ev, fmt.Errorf("has-session: %w", err)
+	}
+	if alive {
+		info, err := s.tmux.Pane(name)
+		if err != nil {
+			return ev, err
+		}
+		if info.Dead {
+			// The command exited and remain-on-exit kept the pane: its exit
+			// status and last screen are the crash's cause.
+			alive, ev.PaneDead = false, true
+			if info.HasStatus {
+				ev.Exit = info.Status
+			}
+			screen, err := s.tmux.CapturePane(name, 0)
+			if err != nil {
+				return ev, err
+			}
+			ev.DeadScreen = shortHash(HashPane(deadPaneLine.ReplaceAllString(screen, "")))
+		}
 	}
 	ev.Alive = alive
 	if ev.Status, err = ReadStatus(sess.Workdir + "/STATUS.md"); err != nil {
@@ -355,6 +408,17 @@ func (s *Supervisor) step(name string, sess Session) {
 		s.emit(name, KindError, map[string]any{"error": err.Error()})
 		return
 	}
+	if ev.Alive {
+		t.Live = true
+	} else if t.Live && !ev.Status.Done {
+		screen := ev.DeadScreen
+		if !ev.PaneDead {
+			screen = shortHash(t.Hash) // gone outright: the last screen seen
+		}
+		if s.crash(name, t, Crash{Exit: ev.Exit, Screen: screen}, nil); s.halt != nil {
+			return
+		}
+	}
 	state, reason := Classify(t, ev, s.cfg.Policies, now)
 	if s.logObserve(name, t, ev, state, reason, now); s.halt != nil {
 		return
@@ -365,6 +429,19 @@ func (s *Supervisor) step(name string, sess Session) {
 		s.emit(name, KindTransition, map[string]any{"from": string(t.State), "to": string(state), "reason": reason})
 		t.State, t.Since = state, now
 	}
+}
+
+// crash records one crash and its cause, and whether it parked the session.
+func (s *Supervisor) crash(name string, t *Track, c Crash, extra map[string]any) {
+	t.noteCrash(c, s.cfg.Policies.Restart.MaxCrashes)
+	d := map[string]any{"screen_hash": c.Screen, "crashes": len(t.Crashes), "parked": t.Parked}
+	if c.Exit >= 0 {
+		d["exit"] = c.Exit
+	}
+	for k, v := range extra {
+		d[k] = v
+	}
+	s.emit(name, KindCrash, d)
 }
 
 func (s *Supervisor) logObserve(name string, t *Track, ev Evidence, state State, reason string, now time.Time) {
@@ -459,19 +536,35 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 		for i, part := range pol.Restart.Command {
 			cmd[i] = strings.NewReplacer("{brief}", brief, "{status}", status).Replace(part)
 		}
-		err := s.act(name, ActRestart, map[string]any{"attempt": n + 1, "cwd": sess.Cwd}, func() error {
+		err := s.act(name, ActRestart, map[string]any{"attempt": n + 1, "cwd": sess.Cwd, "respawn": ev.PaneDead}, func() error {
+			if ev.PaneDead {
+				return s.tmux.Respawn(name, sess.Cwd, shellJoin(cmd))
+			}
 			return s.tmux.NewSession(name, sess.Cwd, shellJoin(cmd), pol.Restart.Width, pol.Restart.Height)
 		})
-		t.Restarts = append(t.Restarts, now) // a failed attempt counts: backoff and the breaker apply to it
+		if s.halt != nil {
+			return state
+		}
+		t.Restarts = append(t.Restarts, now) // a failed attempt counts toward the backoff
 		if err == nil {
-			t.Hash, t.HashSince, t.Observed = "", now, true
-			t.Nudges, t.LastNudge = 0, time.Time{}
+			t.Hash, t.HashSince, t.Observed, t.Live = "", now, true, true
+			t.Nudges, t.LastNudge, t.Limited = 0, time.Time{}, false
 			return Starting
 		}
+		// A restart that fails is a crash, its error the cause: the same
+		// error twice parks the session like any repeated crash.
+		if s.crash(name, t, Crash{Exit: -1, Screen: "restart:" + shortHash(HashPane(err.Error()))}, map[string]any{"restart_error": true}); t.Parked {
+			return CrashLooping
+		}
 	case CrashLooping:
-		key := fmt.Sprintf("crash-loop:%s:%d", name, t.lastRestart().Unix())
-		msg := fmt.Sprintf("%s: tmux session gone again after %d restart attempts within %s; not restarting it again. Attach, fix the cause, and start it by hand.",
-			name, pol.Restart.MaxRestarts, pol.Restart.Window)
+		last := t.Crashes[len(t.Crashes)-1]
+		exit := "unknown"
+		if last.Exit >= 0 {
+			exit = fmt.Sprint(last.Exit)
+		}
+		key := fmt.Sprintf("crash-loop:%s:%d", name, t.Clears)
+		msg := fmt.Sprintf("%s crashed %d times (last exit status %s, last screen %s); parked, not restarting or typing into it. Fix the cause, then run agentd clear %s.",
+			name, len(t.Crashes), exit, last.Screen, name)
 		s.escalate(name, key, msg, t, now)
 	case UsageLimited:
 		t.Limited = true
@@ -859,6 +952,17 @@ func MarkDelivered(cfg *Config, log *Log, now time.Time, session, worktree, ref 
 	}
 	return log.Append(Event{Time: now, Session: session, Kind: KindAction, Details: map[string]any{
 		"action": ActOpen, "delivered": session + ":" + worktree, "ref": ref, "by": "mark-delivered", "mode": ModeOwner}})
+}
+
+// ClearSession records the owner's clearing of a parked session: its crash
+// count starts again and it may be restarted. A running agentd reads the
+// record at its next pass. It is the owner's record, read by live and
+// shadow runs alike.
+func ClearSession(cfg *Config, log *Log, now time.Time, session string) error {
+	if _, ok := cfg.Sessions[session]; !ok {
+		return fmt.Errorf("session %q is not configured", session)
+	}
+	return log.Append(Event{Time: now, Session: session, Kind: KindClear, Details: map[string]any{"by": "clear", "mode": ModeOwner}})
 }
 
 // shellJoin quotes argv for the shell tmux hands a new session's command to.

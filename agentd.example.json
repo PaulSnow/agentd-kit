@@ -12,10 +12,11 @@
     "restart": {
       "enabled": true,
       "max_restarts": 3,
+      "max_crashes": 3,
       "window": "1h",
       "backoff_initial": "1m",
       "backoff_max": "30m",
-      "command": ["bash", "-lic", "claude --continue \"You were restarted by the supervisor. Continue your brief, {brief}, from where you were; your progress is in {status}.\""],
+      "command": ["bash", "-lic", "claude \"You were restarted by the supervisor with a fresh context. Read your brief, {brief}, and your progress, {status}, then continue from where {status} says you are.\""],
       "width": 220,
       "height": 50
     },

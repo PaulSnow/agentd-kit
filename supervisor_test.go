@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -12,20 +13,21 @@ const working = "# Working on the feature\nHalf done.\n"
 const blocked = "# Blocked\nWaiting.\n\n## Questions\n1. Which version gates the fields?\n"
 
 // The old supervisor restarted a crash-looping monitor 4,021 times. agentd
-// restarts it MaxRestarts times within the window, then stops and escalates.
+// parks it as soon as a crash repeats its cause, here dying before its
+// screen was ever seen, and escalates once.
 func TestCrashLoopStopsAfterNRestartsAndEscalates(t *testing.T) {
 	h := newHarness(t, false, "mon")
 	h.status("mon", working)
 	h.tmux.crash["mon"] = true
 	h.ticks(12*12, 5*time.Minute) // twelve hours
 
-	if got := h.tmux.count("new-session", "mon"); got != 3 {
-		t.Fatalf("restarts = %d, want 3", got)
+	if got := h.tmux.count("new-session", "mon"); got != 2 {
+		t.Fatalf("restarts = %d, want 2", got)
 	}
 	if got := len(h.runner.calls); got != 1 {
 		t.Fatalf("escalations = %d, want 1", got)
 	}
-	if !strings.Contains(h.runner.calls[0][4], "after 3 restart attempts") {
+	if !strings.Contains(h.runner.calls[0][4], "crashed 2 times") {
 		t.Fatalf("escalation text: %q", h.runner.calls[0][4])
 	}
 	if h.state("mon") != CrashLooping {
@@ -37,11 +39,15 @@ func TestCrashLoopStopsAfterNRestartsAndEscalates(t *testing.T) {
 }
 
 // Restarts back off: the first is immediate, the next waits the initial
-// backoff, the one after waits twice that.
+// backoff, the one after waits twice that. Each crash here has its own
+// cause, so none parks the session early.
 func TestRestartBackoffDoubles(t *testing.T) {
 	h := newHarness(t, false, "mon")
+	h.cfg.Policies.Restart.MaxCrashes = 10
 	h.status("mon", working)
-	h.tmux.crash["mon"] = true
+	n := 0
+	h.tmux.deadScreen["mon"] = func() string { n++; return fmt.Sprintf("error number %d", n) }
+	h.tmux.crash["mon"], h.tmux.remain["mon"] = true, true
 	h.ticks(20, 30*time.Second) // ten minutes in half-minute steps
 
 	var at []time.Duration
@@ -51,7 +57,7 @@ func TestRestartBackoffDoubles(t *testing.T) {
 			at = append(at, e.Time.Sub(start))
 		}
 	}
-	want := []time.Duration{0, time.Minute, 3 * time.Minute}
+	want := []time.Duration{0, time.Minute, 3 * time.Minute, 7 * time.Minute}
 	if !reflect.DeepEqual(at, want) {
 		t.Fatalf("restart times = %v, want %v", at, want)
 	}
@@ -69,21 +75,21 @@ func actionTimes(h *harness, kind, action string) []time.Duration {
 	return at
 }
 
-// A restart that fails counts as a restart: attempts follow the backoff
-// schedule, the breaker trips after MaxRestarts of them, and one escalation
-// is posted, instead of a silent retry every pass.
+// A restart that fails is a crash, its error the cause: attempts follow the
+// backoff schedule, the same error twice parks the session, and one
+// escalation is posted, instead of a silent retry every pass.
 func TestFailedRestartsCountTowardBreaker(t *testing.T) {
 	h := newHarness(t, false, "mon")
 	h.status("mon", working)
 	h.tmux.newErr["mon"] = errors.New("tmux: server not running")
 	h.ticks(20, 30*time.Second)
 
-	want := []time.Duration{0, time.Minute, 3 * time.Minute}
+	want := []time.Duration{0, time.Minute}
 	if got := actionTimes(h, KindError, ActRestart); !reflect.DeepEqual(got, want) {
 		t.Fatalf("failed restart attempts at %v, want %v", got, want)
 	}
-	if got := h.tmux.count("new-session", "mon"); got != 3 {
-		t.Fatalf("attempts = %d, want 3", got)
+	if got := h.tmux.count("new-session", "mon"); got != 2 {
+		t.Fatalf("attempts = %d, want 2", got)
 	}
 	if h.state("mon") != CrashLooping {
 		t.Fatalf("state = %s, want crash-looping", h.state("mon"))
@@ -93,8 +99,8 @@ func TestFailedRestartsCountTowardBreaker(t *testing.T) {
 	}
 	h.restart(false)
 	h.ticks(24, 5*time.Minute)
-	if got := h.tmux.count("new-session", "mon"); got != 3 {
-		t.Fatalf("attempts = %d after replay, want still 3", got)
+	if got := h.tmux.count("new-session", "mon"); got != 2 {
+		t.Fatalf("attempts = %d after replay, want still 2", got)
 	}
 }
 
@@ -353,7 +359,7 @@ func TestNoBroadKill(t *testing.T) {
 // Shadow mode observes everything and acts on nothing: no tmux writes, no
 // push or merge request, no escalation command. It fetches, which writes
 // nothing the remote sees. It still logs what it would do, with the same
-// breaker and once-per-key rules.
+// crash parking and once-per-key rules.
 func TestShadowNeverActs(t *testing.T) {
 	h := newHarness(t, true, "mon", "idle", "blocked", "done", "trust")
 	h.status("mon", working)
@@ -383,7 +389,7 @@ func TestShadowNeverActs(t *testing.T) {
 	if got, fetches := h.count(KindAction, "", ""), h.count(KindAction, ActFetch, ""); got != fetches {
 		t.Fatalf("action events = %d in shadow mode, only %d of them fetches", got, fetches)
 	}
-	wants := map[string]int{ActRestart: 3, ActNudge: 3, ActPush: 1, ActOpen: 1}
+	wants := map[string]int{ActRestart: 2, ActNudge: 3, ActPush: 1, ActOpen: 1}
 	for action, want := range wants {
 		if got := h.count(KindWould, action, ""); got != want {
 			t.Fatalf("would %s = %d, want %d", action, got, want)
@@ -563,7 +569,7 @@ func TestRestartedSessionComesBack(t *testing.T) {
 		t.Fatalf("state = %s", h.state("s1"))
 	}
 	for _, c := range h.tmux.calls {
-		if c.op == "new-session" && !strings.Contains(c.args[1], "claude --continue") {
+		if c.op == "new-session" && (strings.Contains(c.args[1], "--continue") || !strings.Contains(c.args[1], "BRIEF.md")) {
 			t.Fatalf("restart command = %q", c.args[1])
 		}
 	}

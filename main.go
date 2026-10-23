@@ -6,6 +6,7 @@
 //	agentd status [--config PATH] [--log PATH]
 //	agentd config [--config PATH]
 //	agentd mark-delivered [--config PATH] [--log PATH] SESSION WORKTREE REF
+//	agentd clear [--config PATH] [--log PATH] SESSION
 package main
 
 import (
@@ -41,6 +42,8 @@ func main() {
 		err = configCmd(os.Args[2:])
 	case "mark-delivered":
 		err = markDeliveredCmd(os.Args[2:])
+	case "clear":
+		err = clearCmd(os.Args[2:])
 	case "version", "--version":
 		fmt.Println("agentd", version)
 		return
@@ -63,13 +66,15 @@ func usage() {
   agentd status [--config PATH] [--log PATH]
   agentd config [--config PATH]
   agentd mark-delivered [--config PATH] [--log PATH] SESSION WORKTREE REF
+  agentd clear [--config PATH] [--log PATH] SESSION
   agentd version
 
 run supervises the configured sessions; --shadow observes and logs what it
 would do without acting. status prints the state table from the event log.
 config prints the resolved configuration. mark-delivered records that a
 worktree was already delivered as REF by other means, so run never delivers
-it again.`)
+it again. clear lifts a crash-looping session's park, so it may be
+restarted again.`)
 }
 
 func loadConfigFlag(fs *flag.FlagSet, args []string) (*Config, *string, error) {
@@ -223,4 +228,23 @@ func markDeliveredCmd(args []string) error {
 	}
 	defer log.Close()
 	return MarkDelivered(cfg, log, time.Now(), rest[0], rest[1], rest[2])
+}
+
+// clearCmd is the command-line face of ClearSession.
+func clearCmd(args []string) error {
+	fs := flag.NewFlagSet("clear", flag.ContinueOnError)
+	cfg, _, err := loadConfigFlag(fs, args)
+	if err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) != 1 {
+		return fmt.Errorf("usage: agentd clear SESSION")
+	}
+	log, _, err := openLoaded(cfg.EventLog)
+	if err != nil {
+		return err
+	}
+	defer log.Close()
+	return ClearSession(cfg, log, time.Now(), rest[0])
 }

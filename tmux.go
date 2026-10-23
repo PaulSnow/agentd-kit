@@ -20,6 +20,9 @@ type Tmux interface {
 	// Pane reports what the session's pane is running.
 	Pane(name string) (PaneInfo, error)
 	NewSession(name, cwd, command string, width, height int) error
+	// Respawn starts command again in the session's dead pane. tmux refuses
+	// it for a pane that is still running, so it cannot replace a live one.
+	Respawn(name, cwd, command string) error
 	// Type enters a line of text and submits it.
 	Type(name, text string) error
 	// Keys sends named keys such as Down and Enter, one at a time.
@@ -28,7 +31,10 @@ type Tmux interface {
 
 // PaneInfo is what tmux reports about a session's pane.
 type PaneInfo struct {
-	Command string // #{pane_current_command}
+	Command   string // #{pane_current_command}
+	Dead      bool   // #{pane_dead}: the command exited and remain-on-exit kept the pane
+	Status    int    // #{pane_dead_status}, when HasStatus
+	HasStatus bool
 }
 
 var plainName = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
@@ -87,20 +93,53 @@ func (t ExecTmux) Pane(name string) (PaneInfo, error) {
 	if err != nil {
 		return PaneInfo{}, err
 	}
-	out, err := t.run("display-message", "-p", "-t", tg, "#{pane_current_command}")
+	out, err := t.run("display-message", "-p", "-t", tg, "#{pane_current_command}\t#{pane_dead}\t#{pane_dead_status}")
 	if err != nil {
 		return PaneInfo{}, fmt.Errorf("display-message %s: %w: %s", name, err, strings.TrimSpace(out))
 	}
-	return PaneInfo{Command: strings.TrimSpace(out)}, nil
+	return parsePaneInfo(out), nil
 }
 
+// parsePaneInfo reads display-message's command, dead flag and exit status.
+func parsePaneInfo(out string) PaneInfo {
+	f := strings.Split(strings.TrimRight(out, "\n"), "\t")
+	info := PaneInfo{Command: f[0]}
+	if len(f) > 1 {
+		info.Dead = f[1] == "1"
+	}
+	if len(f) > 2 && info.Dead {
+		if n, err := strconv.Atoi(strings.TrimSpace(f[2])); err == nil {
+			info.Status, info.HasStatus = n, true
+		}
+	}
+	return info
+}
+
+// NewSession starts the session with remain-on-exit set in the same tmux
+// command list, before the command can exit, so a crashed pane stays with
+// its exit status and last screen.
 func (t ExecTmux) NewSession(name, cwd, command string, width, height int) error {
-	if _, err := target(name); err != nil {
+	tg, err := target(name)
+	if err != nil {
 		return err
 	}
-	out, err := t.run("new-session", "-d", "-s", name, "-x", strconv.Itoa(width), "-y", strconv.Itoa(height), "-c", cwd, command)
+	out, err := t.run("new-session", "-d", "-s", name, "-x", strconv.Itoa(width), "-y", strconv.Itoa(height), "-c", cwd, command,
+		";", "set-option", "-w", "-t", tg, "remain-on-exit", "on")
 	if err != nil {
 		return fmt.Errorf("new-session %s: %w: %s", name, err, strings.TrimSpace(out))
+	}
+	return nil
+}
+
+// Respawn runs respawn-pane without -k, which tmux refuses for a pane that
+// is still running: it can only replace a dead one.
+func (t ExecTmux) Respawn(name, cwd, command string) error {
+	tg, err := target(name)
+	if err != nil {
+		return err
+	}
+	if out, err := t.run("respawn-pane", "-t", tg, "-c", cwd, command); err != nil {
+		return fmt.Errorf("respawn-pane %s: %w: %s", name, err, strings.TrimSpace(out))
 	}
 	return nil
 }

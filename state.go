@@ -29,8 +29,11 @@ type Track struct {
 	HashSince time.Time // when the pane last changed, nudge echoes excluded
 	Observed  bool      // at least one observation
 
-	Restarts  []time.Time // restart times by agentd
-	Breaker   bool        // the crash-loop breaker has tripped; cleared when the session is seen alive
+	Restarts  []time.Time // restart times by agentd, for the backoff
+	Live      bool        // seen alive, or restarted, since the last crash: its next disappearance is a crash
+	Crashes   []Crash     // crashes since the owner last cleared the session
+	Parked    bool        // crash-looping: parked for the owner until agentd clear
+	Clears    int         // owner clears applied
 	Nudges    int         // nudges in the current idle episode
 	LastNudge time.Time
 	Limited   bool
@@ -66,11 +69,41 @@ func (q *QuestionsEscalation) observeQuestions(asks, done bool) {
 	}
 }
 
+// Crash is the cause of one crash: the pane's exit status, when tmux kept
+// it, and the short hash of the last screen seen. Two crashes with the same
+// cause are the same failure repeating.
+type Crash struct {
+	Exit   int // -1 when unknown
+	Screen string
+}
+
+// noteCrash records a crash and parks the session when the cause repeats
+// one already seen, or when max crashes have happened since the owner last
+// cleared it, however far apart.
+func (t *Track) noteCrash(c Crash, max int) {
+	for _, p := range t.Crashes {
+		if p == c {
+			t.Parked = true
+		}
+	}
+	t.Crashes = append(t.Crashes, c)
+	t.Live = false
+	if len(t.Crashes) >= max {
+		t.Parked = true
+	}
+}
+
+// clear is the owner's clearing of a parked session.
+func (t *Track) clear() {
+	t.Crashes, t.Parked = nil, false
+	t.Clears++
+}
+
 func newTrack() *Track {
 	return &Track{Posted: map[string]bool{}, Delivered: map[string]string{}, Skipped: map[string]bool{}, Failures: map[string][]time.Time{}}
 }
 
-// restartsInWindow counts restarts inside the breaker window.
+// restartsInWindow counts restarts inside the backoff window.
 func (t *Track) restartsInWindow(now time.Time, window time.Duration) int {
 	n := 0
 	for _, at := range t.Restarts {
@@ -138,19 +171,15 @@ func (t *Track) noteHash(hash string, now time.Time, p NudgePolicy, tr Transcrip
 // but the pane memory. The reason names the evidence that decided.
 func Classify(t *Track, ev Evidence, pol Policies, now time.Time) (State, string) {
 	switch {
+	case t.Parked:
+		return CrashLooping, fmt.Sprintf("parked after %d crashes; waiting for the owner to run agentd clear", len(t.Crashes))
 	case ev.Status.Done:
 		return Done, "STATUS.md ends with DONE"
+	case !ev.Alive && ev.Status.Questions != "":
+		return BlockedOnOwner, "tmux session gone and STATUS.md has open Questions; parked for the owner, not restarted"
 	case !ev.Alive:
-		if t.Breaker {
-			return CrashLooping, "crash-loop breaker tripped; waiting for the owner"
-		}
-		if pol.Restart.Enabled && t.restartsInWindow(now, pol.Restart.Window.Duration) >= pol.Restart.MaxRestarts {
-			t.Breaker = true
-			return CrashLooping, fmt.Sprintf("tmux session gone after %d restart attempts in %s", pol.Restart.MaxRestarts, pol.Restart.Window)
-		}
 		return Failed, "tmux session gone and STATUS.md not DONE"
 	}
-	t.Breaker = false
 	first := !t.Observed
 	t.noteHash(ev.PaneHash, now, pol.Nudge, ev.Transcript)
 	// Open Questions outrank everything on screen, so no prompt is answered

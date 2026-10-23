@@ -259,3 +259,28 @@ func TestExecTmuxPaneAndVisibleCapture(t *testing.T) {
 		t.Fatalf("capture with history ran %q, %v", out, err)
 	}
 }
+
+// The real client starts sessions with remain-on-exit in the same command
+// list, reads a dead pane's exit status, and respawns without -k.
+func TestExecTmuxKeepsDeadPanes(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "args")
+	shim(t, "tmux", `echo "$*" >> `+log)
+	tm := ExecTmux{Timeout: 10 * time.Second}
+	if err := tm.NewSession("s1", "/w", "claude", 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	if err := tm.Respawn("s1", "/w", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(log)
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if len(lines) != 2 || !strings.HasSuffix(lines[0], "claude ; set-option -w -t =s1: remain-on-exit on") || lines[1] != "respawn-pane -t =s1: -c /w claude" {
+		t.Fatalf("tmux calls:\n%s", b)
+	}
+	if got := parsePaneInfo("claude\t1\t137\n"); got != (PaneInfo{Command: "claude", Dead: true, Status: 137, HasStatus: true}) {
+		t.Fatalf("dead pane = %+v", got)
+	}
+	if got := parsePaneInfo("node\t0\t\n"); got != (PaneInfo{Command: "node"}) {
+		t.Fatalf("live pane = %+v", got)
+	}
+}

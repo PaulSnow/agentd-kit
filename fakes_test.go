@@ -28,21 +28,28 @@ type call struct {
 // panes is the visible screen and history the scrollback above it. A
 // sticky session keeps its trust prompt on screen after keys are sent, as a
 // prompt that did not take them would. commands is what each pane runs,
-// claude unless set.
+// claude unless set. A crashing session with remain set keeps its dead
+// pane, as tmux's remain-on-exit does, showing deadScreen with exit status
+// exit; one without dies outright.
 type fakeTmux struct {
-	alive     map[string]bool
-	panes     map[string]string
-	history   map[string]string
-	crash     map[string]bool
-	sticky    map[string]bool
-	commands  map[string]string
-	newErr    map[string]error // NewSession fails with this
-	calls     []call
-	mutations int
+	alive      map[string]bool
+	panes      map[string]string
+	history    map[string]string
+	crash      map[string]bool
+	remain     map[string]bool
+	dead       map[string]bool
+	exit       map[string]int
+	deadScreen map[string]func() string
+	sticky     map[string]bool
+	commands   map[string]string
+	newErr     map[string]error // NewSession fails with this
+	calls      []call
+	mutations  int
 }
 
 func newFakeTmux() *fakeTmux {
 	return &fakeTmux{alive: map[string]bool{}, panes: map[string]string{}, history: map[string]string{}, crash: map[string]bool{},
+		remain: map[string]bool{}, dead: map[string]bool{}, exit: map[string]int{}, deadScreen: map[string]func() string{},
 		sticky: map[string]bool{}, commands: map[string]string{}, newErr: map[string]error{}}
 }
 
@@ -71,7 +78,40 @@ func (f *fakeTmux) Pane(name string) (PaneInfo, error) {
 	if cmd == "" {
 		cmd = "claude"
 	}
+	if f.dead[name] {
+		return PaneInfo{Command: cmd, Dead: true, Status: f.exit[name], HasStatus: true}, nil
+	}
 	return PaneInfo{Command: cmd}, nil
+}
+
+// start runs a session's command: it comes up, or it crashes, leaving a
+// dead pane when remain is set.
+func (f *fakeTmux) start(name string) {
+	f.dead[name] = false
+	switch {
+	case f.crash[name] && f.remain[name]:
+		f.alive[name], f.dead[name] = true, true
+		f.panes[name] = "error: boom"
+		if s := f.deadScreen[name]; s != nil {
+			f.panes[name] = s()
+		}
+		f.panes[name] += "\nPane is dead (status 1, " + fmt.Sprint(len(f.calls)) + ")"
+	case f.crash[name]:
+		f.alive[name] = false
+	default:
+		f.alive[name] = true
+		f.panes[name] = "fresh session " + name
+	}
+}
+
+func (f *fakeTmux) Respawn(name, cwd, command string) error {
+	f.calls = append(f.calls, call{op: "respawn", name: name, args: []string{cwd, command}})
+	f.mutations++
+	if !f.dead[name] {
+		return fmt.Errorf("pane %s still active", name)
+	}
+	f.start(name)
+	return nil
 }
 
 func (f *fakeTmux) NewSession(name, cwd, command string, width, height int) error {
@@ -80,11 +120,10 @@ func (f *fakeTmux) NewSession(name, cwd, command string, width, height int) erro
 	if err := f.newErr[name]; err != nil {
 		return err
 	}
-	if f.crash[name] {
-		return nil
+	if f.alive[name] {
+		return fmt.Errorf("duplicate session: %s", name)
 	}
-	f.alive[name] = true
-	f.panes[name] = "fresh session " + name
+	f.start(name)
 	return nil
 }
 

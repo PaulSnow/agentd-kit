@@ -207,8 +207,8 @@ func TestDefaultRestartCommandKeepsPermissions(t *testing.T) {
 			t.Fatalf("default restart command bypasses permissions: %q", part)
 		}
 	}
-	if last := DefaultConfig().Policies.Restart.Command[2]; !strings.HasPrefix(last, "claude --continue \"") {
-		t.Fatalf("default restart command does not continue the session: %q", last)
+	if last := DefaultConfig().Policies.Restart.Command[2]; !strings.HasPrefix(last, "claude \"") || strings.Contains(last, "--continue") {
+		t.Fatalf("default restart command is not a fresh claude with a prompt: %q", last)
 	}
 	path := filepath.Join(t.TempDir(), "c.json")
 	writeFile(t, path, `{"policies": {"restart": {"command": ["bash", "-lic", "claude --dangerously-skip-permissions --continue"]}}}`)
@@ -317,7 +317,7 @@ func TestStatusTable(t *testing.T) {
 	for _, r := range rows {
 		byName[r.Name] = r
 	}
-	if byName["mon"].State != CrashLooping || byName["mon"].Restarts != 3 || byName["mon"].Escalations != 1 {
+	if byName["mon"].State != CrashLooping || byName["mon"].Restarts != 2 || byName["mon"].Escalations != 1 {
 		t.Fatalf("mon row = %+v", byName["mon"])
 	}
 	if byName["idle"].State != Idle || byName["idle"].Nudges != 3 {

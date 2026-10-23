@@ -56,21 +56,27 @@ type Policies struct {
 	PaneCommands []string `json:"pane_commands"`
 }
 
-// RestartPolicy restarts a session whose tmux session is gone and whose
-// STATUS.md is not DONE. The default Command keeps Claude Code's permission
-// prompts; bypassing them is the owner's explicit choice in their own
-// config. Command ends with Claude itself, so the tmux
-// session ends when Claude exits and the policy sees it; its last screen is
-// not kept, the event log is the record. Restart n (counting from zero within the window)
-// waits BackoffInitial doubled n-1 times, capped at BackoffMax; the first
-// restart is immediate. After MaxRestarts within Window the breaker trips:
-// no more restarts, one escalation. A restart that fails counts as one. The
-// same backoff and MaxRestarts bound the retries of every other action that
-// fails (an escalation command, a push, a merge request), so they are
-// validated even when restarts are disabled.
+// RestartPolicy restarts a session whose tmux session is gone, or whose
+// pane is dead, and whose STATUS.md is not DONE and asks no Questions. The
+// default Command starts Claude with a fresh context, told to read the
+// brief and STATUS.md; it never continues the old conversation. It keeps
+// Claude Code's permission prompts; bypassing them is the owner's explicit
+// choice in their own config. Command ends with Claude itself, so the pane
+// dies when Claude exits; agentd starts it with remain-on-exit, so the dead
+// pane keeps its exit status and last screen. Restart n (counting from zero
+// within Window) waits BackoffInitial doubled n-1 times, capped at
+// BackoffMax; the first restart is immediate. Each disappearance of a
+// session seen alive or restarted is a crash, as is a restart that fails; a
+// crash whose cause (exit status and last screen) repeats an earlier one, or
+// the MaxCrashes-th crash however far apart, parks the session for the
+// owner with one escalation until agentd clear. The same backoff and
+// MaxRestarts bound the retries of every other action that fails (an
+// escalation command, a push, a merge request), so they are validated even
+// when restarts are disabled.
 type RestartPolicy struct {
 	Enabled        bool     `json:"enabled"`
 	MaxRestarts    int      `json:"max_restarts"`
+	MaxCrashes     int      `json:"max_crashes"`
 	Window         Duration `json:"window"`
 	BackoffInitial Duration `json:"backoff_initial"`
 	BackoffMax     Duration `json:"backoff_max"`
@@ -170,12 +176,13 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// DefaultRestartPrompt is what a restarted session is told. {brief} and
-// {status} are substituted.
-const DefaultRestartPrompt = "You were restarted by the supervisor. Continue your brief, {brief}, from where you were; your progress is in {status}."
+// DefaultRestartPrompt is what a restarted session is told. It starts with
+// a fresh context, so it is pointed at its files. {brief} and {status} are
+// substituted.
+const DefaultRestartPrompt = "You were restarted by the supervisor with a fresh context. Read your brief, {brief}, and your progress, {status}, then continue from where {status} says you are."
 
 // DefaultConfig carries the policies of the Python supervisor this replaces,
-// plus the backoff and breaker it lacked.
+// plus the backoff and crash parking it lacked.
 func DefaultConfig() Config {
 	return Config{
 		EventLog:      "~/.local/state/agentd-kit/events.jsonl",
@@ -186,11 +193,12 @@ func DefaultConfig() Config {
 			Restart: RestartPolicy{
 				Enabled:        true,
 				MaxRestarts:    3,
+				MaxCrashes:     3,
 				Window:         Duration{time.Hour},
 				BackoffInitial: Duration{time.Minute},
 				BackoffMax:     Duration{30 * time.Minute},
 				Command: []string{"bash", "-lic",
-					"claude --continue \"" + DefaultRestartPrompt + "\""},
+					"claude \"" + DefaultRestartPrompt + "\""},
 				Width:  220,
 				Height: 50,
 			},
@@ -264,8 +272,8 @@ func (c *Config) finish(base string) error {
 		errs = append(errs, errors.New("timeouts: tmux, forge and escalate must be positive"))
 	}
 	r := &c.Policies.Restart
-	if r.MaxRestarts < 1 {
-		errs = append(errs, errors.New("policies.restart.max_restarts must be at least 1"))
+	if r.MaxRestarts < 1 || r.MaxCrashes < 1 {
+		errs = append(errs, errors.New("policies.restart.max_restarts and max_crashes must be at least 1"))
 	}
 	if r.Window.Duration <= 0 || r.BackoffInitial.Duration <= 0 || r.BackoffMax.Duration < r.BackoffInitial.Duration {
 		errs = append(errs, errors.New("policies.restart: window and backoff_initial must be positive and backoff_max at least backoff_initial"))

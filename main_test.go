@@ -64,3 +64,25 @@ func TestInstanceLockFollowsSymlinks(t *testing.T) {
 		held.Close()
 	}
 }
+
+// agentd clear writes the owner's clear for a configured session, and
+// refuses one that is not configured.
+func TestClearCommand(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "events.jsonl")
+	if err := os.MkdirAll(filepath.Join(dir, "w"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "agentd.json")
+	writeFile(t, cfgPath, `{"event_log": "`+logPath+`", "transcript_dir": "", "policies": {"escalate": {"command": ["post", "{message}"]}}, "sessions": {"s1": {"workdir": "w", "cwd": "w"}}}`)
+	if err := clearCmd([]string{"--config", cfgPath, "s2"}); err == nil {
+		t.Fatal("cleared an unconfigured session")
+	}
+	if err := clearCmd([]string{"--config", cfgPath, "s1"}); err != nil {
+		t.Fatal(err)
+	}
+	events, _, err := ReadLog(logPath)
+	if err != nil || len(events) != 1 || events[0].Kind != KindClear || events[0].Session != "s1" || detailString(events[0], "mode") != ModeOwner {
+		t.Fatalf("events = %+v, %v", events, err)
+	}
+}

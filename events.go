@@ -33,6 +33,8 @@ const (
 	KindAction     = "action"     // an action was taken
 	KindWould      = "would"      // shadow mode: the action that would have been taken
 	KindSkip       = "skip"       // an action a policy declined, with the reason
+	KindCrash      = "crash"      // a session agentd saw alive, or restarted, is gone: its cause
+	KindClear      = "clear"      // the owner cleared a parked session (agentd clear)
 	KindError      = "error"      // observation or action failed
 	KindWarning    = "warning"    // agentd itself noticed something: a torn log line dropped
 )
@@ -214,6 +216,58 @@ func (l *Log) repairTail() (int, error) {
 		return 0, err
 	}
 	return torn, l.write(append(w, '\n'))
+}
+
+// Size is the log's length in bytes, the offset Tail starts after.
+func (l *Log) Size() int64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.f != nil {
+		if info, err := l.f.Stat(); err == nil {
+			return info.Size()
+		}
+		return 0
+	}
+	if b, ok := l.w.(interface{ Bytes() []byte }); ok {
+		return int64(len(b.Bytes()))
+	}
+	return 0
+}
+
+// Tail reads the whole lines appended after offset off, by this process or
+// another (agentd clear), and returns their events and the offset after
+// them. A log written to a plain writer has no tail unless the writer can
+// show its bytes, as the tests' buffers do.
+func (l *Log) Tail(off int64) ([]Event, int64, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var data []byte
+	switch b, ok := l.w.(interface{ Bytes() []byte }); {
+	case l.f != nil:
+		unlock, err := l.lock()
+		if err != nil {
+			return nil, off, err
+		}
+		defer unlock()
+		info, err := l.f.Stat()
+		if err != nil || info.Size() <= off {
+			return nil, off, err
+		}
+		data = make([]byte, info.Size()-off)
+		if _, err := l.f.ReadAt(data, off); err != nil {
+			return nil, off, err
+		}
+	case ok && int64(len(b.Bytes())) > off:
+		data = b.Bytes()[off:]
+	default:
+		return nil, off, nil
+	}
+	end := bytes.LastIndexByte(data, '\n')
+	if end < 0 {
+		return nil, off, nil
+	}
+	events, _, err := ReadEvents(bytes.NewReader(data[:end+1]))
+	return events, off + int64(end+1), err
 }
 
 // Close closes the underlying file, if any.
