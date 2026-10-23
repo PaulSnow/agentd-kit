@@ -515,6 +515,16 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 		read("branch", err)
 		return
 	}
+	// Pushing the target itself would write it directly, and a detached HEAD
+	// has no branch to push. Not final: the session may move to a branch.
+	if branch == "" || branch == "HEAD" || branch == d.Target {
+		reason := fmt.Sprintf("worktree is on the target branch %s; not delivering", d.Target)
+		if branch != d.Target {
+			reason = "worktree has a detached HEAD; not delivering"
+		}
+		s.skipOnce(name, "deliver:"+key+":branch:"+branch, reason, t, map[string]any{"worktree": d.Worktree, "branch": branch})
+		return
+	}
 	// A request that already exists, open or merged, is the delivery: the log
 	// may have missed it (a lost reply, a lost log), and a second push after a
 	// squash merge would recreate the branch and open a duplicate.

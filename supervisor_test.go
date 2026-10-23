@@ -584,3 +584,41 @@ func TestFreshTranscriptIsNotIdle(t *testing.T) {
 		t.Fatalf("state = %s once the transcript is stale too", h.state("s1"))
 	}
 }
+
+// A worktree on the deliver target itself, or on a detached HEAD, is never
+// pushed: pushing it would write the target branch directly, or push nothing
+// nameable. One skip says why, and nothing latches, so the session can move
+// to a branch and be delivered.
+func TestTargetOrDetachedBranchIsNotPushed(t *testing.T) {
+	h := newHarness(t, false, "onmain", "detached", "empty")
+	mr := h.dir + "/mr.md"
+	writeFile(t, mr, "The MR description.\n")
+	for _, n := range []string{"onmain", "detached", "empty"} {
+		h.status(n, "# Finished\n\nDONE\n")
+		h.deliver(n, Deliver{Repository: "widgets", Worktree: h.dir + "/" + n + "/wt", Target: "main", MRFile: mr})
+	}
+	h.git.branches = map[string]string{h.dir + "/onmain/wt": "main", h.dir + "/detached/wt": "HEAD", h.dir + "/empty/wt": ""}
+	h.ticks(6, 5*time.Minute)
+	if len(h.forge.pushes) != 0 || len(h.forge.opens) != 0 {
+		t.Fatalf("pushes %v opens %d from the target or a detached HEAD", h.forge.pushes, len(h.forge.opens))
+	}
+	for _, n := range []string{"onmain", "detached", "empty"} {
+		skips := 0
+		for _, e := range h.events() {
+			if e.Kind == KindSkip && e.Session == n && strings.Contains(detailString(e, "reason"), "not delivering") {
+				skips++
+			}
+		}
+		if skips != 1 {
+			t.Fatalf("%s: skips = %d, want 1", n, skips)
+		}
+		if got := h.sup.Tracks()[n].Delivered; len(got) != 0 {
+			t.Fatalf("%s: delivery latched: %v", n, got)
+		}
+	}
+	h.git.branches[h.dir+"/onmain/wt"] = "feature"
+	h.ticks(1, 5*time.Minute)
+	if len(h.forge.pushes) != 1 || h.forge.pushes[0] != "feature" {
+		t.Fatalf("pushes %v after moving to a branch", h.forge.pushes)
+	}
+}

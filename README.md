@@ -61,6 +61,7 @@ One JSONL file, append-only, one line per observation and action: `time`, `sessi
 - Process control is by exact session name only. The tmux surface has no listing, no pattern and no kill.
 - Every forge write goes through one client wrapped with the per-repository allow-list. It can push and open; there is no merge call to authorize.
 - Escalations and deliveries are keyed and posted once, across restarts of `agentd`. Before pushing, the forge is asked for an existing open or merged request on the branch; one found is recorded as the delivery, so a lost reply or a lost log never opens a duplicate. `mark-delivered` accepts only a worktree named in the session's deliver specs.
+- A worktree on the deliver target itself, or on a detached HEAD, is never pushed; one skip says why, and it is delivered once it moves to a branch.
 - A failed action is not retried every pass: retries follow the restart backoff and stop after `max_restarts` tries, with one skip or escalation saying so.
 - Every external command runs under a timeout and is killed when it hangs; a hung tmux is an error, never taken for a gone session.
 - Shadow mode performs no tmux write, no fetch, push or open, and runs no escalation command.
