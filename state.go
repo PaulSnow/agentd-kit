@@ -36,10 +36,33 @@ type Track struct {
 	Limited   bool
 
 	Posted    map[string]bool        // escalation keys already posted, or given up on
+	Questions QuestionsEscalation    // the escalation of the Questions section
 	Delivered map[string]string      // delivery keys: MR reference or the reason none was made
 	Skipped   map[string]bool        // skip reasons already logged
 	Failures  map[string][]time.Time // failed tries of a keyed action; retries follow the restart backoff
 	LastObs   map[string]any         // last observe details, to log only changes
+}
+
+// QuestionsEscalation is the one escalation a session's Questions section
+// has at a time. It opens when Questions become non-empty, closes when they
+// empty or the session is DONE, and is numbered so a reopened section is a
+// new escalation. Open and Episode follow the observe events; Hash and
+// Updates follow the escalate and update events, so replay rebuilds them.
+type QuestionsEscalation struct {
+	Open    bool
+	Episode int    // escalations opened so far; the open one's number
+	Hash    string // short hash of the text last posted, or "" before the first post
+	Updates int    // updates posted in this episode
+}
+
+// observeQuestions opens or closes the escalation from what STATUS.md asks.
+func (q *QuestionsEscalation) observeQuestions(asks, done bool) {
+	switch {
+	case asks && !done && !q.Open:
+		q.Open, q.Episode, q.Hash, q.Updates = true, q.Episode+1, "", 0
+	case (!asks || done) && q.Open:
+		q.Open = false
+	}
 }
 
 func newTrack() *Track {

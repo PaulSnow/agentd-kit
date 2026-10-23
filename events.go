@@ -46,6 +46,7 @@ const (
 	ActPush     = "push"
 	ActOpen     = "open"
 	ActEscalate = "escalate"
+	ActUpdate   = "update" // the open Questions escalation's text changed
 )
 
 // Log appends events to a JSONL file. It is safe for concurrent use, and

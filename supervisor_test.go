@@ -259,11 +259,14 @@ func TestEscalationIsPostedOnce(t *testing.T) {
 		t.Fatalf("posted = %d after replay, want still 1", got)
 	}
 
-	// A different question is a different key.
+	// A changed question while they stay open is an update, not a new escalation.
 	h.status("s1", "# Blocked\n\n## Questions\n2. Another thing?\n")
 	h.ticks(2, 5*time.Minute)
 	if got := len(h.runner.calls); got != 2 {
-		t.Fatalf("posted = %d, want 2 for the new question", got)
+		t.Fatalf("posted = %d, want 2 for the changed question", got)
+	}
+	if got := h.count(KindAction, ActUpdate, "s1"); got != 1 {
+		t.Fatalf("updates = %d, want 1", got)
 	}
 }
 

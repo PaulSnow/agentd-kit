@@ -157,6 +157,9 @@ func (s *Supervisor) Replay(events []Event) {
 				t.Nudges = 0
 			}
 			t.Limited, _ = e.Details["limited"].(bool)
+			asks, _ := e.Details["questions"].(bool)
+			done, _ := e.Details["done"].(bool)
+			t.Questions.observeQuestions(asks, done)
 			if st := detailString(e, "state"); st != "" && t.State == "" {
 				t.State, t.Since = State(st), e.Time
 			}
@@ -169,6 +172,7 @@ func (s *Supervisor) Replay(events []Event) {
 			}
 			if k := detailString(e, "escalation"); k != "" {
 				t.Posted[k] = true // given up on
+				t.replayQuestionsPost(e)
 			}
 			t.Skipped[detailString(e, "key")] = true
 		case KindError:
@@ -191,8 +195,9 @@ func (s *Supervisor) Replay(events []Event) {
 				t.LastNudge = e.Time
 			case ActResume:
 				t.Limited = false
-			case ActEscalate:
+			case ActEscalate, ActUpdate:
 				t.Posted[detailString(e, "key")] = true
+				t.replayQuestionsPost(e)
 			case ActOpen:
 				ref := detailString(e, "ref")
 				if ref == "" {
@@ -201,6 +206,19 @@ func (s *Supervisor) Replay(events []Event) {
 				t.Delivered[detailString(e, "delivered")] = ref
 			}
 		}
+	}
+}
+
+// replayQuestionsPost settles a Questions escalation or update: posted, or
+// given up on, it carries the hash of the text it covered.
+func (t *Track) replayQuestionsPost(e Event) {
+	h := detailString(e, "questions_hash")
+	if h == "" {
+		return
+	}
+	t.Questions.Hash = h
+	if n, ok := detailInt(e, "update"); ok {
+		t.Questions.Updates = n
 	}
 }
 
@@ -268,6 +286,7 @@ func (s *Supervisor) step(name string, sess Session) {
 	}
 	state, reason := Classify(t, ev, s.cfg.Policies, now)
 	s.logObserve(name, t, ev, state, reason, now)
+	t.Questions.observeQuestions(ev.Status.Questions != "", ev.Status.Done)
 	state = s.actOn(name, sess, t, ev, state, now)
 	if state != t.State {
 		s.emit(name, KindTransition, map[string]any{"from": string(t.State), "to": string(state), "reason": reason})
@@ -386,12 +405,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			})
 		}
 	case BlockedOnOwner:
-		key := fmt.Sprintf("questions:%s:%s", name, shortHash(HashPane(ev.Status.Questions)))
-		q := ev.Status.Questions
-		if len(q) > 2000 {
-			q = q[:2000] + "…"
-		}
-		s.escalate(name, key, fmt.Sprintf("%s is blocked on you. Questions from STATUS.md:\n%s", name, q), t, now)
+		s.escalateQuestions(name, ev.Status.Questions, t, now)
 	case Idle:
 		if !pol.Nudge.Enabled {
 			return state
@@ -438,46 +452,93 @@ func (s *Supervisor) confidentialMatch(texts ...string) int {
 	return 0
 }
 
-// escalate posts one decision to the console, once per key. A failing
-// command is retried on the backoff schedule and given up after MaxRestarts
-// tries, with one skip saying so. A message that matches a confidential
-// pattern is replaced, before it is posted or logged, by one that names only
-// the session; one skip records that it was filtered, without the text.
-func (s *Supervisor) escalate(name, key, message string, t *Track, now time.Time) {
-	if t.Posted[key] {
+// escalateQuestions posts the session's open Questions once per episode,
+// and each later change of their text as one short update, at most one per
+// pass. Both carry the hash of the text they cover, so replay knows which
+// text the console has seen.
+func (s *Supervisor) escalateQuestions(name, questions string, t *Track, now time.Time) {
+	q := &t.Questions
+	hash := shortHash(HashPane(questions))
+	if len(questions) > 2000 {
+		questions = questions[:2000] + "…"
+	}
+	key := fmt.Sprintf("questions:%s:%d", name, q.Episode)
+	if !t.Posted[key] {
+		if s.post(name, ActEscalate, key, fmt.Sprintf("%s is blocked on you. Questions from STATUS.md:\n%s", name, questions), t, now,
+			map[string]any{"questions_hash": hash}) {
+			q.Hash = hash
+		}
 		return
 	}
+	if hash == q.Hash {
+		return
+	}
+	n := q.Updates + 1
+	if s.post(name, ActUpdate, fmt.Sprintf("%s:update:%d", key, n), fmt.Sprintf("%s changed its open Questions in STATUS.md; they now read:\n%s", name, questions), t, now,
+		map[string]any{"questions_hash": hash, "update": n}) {
+		q.Hash, q.Updates = hash, n
+	}
+}
+
+// escalate posts one decision to the console, once per key.
+func (s *Supervisor) escalate(name, key, message string, t *Track, now time.Time) {
+	s.post(name, ActEscalate, key, message, t, now, nil)
+}
+
+// post sends one message to the console as action, once per key, and says
+// whether the key is settled: posted, or given up on. A failing command is
+// retried on the backoff schedule and given up after MaxRestarts tries,
+// with one skip saying so. A message that matches a confidential pattern is
+// replaced, before it is posted or logged, by one that names only the
+// session; one skip records that it was filtered, without the text. extra
+// details go on the events that settle the key.
+func (s *Supervisor) post(name, action, key, message string, t *Track, now time.Time, extra map[string]any) bool {
+	if t.Posted[key] {
+		return true
+	}
+	with := func(d map[string]any) map[string]any {
+		for k, v := range extra {
+			d[k] = v
+		}
+		return d
+	}
 	if i := s.confidentialMatch(message); i > 0 {
-		s.skipOnce(name, key+":filtered", fmt.Sprintf("escalation text matched confidential pattern %d; posted a generic message instead", i), t,
+		var what string
+		what, message = "escalation", fmt.Sprintf("%s needs your attention; the details were withheld because they matched a confidential pattern. Look at the session directly.", name)
+		if action == ActUpdate {
+			what, message = "update", fmt.Sprintf("%s changed its open Questions; the details were withheld because they matched a confidential pattern. Look at the session directly.", name)
+		}
+		s.skipOnce(name, key+":filtered", fmt.Sprintf("%s text matched confidential pattern %d; posted a generic message instead", what, i), t,
 			map[string]any{"filtered": key})
-		message = fmt.Sprintf("%s needs your attention; the details were withheld because they matched a confidential pattern. Look at the session directly.", name)
 	}
 	console := s.cfg.Console(name)
 	tmpl := s.cfg.Policies.Escalate.Command
 	if len(tmpl) == 0 {
-		s.skipOnce(name, key, "no escalate command configured", t, map[string]any{"message": message})
+		s.skipOnce(name, key, "no escalate command configured", t, with(map[string]any{"escalation": key, "message": message}))
 		t.Posted[key] = true
-		return
+		return true
 	}
 	if !s.retryDue(t, key, now) {
-		return
+		return false
 	}
 	argv := make([]string, len(tmpl))
 	for i, part := range tmpl {
 		argv[i] = strings.NewReplacer("{console}", console, "{message}", message).Replace(part)
 	}
-	err := s.act(name, ActEscalate, map[string]any{"key": key, "console": console, "message": message}, func() error {
+	err := s.act(name, action, with(map[string]any{"key": key, "console": console, "message": message}), func() error {
 		return s.runner.Run(argv)
 	})
 	if err == nil {
 		t.Posted[key] = true
-		return
+		return true
 	}
 	if s.failed(t, key, now) {
 		t.Posted[key] = true
 		s.skipOnce(name, key+":gave-up", fmt.Sprintf("escalation command failed %d times; not retrying: %v", len(t.Failures[key]), err), t,
-			map[string]any{"escalation": key, "console": console, "message": message})
+			with(map[string]any{"escalation": key, "console": console, "message": message}))
+		return true
 	}
+	return false
 }
 
 // deliver pushes a finished session's branch and opens a merge request,

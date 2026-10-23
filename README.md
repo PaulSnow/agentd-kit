@@ -44,6 +44,8 @@ The configuration is JSON, not the YAML the issue sketched: `agentd` is standard
 - `policies.trust_prompt`: the pattern and keys that answer the folder-trust prompt.
 - `policies.escalate`: the command run once per escalation key, with `{console}` and `{message}` substituted.
 
+A session's Questions section has one open escalation at a time. It opens when Questions become non-empty and the escalation is posted once. While they stay open, each change to their text posts one short `update` to the same console that names the session, says the questions changed and gives the new text (filtered like an escalation), at most one per change and one per pass; rewording never posts a new escalation. When the section empties, or the session is DONE, the escalation closes, and a later non-empty Questions section posts a new one. The episode number and the text last posted are rebuilt from the log, so a restart re-posts nothing and a change made while `agentd` was down is one update.
+
 ## States and evidence
 
 A session is `starting`, `working`, `idle`, `blocked-on-owner`, `usage-limited`, `done`, `failed` or `crash-looping`. Every transition comes from evidence and names it in the log:
@@ -62,11 +64,11 @@ One JSONL file, append-only, one line per observation and action: `time`, `sessi
 - Process control is by exact session name only. The tmux surface has no listing, no pattern and no kill.
 - Every forge write goes through one client wrapped with the per-repository allow-list. It can push and open; there is no merge call to authorize.
 - No escalation or merge-request text that matches a `confidential_patterns` entry is posted, and none is logged.
-- Escalations and deliveries are keyed and posted once, across restarts of `agentd`. Before pushing, the forge is asked for an existing request on the branch: an open one, or a merged one whose head commit is the worktree's current HEAD, or whose head the target already contains while HEAD has nothing the target lacks (the forge rebased it before merging). One found is recorded as the delivery, with the HEAD it covers, so a lost reply or a lost log never opens a duplicate. Commits count as ahead of the target only when the target lacks their changes, so a branch rebased onto a squash merge has nothing to deliver; a merged request for older commits does not count, so new commits on a reused branch name are delivered. `mark-delivered` accepts only a worktree named in the session's deliver specs.
+- Escalations, Questions updates and deliveries are keyed and posted once, across restarts of `agentd`. Before pushing, the forge is asked for an existing request on the branch: an open one, or a merged one whose head commit is the worktree's current HEAD, or whose head the target already contains while HEAD has nothing the target lacks (the forge rebased it before merging). One found is recorded as the delivery, with the HEAD it covers, so a lost reply or a lost log never opens a duplicate. Commits count as ahead of the target only when the target lacks their changes, so a branch rebased onto a squash merge has nothing to deliver; a merged request for older commits does not count, so new commits on a reused branch name are delivered. `mark-delivered` accepts only a worktree named in the session's deliver specs.
 - A worktree on the deliver target itself, or on a detached HEAD, is never pushed; one skip says why, and it is delivered once it moves to a branch.
 - A failed action is not retried every pass: retries follow the restart backoff and stop after `max_restarts` tries, with one skip or escalation saying so.
 - Every external command runs under a timeout, and when it hangs its whole process group is killed; a hung tmux is an error, never taken for a gone session.
-- Shadow mode performs no tmux write, no fetch, push or open, and runs no escalation command.
+- Shadow mode performs no tmux write, no fetch, push or open, and runs no escalation command; escalations and Questions updates are logged as `would` events.
 
 ## Tests
 
@@ -76,4 +78,4 @@ One JSONL file, append-only, one line per observation and action: `time`, `sessi
 
 `bin/check` runs `gofmt -l`, `go vet` and `go test -race`, and fails when Go is missing rather than passing without it. CI runs the same script on every push.
 
-The tests run the supervisor against a fake tmux, forge, git and clock over simulated hours. Each failure the old tools showed is a test: a crash loop stops after N restarts and escalates; a session blocked on the owner is not nudged; an escalation is posted once; nothing is ever killed; shadow mode never acts.
+The tests run the supervisor against a fake tmux, forge, git and clock over simulated hours. Each failure the old tools showed is a test: a crash loop stops after N restarts and escalates; a session blocked on the owner is not nudged; an escalation is posted once, and reworded Questions are updates to it; nothing is ever killed; shadow mode never acts.
