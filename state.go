@@ -34,6 +34,7 @@ type Track struct {
 	Nudges    int         // nudges in the current idle episode
 	LastNudge time.Time
 	Limited   bool
+	TrustHash string // the screen hash the trust keys were last sent for
 
 	Posted    map[string]bool        // escalation keys already posted, or given up on
 	Questions QuestionsEscalation    // the escalation of the Questions section
@@ -152,13 +153,18 @@ func Classify(t *Track, ev Evidence, pol Policies, now time.Time) (State, string
 	t.Breaker = false
 	first := !t.Observed
 	t.noteHash(ev.PaneHash, now, pol.Nudge, ev.Transcript)
+	// Open Questions outrank everything on screen, so no prompt is answered
+	// for a session that waits on the owner. The trust prompt is itself a
+	// numbered menu, so it is recognised before the dialog patterns.
 	switch {
-	case ev.Limited:
-		return UsageLimited, "screen shows the usage-limit message"
-	case ev.TrustPrompt:
-		return Starting, "screen shows the folder-trust prompt"
 	case ev.Status.Questions != "":
 		return BlockedOnOwner, "STATUS.md has open Questions"
+	case ev.TrustPrompt:
+		return Starting, "screen shows the folder-trust prompt"
+	case ev.Limited:
+		return UsageLimited, "screen shows the usage-limit message"
+	case ev.Dialog != "":
+		return BlockedOnOwner, fmt.Sprintf("screen shows a permission or confirmation dialog (matches %q)", ev.Dialog)
 	}
 	if first {
 		return Starting, "first observation"
@@ -167,6 +173,9 @@ func Classify(t *Track, ev Evidence, pol Policies, now time.Time) (State, string
 	if pol.Nudge.Enabled && unchanged >= pol.Nudge.Stall.Duration {
 		if ev.Transcript.Found && now.Sub(ev.Transcript.At) < pol.Nudge.Stall.Duration {
 			return Working, fmt.Sprintf("screen unchanged for %s but the transcript moved %s ago", unchanged.Round(time.Minute), now.Sub(ev.Transcript.At).Round(time.Minute))
+		}
+		if ev.Transcript.Found && ev.Transcript.Role == "assistant" && ev.Transcript.StopReason == "tool_use" {
+			return BlockedOnOwner, fmt.Sprintf("screen unchanged for %s and the last transcript turn is a tool call; probably waiting at a permission prompt", unchanged.Round(time.Minute))
 		}
 		return Idle, fmt.Sprintf("screen unchanged for %s", unchanged.Round(time.Minute))
 	}

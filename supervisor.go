@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -21,7 +22,9 @@ type RealClock struct{}
 func (RealClock) Now() time.Time        { return time.Now() }
 func (RealClock) Sleep(d time.Duration) { time.Sleep(d) }
 
-// PaneLines is how much screen is read for the hash and the patterns.
+// PaneLines is how many lines of history above the visible screen go into
+// the screen hash. The patterns read the visible screen only, so a prompt
+// that has scrolled away is never answered.
 const PaneLines = 40
 
 // Supervisor runs the policies over the configured sessions. Every write to
@@ -44,15 +47,19 @@ type Supervisor struct {
 	tracks       map[string]*Track
 	limitRe      *regexp.Regexp
 	trustRe      *regexp.Regexp
+	dialogs      []*regexp.Regexp
 	confidential []*regexp.Regexp
 }
 
 // NewSupervisor wires the supervisor. The forge is wrapped with the
 // repository allow-list here, so no caller can reach it unwrapped.
 func NewSupervisor(cfg *Config, log *Log, clock Clock, tmux Tmux, git Git, forge Forge, runner Runner, shadow bool) *Supervisor {
-	var confidential []*regexp.Regexp
+	var confidential, dialogs []*regexp.Regexp
 	for _, p := range cfg.ConfidentialPatterns {
 		confidential = append(confidential, regexp.MustCompile(p))
+	}
+	for _, p := range cfg.Policies.Dialog.Patterns {
+		dialogs = append(dialogs, regexp.MustCompile(p))
 	}
 	return &Supervisor{
 		cfg:     cfg,
@@ -66,6 +73,7 @@ func NewSupervisor(cfg *Config, log *Log, clock Clock, tmux Tmux, git Git, forge
 		tracks:  map[string]*Track{},
 		limitRe: regexp.MustCompile(cfg.Policies.UsageLimit.Pattern),
 		trustRe: regexp.MustCompile(regexp.QuoteMeta(cfg.Policies.Trust.Pattern)),
+		dialogs: dialogs,
 
 		confidential: confidential,
 	}
@@ -240,6 +248,8 @@ func (s *Supervisor) Replay(events []Event) {
 				t.LastNudge = e.Time
 			case ActResume:
 				t.Limited = false
+			case ActTrust:
+				t.TrustHash = detailString(e, "pane_hash")
 			case ActEscalate, ActUpdate:
 				t.Posted[detailString(e, "key")] = true
 				t.replayQuestionsPost(e)
@@ -318,8 +328,18 @@ func (s *Supervisor) observe(name string, sess Session) (Evidence, error) {
 			return ev, err
 		}
 		ev.PaneHash = HashPane(pane)
-		ev.Limited = s.limitRe.MatchString(pane)
-		ev.TrustPrompt = s.cfg.Policies.Trust.Enabled && s.trustRe.MatchString(pane)
+		screen, err := s.tmux.CapturePane(name, 0)
+		if err != nil {
+			return ev, err
+		}
+		ev.Limited = s.limitRe.MatchString(screen)
+		ev.TrustPrompt = s.cfg.Policies.Trust.Enabled && s.trustRe.MatchString(screen)
+		for _, re := range s.dialogs {
+			if re.MatchString(screen) {
+				ev.Dialog = re.String()
+				break
+			}
+		}
 	}
 	if s.cfg.TranscriptDir != "" {
 		ev.Transcript = ReadTranscript(TranscriptDir(s.cfg.TranscriptDir, sess.Cwd))
@@ -356,6 +376,7 @@ func (s *Supervisor) logObserve(name string, t *Track, ev Evidence, state State,
 		"questions": ev.Status.Questions != "",
 		"limited":   ev.Limited,
 		"trust":     ev.TrustPrompt,
+		"dialog":    ev.Dialog != "",
 		"head":      ev.Status.Head,
 	}
 	if s.confidentialMatch(ev.Status.Head) > 0 {
@@ -408,11 +429,14 @@ func copyDetails(d map[string]any) map[string]any {
 // is in afterwards.
 func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, state State, now time.Time) State {
 	pol := s.cfg.Policies
-	if state != UsageLimited && t.Limited && ev.Alive {
-		t.Limited = false
-		s.act(name, ActResume, map[string]any{"message": pol.Nudge.ResumeMessage}, func() error {
+	// The limit has cleared. Only a session that can take a line is told to
+	// go on: never one that is DONE, waits on the owner, or shows a dialog.
+	if t.Limited && ev.Alive && (state == Working || state == Idle) {
+		if s.typeInto(name, ActResume, map[string]any{"message": pol.Nudge.ResumeMessage}, t, func() error {
 			return s.tmux.Type(name, pol.Nudge.ResumeMessage)
-		})
+		}) == nil {
+			t.Limited = false
+		}
 	}
 	switch state {
 	case Done:
@@ -452,13 +476,27 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 	case UsageLimited:
 		t.Limited = true
 	case Starting:
-		if ev.TrustPrompt {
-			s.act(name, ActTrust, map[string]any{"keys": pol.Trust.Keys}, func() error {
+		// Once per screen: a prompt still showing the same screen after the
+		// keys did not take them, and sending them again could answer
+		// whatever replaced it.
+		if ev.TrustPrompt && ev.PaneHash != t.TrustHash {
+			if s.typeInto(name, ActTrust, map[string]any{"keys": pol.Trust.Keys, "pane_hash": ev.PaneHash}, t, func() error {
 				return s.tmux.Keys(name, pol.Trust.Keys...)
-			})
+			}) == nil {
+				t.TrustHash = ev.PaneHash
+			}
 		}
 	case BlockedOnOwner:
-		s.escalateQuestions(name, ev.Status.Questions, t, now)
+		switch {
+		case ev.Status.Questions != "":
+			s.escalateQuestions(name, ev.Status.Questions, t, now)
+		case ev.Dialog != "":
+			s.escalate(name, fmt.Sprintf("dialog:%s:%s", name, shortHash(ev.PaneHash)),
+				fmt.Sprintf("%s is stopped at a permission or confirmation dialog (the screen matches %q); agentd will not answer it. Attach and answer it.", name, ev.Dialog), t, now)
+		default:
+			s.escalate(name, fmt.Sprintf("tool-wait:%s:%d", name, t.HashSince.Unix()),
+				fmt.Sprintf("%s has shown the same screen since %s with a tool call as its last turn; it is probably waiting at a permission prompt. Attach and answer it.", name, t.HashSince.Format(time.RFC3339)), t, now)
+		}
 	case Idle:
 		if !pol.Nudge.Enabled {
 			return state
@@ -473,7 +511,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 		if !t.LastNudge.IsZero() && now.Sub(t.LastNudge) < pol.Nudge.Stall.Duration {
 			return state
 		}
-		err := s.act(name, ActNudge, map[string]any{"nudge": t.Nudges + 1, "message": pol.Nudge.Message}, func() error {
+		err := s.typeInto(name, ActNudge, map[string]any{"nudge": t.Nudges + 1, "message": pol.Nudge.Message}, t, func() error {
 			if err := s.tmux.Type(name, pol.Nudge.Message); err != nil {
 				return err
 			}
@@ -490,6 +528,33 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 		}
 	}
 	return state
+}
+
+// errNotClaude stops a typing action whose pane does not run Claude.
+var errNotClaude = errors.New("the pane does not run Claude")
+
+// typeInto performs an action that types or sends keys, only after asking
+// tmux what the pane runs: a pane running anything but a configured Claude
+// command is skipped, once per command, with a skip naming it. The check is
+// a read, so shadow mode makes it too.
+func (s *Supervisor) typeInto(name, action string, details map[string]any, t *Track, do func() error) error {
+	if s.halt != nil {
+		return s.halt
+	}
+	info, err := s.tmux.Pane(name)
+	if err != nil {
+		s.emit(name, KindError, map[string]any{"action": action, "step": "pane", "error": err.Error()})
+		return err
+	}
+	for _, c := range s.cfg.Policies.PaneCommands {
+		if info.Command == c {
+			return s.act(name, action, details, do)
+		}
+	}
+	s.skipOnce(name, "pane-command:"+name+":"+info.Command,
+		fmt.Sprintf("pane runs %q, not one of %s; not typing into it", info.Command, strings.Join(s.cfg.Policies.PaneCommands, ", ")), t,
+		map[string]any{"action": action, "command": info.Command})
+	return errNotClaude
 }
 
 // confidentialMatch returns the number, from 1, of the first confidential

@@ -25,17 +25,25 @@ type call struct {
 
 // fakeTmux is a tmux whose sessions and screens the test sets. A session
 // started while crash is set dies at once, as a crash-looping one would.
+// panes is the visible screen and history the scrollback above it. A
+// sticky session keeps its trust prompt on screen after keys are sent, as a
+// prompt that did not take them would. commands is what each pane runs,
+// claude unless set.
 type fakeTmux struct {
 	alive     map[string]bool
 	panes     map[string]string
+	history   map[string]string
 	crash     map[string]bool
+	sticky    map[string]bool
+	commands  map[string]string
 	newErr    map[string]error // NewSession fails with this
 	calls     []call
 	mutations int
 }
 
 func newFakeTmux() *fakeTmux {
-	return &fakeTmux{alive: map[string]bool{}, panes: map[string]string{}, crash: map[string]bool{}, newErr: map[string]error{}}
+	return &fakeTmux{alive: map[string]bool{}, panes: map[string]string{}, history: map[string]string{}, crash: map[string]bool{},
+		sticky: map[string]bool{}, commands: map[string]string{}, newErr: map[string]error{}}
 }
 
 func (f *fakeTmux) HasSession(name string) (bool, error) {
@@ -48,7 +56,22 @@ func (f *fakeTmux) CapturePane(name string, lines int) (string, error) {
 	if !f.alive[name] {
 		return "", fmt.Errorf("no session %s", name)
 	}
+	if lines > 0 && f.history[name] != "" {
+		return f.history[name] + "\n" + f.panes[name], nil
+	}
 	return f.panes[name], nil
+}
+
+func (f *fakeTmux) Pane(name string) (PaneInfo, error) {
+	f.calls = append(f.calls, call{op: "pane", name: name})
+	if !f.alive[name] {
+		return PaneInfo{}, fmt.Errorf("no session %s", name)
+	}
+	cmd := f.commands[name]
+	if cmd == "" {
+		cmd = "claude"
+	}
+	return PaneInfo{Command: cmd}, nil
 }
 
 func (f *fakeTmux) NewSession(name, cwd, command string, width, height int) error {
@@ -75,7 +98,9 @@ func (f *fakeTmux) Type(name, text string) error {
 func (f *fakeTmux) Keys(name string, keys ...string) error {
 	f.calls = append(f.calls, call{op: "keys", name: name, args: keys})
 	f.mutations++
-	f.panes[name] = strings.ReplaceAll(f.panes[name], "trust this folder", "trusted")
+	if !f.sticky[name] {
+		f.panes[name] = strings.ReplaceAll(f.panes[name], "trust this folder", "trusted")
+	}
 	return nil
 }
 

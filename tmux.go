@@ -14,12 +14,21 @@ import (
 // exact session name; there is no listing, no pattern, and no kill.
 type Tmux interface {
 	HasSession(name string) (bool, error)
+	// CapturePane returns the visible screen and, when lines is more than
+	// zero, that many lines of history above it.
 	CapturePane(name string, lines int) (string, error)
+	// Pane reports what the session's pane is running.
+	Pane(name string) (PaneInfo, error)
 	NewSession(name, cwd, command string, width, height int) error
 	// Type enters a line of text and submits it.
 	Type(name, text string) error
 	// Keys sends named keys such as Down and Enter, one at a time.
 	Keys(name string, keys ...string) error
+}
+
+// PaneInfo is what tmux reports about a session's pane.
+type PaneInfo struct {
+	Command string // #{pane_current_command}
 }
 
 var plainName = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
@@ -61,11 +70,28 @@ func (t ExecTmux) CapturePane(name string, lines int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	out, err := t.run("capture-pane", "-p", "-t", tg, "-S", "-"+strconv.Itoa(lines))
+	args := []string{"capture-pane", "-p", "-t", tg}
+	if lines > 0 {
+		args = append(args, "-S", "-"+strconv.Itoa(lines))
+	}
+	out, err := t.run(args...)
 	if err != nil {
 		return "", fmt.Errorf("capture-pane %s: %w: %s", name, err, strings.TrimSpace(out))
 	}
 	return out, nil
+}
+
+// Pane asks tmux what the session's active pane is running.
+func (t ExecTmux) Pane(name string) (PaneInfo, error) {
+	tg, err := target(name)
+	if err != nil {
+		return PaneInfo{}, err
+	}
+	out, err := t.run("display-message", "-p", "-t", tg, "#{pane_current_command}")
+	if err != nil {
+		return PaneInfo{}, fmt.Errorf("display-message %s: %w: %s", name, err, strings.TrimSpace(out))
+	}
+	return PaneInfo{Command: strings.TrimSpace(out)}, nil
 }
 
 func (t ExecTmux) NewSession(name, cwd, command string, width, height int) error {

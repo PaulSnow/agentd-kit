@@ -20,6 +20,7 @@ type Evidence struct {
 	PaneHash    string
 	Limited     bool
 	TrustPrompt bool
+	Dialog      string // the dialog pattern the visible screen matches, or ""
 	Status      StatusEvidence
 	Transcript  TranscriptEvidence
 }

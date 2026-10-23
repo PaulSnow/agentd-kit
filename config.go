@@ -48,6 +48,12 @@ type Policies struct {
 	UsageLimit UsageLimitPolicy `json:"usage_limit"`
 	Trust      TrustPolicy      `json:"trust_prompt"`
 	Escalate   EscalatePolicy   `json:"escalate"`
+	Dialog     DialogPolicy     `json:"dialog"`
+	// PaneCommands are the values of tmux's #{pane_current_command} that
+	// mean the pane runs Claude Code. Nothing is typed or sent as keys into
+	// a pane running anything else, such as the shell left after Claude
+	// exited. A native install reports claude; an npm install reports node.
+	PaneCommands []string `json:"pane_commands"`
 }
 
 // RestartPolicy restarts a session whose tmux session is gone and whose
@@ -98,6 +104,14 @@ type TrustPolicy struct {
 	Enabled bool     `json:"enabled"`
 	Pattern string   `json:"pattern"`
 	Keys    []string `json:"keys"`
+}
+
+// DialogPolicy recognises a Claude Code permission or confirmation dialog on
+// the visible screen. Patterns are regular expressions; a session showing a
+// match is blocked on the owner and never typed into, since a typed line or
+// a key would answer the dialog.
+type DialogPolicy struct {
+	Patterns []string `json:"patterns"`
 }
 
 // EscalatePolicy runs Command, with {console} and {message} substituted, once
@@ -189,9 +203,11 @@ func DefaultConfig() Config {
 					"and go on with what does not depend on it; if you are finished, make DONE the last line of STATUS.md.",
 				ResumeMessage: "Continue with your brief; the usage limit has reset.",
 			},
-			UsageLimit: UsageLimitPolicy{Pattern: `(?i)limit reached.{0,80}reset|out of extra usage`},
-			Trust:      TrustPolicy{Enabled: true, Pattern: "trust this folder", Keys: []string{"Down", "Enter"}},
-			Escalate:   EscalatePolicy{},
+			UsageLimit:   UsageLimitPolicy{Pattern: `(?i)limit reached.{0,80}reset|out of extra usage`},
+			Trust:        TrustPolicy{Enabled: true, Pattern: "trust this folder", Keys: []string{"Down", "Enter"}},
+			Escalate:     EscalatePolicy{},
+			Dialog:       DialogPolicy{Patterns: []string{`Do you want to`, `❯\s*1\.`, `(?i)enter to confirm`}},
+			PaneCommands: []string{"claude"},
 		},
 	}
 }
@@ -268,6 +284,14 @@ func (c *Config) finish(base string) error {
 	}
 	if _, err := regexp.Compile(c.Policies.UsageLimit.Pattern); err != nil {
 		errs = append(errs, fmt.Errorf("policies.usage_limit.pattern: %w", err))
+	}
+	for i, p := range c.Policies.Dialog.Patterns {
+		if _, err := regexp.Compile(p); err != nil {
+			errs = append(errs, fmt.Errorf("policies.dialog.patterns[%d]: %w", i, err))
+		}
+	}
+	if len(c.Policies.PaneCommands) == 0 {
+		errs = append(errs, errors.New("policies.pane_commands must name at least one command"))
 	}
 	if c.Policies.Trust.Enabled && (c.Policies.Trust.Pattern == "" || len(c.Policies.Trust.Keys) == 0) {
 		errs = append(errs, errors.New("policies.trust_prompt needs a pattern and keys"))

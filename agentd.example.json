@@ -30,6 +30,10 @@
       "pattern": "trust this folder",
       "keys": ["Down", "Enter"]
     },
+    "dialog": {
+      "patterns": ["Do you want to", "❯\\s*1\\.", "(?i)enter to confirm"]
+    },
+    "pane_commands": ["claude"],
     "escalate": {
       "command": ["~/bin/post-to-console", "{console}", "--kind", "decision", "{message}"],
       "default_console": "infra"

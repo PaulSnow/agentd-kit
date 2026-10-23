@@ -389,9 +389,9 @@ func TestShadowNeverActs(t *testing.T) {
 			t.Fatalf("would %s = %d, want %d", action, got, want)
 		}
 	}
-	// Nothing answers the prompt in shadow mode, so it would be answered every pass.
-	if got := h.count(KindWould, ActTrust, ""); got < 100 {
-		t.Fatalf("would trust = %d, want one per pass", got)
+	// Nothing answers the prompt in shadow mode; the keys would be sent once for the screen.
+	if got := h.count(KindWould, ActTrust, ""); got != 1 {
+		t.Fatalf("would trust = %d, want 1", got)
 	}
 	// crash loop, blocked question, exhausted nudges: one each
 	if got := h.count(KindWould, ActEscalate, ""); got != 3 {
@@ -570,7 +570,8 @@ func TestRestartedSessionComesBack(t *testing.T) {
 }
 
 // A session whose transcript moved recently is working even when its screen
-// is static, as during a long tool call.
+// is static, as during a long tool call. Once the transcript is stale too,
+// a tool call that never returned is waiting on the owner, not idle.
 func TestFreshTranscriptIsNotIdle(t *testing.T) {
 	h := newHarness(t, false, "s1")
 	h.cfg.TranscriptDir = h.dir + "/transcripts"
@@ -584,8 +585,8 @@ func TestFreshTranscriptIsNotIdle(t *testing.T) {
 		t.Fatalf("state = %s, nudges = %d", h.state("s1"), h.tmux.count("type", "s1"))
 	}
 	h.ticks(12, 5*time.Minute)
-	if h.state("s1") != Idle {
-		t.Fatalf("state = %s once the transcript is stale too", h.state("s1"))
+	if h.state("s1") != BlockedOnOwner || h.tmux.count("type", "s1") != 0 {
+		t.Fatalf("state = %s, nudges = %d once the transcript is stale too", h.state("s1"), h.tmux.count("type", "s1"))
 	}
 }
 

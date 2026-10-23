@@ -243,3 +243,19 @@ func TestTimeoutKillsTheProcessGroup(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// The real client asks tmux for the pane's command, and captures the
+// visible screen alone when no history is wanted.
+func TestExecTmuxPaneAndVisibleCapture(t *testing.T) {
+	shim(t, "tmux", `case "$1" in display-message) echo "claude";; *) echo "$*";; esac`)
+	tm := ExecTmux{Timeout: 10 * time.Second}
+	if info, err := tm.Pane("s1"); err != nil || info.Command != "claude" {
+		t.Fatalf("pane = %+v, %v", info, err)
+	}
+	if out, err := tm.CapturePane("s1", 0); err != nil || strings.TrimSpace(out) != "capture-pane -p -t =s1:" {
+		t.Fatalf("visible capture ran %q, %v", out, err)
+	}
+	if out, err := tm.CapturePane("s1", 40); err != nil || strings.TrimSpace(out) != "capture-pane -p -t =s1: -S -40" {
+		t.Fatalf("capture with history ran %q, %v", out, err)
+	}
+}
