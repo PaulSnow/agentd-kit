@@ -337,10 +337,10 @@ func TestNoBroadKill(t *testing.T) {
 			t.Fatalf("Tmux interface has %s", iface.Method(i).Name)
 		}
 	}
-	if got, _ := target("s4"); got != "=s4:" {
-		t.Fatalf("target = %q, want exact match =s4:", got)
+	if got, _ := target("w1"); got != "=w1:" {
+		t.Fatalf("target = %q, want exact match =w1:", got)
 	}
-	for _, bad := range []string{"", "s4*", "s4:1", "fix-*", "a b", "s4.0"} {
+	for _, bad := range []string{"", "w1*", "w1:1", "job-*", "a b", "w1.0"} {
 		if _, err := target(bad); err == nil {
 			t.Fatalf("target(%q) accepted", bad)
 		}

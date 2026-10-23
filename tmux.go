@@ -25,7 +25,7 @@ type Tmux interface {
 var plainName = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // target is the exact-match form of a tmux target. tmux matches a bare
-// name as a prefix; "=" forces equality, so "s4" never reaches "s4590", and
+// name as a prefix; "=" forces equality, so "w1" never reaches "w17", and
 // the trailing ":" names the session's current window and pane, which
 // capture-pane and send-keys need.
 func target(name string) (string, error) {
