@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -157,5 +158,28 @@ func TestNoTypingIntoAPaneNotRunningClaude(t *testing.T) {
 	h.ticks(1, 5*time.Minute)
 	if typed(h, "idle")+typed(h, "trust") == 0 {
 		t.Fatal("a configured pane command was not allowed")
+	}
+}
+
+// The trust and usage-limit patterns are regular expressions: the default
+// trust pattern matches Claude Code's own wording, and a pattern that does
+// not compile is refused at load.
+func TestTrustAndLimitPatternsAreRegexps(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.status("s1", working)
+	h.alive("s1", "Do you trust the files in this folder?\n❯ 1. Yes, proceed\n  2. No, exit\nEnter to confirm · Esc to exit")
+	h.ticks(1, 5*time.Minute)
+	if got := h.tmux.count("keys", "s1"); got != 1 || h.state("s1") != Starting {
+		t.Fatalf("key sends = %d, state = %s", got, h.state("s1"))
+	}
+	for name, text := range map[string]string{
+		"trust": `{"policies": {"trust_prompt": {"pattern": "trust (this"}}}`,
+		"limit": `{"policies": {"usage_limit": {"pattern": "limit (reached"}}}`,
+	} {
+		path := filepath.Join(t.TempDir(), "c.json")
+		writeFile(t, path, text)
+		if _, err := LoadConfig(path); err == nil {
+			t.Errorf("%s: a pattern that does not compile was accepted", name)
+		}
 	}
 }
