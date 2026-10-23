@@ -1136,9 +1136,10 @@ func ClearSession(cfg *Config, log *Log, now time.Time, session string) error {
 // account: CLAUDE_CONFIG_DIR for its config directory, and for a token
 // account CLAUDE_CODE_OAUTH_TOKEN, read from the token file by the shell as
 // the command launches. The token is never in agentd's memory, the log, or
-// any process's arguments, where other users could see it. A token file
-// that is missing, not a regular file, empty, or readable by group or
-// others is refused: the session is not started under any account.
+// any process's arguments, where other users could see it. The launch fails
+// closed: when the file cannot be read or holds only white space by then,
+// the shell stops before starting anything, so Claude never falls back to
+// another login. A token file that fails checkTokenFile now is refused.
 func (s *Supervisor) launchLine(sess Session, argv []string) (string, error) {
 	line := shellJoin(argv)
 	if sess.Account == "" {
@@ -1148,23 +1149,19 @@ func (s *Supervisor) launchLine(sess Session, argv []string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("account %q is not configured", sess.Account)
 	}
+	var pre string
 	var env []string
 	if acct.ConfigDir != "" {
 		env = append(env, "CLAUDE_CONFIG_DIR="+shellJoin([]string{acct.ConfigDir}))
 	}
 	if acct.TokenFile != "" {
-		info, err := os.Stat(acct.TokenFile)
-		switch {
-		case err != nil:
+		if err := checkTokenFile(acct.TokenFile); err != nil {
 			return "", fmt.Errorf("account %s: token file: %w", sess.Account, err)
-		case !info.Mode().IsRegular() || info.Size() == 0:
-			return "", fmt.Errorf("account %s: token file %s is not a non-empty regular file", sess.Account, acct.TokenFile)
-		case info.Mode().Perm()&0o077 != 0:
-			return "", fmt.Errorf("account %s: token file %s is readable by others (mode %04o); make it 0600", sess.Account, acct.TokenFile, info.Mode().Perm())
 		}
-		env = append(env, `CLAUDE_CODE_OAUTH_TOKEN="$(cat `+shellJoin([]string{acct.TokenFile})+`)"`)
+		pre = `t=$(cat ` + shellJoin([]string{acct.TokenFile}) + `) && case $t in *[![:space:]]*) true ;; *) false ;; esac && `
+		env = append(env, `CLAUDE_CODE_OAUTH_TOKEN="$t"`)
 	}
-	return strings.Join(append(env, line), " "), nil
+	return pre + strings.Join(env, " ") + " exec " + line, nil
 }
 
 // shellJoin quotes argv for the shell tmux hands a new session's command to.

@@ -73,29 +73,79 @@ func TestReadableTokenFileIsRefused(t *testing.T) {
 	}
 }
 
-// An unknown account, or one naming neither a config directory nor a
-// token file, is refused at load.
+// An unknown account, one naming neither a config directory nor a token
+// file, and a token file that is missing, readable by others, or blank are
+// refused at load.
 func TestAccountsAreValidated(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "w"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	tokenFile := func(name, text string, mode os.FileMode) {
+		writeFile(t, filepath.Join(dir, name), text)
+		if err := os.Chmod(filepath.Join(dir, name), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tokenFile("blank", " \n\t\n", 0o600)
+	tokenFile("open", token, 0o644)
+	tokenFile("tok", token, 0o600)
 	path := filepath.Join(dir, "c.json")
 	for name, text := range map[string]string{
-		"unknown": `{"policies": {"escalate": {"command": ["post"]}}, "sessions": {"s": {"workdir": "w", "cwd": "w", "account": "nope"}}}`,
-		"empty":   `{"policies": {"escalate": {"command": ["post"]}}, "accounts": {"a": {}}}`,
+		"unknown":  `{"policies": {"escalate": {"command": ["post"]}}, "sessions": {"s": {"workdir": "w", "cwd": "w", "account": "nope"}}}`,
+		"empty":    `{"policies": {"escalate": {"command": ["post"]}}, "accounts": {"a": {}}}`,
+		"missing":  `{"accounts": {"a": {"token_file": "no-such-token"}}}`,
+		"readable": `{"accounts": {"a": {"token_file": "open"}}}`,
+		"blank":    `{"accounts": {"a": {"token_file": "blank"}}}`,
 	} {
 		writeFile(t, path, text)
 		if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "account") {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	writeFile(t, path, `{"policies": {"escalate": {"command": ["post"]}}, "accounts": {"a": {"config_dir": "claude-a", "token_file": "~/tok"}}, "sessions": {"s": {"workdir": "w", "cwd": "w", "account": "a"}}}`)
+	writeFile(t, path, `{"policies": {"escalate": {"command": ["post"]}}, "accounts": {"a": {"config_dir": "claude-a", "token_file": "tok"}}, "sessions": {"s": {"workdir": "w", "cwd": "w", "account": "a"}}}`)
 	cfg, err := LoadConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a := cfg.Accounts["a"]; a.ConfigDir != filepath.Join(dir, "claude-a") || !filepath.IsAbs(a.TokenFile) {
+	if a := cfg.Accounts["a"]; a.ConfigDir != filepath.Join(dir, "claude-a") || a.TokenFile != filepath.Join(dir, "tok") {
 		t.Fatalf("account paths not expanded: %+v", a)
+	}
+}
+
+// The launch fails closed: a token file that has become unreadable or blank
+// by the time the command starts stops it, rather than letting Claude fall
+// back to another login. Paths with spaces and quotes are quoted.
+func TestTokenLaunchFailsClosed(t *testing.T) {
+	h, acct := accountHarness(t, 0o600)
+	odd := filepath.Join(h.dir, "tok dir", "it's \"here\"")
+	writeFile(t, odd, token+"\n")
+	if err := os.Chmod(odd, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	acct.TokenFile, acct.ConfigDir = odd, filepath.Join(h.dir, "conf $HOME")
+	h.cfg.Accounts["b"] = acct
+	line, err := h.sup.launchLine(h.cfg.Sessions["s1"], []string{"sh", "-c", `echo "$CLAUDE_CONFIG_DIR|$CLAUDE_CODE_OAUTH_TOKEN"`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("sh", "-c", line).Output()
+	if err != nil || strings.TrimSpace(string(out)) != acct.ConfigDir+"|"+token {
+		t.Fatalf("launched with %q, %v", out, err)
+	}
+	for name, spoil := range map[string]func() error{
+		"blank":      func() error { return os.WriteFile(odd, []byte(" \n"), 0o600) },
+		"unreadable": func() error { return os.Chmod(odd, 0o000) },
+		"gone":       func() error { return os.Remove(odd) },
+	} {
+		if err := spoil(); err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command("sh", "-c", line).Output()
+		if err == nil || strings.Contains(string(out), "|") {
+			t.Fatalf("%s token: the command ran (%q, %v)", name, out, err)
+		}
+		os.Chmod(odd, 0o600)
+		writeFile(t, odd, token+"\n")
 	}
 }

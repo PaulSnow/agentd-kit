@@ -371,6 +371,11 @@ func (c *Config) finish(base string) error {
 		}
 		a.ConfigDir = path("accounts."+name+".config_dir", a.ConfigDir)
 		a.TokenFile = path("accounts."+name+".token_file", a.TokenFile)
+		if a.TokenFile != "" {
+			if err := checkTokenFile(a.TokenFile); err != nil {
+				errs = append(errs, fmt.Errorf("accounts.%s.token_file: %w", name, err))
+			}
+		}
 		c.Accounts[name] = a
 	}
 	for name, s := range c.Sessions {
@@ -419,6 +424,30 @@ func (c *Config) finish(base string) error {
 		cmd[0] = path("policies.escalate.command", cmd[0])
 	}
 	return errors.Join(errs...)
+}
+
+// checkTokenFile refuses a token file that is missing, not a regular file,
+// readable by group or others, or blank. It reads the file only to see that
+// it holds something; the token is not kept.
+func checkTokenFile(p string) error {
+	info, err := os.Stat(p)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", p)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("%s is readable by others (mode %04o); make it 0600", p, info.Mode().Perm())
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(string(b)) == "" {
+		return fmt.Errorf("%s is blank", p)
+	}
+	return nil
 }
 
 // expandPath resolves ~ to the home directory and a relative path against

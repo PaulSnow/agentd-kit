@@ -164,6 +164,11 @@ func TestExampleConfigLoads(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	token := filepath.Join(home, ".config", "agentd-kit", "spare.token")
+	writeFile(t, token, "a token\n")
+	if err := os.Chmod(token, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	cfg, err := LoadConfig("agentd.example.json")
 	if err != nil {
 		t.Fatal(err)
