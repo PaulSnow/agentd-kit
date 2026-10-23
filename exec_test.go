@@ -62,11 +62,11 @@ func TestHungForgeCommandsTimeOut(t *testing.T) {
 		"fetch": func() error { return g.Fetch(t.TempDir()) },
 		"push":  func() error { return f.Push(t.TempDir(), "feature") },
 		"glab find": func() error {
-			_, _, err := f.Find(Repository{Forge: "gitlab", Project: "a/b"}, "feature", "main")
+			_, _, err := f.Find(Repository{Forge: "gitlab", Project: "a/b"}, "feature", "main", "abc")
 			return err
 		},
 		"gh find": func() error {
-			_, _, err := f.Find(Repository{Forge: "github", Project: "a/b"}, "feature", "main")
+			_, _, err := f.Find(Repository{Forge: "github", Project: "a/b"}, "feature", "main", "abc")
 			return err
 		},
 		"glab open": func() error {
@@ -109,5 +109,37 @@ func TestTimeoutsConfig(t *testing.T) {
 	writeFile(t, path, `{"timeouts": {"tmux": "0s"}}`)
 	if _, err := LoadConfig(path); err == nil {
 		t.Fatal("a zero timeout was accepted")
+	}
+}
+
+// The real clients apply the same rule to the forge's reply: an open request
+// on the branch counts, a merged one only when its head commit is HEAD, and a
+// closed one never.
+func TestFindMatchesMergedRequestsByHead(t *testing.T) {
+	f := ExecForge{Timeout: 10 * time.Second}
+	shim(t, "glab", `echo '[{"iid":3,"state":"closed","sha":"abc","web_url":"u3"},{"iid":2,"state":"merged","sha":"old","web_url":"u2"},{"iid":1,"state":"merged","sha":"abc","web_url":"u1"}]'`)
+	gl := Repository{Forge: "gitlab", Project: "a/b"}
+	if got, ok, err := f.Find(gl, "feature", "main", "abc"); err != nil || !ok || got.Ref != "!1" {
+		t.Fatalf("gitlab merged at HEAD: %+v %v %v", got, ok, err)
+	}
+	if got, ok, err := f.Find(gl, "feature", "main", "new"); err != nil || ok {
+		t.Fatalf("gitlab merged before HEAD counted: %+v %v %v", got, ok, err)
+	}
+	shim(t, "glab", `echo '[{"iid":5,"state":"opened","sha":"old","web_url":"u5"}]'`)
+	if got, ok, err := f.Find(gl, "feature", "main", "new"); err != nil || !ok || got.Ref != "!5" {
+		t.Fatalf("gitlab open request: %+v %v %v", got, ok, err)
+	}
+
+	shim(t, "gh", `echo '[{"number":2,"state":"MERGED","headRefOid":"old","url":"u2"},{"number":1,"state":"MERGED","headRefOid":"abc","url":"u1"}]'`)
+	gh := Repository{Forge: "github", Project: "a/b"}
+	if got, ok, err := f.Find(gh, "feature", "main", "abc"); err != nil || !ok || got.Ref != "#1" {
+		t.Fatalf("github merged at HEAD: %+v %v %v", got, ok, err)
+	}
+	if got, ok, err := f.Find(gh, "feature", "main", "new"); err != nil || ok {
+		t.Fatalf("github merged before HEAD counted: %+v %v %v", got, ok, err)
+	}
+	shim(t, "gh", `echo '[{"number":7,"state":"OPEN","headRefOid":"old","url":"u7"}]'`)
+	if got, ok, err := f.Find(gh, "feature", "main", "new"); err != nil || !ok || got.Ref != "#7" {
+		t.Fatalf("github open request: %+v %v %v", got, ok, err)
 	}
 }

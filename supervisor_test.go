@@ -622,3 +622,28 @@ func TestTargetOrDetachedBranchIsNotPushed(t *testing.T) {
 		t.Fatalf("pushes %v after moving to a branch", h.forge.pushes)
 	}
 }
+
+// A branch name is reused: its old request was merged, and the session has
+// since committed more on it. The merged request is the delivery only when
+// it carried the worktree's current HEAD; new commits are delivered.
+func TestReusedBranchDeliversNewCommits(t *testing.T) {
+	h := newHarness(t, false, "same", "newer")
+	mr := h.dir + "/mr.md"
+	writeFile(t, mr, "The MR description.\n")
+	for _, n := range []string{"same", "newer"} {
+		h.status(n, "# Finished\n\nDONE\n")
+		h.deliver(n, Deliver{Repository: "widgets", Worktree: h.dir + "/" + n + "/wt", Target: "main", MRFile: mr})
+	}
+	h.git.branches = map[string]string{h.dir + "/same/wt": "feature-same", h.dir + "/newer/wt": "feature-newer"}
+	h.forge.merged = []mergedRequest{
+		{ref: "!40", source: "feature-same", target: "main", head: "c0ffee"},
+		{ref: "!41", source: "feature-newer", target: "main", head: "0ld"},
+	}
+	h.ticks(3, 5*time.Minute)
+	if got := h.sup.Tracks()["same"].Delivered["same:"+h.dir+"/same/wt"]; got != "!40" {
+		t.Fatalf("same: delivered = %q, want the merged request that carried HEAD", got)
+	}
+	if len(h.forge.pushes) != 1 || h.forge.pushes[0] != "feature-newer" || len(h.forge.opens) != 1 {
+		t.Fatalf("pushes %v opens %d, want the new commits on feature-newer delivered once", h.forge.pushes, len(h.forge.opens))
+	}
+}

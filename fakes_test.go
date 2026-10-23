@@ -95,6 +95,7 @@ type fakeGit struct {
 	branches map[string]string // branch per worktree, over branch
 	ahead    int
 	subject  string
+	head     string
 	fetches  int
 }
 
@@ -106,17 +107,24 @@ func (g *fakeGit) Branch(dir string) (string, error) {
 	}
 	return g.branch, nil
 }
+func (g *fakeGit) Head(string) (string, error)                 { return g.head, nil }
 func (g *fakeGit) Ahead(string, string) (int, error)           { return g.ahead, nil }
 func (g *fakeGit) FirstSubject(string, string) (string, error) { return g.subject, nil }
 
-// fakeForge records pushes and opened requests. fail makes Open fail
-// without opening; recordThenFail opens the request and then fails, as a
-// forge whose reply could not be read would.
+// fakeForge records pushes and opened requests, which stay open. merged are
+// requests merged before the test, with the head commit each carried. fail
+// makes Open fail without opening; recordThenFail opens the request and then
+// fails, as a forge whose reply could not be read would.
 type fakeForge struct {
 	pushes         []string
 	opens          []MergeRequest
+	merged         []mergedRequest
 	fail           error
 	recordThenFail error
+}
+
+type mergedRequest struct {
+	ref, source, target, head string
 }
 
 func (f *fakeForge) Push(dir, branch string) error {
@@ -139,10 +147,15 @@ func (f *fakeForge) result(n int) MergeResult {
 	return MergeResult{Ref: fmt.Sprintf("!%d", n), URL: "https://forge.example/mr/" + fmt.Sprint(n)}
 }
 
-func (f *fakeForge) Find(repo Repository, source, target string) (MergeResult, bool, error) {
+func (f *fakeForge) Find(repo Repository, source, target, head string) (MergeResult, bool, error) {
 	for i, o := range f.opens {
 		if o.Source == source && o.Target == target {
 			return f.result(i + 1), true, nil
+		}
+	}
+	for _, m := range f.merged {
+		if m.source == source && m.target == target && m.head == head {
+			return MergeResult{Ref: m.ref}, true, nil
 		}
 	}
 	return MergeResult{}, false, nil
@@ -201,7 +214,7 @@ func newHarness(t *testing.T, shadow bool, names ...string) *harness {
 		t.Fatal(err)
 	}
 	h := &harness{t: t, dir: dir, cfg: &cfg, clock: &fakeClock{now: time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC)},
-		tmux: newFakeTmux(), git: &fakeGit{clean: true, branch: "feature", ahead: 2, subject: "Add the feature"},
+		tmux: newFakeTmux(), git: &fakeGit{clean: true, branch: "feature", ahead: 2, subject: "Add the feature", head: "c0ffee"},
 		forge: &fakeForge{}, runner: &fakeRunner{}, buf: &bytes.Buffer{}}
 	h.sup = NewSupervisor(h.cfg, NewLogWriter(h.buf), h.clock, h.tmux, h.git, h.forge, h.runner, shadow)
 	return h

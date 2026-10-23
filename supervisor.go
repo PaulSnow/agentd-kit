@@ -525,10 +525,17 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 		s.skipOnce(name, "deliver:"+key+":branch:"+branch, reason, t, map[string]any{"worktree": d.Worktree, "branch": branch})
 		return
 	}
-	// A request that already exists, open or merged, is the delivery: the log
-	// may have missed it (a lost reply, a lost log), and a second push after a
-	// squash merge would recreate the branch and open a duplicate.
-	if found, exists, err := s.forge.Find(d.Repository, branch, d.Target); err != nil {
+	head, err := s.git.Head(d.Worktree)
+	if err != nil {
+		read("head", err)
+		return
+	}
+	// A request that already delivers HEAD is the delivery: the log may have
+	// missed it (a lost reply, a lost log), and a second push after a squash
+	// merge would recreate the branch and open a duplicate. An open request on
+	// the branch counts; a merged one only if it carried HEAD, since a reused
+	// branch name with new commits must be delivered again.
+	if found, exists, err := s.forge.Find(d.Repository, branch, d.Target, head); err != nil {
 		read("find", err)
 		return
 	} else if exists {

@@ -18,6 +18,7 @@ type Git interface {
 	Fetch(dir string) error
 	Clean(dir string) (bool, error)
 	Branch(dir string) (string, error)
+	Head(dir string) (string, error)
 	Ahead(dir, target string) (int, error)
 	FirstSubject(dir, target string) (string, error)
 }
@@ -39,11 +40,14 @@ type MergeResult struct {
 }
 
 // Forge performs writes on a forge. It can push and open; it cannot merge.
-// Find is its one read: the open or merged request for a branch, if any.
+// Find is its one read: the request that already delivers head from a
+// branch, if any. An open request on the branch counts whatever its head,
+// since a push updates it; a merged one counts only when it carried head, so
+// new commits on a reused branch name are delivered again; a closed one never.
 type Forge interface {
 	Push(dir, branch string) error
 	Open(repo Repository, mr MergeRequest, dir string) (MergeResult, error)
-	Find(repo Repository, source, target string) (MergeResult, bool, error)
+	Find(repo Repository, source, target, head string) (MergeResult, bool, error)
 }
 
 // AllowedForge wraps a Forge with the per-repository allow-list. Every write
@@ -74,14 +78,15 @@ func (a AllowedForge) PushAllowed(repo, dir, branch string) error {
 	return a.Forge.Push(dir, branch)
 }
 
-// Find looks for an existing open or merged request from source to target
-// in a configured repository. It reads only, so the allow-list does not apply.
-func (a AllowedForge) Find(repo, source, target string) (MergeResult, bool, error) {
+// Find looks for an existing request from source to target that delivers
+// head, in a configured repository. It reads only, so the allow-list does
+// not apply.
+func (a AllowedForge) Find(repo, source, target, head string) (MergeResult, bool, error) {
 	r, ok := a.Repos[repo]
 	if !ok {
 		return MergeResult{}, false, fmt.Errorf("repository %q is not configured", repo)
 	}
-	return a.Forge.Find(r, source, target)
+	return a.Forge.Find(r, source, target, head)
 }
 
 // OpenAllowed opens a merge request if the repository allows it.
@@ -159,6 +164,11 @@ func (g ExecGit) Branch(dir string) (string, error) {
 	return strings.TrimSpace(out), err
 }
 
+func (g ExecGit) Head(dir string) (string, error) {
+	out, err := gitOut(g.Timeout, dir, "rev-parse", "HEAD")
+	return strings.TrimSpace(out), err
+}
+
 func (g ExecGit) Ahead(dir, target string) (int, error) {
 	out, err := gitOut(g.Timeout, dir, "rev-list", "--count", "origin/"+target+"..HEAD")
 	if err != nil {
@@ -196,20 +206,21 @@ func (f ExecForge) Open(repo Repository, mr MergeRequest, dir string) (MergeResu
 	return MergeResult{}, fmt.Errorf("unknown forge %q", repo.Forge)
 }
 
-func (f ExecForge) Find(repo Repository, source, target string) (MergeResult, bool, error) {
+func (f ExecForge) Find(repo Repository, source, target, head string) (MergeResult, bool, error) {
 	switch repo.Forge {
 	case "gitlab":
-		return findGitLab(f.Timeout, repo, source, target)
+		return findGitLab(f.Timeout, repo, source, target, head)
 	case "github":
-		return findGitHub(f.Timeout, repo, source, target)
+		return findGitHub(f.Timeout, repo, source, target, head)
 	}
 	return MergeResult{}, false, fmt.Errorf("unknown forge %q", repo.Forge)
 }
 
 // findGitLab lists the project's merge requests from source to target in
-// every state and returns the first that is open or merged; a closed one
-// does not count, since the branch may be delivered again.
-func findGitLab(timeout time.Duration, repo Repository, source, target string) (MergeResult, bool, error) {
+// every state and returns the first that is open, or merged with head as its
+// head commit (sha); a closed one does not count, since the branch may be
+// delivered again.
+func findGitLab(timeout time.Duration, repo Repository, source, target, head string) (MergeResult, bool, error) {
 	proj := strings.ReplaceAll(repo.Project, "/", "%2F")
 	path := "projects/" + proj + "/merge_requests?state=all&per_page=50&source_branch=" + url.QueryEscape(source) + "&target_branch=" + url.QueryEscape(target)
 	out, err := runTimed(timeout, "", nil, false, "glab", "api", path)
@@ -219,35 +230,38 @@ func findGitLab(timeout time.Duration, repo Repository, source, target string) (
 	var resp []struct {
 		IID    int    `json:"iid"`
 		State  string `json:"state"`
+		SHA    string `json:"sha"`
 		WebURL string `json:"web_url"`
 	}
 	if err := json.Unmarshal(out, &resp); err != nil {
 		return MergeResult{}, false, fmt.Errorf("glab: unreadable reply: %w", err)
 	}
 	for _, r := range resp {
-		if r.State == "opened" || r.State == "merged" {
+		if r.State == "opened" || (r.State == "merged" && r.SHA == head) {
 			return MergeResult{Ref: "!" + strconv.Itoa(r.IID), URL: r.WebURL}, true, nil
 		}
 	}
 	return MergeResult{}, false, nil
 }
 
-func findGitHub(timeout time.Duration, repo Repository, source, target string) (MergeResult, bool, error) {
+// findGitHub is findGitLab for GitHub, where the head commit is headRefOid.
+func findGitHub(timeout time.Duration, repo Repository, source, target, head string) (MergeResult, bool, error) {
 	out, err := runTimed(timeout, "", nil, false, "gh", "pr", "list", "-R", repo.Project, "--head", source, "--base", target,
-		"--state", "all", "--json", "number,url,state")
+		"--state", "all", "--json", "number,url,state,headRefOid")
 	if err != nil {
 		return MergeResult{}, false, fmt.Errorf("gh: %s", exitMessage(err))
 	}
 	var resp []struct {
 		Number int    `json:"number"`
 		State  string `json:"state"`
+		Head   string `json:"headRefOid"`
 		URL    string `json:"url"`
 	}
 	if err := json.Unmarshal(out, &resp); err != nil {
 		return MergeResult{}, false, fmt.Errorf("gh: unreadable reply: %w", err)
 	}
 	for _, r := range resp {
-		if r.State == "OPEN" || r.State == "MERGED" {
+		if r.State == "OPEN" || (r.State == "MERGED" && r.Head == head) {
 			return MergeResult{Ref: "#" + strconv.Itoa(r.Number), URL: r.URL}, true, nil
 		}
 	}
