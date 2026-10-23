@@ -1,0 +1,184 @@
+package main
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func writeFile(t *testing.T, path, text string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestParseStatus(t *testing.T) {
+	cases := []struct {
+		text      string
+		done      bool
+		questions bool
+		head      string
+	}{
+		{"# Title\nbody\nDONE\n", true, false, "# Title"},
+		{"# Title\nbody\nDONE\n\n", true, false, "# Title"},
+		{"# Title\nDONE\nmore\n", false, false, "# Title"},
+		{"", false, false, ""},
+		{"# T\n## Questions\nnone\n## Next\nx\n", false, false, "# T"},
+		{"# T\n## Questions\n- none\n", false, false, "# T"},
+		{"# T\n## Questions\nNone yet.\n", false, false, "# T"},
+		{"# T\n## Questions\n(none yet)\n", false, false, "# T"},
+		{"# T\n## Questions\n* N/A\n", false, false, "# T"},
+		{"# T\n## Questions\nNone of the tests pass.\n", false, true, "# T"},
+		{"# T\n## Questions\n1. Which version?\n## Next\n", false, true, "# T"},
+		{"# T\n### questions\nWhat now?\nDONE\n", true, true, "# T"},
+	}
+	for _, c := range cases {
+		ev := ParseStatus(c.text)
+		if ev.Done != c.done || (ev.Questions != "") != c.questions || ev.Head != c.head {
+			t.Errorf("%q: done %v questions %q head %q", c.text, ev.Done, ev.Questions, ev.Head)
+		}
+	}
+}
+
+func TestTranscriptDirAndLastTurn(t *testing.T) {
+	if got := TranscriptDir("/root", "/home/me/repos/github.com/org/proj.wt"); got != "/root/-home-me-repos-github-com-org-proj-wt" {
+		t.Fatalf("dir = %q", got)
+	}
+	dir := t.TempDir()
+	if ev := ReadTranscript(dir); ev.Found {
+		t.Fatal("found a transcript in an empty directory")
+	}
+	big := strings.Repeat("x", 300*1024)
+	writeFile(t, dir+"/a.jsonl", `{"type":"user","timestamp":"2026-10-22T01:00:00Z","message":{"content":"`+big+`"}}`+"\n"+
+		`{"type":"assistant","timestamp":"2026-10-22T02:00:00Z","message":{"stop_reason":"end_turn"}}`+"\n"+
+		`{"type":"atis-latch"}`+"\n")
+	ev := ReadTranscript(dir)
+	if !ev.Found || ev.Role != "assistant" || ev.StopReason != "end_turn" || !ev.At.Equal(time.Date(2026, 10, 22, 2, 0, 0, 0, time.UTC)) {
+		t.Fatalf("last turn = %+v", ev)
+	}
+}
+
+func TestLogRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "events.jsonl")
+	l, err := OpenLog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 10, 22, 3, 4, 5, 0, time.UTC)
+	if err := l.Append(Event{Time: at, Session: "s", Kind: KindObserve, Details: map[string]any{"state": "idle", "restarts": 2}}); err != nil {
+		t.Fatal(err)
+	}
+	l.Close()
+	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	f.WriteString(`{"time":"2026-10-22T03:04:06Z","kind":"obs`) // torn last line
+	f.Close()
+	events, bad, err := ReadLog(path)
+	if err != nil || bad != 1 || len(events) != 1 {
+		t.Fatalf("events %d bad %d err %v", len(events), bad, err)
+	}
+	e := events[0]
+	if !e.Time.Equal(at) || e.Session != "s" || detailString(e, "state") != "idle" || detailInt(e, "restarts") != 2 {
+		t.Fatalf("event = %+v", e)
+	}
+	if events, _, err := ReadLog(filepath.Join(t.TempDir(), "missing")); err != nil || events != nil {
+		t.Fatalf("missing log: %v %v", events, err)
+	}
+}
+
+func TestExampleConfigLoads(t *testing.T) {
+	cfg, err := LoadConfig("agentd.example.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Policies.Nudge.Message == "" || cfg.Policies.Restart.MaxRestarts != 3 || len(cfg.Sessions) != 2 {
+		t.Fatalf("config = %+v", cfg)
+	}
+	if cfg.Console("w17") != "widgets" || cfg.Console("g42") != "gadgets" {
+		t.Fatalf("consoles: %s %s", cfg.Console("w17"), cfg.Console("g42"))
+	}
+	if !filepath.IsAbs(cfg.Sessions["w17"].Deliver[0].MRFile) || !filepath.IsAbs(cfg.EventLog) {
+		t.Fatalf("paths not expanded: %+v", cfg.Sessions["w17"])
+	}
+	if cfg.Policies.Escalate.Command[0] == "~/consoles/route" {
+		t.Fatal("escalate command not expanded")
+	}
+}
+
+func TestConfigRefusesMistakes(t *testing.T) {
+	cases := map[string]string{
+		"unknown field":       `{"sessions": {"s": {"workdir": "w", "cwd": "c", "typo": 1}}}`,
+		"merge in allow":      `{"repositories": {"r": {"forge": "gitlab", "project": "a/b", "allow": ["merge"]}}}`,
+		"unknown repository":  `{"sessions": {"s": {"workdir": "w", "cwd": "c", "repository": "nope"}}}`,
+		"pattern name":        `{"sessions": {"s4*": {"workdir": "w", "cwd": "c"}}}`,
+		"bad duration":        `{"poll_interval": "soon"}`,
+		"deliver without mr":  `{"repositories": {"r": {"forge": "gitlab", "project": "a/b"}}, "sessions": {"s": {"workdir": "w", "cwd": "c", "deliver": [{"repository": "r", "worktree": "x", "target": "main"}]}}}`,
+		"backoff max too low": `{"policies": {"restart": {"backoff_initial": "10m", "backoff_max": "1m"}}}`,
+	}
+	for name, text := range cases {
+		path := filepath.Join(t.TempDir(), "c.json")
+		writeFile(t, path, text)
+		if _, err := LoadConfig(path); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func TestStatusTable(t *testing.T) {
+	h := newHarness(t, false, "mon", "idle", "blocked")
+	h.status("mon", working)
+	h.tmux.crash["mon"] = true
+	h.status("idle", working)
+	h.alive("idle", "static")
+	h.status("blocked", blocked)
+	h.alive("blocked", "static")
+	h.sup.Run(contextWithCancel(t), true)
+	h.ticks(3*12, 5*time.Minute)
+
+	rows, meta := Summarize(h.events())
+	byName := map[string]SessionStatus{}
+	for _, r := range rows {
+		byName[r.Name] = r
+	}
+	if byName["mon"].State != CrashLooping || byName["mon"].Restarts != 3 || byName["mon"].Escalations != 1 {
+		t.Fatalf("mon row = %+v", byName["mon"])
+	}
+	if byName["idle"].State != Idle || byName["idle"].Nudges != 3 {
+		t.Fatalf("idle row = %+v", byName["idle"])
+	}
+	if byName["blocked"].State != BlockedOnOwner || byName["blocked"].Nudges != 0 {
+		t.Fatalf("blocked row = %+v", byName["blocked"])
+	}
+	var out bytes.Buffer
+	PrintStatus(&out, rows, meta, h.clock.now)
+	text := out.String()
+	for _, want := range []string{"agentd live", "SESSION", "crash-looping", "blocked-on-owner", "STATUS.md has open Questions"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("status table lacks %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestBackoff(t *testing.T) {
+	p := RestartPolicy{BackoffInitial: Duration{time.Minute}, BackoffMax: Duration{5 * time.Minute}}
+	want := []time.Duration{0, time.Minute, 2 * time.Minute, 4 * time.Minute, 5 * time.Minute, 5 * time.Minute}
+	for n, w := range want {
+		if got := backoff(n, p); got != w {
+			t.Errorf("backoff(%d) = %s, want %s", n, got, w)
+		}
+	}
+}
+
+func TestShellJoin(t *testing.T) {
+	got := shellJoin([]string{"bash", "-lic", `claude --continue "Go on; it's fine"; exec bash`})
+	want := `bash -lic 'claude --continue "Go on; it'\''s fine"; exec bash'`
+	if got != want {
+		t.Fatalf("shellJoin = %s", got)
+	}
+}

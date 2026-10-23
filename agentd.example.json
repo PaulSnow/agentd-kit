@@ -1,0 +1,65 @@
+{
+  "event_log": "~/.local/state/agentic-kit/agentd/events.jsonl",
+  "poll_interval": "5m",
+  "transcript_dir": "~/.claude/projects",
+  "policies": {
+    "restart": {
+      "enabled": true,
+      "max_restarts": 3,
+      "window": "1h",
+      "backoff_initial": "1m",
+      "backoff_max": "30m"
+    },
+    "nudge": {
+      "enabled": true,
+      "stall": "40m",
+      "max": 3,
+      "settle": "6m"
+    },
+    "trust_prompt": {
+      "enabled": true,
+      "pattern": "trust this folder",
+      "keys": ["Down", "Enter"]
+    },
+    "escalate": {
+      "command": ["~/consoles/route", "{console}", "--kind", "decision", "{message}"],
+      "default_console": "infra"
+    }
+  },
+  "repositories": {
+    "widgets": {
+      "forge": "gitlab",
+      "project": "example-org/widgets",
+      "allow": ["push", "open"],
+      "console": "widgets",
+      "assignee": "123456"
+    },
+    "gadgets": {
+      "forge": "github",
+      "project": "example-org/gadgets",
+      "allow": ["push", "open"],
+      "console": "gadgets"
+    }
+  },
+  "sessions": {
+    "w17": {
+      "workdir": "work-17",
+      "cwd": "repos/widgets-wt/17",
+      "repository": "widgets",
+      "deliver": [
+        {
+          "repository": "widgets",
+          "worktree": "repos/widgets-wt/17",
+          "target": "main",
+          "mr_file": "work-17/mr-description.md"
+        }
+      ]
+    },
+    "g42": {
+      "workdir": "work-42",
+      "cwd": "repos/gadgets",
+      "repository": "gadgets",
+      "hold": "Delivery waits for the owner's design review (2026-10-22)"
+    }
+  }
+}

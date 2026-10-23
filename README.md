@@ -1,0 +1,65 @@
+# agentd
+
+`agentd` keeps unattended Claude Code sessions going and delivers their work. The deterministic management, watching, restarting, nudging, delivering and routing, runs in this program and runs the same way every time. A model is called in only for judgment, through escalation. It replaces the Python session supervisor in phases; this is phase 1: the event log, the session state machine and the supervisor's policies.
+
+## Running
+
+```bash
+cd kit/agentd && go build -o ~/.local/bin/agentd .
+```
+
+```bash
+agentd run --shadow
+```
+
+```bash
+agentd run
+```
+
+```bash
+agentd status
+```
+
+`run` reads `~/.config/agentic-kit/agentd.json` (`--config` for another file), replays its event log, then passes over every configured session each `poll_interval`. `--shadow` observes everything and acts on nothing: each action is logged as a `would` event instead. `--once` makes one pass. `status` prints one row per session from the event log. `config` prints the resolved configuration. `mark-delivered SESSION WORKTREE REF` records a delivery made before `agentd` took over, so it is never repeated.
+
+`run` is meant to live in a tmux session of its own, under `nice -n 19`.
+
+## Configuration
+
+Features live in the kit; the owner's specifics live outside the repository, in the config file. [`agentd.example.json`](agentd.example.json) shows every field; unset fields take the defaults in `config.go`, which are the Python supervisor's numbers. Relative paths are home-relative, as before; `~` expands.
+
+- `repositories`: each forge project `agentd` may write to, with its `forge` (`gitlab` or `github`), `project` path, `allow` list (`push`, `open`; there is no `merge`), the `console` escalations go to, and the `assignee` for opened requests.
+- `sessions`: each tmux session, its `workdir` (holding `BRIEF.md` and `STATUS.md`), its `cwd`, its `repository`, optional `deliver` specs, and an optional `hold` reason that stops delivery.
+- `policies.restart`: restart a gone session with `claude --continue`; exponential backoff from `backoff_initial` to `backoff_max`; after `max_restarts` within `window` the breaker trips, restarts stop and one escalation is posted. The breaker clears when the session is next seen alive.
+- `policies.nudge`: type `message` into a session whose screen has not changed for `stall`, at most `max` times per idle episode, then escalate once. A session with open Questions is never nudged.
+- `policies.usage_limit`: the screen pattern that means wait; when it clears, `resume_message` is typed once.
+- `policies.trust_prompt`: the pattern and keys that answer the folder-trust prompt.
+- `policies.escalate`: the command run once per escalation key, with `{console}` and `{message}` substituted.
+
+## States and evidence
+
+A session is `starting`, `working`, `idle`, `blocked-on-owner`, `usage-limited`, `done`, `failed` or `crash-looping`. Every transition comes from evidence and names it in the log:
+
+- whether the tmux session exists, by exact name;
+- the hash of the last 40 screen lines and how long since it changed, with a nudge's own echo not counted as change;
+- `STATUS.md`: its first line, whether its last line is `DONE`, and whether its Questions section asks anything;
+- the transcript's last turn, role and stop reason, read from the tail of the newest transcript for the session's directory when one exists. A fresh transcript keeps a static screen from counting as idle, as during a long tool call. Sessions sharing a directory share transcripts, so this is supporting evidence only.
+
+## Event log
+
+One JSONL file, append-only, one line per observation and action: `time`, `session`, `kind` and `details`. Kinds are `start`, `stop`, `observe` (logged when the evidence changes), `transition`, `action`, `would`, `skip` and `error`. The log is the only state: `run` rebuilds its counters, posted escalations and deliveries from it, and `status` is derived from it. In shadow mode `would` events count toward the shadow's own counters, so the breaker and the once-per-key rules show in the log as they would have run.
+
+## Safety
+
+- Process control is by exact session name only. The tmux surface has no listing, no pattern and no kill.
+- Every forge write goes through one client wrapped with the per-repository allow-list. It can push and open; there is no merge call to authorize.
+- Escalations and deliveries are keyed and posted once, across restarts of `agentd`.
+- Shadow mode performs no tmux write, no fetch, push or open, and runs no escalation command.
+
+## Tests
+
+```bash
+cd kit/agentd && go test -race ./...
+```
+
+The tests run the supervisor against a fake tmux, forge, git and clock over simulated hours. Each failure the old tools showed is a test: a crash loop stops after N restarts and escalates; a session blocked on the owner is not nudged; an escalation is posted once; nothing is ever killed; shadow mode never acts.
