@@ -155,6 +155,63 @@ func TestFailingOpenIsBounded(t *testing.T) {
 	}
 }
 
+// A merge request that already exists for the branch, open or merged, is
+// found before the push and recorded as the delivery, so a lost reply (or a
+// lost log) never opens a second one.
+func TestExistingMergeRequestIsFoundNotReopened(t *testing.T) {
+	h := newHarness(t, false, "d")
+	mr := h.dir + "/mr.md"
+	writeFile(t, mr, "The MR description.\n")
+	h.status("d", "# Finished\n\nDONE\n")
+	h.deliver("d", Deliver{Repository: "widgets", Worktree: h.dir + "/d/wt", Target: "main", MRFile: mr})
+	h.forge.recordThenFail = errors.New("glab: unreadable reply")
+	h.ticks(1, 5*time.Minute)
+	if len(h.forge.opens) != 1 || h.count(KindError, ActOpen, "d") != 1 {
+		t.Fatalf("opens = %d, open errors = %d after the first pass", len(h.forge.opens), h.count(KindError, ActOpen, "d"))
+	}
+	h.ticks(3, 5*time.Minute)
+	if len(h.forge.opens) != 1 || len(h.forge.pushes) != 1 {
+		t.Fatalf("opens = %d pushes = %d, want one each: the request exists", len(h.forge.opens), len(h.forge.pushes))
+	}
+	if got := h.sup.Tracks()["d"].Delivered["d:"+h.dir+"/d/wt"]; got != "!1" {
+		t.Fatalf("delivered = %q, want the found request", got)
+	}
+	h.restart(false)
+	h.ticks(3, 5*time.Minute)
+	if len(h.forge.opens) != 1 || len(h.forge.pushes) != 1 {
+		t.Fatalf("opens = %d pushes = %d after replay", len(h.forge.opens), len(h.forge.pushes))
+	}
+}
+
+// mark-delivered seeds a delivery made by other means. It refuses a worktree
+// the session's deliver specs do not name, and what it writes stops the
+// delivery after a replay.
+func TestMarkDelivered(t *testing.T) {
+	h := newHarness(t, false, "d")
+	mr := h.dir + "/mr.md"
+	writeFile(t, mr, "The MR description.\n")
+	h.status("d", "# Finished\n\nDONE\n")
+	h.deliver("d", Deliver{Repository: "widgets", Worktree: h.dir + "/d/wt", Target: "main", MRFile: mr})
+	log := NewLogWriter(h.buf)
+	if err := MarkDelivered(h.cfg, log, h.clock.Now(), "d", h.dir+"/other", "!7"); err == nil {
+		t.Fatal("a worktree outside the deliver specs was accepted")
+	}
+	if err := MarkDelivered(h.cfg, log, h.clock.Now(), "nope", h.dir+"/d/wt", "!7"); err == nil {
+		t.Fatal("an unconfigured session was accepted")
+	}
+	if err := MarkDelivered(h.cfg, log, h.clock.Now(), "d", h.dir+"/d/wt", "!7"); err != nil {
+		t.Fatal(err)
+	}
+	h.restart(false)
+	h.ticks(3, 5*time.Minute)
+	if len(h.forge.pushes) != 0 || len(h.forge.opens) != 0 {
+		t.Fatalf("pushes %v opens %d after mark-delivered", h.forge.pushes, len(h.forge.opens))
+	}
+	if got := h.sup.Tracks()["d"].Delivered["d:"+h.dir+"/d/wt"]; got != "!7" {
+		t.Fatalf("delivered = %q, want !7", got)
+	}
+}
+
 // The old supervisor nudged a session blocked on the owner every 40 minutes
 // for 10 hours. A session with open Questions is never nudged; its question
 // is escalated once.
@@ -397,6 +454,7 @@ func TestDoneDeliversOnce(t *testing.T) {
 	s := h.cfg.Sessions["d4"]
 	s.Hold = "gate change first"
 	h.cfg.Sessions["d4"] = s
+	h.git.branches = map[string]string{h.dir + "/d2/wt": "feature-2"}
 
 	h.ticks(2, 5*time.Minute)
 	if got := len(h.forge.opens); got != 0 {
@@ -416,7 +474,7 @@ func TestDoneDeliversOnce(t *testing.T) {
 	titles := map[string]bool{}
 	for _, o := range h.forge.opens {
 		titles[o.Title] = true
-		if o.Description != "The MR description.\n" || o.Target != "main" || o.Source != "feature" {
+		if o.Description != "The MR description.\n" || o.Target != "main" || !strings.HasPrefix(o.Source, "feature") {
 			t.Fatalf("merge request: %+v", o)
 		}
 	}

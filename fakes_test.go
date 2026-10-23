@@ -90,23 +90,33 @@ func (f *fakeTmux) count(op, name string) int {
 }
 
 type fakeGit struct {
-	clean   bool
-	branch  string
-	ahead   int
-	subject string
-	fetches int
+	clean    bool
+	branch   string
+	branches map[string]string // branch per worktree, over branch
+	ahead    int
+	subject  string
+	fetches  int
 }
 
-func (g *fakeGit) Fetch(string) error                          { g.fetches++; return nil }
-func (g *fakeGit) Clean(string) (bool, error)                  { return g.clean, nil }
-func (g *fakeGit) Branch(string) (string, error)               { return g.branch, nil }
+func (g *fakeGit) Fetch(string) error         { g.fetches++; return nil }
+func (g *fakeGit) Clean(string) (bool, error) { return g.clean, nil }
+func (g *fakeGit) Branch(dir string) (string, error) {
+	if b, ok := g.branches[dir]; ok {
+		return b, nil
+	}
+	return g.branch, nil
+}
 func (g *fakeGit) Ahead(string, string) (int, error)           { return g.ahead, nil }
 func (g *fakeGit) FirstSubject(string, string) (string, error) { return g.subject, nil }
 
+// fakeForge records pushes and opened requests. fail makes Open fail
+// without opening; recordThenFail opens the request and then fails, as a
+// forge whose reply could not be read would.
 type fakeForge struct {
-	pushes []string
-	opens  []MergeRequest
-	fail   error
+	pushes         []string
+	opens          []MergeRequest
+	fail           error
+	recordThenFail error
 }
 
 func (f *fakeForge) Push(dir, branch string) error {
@@ -119,7 +129,23 @@ func (f *fakeForge) Open(repo Repository, mr MergeRequest, dir string) (MergeRes
 		return MergeResult{}, f.fail
 	}
 	f.opens = append(f.opens, mr)
-	return MergeResult{Ref: fmt.Sprintf("!%d", len(f.opens)), URL: "https://forge.example/mr/" + fmt.Sprint(len(f.opens))}, nil
+	if f.recordThenFail != nil {
+		return MergeResult{}, f.recordThenFail
+	}
+	return f.result(len(f.opens)), nil
+}
+
+func (f *fakeForge) result(n int) MergeResult {
+	return MergeResult{Ref: fmt.Sprintf("!%d", n), URL: "https://forge.example/mr/" + fmt.Sprint(n)}
+}
+
+func (f *fakeForge) Find(repo Repository, source, target string) (MergeResult, bool, error) {
+	for i, o := range f.opens {
+		if o.Source == source && o.Target == target {
+			return f.result(i + 1), true, nil
+		}
+	}
+	return MergeResult{}, false, nil
 }
 
 type fakeRunner struct {

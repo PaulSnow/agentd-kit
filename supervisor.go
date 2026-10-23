@@ -515,6 +515,18 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 		read("branch", err)
 		return
 	}
+	// A request that already exists, open or merged, is the delivery: the log
+	// may have missed it (a lost reply, a lost log), and a second push after a
+	// squash merge would recreate the branch and open a duplicate.
+	if found, exists, err := s.forge.Find(d.Repository, branch, d.Target); err != nil {
+		read("find", err)
+		return
+	} else if exists {
+		t.Delivered[key] = found.Ref
+		details["outcome"], details["url"], details["branch"] = found.Ref, found.URL, branch
+		s.skipOnce(name, "deliver:"+key+":exists", fmt.Sprintf("%s already has merge request %s; not delivering again", branch, found.Ref), t, details)
+		return
+	}
 	ahead, err := s.git.Ahead(d.Worktree, d.Target)
 	if err != nil {
 		read("ahead", err)
@@ -567,6 +579,31 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 		return
 	}
 	t.Delivered[key] = res.Ref
+}
+
+// MarkDelivered records a delivery made by other means, as the action event
+// deliver would have written, so the worktree is never delivered again. The
+// worktree must be one of the session's deliver specs.
+func MarkDelivered(cfg *Config, log *Log, now time.Time, session, worktree, ref string) error {
+	sess, ok := cfg.Sessions[session]
+	if !ok {
+		return fmt.Errorf("session %q is not configured", session)
+	}
+	worktree = expandPath(worktree)
+	known := false
+	for _, d := range sess.Deliver {
+		if d.Worktree == worktree {
+			known = true
+		}
+	}
+	if !known {
+		return fmt.Errorf("session %q has no deliver spec for worktree %s", session, worktree)
+	}
+	if ref == "" {
+		return fmt.Errorf("the merge request reference must not be empty")
+	}
+	return log.Append(Event{Time: now, Session: session, Kind: KindAction, Details: map[string]any{
+		"action": ActOpen, "delivered": session + ":" + worktree, "ref": ref, "by": "mark-delivered"}})
 }
 
 // shellJoin quotes argv for the shell tmux hands a new session's command to.

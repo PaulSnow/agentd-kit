@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -35,9 +36,11 @@ type MergeResult struct {
 }
 
 // Forge performs writes on a forge. It can push and open; it cannot merge.
+// Find is its one read: the open or merged request for a branch, if any.
 type Forge interface {
 	Push(dir, branch string) error
 	Open(repo Repository, mr MergeRequest, dir string) (MergeResult, error)
+	Find(repo Repository, source, target string) (MergeResult, bool, error)
 }
 
 // AllowedForge wraps a Forge with the per-repository allow-list. Every write
@@ -66,6 +69,16 @@ func (a AllowedForge) PushAllowed(repo, dir, branch string) error {
 		return err
 	}
 	return a.Forge.Push(dir, branch)
+}
+
+// Find looks for an existing open or merged request from source to target
+// in a configured repository. It reads only, so the allow-list does not apply.
+func (a AllowedForge) Find(repo, source, target string) (MergeResult, bool, error) {
+	r, ok := a.Repos[repo]
+	if !ok {
+		return MergeResult{}, false, fmt.Errorf("repository %q is not configured", repo)
+	}
+	return a.Forge.Find(r, source, target)
 }
 
 // OpenAllowed opens a merge request if the repository allows it.
@@ -147,6 +160,64 @@ func (ExecForge) Open(repo Repository, mr MergeRequest, dir string) (MergeResult
 		return openGitHub(repo, mr, dir)
 	}
 	return MergeResult{}, fmt.Errorf("unknown forge %q", repo.Forge)
+}
+
+func (ExecForge) Find(repo Repository, source, target string) (MergeResult, bool, error) {
+	switch repo.Forge {
+	case "gitlab":
+		return findGitLab(repo, source, target)
+	case "github":
+		return findGitHub(repo, source, target)
+	}
+	return MergeResult{}, false, fmt.Errorf("unknown forge %q", repo.Forge)
+}
+
+// findGitLab lists the project's merge requests from source to target in
+// every state and returns the first that is open or merged; a closed one
+// does not count, since the branch may be delivered again.
+func findGitLab(repo Repository, source, target string) (MergeResult, bool, error) {
+	proj := strings.ReplaceAll(repo.Project, "/", "%2F")
+	path := "projects/" + proj + "/merge_requests?state=all&per_page=50&source_branch=" + url.QueryEscape(source) + "&target_branch=" + url.QueryEscape(target)
+	out, err := exec.Command("glab", "api", path).Output()
+	if err != nil {
+		return MergeResult{}, false, fmt.Errorf("glab: %s", exitMessage(err))
+	}
+	var resp []struct {
+		IID    int    `json:"iid"`
+		State  string `json:"state"`
+		WebURL string `json:"web_url"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		return MergeResult{}, false, fmt.Errorf("glab: unreadable reply: %w", err)
+	}
+	for _, r := range resp {
+		if r.State == "opened" || r.State == "merged" {
+			return MergeResult{Ref: "!" + strconv.Itoa(r.IID), URL: r.WebURL}, true, nil
+		}
+	}
+	return MergeResult{}, false, nil
+}
+
+func findGitHub(repo Repository, source, target string) (MergeResult, bool, error) {
+	out, err := exec.Command("gh", "pr", "list", "-R", repo.Project, "--head", source, "--base", target,
+		"--state", "all", "--json", "number,url,state").Output()
+	if err != nil {
+		return MergeResult{}, false, fmt.Errorf("gh: %s", exitMessage(err))
+	}
+	var resp []struct {
+		Number int    `json:"number"`
+		State  string `json:"state"`
+		URL    string `json:"url"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		return MergeResult{}, false, fmt.Errorf("gh: unreadable reply: %w", err)
+	}
+	for _, r := range resp {
+		if r.State == "OPEN" || r.State == "MERGED" {
+			return MergeResult{Ref: "#" + strconv.Itoa(r.Number), URL: r.URL}, true, nil
+		}
+	}
+	return MergeResult{}, false, nil
 }
 
 func openGitLab(repo Repository, mr MergeRequest, dir string) (MergeResult, error) {

@@ -145,9 +145,7 @@ func configCmd(args []string) error {
 	return enc.Encode(cfg)
 }
 
-// markDeliveredCmd records a delivery made before agentd took over, as the
-// action event run would have written, so the worktree is never delivered
-// twice.
+// markDeliveredCmd is the command-line face of MarkDelivered.
 func markDeliveredCmd(args []string) error {
 	fs := flag.NewFlagSet("mark-delivered", flag.ContinueOnError)
 	cfg, _, err := loadConfigFlag(fs, args)
@@ -158,15 +156,10 @@ func markDeliveredCmd(args []string) error {
 	if len(rest) != 3 {
 		return fmt.Errorf("usage: agentd mark-delivered SESSION WORKTREE REF")
 	}
-	session, worktree, ref := rest[0], expandPath(rest[1]), rest[2]
-	if _, ok := cfg.Sessions[session]; !ok {
-		return fmt.Errorf("session %q is not configured", session)
-	}
 	log, err := OpenLog(cfg.EventLog)
 	if err != nil {
 		return err
 	}
 	defer log.Close()
-	return log.Append(Event{Time: time.Now(), Session: session, Kind: KindAction, Details: map[string]any{
-		"action": ActOpen, "delivered": session + ":" + worktree, "ref": ref, "by": "mark-delivered"}})
+	return MarkDelivered(cfg, log, time.Now(), rest[0], rest[1], rest[2])
 }
