@@ -308,7 +308,9 @@ func (s *Supervisor) logObserve(name string, t *Track, ev Evidence, state State,
 	}
 	t.LastObs = d
 	d = copyDetails(d)
-	d["unchanged_s"] = int(now.Sub(t.HashSince).Seconds())
+	if !t.HashSince.IsZero() { // unknown until the screen is first seen
+		d["unchanged_s"] = int(now.Sub(t.HashSince).Seconds())
+	}
 	s.emit(name, KindObserve, d)
 }
 

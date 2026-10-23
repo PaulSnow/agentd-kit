@@ -54,7 +54,7 @@ A session is `starting`, `working`, `idle`, `blocked-on-owner`, `usage-limited`,
 
 ## Event log
 
-One JSONL file, append-only, one line per observation and action: `time`, `session`, `kind` and `details`. Kinds are `start`, `stop`, `observe` (logged when the evidence changes), `transition`, `action`, `would`, `skip` and `error`. The log is the only state: `run` rebuilds its counters, posted escalations and deliveries from it, and `status` is derived from it. In shadow mode `would` events count toward the shadow's own counters, so the breaker and the once-per-key rules show in the log as they would have run.
+One JSONL file, append-only, one line per observation and action: `time`, `session`, `kind` and `details`. Kinds are `start`, `stop`, `observe` (logged when the evidence changes), `transition`, `action`, `would`, `skip`, `error` and `warning`. The file is created readable by its owner only (`0600`). Each append holds an exclusive `flock` on the file, so `mark-delivered` never interleaves with `run`, and is synced to disk before the action counts as recorded. At startup a malformed line before the last is corruption: `run` refuses to start and names the line. A malformed last line is a write cut short; `run` cuts it off and logs a `warning` with its length. An `observe` event carries `unchanged_s` only once the screen has been seen; until then the time is unknown and the field is absent. The log is the only state: `run` rebuilds its counters, posted escalations and deliveries from it, and `status` is derived from it. In shadow mode `would` events count toward the shadow's own counters, so the breaker and the once-per-key rules show in the log as they would have run.
 
 ## Safety
 

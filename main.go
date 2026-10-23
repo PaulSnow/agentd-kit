@@ -105,18 +105,22 @@ func runCmd(args []string) error {
 		return err
 	}
 	defer lock.Close()
-	events, bad, err := ReadLog(cfg.EventLog)
-	if err != nil {
-		return err
-	}
-	if bad > 0 {
-		fmt.Fprintf(os.Stderr, "agentd: %d malformed lines in %s ignored\n", bad, cfg.EventLog)
-	}
 	log, err := OpenLog(cfg.EventLog)
 	if err != nil {
 		return err
 	}
 	defer log.Close()
+	events, torn, err := log.Load()
+	if err != nil {
+		return fmt.Errorf("%s: %w", cfg.EventLog, err)
+	}
+	if torn > 0 {
+		fmt.Fprintf(os.Stderr, "agentd: dropped a torn final line of %d bytes from %s\n", torn, cfg.EventLog)
+		if err := log.Append(Event{Time: time.Now(), Kind: KindWarning, Details: map[string]any{
+			"warning": "dropped a torn final line of the event log", "bytes": torn}}); err != nil {
+			return err
+		}
+	}
 	to := cfg.Timeouts
 	sup := NewSupervisor(cfg, log, RealClock{}, ExecTmux{Timeout: to.Tmux.Duration}, ExecGit{Timeout: to.Forge.Duration},
 		ExecForge{Timeout: to.Forge.Duration}, ExecRunner{Timeout: to.Escalate.Duration}, *shadow)
@@ -160,14 +164,11 @@ func statusCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	events, bad, err := ReadLog(cfg.EventLog)
+	events, _, err := ReadLog(cfg.EventLog)
 	if err != nil {
 		return err
 	}
 	rows, meta := Summarize(events)
-	if bad > 0 {
-		meta["malformed"] = bad
-	}
 	PrintStatus(os.Stdout, rows, meta, time.Now())
 	return nil
 }

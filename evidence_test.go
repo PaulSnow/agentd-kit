@@ -114,12 +114,12 @@ func TestLogRoundTrip(t *testing.T) {
 	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
 	f.WriteString(`{"time":"2026-10-22T03:04:06Z","kind":"obs`) // torn last line
 	f.Close()
-	events, bad, err := ReadLog(path)
-	if err != nil || bad != 1 || len(events) != 1 {
-		t.Fatalf("events %d bad %d err %v", len(events), bad, err)
+	events, torn, err := ReadLog(path)
+	if err != nil || torn == 0 || len(events) != 1 {
+		t.Fatalf("events %d torn %d err %v", len(events), torn, err)
 	}
 	e := events[0]
-	if !e.Time.Equal(at) || e.Session != "s" || detailString(e, "state") != "idle" || detailInt(e, "restarts") != 2 {
+	if n, ok := detailInt(e, "restarts"); !e.Time.Equal(at) || e.Session != "s" || detailString(e, "state") != "idle" || !ok || n != 2 {
 		t.Fatalf("event = %+v", e)
 	}
 	if events, _, err := ReadLog(filepath.Join(t.TempDir(), "missing")); err != nil || events != nil {
