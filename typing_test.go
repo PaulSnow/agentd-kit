@@ -256,3 +256,23 @@ func TestDialogEscalationsAreBounded(t *testing.T) {
 		t.Fatalf("escalations = %d 30 minutes after the second, want 3", len(h.runner.calls))
 	}
 }
+
+// A pane that has run something other than Claude, such as the shell left
+// after Claude exited, for longer than the stall time is escalated once,
+// across a restart of agentd.
+func TestShellPaneIsEscalatedOnce(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.status("s1", working)
+	h.alive("s1", "$ ")
+	h.tmux.commands["s1"] = "bash"
+	h.ticks(7, 5*time.Minute) // 30 minutes
+	if len(h.runner.calls) != 0 {
+		t.Fatalf("escalated before the stall time: %v", h.runner.calls)
+	}
+	h.ticks(12, 5*time.Minute)
+	h.restart(false)
+	h.ticks(24, 5*time.Minute)
+	if len(h.runner.calls) != 1 || !strings.Contains(h.runner.calls[0][4], "bash") {
+		t.Fatalf("escalations = %v, want one naming bash", h.runner.calls)
+	}
+}

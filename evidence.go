@@ -20,6 +20,7 @@ type Evidence struct {
 	PaneDead    bool // the session exists but its command exited, kept by remain-on-exit
 	Exit        int  // the dead pane's exit status, or -1 when unknown
 	DeadScreen  string
+	Command     string // what the live pane runs, #{pane_current_command}
 	PaneHash    string
 	Limited     bool
 	TrustPrompt bool

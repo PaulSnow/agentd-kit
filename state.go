@@ -38,6 +38,9 @@ type Track struct {
 	LastNudge time.Time
 	Limited   bool
 	TrustHash string // the screen hash the trust keys were last sent for
+	// NotClaudeSince is when the pane was first seen running a command
+	// that is not Claude, or zero while it runs Claude.
+	NotClaudeSince time.Time
 
 	Posted    map[string]bool        // escalation keys already posted, or given up on
 	Questions QuestionsEscalation    // the escalation of the Questions section

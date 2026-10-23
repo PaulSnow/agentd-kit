@@ -226,6 +226,9 @@ func (s *Supervisor) Replay(events []Event) {
 			if d, _ := e.Details["dialog"].(bool); !d {
 				t.Dialog.Open = false
 			}
+			if alive, _ := e.Details["alive"].(bool); alive {
+				t.noteCommand(detailString(e, "command"), s.cfg.Policies.PaneCommands, e.Time)
+			}
 			asks, _ := e.Details["questions"].(bool)
 			done, _ := e.Details["done"].(bool)
 			t.Questions.observeQuestions(asks, done)
@@ -396,6 +399,7 @@ func (s *Supervisor) observe(name string, sess Session) (Evidence, error) {
 		if err != nil {
 			return ev, err
 		}
+		ev.Command = info.Command
 		if info.Dead {
 			// The command exited and remain-on-exit kept the pane: its exit
 			// status and last screen are the crash's cause.
@@ -471,6 +475,9 @@ func (s *Supervisor) step(name string, sess Session) {
 	}
 	t.Questions.observeQuestions(ev.Status.Questions != "", ev.Status.Done)
 	state = s.actOn(name, sess, t, ev, state, now)
+	if ev.Alive && state != Done && state != CrashLooping {
+		s.watchCommand(name, ev.Command, t, now)
+	}
 	if state != t.State {
 		s.emit(name, KindTransition, map[string]any{"from": string(t.State), "to": string(state), "reason": reason})
 		t.State, t.Since = state, now
@@ -500,6 +507,7 @@ func (s *Supervisor) logObserve(name string, t *Track, ev Evidence, state State,
 		"limited":   ev.Limited,
 		"trust":     ev.TrustPrompt,
 		"dialog":    ev.Dialog != "",
+		"command":   ev.Command,
 		"head":      ev.Status.Head,
 	}
 	if s.confidentialMatch(ev.Status.Head) > 0 {
@@ -679,6 +687,32 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 		}
 	}
 	return state
+}
+
+// noteCommand follows how long the pane has run something not in commands.
+func (t *Track) noteCommand(cmd string, commands []string, now time.Time) {
+	for _, c := range commands {
+		if cmd == c {
+			t.NotClaudeSince = time.Time{}
+			return
+		}
+	}
+	if t.NotClaudeSince.IsZero() {
+		t.NotClaudeSince = now
+	}
+}
+
+// watchCommand escalates once when the pane has run something that is not
+// Claude, such as the shell left after Claude exited, for the stall time:
+// nothing is typed into it, so without a word it would sit there unseen.
+func (s *Supervisor) watchCommand(name, cmd string, t *Track, now time.Time) {
+	t.noteCommand(cmd, s.cfg.Policies.PaneCommands, now)
+	since := t.NotClaudeSince
+	if since.IsZero() || now.Sub(since) < s.cfg.Policies.Nudge.Stall.Duration {
+		return
+	}
+	s.escalate(name, fmt.Sprintf("not-claude:%s:%d", name, since.Unix()),
+		fmt.Sprintf("%s's pane has run %q, not Claude, since %s; agentd does not type into it. Attach and see what happened.", name, cmd, since.Format(time.RFC3339)), t, now)
 }
 
 // errNotClaude stops a typing action whose pane does not run Claude.
