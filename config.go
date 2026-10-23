@@ -145,12 +145,17 @@ type EscalatePolicy struct {
 
 // Repository is a forge project agentd may deliver to. Allow lists the writes
 // the forge client may make for it: "push" and "open". There is no "merge".
+// Host (by default gitlab.com or github.com) and Project build the one URL
+// delivery pushes to, over Transport, ssh (the default) or https; glab and
+// gh are pointed at Host.
 type Repository struct {
-	Forge    string   `json:"forge"`
-	Project  string   `json:"project"`
-	Allow    []string `json:"allow"`
-	Console  string   `json:"console"`
-	Assignee string   `json:"assignee"`
+	Forge     string   `json:"forge"`
+	Host      string   `json:"host"`
+	Transport string   `json:"transport"`
+	Project   string   `json:"project"`
+	Allow     []string `json:"allow"`
+	Console   string   `json:"console"`
+	Assignee  string   `json:"assignee"`
 	// Gate is the argv agentd runs in the worktree, on the exact commit,
 	// before it pushes; delivery pushes only when it exits 0. A repository
 	// that allows push must have one. GateTimeout bounds it, by default
@@ -337,6 +342,17 @@ func (c *Config) finish(base string) error {
 		if repo.Project == "" {
 			errs = append(errs, fmt.Errorf("repositories.%s.project must be set", name))
 		}
+		if repo.Host == "" {
+			repo.Host = map[string]string{"gitlab": "gitlab.com", "github": "github.com"}[repo.Forge]
+		}
+		switch repo.Transport {
+		case "":
+			repo.Transport = "ssh"
+		case "ssh", "https":
+		default:
+			errs = append(errs, fmt.Errorf("repositories.%s.transport must be ssh or https", name))
+		}
+		c.Repositories[name] = repo
 		for _, a := range repo.Allow {
 			if a != "push" && a != "open" {
 				errs = append(errs, fmt.Errorf("repositories.%s.allow: %q is not push or open", name, a))

@@ -67,7 +67,7 @@ func TestHungForgeCommandsTimeOut(t *testing.T) {
 	r := ExecRunner{Timeout: 100 * time.Millisecond}
 	checks := map[string]func() error{
 		"fetch": func() error { return g.Fetch(t.TempDir()) },
-		"push":  func() error { return f.Push(t.TempDir(), "c0ffee", "feature") },
+		"push":  func() error { return f.Push(t.TempDir(), "git@h:p.git", "c0ffee", "feature") },
 		"glab find": func() error {
 			_, err := f.Find(Repository{Forge: "gitlab", Project: "a/b"}, "feature", "main")
 			return err

@@ -178,18 +178,21 @@ func (f *fakeTmux) count(op, name string) int {
 }
 
 type fakeGit struct {
-	clean    bool
-	branch   string
-	branches map[string]string // branch per worktree, over branch
-	ahead    int
-	aheads   map[string]int // ahead per worktree, over ahead
-	subject  string
-	messages string // the commit messages ahead of the target
-	head     string
-	inTarget map[string]bool // commits the target contains
-	remote   string
-	remotes  map[string]string // origin URL per worktree, over remote
-	fetches  int
+	clean      bool
+	branch     string
+	branches   map[string]string // branch per worktree, over branch
+	ahead      int
+	aheads     map[string]int // ahead per worktree, over ahead
+	subject    string
+	messages   string // the commit messages ahead of the target
+	head       string
+	inTarget   map[string]bool // commits the target contains
+	remote     string
+	remotes    map[string]string // origin URL per worktree, over remote
+	pushRemote string            // origin's separate push URL, if any
+	rewrites   []string          // url.*.insteadOf and pushInsteadOf prefixes in git config
+	config     string            // git config as listed; a change is a rewritten config
+	fetches    int
 }
 
 func (g *fakeGit) Fetch(string) error         { g.fetches++; return nil }
@@ -201,12 +204,18 @@ func (g *fakeGit) Branch(dir string) (string, error) {
 	return g.branch, nil
 }
 func (g *fakeGit) Head(string) (string, error) { return g.head, nil }
-func (g *fakeGit) RemoteURL(dir string) (string, error) {
-	if u, ok := g.remotes[dir]; ok {
-		return u, nil
+func (g *fakeGit) RemoteURLs(dir string) ([]string, error) {
+	u := g.remote
+	if r, ok := g.remotes[dir]; ok {
+		u = r
 	}
-	return g.remote, nil
+	if g.pushRemote != "" {
+		return []string{u, g.pushRemote}, nil
+	}
+	return []string{u}, nil
 }
+func (g *fakeGit) Rewrites(string) ([]string, error) { return g.rewrites, nil }
+func (g *fakeGit) ConfigHash(string) (string, error) { return HashPane(g.config), nil }
 func (g *fakeGit) Ahead(dir, target string) (int, error) {
 	if n, ok := g.aheads[dir]; ok {
 		return n, nil
@@ -224,6 +233,7 @@ func (g *fakeGit) Messages(string, string) (string, error)        { return g.mes
 type fakeForge struct {
 	pushes         []string
 	pushedSHAs     []string
+	pushURLs       []string
 	opens          []MergeRequest
 	merged         []mergedRequest
 	fail           error
@@ -234,8 +244,9 @@ type mergedRequest struct {
 	ref, source, target, head string
 }
 
-func (f *fakeForge) Push(dir, sha, branch string) error {
+func (f *fakeForge) Push(dir, url, sha, branch string) error {
 	f.pushes = append(f.pushes, branch)
+	f.pushURLs = append(f.pushURLs, url)
 	f.pushedSHAs = append(f.pushedSHAs, sha)
 	return nil
 }
@@ -329,8 +340,8 @@ func newHarness(t *testing.T, shadow bool, names ...string) *harness {
 	cfg.Policies.Escalate.Command = []string{"route", "{console}", "--kind", "decision", "{message}"}
 	cfg.Policies.Escalate.DefaultConsole = "infra"
 	cfg.Repositories = map[string]Repository{
-		"widgets":  {Forge: "gitlab", Project: "example-org/widgets", Allow: []string{"push", "open"}, Console: "widgets", Gate: []string{"./bin/check"}},
-		"readonly": {Forge: "gitlab", Project: "example-org/readonly", Allow: nil},
+		"widgets":  {Forge: "gitlab", Host: "gitlab.example.com", Project: "example-org/widgets", Allow: []string{"push", "open"}, Console: "widgets", Gate: []string{"./bin/check"}},
+		"readonly": {Forge: "gitlab", Host: "gitlab.example.com", Project: "example-org/readonly", Allow: nil},
 	}
 	cfg.Sessions = map[string]Session{}
 	for _, n := range names {

@@ -20,8 +20,13 @@ type Git interface {
 	Clean(dir string) (bool, error)
 	Branch(dir string) (string, error)
 	Head(dir string) (string, error)
-	// RemoteURL is the URL of the worktree's origin.
-	RemoteURL(dir string) (string, error)
+	// RemoteURLs are origin's fetch and push URLs.
+	RemoteURLs(dir string) ([]string, error)
+	// Rewrites are the URL prefixes git config rewrites (insteadOf,
+	// pushInsteadOf), in every scope.
+	Rewrites(dir string) ([]string, error)
+	// ConfigHash hashes the worktree's whole git configuration.
+	ConfigHash(dir string) (string, error)
 	// Ahead counts the commits on HEAD whose changes origin/target lacks:
 	// a commit the target already has as a patch, rebased or cherry-picked
 	// under another hash, does not count.
@@ -56,8 +61,8 @@ type MergeResult struct {
 // project itself, forks left out, each with its head commit. Closed ones are left out, since the branch may be
 // delivered again; the supervisor decides which, if any, delivers HEAD.
 type Forge interface {
-	// Push sends commit sha to the remote branch.
-	Push(dir, sha, branch string) error
+	// Push sends commit sha to branch at url.
+	Push(dir, url, sha, branch string) error
 	Open(repo Repository, mr MergeRequest, dir string) (MergeResult, error)
 	Find(repo Repository, source, target string) ([]MergeResult, error)
 }
@@ -87,30 +92,58 @@ func (a AllowedForge) PushAllowed(repo, dir, sha, branch string) error {
 	if err := a.allowed(repo, "push"); err != nil {
 		return err
 	}
-	return a.Forge.Push(dir, sha, branch)
+	return a.Forge.Push(dir, pushURL(a.Repos[repo]), sha, branch)
 }
 
-// originIs says whether a git remote URL names project on a forge: an
-// https or ssh URL, or git's scp-like user@host:path form, whose path, less
-// a trailing .git, is the project path. Forge paths ignore case. A local
-// path names no forge project.
-func originIs(remote, project string) bool {
-	var path string
+// pushURL is where a delivery for r goes, built from the configuration
+// alone: nothing in the worktree, its remotes or its hooks, decides it.
+func pushURL(r Repository) string {
+	if r.Transport == "https" {
+		return "https://" + r.Host + "/" + r.Project + ".git"
+	}
+	return "git@" + r.Host + ":" + r.Project + ".git"
+}
+
+// glabArgs points a glab call at the repository's host.
+func glabArgs(r Repository, args ...string) []string {
+	if r.Host != "" {
+		return append([]string{"api", "--hostname", r.Host}, args...)
+	}
+	return append([]string{"api"}, args...)
+}
+
+// ghRepo names the repository for gh's -R, with its host.
+func ghRepo(r Repository) string {
+	if r.Host != "" {
+		return r.Host + "/" + r.Project
+	}
+	return r.Project
+}
+
+// originIs says whether a git remote URL names project on host: an https
+// or ssh URL, or git's scp-like user@host:path form, whose host is host and
+// whose path, less a trailing .git, is the project path. Hosts and forge
+// paths ignore case. A local path names no forge project.
+func originIs(remote, host, project string) bool {
+	var h, path string
 	if strings.Contains(remote, "://") {
 		u, err := url.Parse(remote)
 		if err != nil || u.Host == "" {
 			return false
 		}
-		path = u.Path
+		h, path = u.Hostname(), u.Path
 	} else {
 		i := strings.Index(remote, ":")
 		if i <= 0 || strings.Contains(remote[:i], "/") {
 			return false
 		}
-		path = remote[i+1:]
+		h, path = remote[:i], remote[i+1:]
+		if at := strings.LastIndex(h, "@"); at >= 0 {
+			h = h[at+1:]
+		}
 	}
 	path = strings.TrimSuffix(strings.Trim(path, "/"), ".git")
-	return path != "" && strings.EqualFold(path, project)
+	return path != "" && strings.EqualFold(h, host) && strings.EqualFold(path, project)
 }
 
 // redactRemote drops any credentials from a remote URL, so it can be logged.
@@ -217,9 +250,44 @@ func (g ExecGit) Head(dir string) (string, error) {
 	return strings.TrimSpace(out), err
 }
 
-func (g ExecGit) RemoteURL(dir string) (string, error) {
-	out, err := gitOut(g.Timeout, dir, "remote", "get-url", "origin")
-	return strings.TrimSpace(out), err
+// RemoteURLs lists origin's fetch URLs, then its push URLs.
+func (g ExecGit) RemoteURLs(dir string) ([]string, error) {
+	var urls []string
+	for _, args := range [][]string{{"remote", "get-url", "--all", "origin"}, {"remote", "get-url", "--push", "--all", "origin"}} {
+		out, err := gitOut(g.Timeout, dir, args...)
+		if err != nil {
+			return nil, err
+		}
+		urls = append(urls, strings.Fields(out)...)
+	}
+	return urls, nil
+}
+
+// Rewrites lists the prefixes git config rewrites; git config answers 1
+// when there are none.
+func (g ExecGit) Rewrites(dir string) ([]string, error) {
+	out, err := runTimed(g.Timeout, dir, gitEnv, false, "git", "config", "--get-regexp", `^url\..*\.(insteadof|pushinsteadof)$`)
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("git config in %s: %s", dir, exitMessage(err))
+	}
+	var prefixes []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if _, value, ok := strings.Cut(line, " "); ok {
+			prefixes = append(prefixes, value)
+		}
+	}
+	return prefixes, nil
+}
+
+// ConfigHash hashes every setting git would use in dir, with the file each
+// comes from.
+func (g ExecGit) ConfigHash(dir string) (string, error) {
+	out, err := gitOut(g.Timeout, dir, "config", "--list", "--show-origin")
+	return HashPane(out), err
 }
 
 func (g ExecGit) Ahead(dir, target string) (int, error) {
@@ -264,9 +332,10 @@ func (g ExecGit) Messages(dir, target string) (string, error) {
 type ExecForge struct{ Timeout time.Duration }
 
 // Push sends exactly sha, the commit the supervisor checked, never
-// whatever HEAD has become since.
-func (f ExecForge) Push(dir, sha, branch string) error {
-	_, err := gitOut(f.Timeout, dir, "push", "-q", "origin", sha+":refs/heads/"+branch)
+// whatever HEAD has become since, to url, never to a remote the worktree
+// names. Hooks are off: a pre-push hook is the branch's own code.
+func (f ExecForge) Push(dir, url, sha, branch string) error {
+	_, err := gitOut(f.Timeout, dir, "-c", "core.hooksPath=/dev/null", "push", "--no-verify", "-q", url, sha+":refs/heads/"+branch)
 	return err
 }
 
@@ -297,7 +366,7 @@ func (f ExecForge) Find(repo Repository, source, target string) ([]MergeResult, 
 func findGitLab(timeout time.Duration, repo Repository, source, target string) ([]MergeResult, error) {
 	proj := strings.ReplaceAll(repo.Project, "/", "%2F")
 	path := "projects/" + proj + "/merge_requests?state=all&per_page=50&source_branch=" + url.QueryEscape(source) + "&target_branch=" + url.QueryEscape(target)
-	out, err := runTimed(timeout, "", nil, false, "glab", "api", path)
+	out, err := runTimed(timeout, "", nil, false, "glab", glabArgs(repo, path)...)
 	if err != nil {
 		return nil, fmt.Errorf("glab: %s", exitMessage(err))
 	}
@@ -327,7 +396,7 @@ func findGitLab(timeout time.Duration, repo Repository, source, target string) (
 // findGitHub is findGitLab for GitHub, where the head commit is headRefOid
 // and a fork's request is cross-repository.
 func findGitHub(timeout time.Duration, repo Repository, source, target string) ([]MergeResult, error) {
-	out, err := runTimed(timeout, "", nil, false, "gh", "pr", "list", "-R", repo.Project, "--head", source, "--base", target,
+	out, err := runTimed(timeout, "", nil, false, "gh", "pr", "list", "-R", ghRepo(repo), "--head", source, "--base", target,
 		"--state", "all", "--json", "number,url,state,headRefOid,isCrossRepository")
 	if err != nil {
 		return nil, fmt.Errorf("gh: %s", exitMessage(err))
@@ -356,9 +425,9 @@ func findGitHub(timeout time.Duration, repo Repository, source, target string) (
 
 func openGitLab(timeout time.Duration, repo Repository, mr MergeRequest, dir string) (MergeResult, error) {
 	proj := strings.ReplaceAll(repo.Project, "/", "%2F")
-	args := []string{"api", "-X", "POST", "projects/" + proj + "/merge_requests",
-		"-f", "source_branch=" + mr.Source, "-f", "target_branch=" + mr.Target,
-		"-f", "title=" + mr.Title, "-f", "description=" + mr.Description, "-f", "remove_source_branch=true"}
+	args := glabArgs(repo, "-X", "POST", "projects/"+proj+"/merge_requests",
+		"-f", "source_branch="+mr.Source, "-f", "target_branch="+mr.Target,
+		"-f", "title="+mr.Title, "-f", "description="+mr.Description, "-f", "remove_source_branch=true")
 	if mr.Assignee != "" {
 		args = append(args, "-f", "assignee_id="+mr.Assignee)
 	}
@@ -377,7 +446,7 @@ func openGitLab(timeout time.Duration, repo Repository, mr MergeRequest, dir str
 }
 
 func openGitHub(timeout time.Duration, repo Repository, mr MergeRequest, dir string) (MergeResult, error) {
-	args := []string{"pr", "create", "-R", repo.Project, "--head", mr.Source, "--base", mr.Target,
+	args := []string{"pr", "create", "-R", ghRepo(repo), "--head", mr.Source, "--base", mr.Target,
 		"--title", mr.Title, "--body", mr.Description}
 	if mr.Assignee != "" {
 		args = append(args, "--assignee", mr.Assignee)

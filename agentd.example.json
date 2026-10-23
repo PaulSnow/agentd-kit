@@ -43,6 +43,8 @@
   "repositories": {
     "widgets": {
       "forge": "gitlab",
+      "host": "gitlab.example.com",
+      "transport": "ssh",
       "project": "example-org/widgets",
       "allow": ["push", "open"],
       "console": "widgets",
@@ -52,6 +54,8 @@
     },
     "gadgets": {
       "forge": "github",
+      "host": "github.com",
+      "transport": "https",
       "project": "example-org/gadgets",
       "allow": ["push", "open"],
       "console": "gadgets",

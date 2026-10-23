@@ -833,17 +833,23 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 		s.emit(name, KindError, map[string]any{"key": fkey, "step": step, "error": err.Error()})
 		fail(step, err)
 	}
-	// Push only to the configured project: a worktree whose origin is a fork
-	// or another project would deliver somewhere the allow-list never named.
-	// Not final: the origin may be fixed.
-	remote, err := s.git.RemoteURL(d.Worktree)
+	// The push goes to the URL built from the configuration, whatever the
+	// worktree says. Origin still decides what the fetch brings and what
+	// counts as ahead, so every fetch and push URL it has must be the
+	// configured project on the configured host. Not final: it may be fixed.
+	remotes, err := s.git.RemoteURLs(d.Worktree)
 	if err != nil {
 		read("remote", err)
 		return
 	}
-	if project := s.cfg.Repositories[d.Repository].Project; !originIs(remote, project) {
+	repoCfg := s.cfg.Repositories[d.Repository]
+	for _, remote := range remotes {
+		if originIs(remote, repoCfg.Host, repoCfg.Project) {
+			continue
+		}
 		shown := redactRemote(remote)
-		s.skipOnce(name, "deliver:"+key+":origin:"+shortHash(HashPane(remote)), fmt.Sprintf("worktree's origin %s is not the project %s; not delivering", shown, project), t,
+		s.skipOnce(name, "deliver:"+key+":origin:"+shortHash(HashPane(strings.Join(remotes, " "))),
+			fmt.Sprintf("worktree's origin %s is not the project %s on %s; not delivering", shown, repoCfg.Project, repoCfg.Host), t,
 			map[string]any{"worktree": d.Worktree, "origin": shown})
 		return
 	}
@@ -965,6 +971,20 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 	if !s.gate(name, key, fkey, d, repo, head, t, fail) {
 		return
 	}
+	// A git config rewrite (insteadOf, pushInsteadOf) of the push URL would
+	// send the push elsewhere; refuse rather than guess. Not final.
+	rewrites, err := s.git.Rewrites(d.Worktree)
+	if err != nil {
+		read("rewrites", err)
+		return
+	}
+	for _, prefix := range rewrites {
+		if url := pushURL(repo); prefix != "" && strings.HasPrefix(url, prefix) {
+			s.skipOnce(name, "deliver:"+key+":rewrite:"+shortHash(HashPane(prefix)), fmt.Sprintf("git config rewrites the push URL %s (prefix %s); not pushing", url, prefix), t,
+				map[string]any{"worktree": d.Worktree})
+			return
+		}
+	}
 	if err := s.act(name, ActPush, map[string]any{"key": fkey, "branch": branch, "repository": d.Repository}, func() error {
 		return s.forge.PushAllowed(d.Repository, d.Worktree, head, branch)
 	}); err != nil {
@@ -1008,8 +1028,14 @@ func (s *Supervisor) gate(name, key, fkey string, d Deliver, repo Repository, he
 	if timeout <= 0 {
 		timeout = s.cfg.Timeouts.Forge.Duration
 	}
+	config, err := s.git.ConfigHash(d.Worktree)
+	if err != nil {
+		s.emit(name, KindError, map[string]any{"key": fkey, "step": "config", "error": err.Error()})
+		fail("config", err)
+		return false
+	}
 	gd := map[string]any{"key": fkey, "command": repo.Gate, "sha": head, "worktree": d.Worktree}
-	err := s.act(name, ActGate, gd, func() error {
+	err = s.act(name, ActGate, gd, func() error {
 		start := s.clock.Now()
 		exit, err := s.runner.Gate(d.Worktree, repo.Gate, timeout)
 		gd["duration_s"] = s.clock.Now().Sub(start).Seconds()
@@ -1035,7 +1061,10 @@ func (s *Supervisor) gate(name, key, fkey string, d Deliver, repo Repository, he
 	if err == nil && now == head {
 		var clean bool
 		if clean, err = s.git.Clean(d.Worktree); err == nil && clean {
-			return true
+			var after string
+			if after, err = s.git.ConfigHash(d.Worktree); err == nil && after == config {
+				return true
+			}
 		}
 	}
 	if err != nil {
@@ -1043,7 +1072,7 @@ func (s *Supervisor) gate(name, key, fkey string, d Deliver, repo Repository, he
 		fail("after gate", err)
 		return false
 	}
-	s.skipOnce(name, "deliver:"+key+":moved:"+head, fmt.Sprintf("the tree changed while the gate ran on %s; not pushing it, the next pass gates the new tree", shortHash(head)), t,
+	s.skipOnce(name, "deliver:"+key+":moved:"+head, fmt.Sprintf("the tree or the git config changed while the gate ran on %s; not pushing it, the next pass gates it again", shortHash(head)), t,
 		map[string]any{"worktree": d.Worktree, "sha": head, "head": now})
 	return false
 }
