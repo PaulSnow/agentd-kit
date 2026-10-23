@@ -110,15 +110,28 @@ func (l *Log) Append(e Event) error {
 	return l.write(append(b, '\n'))
 }
 
-// write writes and syncs, with the lock held.
+// write writes and syncs, with the lock held. When the write or the sync
+// fails, a log file is cut back to its size before, so a failed append, a
+// full disk say, never leaves a fragment for the next append to follow.
 func (l *Log) write(b []byte) error {
-	if _, err := l.w.Write(b); err != nil {
-		return err
+	size := int64(-1)
+	if l.f != nil {
+		info, err := l.f.Stat()
+		if err != nil {
+			return err
+		}
+		size = info.Size()
 	}
-	if s, ok := l.w.(interface{ Sync() error }); ok {
-		return s.Sync()
+	_, err := l.w.Write(b)
+	if s, ok := l.w.(interface{ Sync() error }); ok && err == nil {
+		err = s.Sync()
 	}
-	return nil
+	if err != nil && size >= 0 {
+		if terr := l.f.Truncate(size); terr != nil {
+			return errors.Join(err, fmt.Errorf("cutting back the failed append: %w", terr))
+		}
+	}
+	return err
 }
 
 // Load reads every event in the open log under its lock, after repairing a

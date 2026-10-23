@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -185,5 +186,48 @@ func TestMarkDeliveredAfterTornLineSurvivesReplay(t *testing.T) {
 	sup.Replay(events)
 	if tr := sup.Tracks()["d"]; tr == nil || tr.Delivered["d:"+wt] != "!7" {
 		t.Fatalf("the mark-delivered record was lost; events %+v", events)
+	}
+}
+
+// An append that fails part way, as on a full disk, leaves no fragment: the
+// file is cut back to where it was, and the next reader sees a whole log.
+// The file-size limit stands in for the full disk; the write stops short.
+func TestFailedAppendLeavesNoFragment(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	l, err := OpenLog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	if err := l.Append(Event{Kind: KindStart}); err != nil {
+		t.Fatal(err)
+	}
+	info, _ := os.Stat(path)
+	before := info.Size()
+
+	var old syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &old); err != nil {
+		t.Fatal(err)
+	}
+	signal.Ignore(syscall.SIGXFSZ)
+	defer signal.Reset(syscall.SIGXFSZ)
+	limit := old
+	limit.Cur = uint64(before + 10)
+	if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &limit); err != nil {
+		t.Skipf("cannot lower the file-size limit: %v", err)
+	}
+	err = l.Append(Event{Kind: KindObserve, Details: map[string]any{"head": strings.Repeat("x", 200)}})
+	if rerr := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &old); rerr != nil {
+		t.Fatal(rerr)
+	}
+	if err == nil {
+		t.Fatal("an append past the limit succeeded")
+	}
+	info, _ = os.Stat(path)
+	if info.Size() != before {
+		t.Fatalf("log is %d bytes after the failed append, want %d", info.Size(), before)
+	}
+	if events, torn, err := ReadLog(path); err != nil || torn != 0 || len(events) != 1 {
+		t.Fatalf("log after the failed append: %d events, torn %d, %v", len(events), torn, err)
 	}
 }
