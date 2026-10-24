@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -182,4 +183,147 @@ func TestExecGate(t *testing.T) {
 	if _, _, err := (ExecRunner{}).Gate(dir, []string{"sleep", "30"}, []string{"PATH=" + os.Getenv("PATH")}, 100*time.Millisecond); err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("hung gate: %v", err)
 	}
+}
+
+// The gate that runs is the target branch's: a session that changed the
+// gate's files, committed or not, is refused delivery with a clear reason
+// and one escalation, and its gate is not run. A later commit with the
+// gate as the target has it is delivered.
+func TestChangedGateIsRefused(t *testing.T) {
+	h := newHarness(t, false, "d")
+	r := h.cfg.Repositories["widgets"]
+	r.GatePaths = []string{"bin/lib"}
+	h.cfg.Repositories["widgets"] = r
+	doneWithDelivery(t, h, "d")
+	h.git.gateChanged = []string{"bin/check"}
+	h.ticks(4, 5*time.Minute)
+	if len(h.runner.gates) != 0 || len(h.forge.pushes) != 0 {
+		t.Fatalf("ran %d gates, pushed %v with a changed gate", len(h.runner.gates), h.forge.pushes)
+	}
+	if !reflect.DeepEqual(h.git.gatePaths, []string{"bin/check", "bin/lib"}) {
+		t.Fatalf("asked about %v", h.git.gatePaths)
+	}
+	var reason string
+	for _, e := range h.events() {
+		if e.Kind == KindSkip && strings.Contains(e.Skip.Key, ":gate-changed:") {
+			reason = e.Skip.Reason
+		}
+	}
+	if !strings.Contains(reason, "bin/check") || !strings.Contains(reason, "target branch") {
+		t.Fatalf("skip reason %q", reason)
+	}
+	if len(h.runner.calls) != 1 || !strings.Contains(h.runner.calls[0][4], "bin/check") {
+		t.Fatalf("escalations = %v", h.runner.calls)
+	}
+	h.git.gateChanged, h.git.head = nil, "beef"
+	h.ticks(1, 5*time.Minute)
+	if len(h.forge.pushedSHAs) != 1 || h.forge.pushedSHAs[0] != "beef" {
+		t.Fatalf("pushes = %v once the gate is the target's", h.forge.pushedSHAs)
+	}
+}
+
+// The gate runs with HOME a fresh empty directory, removed after it, and
+// the gate event records which credential paths stay reachable.
+func TestGateRunsWithScratchHome(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(home, ".netrc"), "machine example.org\n")
+	t.Setenv("HOME", home)
+	h := newHarness(t, false, "d")
+	doneWithDelivery(t, h, "d")
+	var scratch string
+	var entries int
+	h.runner.onGate = func() {
+		for _, kv := range h.runner.gateEnv {
+			if strings.HasPrefix(kv, "HOME=") {
+				scratch = strings.TrimPrefix(kv, "HOME=")
+			}
+		}
+		es, err := os.ReadDir(scratch)
+		if err != nil {
+			t.Errorf("the gate's HOME: %v", err)
+		}
+		entries = len(es)
+	}
+	h.ticks(1, 5*time.Minute)
+	if scratch == "" || scratch == home || entries != 0 {
+		t.Fatalf("the gate's HOME is %q with %d entries", scratch, entries)
+	}
+	if _, err := os.Stat(scratch); !os.IsNotExist(err) {
+		t.Fatalf("the gate's HOME was left behind: %v", err)
+	}
+	var gate *ActPayload
+	for _, e := range h.events() {
+		if e.Kind == KindAction && actionOf(e) == ActGate {
+			gate = e.Act
+		}
+	}
+	if gate == nil || !reflect.DeepEqual(gate.Reachable, []string{"~/.netrc", "~/.ssh"}) {
+		t.Fatalf("gate event %+v", gate)
+	}
+	path := filepath.Join(t.TempDir(), "c.json")
+	writeFile(t, path, `{"repositories": {"r": {"forge": "gitlab", "project": "a/b", "gate": ["make"], "gate_env": ["HOME"]}}}`)
+	if _, err := LoadConfig(path); err == nil {
+		t.Error("gate_env HOME was accepted")
+	}
+}
+
+// An error from git, the forge CLIs or the escalation command that matches
+// a confidential pattern never reaches the log.
+func TestConfidentialErrorIsWithheld(t *testing.T) {
+	h := newHarness(t, false, "d")
+	h.cfg.ConfidentialPatterns = []string{`(?i)project\s+nightingale`}
+	h.restart(false)
+	doneWithDelivery(t, h, "d")
+	h.forge.pushErr = errors.New("remote: Project Nightingale is archived")
+	h.ticks(2, 5*time.Minute)
+	if strings.Contains(h.buf.String(), "Nightingale") {
+		t.Fatalf("the log carries the confidential error:\n%s", h.buf.String())
+	}
+	if h.count(KindError, ActPush, "d") == 0 || !strings.Contains(h.buf.String(), "withheld") {
+		t.Fatalf("the error was not logged as withheld:\n%s", h.buf.String())
+	}
+}
+
+// GateFiles names the gate paths whose content at HEAD, or in the working
+// tree, is not the target branch's.
+func TestExecGateFiles(t *testing.T) {
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		if _, err := gitOut(10*time.Second, dir, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "agent@example.org")
+	run("config", "user.name", "agent")
+	writeFile(t, filepath.Join(dir, "bin", "check"), "#!/bin/sh\ngo test ./...\n")
+	writeFile(t, filepath.Join(dir, "lib", "a.sh"), "true\n")
+	writeFile(t, filepath.Join(dir, "main.go"), "package main\n")
+	run("add", "bin/check", "lib/a.sh", "main.go")
+	run("commit", "-q", "-m", "base")
+	run("update-ref", "refs/remotes/origin/main", "HEAD")
+	g := ExecGit{Timeout: 10 * time.Second}
+	paths := []string{"bin/check", "lib", "bin/absent"}
+	check := func(want ...string) {
+		t.Helper()
+		got, err := g.GateFiles(dir, "main", paths)
+		if err != nil || strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("changed %v, %v; want %v", got, err, want)
+		}
+	}
+	check()
+	writeFile(t, filepath.Join(dir, "main.go"), "package main // changed\n")
+	run("commit", "-q", "-am", "work")
+	check()
+	writeFile(t, filepath.Join(dir, "bin", "check"), "#!/bin/sh\nexit 0\n")
+	check("bin/check")
+	run("commit", "-q", "-am", "pass always")
+	check("bin/check")
+	writeFile(t, filepath.Join(dir, "lib", "b.sh"), "true\n")
+	writeFile(t, filepath.Join(dir, "bin", "absent"), "exit 0\n")
+	check("bin/check", "lib", "bin/absent")
 }

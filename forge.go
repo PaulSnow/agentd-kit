@@ -31,6 +31,10 @@ type Git interface {
 	// a commit the target already has as a patch, rebased or cherry-picked
 	// under another hash, does not count.
 	Ahead(dir, target string) (int, error)
+	// GateFiles names those of paths, files or directories relative to
+	// the worktree, whose content at HEAD or in the working tree is not
+	// origin/target's. A path neither has is unchanged.
+	GateFiles(dir, target string, paths []string) ([]string, error)
 	// Contains says whether origin/target contains the commit sha.
 	Contains(dir, sha, target string) (bool, error)
 	FirstSubject(dir, target string) (string, error)
@@ -261,6 +265,42 @@ func exitMessage(err error) string {
 func (g ExecGit) Fetch(dir string) error {
 	_, err := gitOut(g.Timeout, dir, "fetch", "-q", "origin")
 	return err
+}
+
+func (g ExecGit) GateFiles(dir, target string, paths []string) ([]string, error) {
+	var changed []string
+	for _, p := range paths {
+		// The object each side names: a blob or a tree, "" when absent.
+		object := func(rev string) (string, error) {
+			out, err := runTimed(g.Timeout, dir, gitEnv, false, "git", "rev-parse", "--verify", "--quiet", rev+":"+p)
+			var exit *exec.ExitError
+			if errors.As(err, &exit) && exit.ExitCode() == 1 {
+				return "", nil
+			}
+			if err != nil {
+				return "", fmt.Errorf("git rev-parse %s:%s in %s: %s", rev, p, dir, exitMessage(err))
+			}
+			return strings.TrimSpace(string(out)), nil
+		}
+		want, err := object("refs/remotes/origin/" + target)
+		if err != nil {
+			return nil, err
+		}
+		have, err := object("HEAD")
+		if err != nil {
+			return nil, err
+		}
+		// The working tree: any change, staged or not, or a file git does
+		// not track, ignored ones included.
+		status, err := gitOut(g.Timeout, dir, "status", "--porcelain", "--untracked-files=all", "--ignored", "--", p)
+		if err != nil {
+			return nil, err
+		}
+		if want != have || strings.TrimSpace(status) != "" {
+			changed = append(changed, p)
+		}
+	}
+	return changed, nil
 }
 
 func (g ExecGit) Clean(dir string) (bool, error) {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -126,6 +127,7 @@ func (s *Supervisor) mode() string { return mode(s.shadow) }
 // In a worker, a failed append stops its job, not the pass, and the event
 // is also queued for the loop to apply to the session's own Track.
 func (s *Supervisor) emit(name string, e Event) {
+	s.screen(&e)
 	if s.worker {
 		s.emitQueued(name, e)
 		return
@@ -139,6 +141,22 @@ func (s *Supervisor) emit(name string, e Event) {
 		return
 	}
 	s.st.apply(e)
+}
+
+// screen withholds what git, the forge CLIs, a gate or the escalation
+// command said when it matches a confidential pattern: an error's text and
+// a skip's reason never reach the log as they were.
+func (s *Supervisor) screen(e *Event) {
+	if e.Error != nil {
+		if i := s.confidentialMatch(e.Error.Error); i > 0 {
+			e.Error.Error = fmt.Sprintf("(withheld: matches confidential pattern %d)", i)
+		}
+	}
+	if e.Skip != nil {
+		if i := s.confidentialMatch(e.Skip.Reason); i > 0 {
+			e.Skip.Reason = fmt.Sprintf("(withheld: matches confidential pattern %d)", i)
+		}
+	}
 }
 
 // eventMode is the mode an event is written with: the run's, except for a
@@ -1194,10 +1212,38 @@ func (s *Supervisor) gate(name, key, fkey string, d Deliver, repo Repository, he
 		fail("config", err)
 		return false
 	}
+	// The gate is the target branch's (#3: authority comes from the target
+	// branch). A session that changed it is refused until its branch has
+	// the gate as the target has it; the owner changes gates by merging.
+	changed, err := s.git.GateFiles(d.Worktree, d.Target, gatePaths(repo))
+	if err != nil {
+		s.emit(name, Event{Kind: KindError, Error: &ErrorPayload{Key: fkey, Step: "gate files", Error: err.Error()}})
+		fail("gate files", err)
+		return false
+	}
+	if len(changed) > 0 {
+		ck := "deliver:" + key + ":gate-changed:" + head
+		s.skipOnce(name, ck, fmt.Sprintf("the session changed its gate (%s) from the target branch's %s; not running it or delivering %s",
+			strings.Join(changed, ", "), d.Target, shortHash(head)), t, &SkipPayload{Worktree: d.Worktree, SHA: head})
+		s.escalate(name, ck, fmt.Sprintf("%s is DONE but changed its gate (%s) from what the target branch %s has; nothing is delivered. "+
+			"Restore the gate in the branch, or change it on %s through review.", name, strings.Join(changed, ", "), d.Target, d.Target), t, s.clock.Now())
+		return false
+	}
 	gd := &ActPayload{Key: gkey, Gate: repo.Gate, SHA: head, Worktree: d.Worktree}
 	err = s.act(name, ActGate, gd, func() error {
+		// HOME is an empty directory of the gate's own, so tools find no
+		// credentials there; what the gate could still reach by path is
+		// recorded.
+		home, err := os.MkdirTemp("", "agentd-gate-home-")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(home)
+		if real, err := os.UserHomeDir(); err == nil {
+			gd.Reachable = reachableCredentials(real)
+		}
 		start := s.clock.Now()
-		exit, output, err := s.runner.Gate(d.Worktree, repo.Gate, gateEnv(repo), timeout)
+		exit, output, err := s.runner.Gate(d.Worktree, repo.Gate, gateEnv(repo, home), timeout)
 		took := s.clock.Now().Sub(start).Seconds()
 		gd.DurationS = &took
 		if err == nil && exit != 0 {
@@ -1328,4 +1374,46 @@ func shellJoin(argv []string) string {
 		parts[i] = "'" + strings.ReplaceAll(a, "'", "'\\''") + "'"
 	}
 	return strings.Join(parts, " ")
+}
+
+// gatePaths are the paths that make up r's gate: each argument of its argv
+// that is a relative path in the worktree, its script, and GatePaths.
+func gatePaths(r Repository) []string {
+	var paths []string
+	seen := map[string]bool{}
+	add := func(p string) {
+		if !seen[p] {
+			seen[p] = true
+			paths = append(paths, p)
+		}
+	}
+	for _, a := range r.Gate {
+		if strings.Contains(a, "/") && !filepath.IsAbs(a) && !strings.HasPrefix(a, "-") && !strings.Contains(a, "=") {
+			if p := filepath.Clean(a); p != "." && p != ".." && !strings.HasPrefix(p, "../") {
+				add(p)
+			}
+		}
+	}
+	for _, p := range r.GatePaths {
+		add(p)
+	}
+	return paths
+}
+
+// credentialPaths are where common tools keep credentials, under HOME.
+var credentialPaths = []string{".aws", ".claude", ".claude.json", ".config/agentd-kit", ".config/gcloud", ".config/gh", ".config/glab-cli",
+	".docker/config.json", ".git-credentials", ".gnupg", ".kube/config", ".netrc", ".npmrc", ".pypirc", ".ssh"}
+
+// reachableCredentials lists, as ~/ paths, the credential paths under home
+// that a process running as agentd's user can open: a gate given another
+// HOME can still reach them by path.
+func reachableCredentials(home string) []string {
+	var out []string
+	for _, p := range credentialPaths {
+		if f, err := os.Open(filepath.Join(home, p)); err == nil {
+			f.Close()
+			out = append(out, "~/"+p)
+		}
+	}
+	return out
 }

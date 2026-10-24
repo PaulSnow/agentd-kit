@@ -203,12 +203,16 @@ type Repository struct {
 	// Gate is the argv agentd runs in the worktree, on the exact commit,
 	// before it pushes; delivery pushes only when it exits 0. A repository
 	// that allows push must have one. GateTimeout bounds it, by default
-	// DefaultGateTimeout. It runs with PATH, HOME, LANG and TMPDIR and the
-	// variables GateEnv names, nothing else; no agent socket, token or
-	// Claude setting may be named.
+	// DefaultGateTimeout. It runs with PATH, LANG and TMPDIR, HOME a fresh
+	// empty directory, and the variables GateEnv names, nothing else; no
+	// agent socket, token, Claude setting or HOME may be named. The gate
+	// must be the target branch's: its script, when Gate names one in the
+	// worktree, and the files or directories GatePaths names, relative to
+	// the worktree, must be as the target branch has them.
 	Gate        []string `json:"gate"`
 	GateTimeout Duration `json:"gate_timeout"`
 	GateEnv     []string `json:"gate_env"`
+	GatePaths   []string `json:"gate_paths"`
 	// OwnerOnly marks every entry the report publishes for this repository
 	// as for the owner alone.
 	OwnerOnly bool `json:"owner_only"`
@@ -453,6 +457,11 @@ func (c *Config) finish(base string) error {
 				errs = append(errs, fmt.Errorf("repositories.%s.gate_env: %q may not be passed to a gate", name, v))
 			}
 		}
+		for _, p := range repo.GatePaths {
+			if p == "" || filepath.IsAbs(p) || filepath.Clean(p) != p || p == "." || p == ".." || strings.HasPrefix(p, "../") {
+				errs = append(errs, fmt.Errorf("repositories.%s.gate_paths: %q must be a clean path inside the worktree", name, p))
+			}
+		}
 	}
 	for name, a := range c.Accounts {
 		if a.ConfigDir == "" && a.TokenFile == "" {
@@ -543,17 +552,18 @@ func checkTokenFile(p string) error {
 const DefaultGateTimeout = 10 * time.Minute
 
 // gateBaseEnv are the variables every gate gets, when agentd has them.
-var gateBaseEnv = []string{"PATH", "HOME", "LANG", "TMPDIR"}
+var gateBaseEnv = []string{"PATH", "LANG", "TMPDIR"}
 
 // secretEnv says whether a variable must never reach a gate: the ssh
-// agent's socket, any token, any Claude setting.
+// agent's socket, any token, any Claude setting, and HOME, which the gate
+// gets as an empty directory of its own.
 func secretEnv(name string) bool {
-	return name == "SSH_AUTH_SOCK" || strings.HasSuffix(name, "_TOKEN") || strings.HasPrefix(name, "CLAUDE_")
+	return name == "SSH_AUTH_SOCK" || name == "HOME" || strings.HasSuffix(name, "_TOKEN") || strings.HasPrefix(name, "CLAUDE_")
 }
 
-// gateEnv is the environment a gate for r runs with.
-func gateEnv(r Repository) []string {
-	var env []string
+// gateEnv is the environment a gate for r runs with, its HOME home.
+func gateEnv(r Repository, home string) []string {
+	env := []string{"HOME=" + home}
 	for _, name := range append(append([]string{}, gateBaseEnv...), r.GateEnv...) {
 		if v, ok := os.LookupEnv(name); ok && !secretEnv(name) {
 			env = append(env, name+"="+v)

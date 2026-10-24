@@ -293,6 +293,8 @@ type fakeGit struct {
 	merge        string // the newest merge at HEAD, and its subject
 	mergeSubject string
 	mergeAt      map[string]time.Time // each merge's commit time, zero by default
+	gateChanged  []string             // the gate files the session changed
+	gatePaths    []string             // the gate files last asked about
 }
 
 func (g *fakeGit) Fetch(string) error {
@@ -349,6 +351,13 @@ func (g *fakeGit) Ahead(dir, target string) (int, error) {
 	}
 	return g.ahead, nil
 }
+func (g *fakeGit) GateFiles(dir, target string, paths []string) ([]string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.gatePaths = paths
+	return g.gateChanged, nil
+}
+
 func (g *fakeGit) Contains(dir, sha, target string) (bool, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -384,6 +393,7 @@ type fakeForge struct {
 	merged         []mergedRequest
 	fail           error
 	recordThenFail error
+	pushErr        error // what a push returns, after recording it
 }
 
 type mergedRequest struct {
@@ -396,7 +406,7 @@ func (f *fakeForge) Push(dir, url, sha, branch string) error {
 	f.pushes = append(f.pushes, branch)
 	f.pushURLs = append(f.pushURLs, url)
 	f.pushedSHAs = append(f.pushedSHAs, sha)
-	return nil
+	return f.pushErr
 }
 
 func (f *fakeForge) Open(repo Repository, mr MergeRequest, dir string) (MergeResult, error) {
