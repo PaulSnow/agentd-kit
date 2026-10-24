@@ -163,6 +163,7 @@ func (t *Track) clone() *Track {
 	c.GaveUp = append([]string(nil), t.GaveUp...)
 	c.CutShort = append([]string(nil), t.CutShort...)
 	c.Deliveries = append([]DeliveryRecord(nil), t.Deliveries...)
+	c.Gated = append([]string(nil), t.Gated...)
 	c.Escalated = append([]EscalationRecord(nil), t.Escalated...)
 	if t.LastObs != nil {
 		o := *t.LastObs

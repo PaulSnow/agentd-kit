@@ -666,7 +666,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			why = "answered"
 		}
 		id := newSessionID()
-		cmd, facts := s.launchCommand(sess, t, id, why)
+		cmd, facts := s.launchCommand(name, sess, t, id, why)
 		line, err := s.launchLine(sess, cmd)
 		if err != nil {
 			// Not final, and not a crash: the owner may fix the account.

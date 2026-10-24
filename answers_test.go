@@ -323,7 +323,7 @@ func TestDeadSessionAnsweredOtherIsRestarted(t *testing.T) {
 		t.Fatalf("after the delivery: state %s", h.state("s1"))
 	}
 	tr := h.sup.Tracks()["s1"]
-	if p := h.sup.restartPrompt(h.cfg.Sessions["s1"], tr, "restart"); !strings.Contains(p, `"answers":`) || strings.Contains(p, h.cfg.Policies.Answers.Pointer) {
+	if p := h.sup.restartPrompt("s1", h.cfg.Sessions["s1"], tr, "restart"); !strings.Contains(p, `"answers":`) || strings.Contains(p, h.cfg.Policies.Answers.Pointer) {
 		t.Fatalf("a later restart's prompt %q", p)
 	}
 }

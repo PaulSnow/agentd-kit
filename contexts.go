@@ -357,7 +357,7 @@ func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, no
 		return false
 	}
 	id := newSessionID()
-	cmd, facts := s.launchCommand(sess, t, id, "rotation")
+	cmd, facts := s.launchCommand(name, sess, t, id, "rotation")
 	line, err := s.launchLine(sess, cmd)
 	if err != nil {
 		s.skipOnce(name, "account:"+name, "not rotating: "+err.Error(), t, &SkipPayload{Account: sess.Account})
@@ -506,17 +506,23 @@ type restartFacts struct {
 	LastMerge string   `json:"last_merge,omitempty"`
 	Next      []string `json:"next,omitempty"`
 	Answers   string   `json:"answers,omitempty"` // the owner's answers, when restarted with them
+	// With the case's server passed at launch: the tools to report
+	// through, the done-when items they name, and the rulings the first
+	// report must acknowledge.
+	Tools       []string   `json:"tools,omitempty"`
+	Items       []GoalItem `json:"items,omitempty"`
+	Acknowledge []string   `json:"acknowledge,omitempty"`
 }
 
 // restartPrompt is the fresh session's prompt: the fixed instruction, then
 // the facts agentd recorded, from the progress file and the last merge.
-func (s *Supervisor) restartPrompt(sess Session, t *Track, why string) string {
-	return s.promptWith(s.packFacts(sess, t, why), why)
+func (s *Supervisor) restartPrompt(name string, sess Session, t *Track, why string) string {
+	return s.promptWith(s.packFacts(name, sess, t, why), why)
 }
 
 // packFacts is the facts document a fresh session is handed, its context
 // pack, as compact JSON.
-func (s *Supervisor) packFacts(sess Session, t *Track, why string) []byte {
+func (s *Supervisor) packFacts(name string, sess Session, t *Track, why string) []byte {
 	f := restartFacts{Why: why, Brief: sess.Workdir + "/BRIEF.md", Progress: sess.Workdir + "/STATUS.md"}
 	// Answers the owner gave stay in the file and are named in every
 	// fresh session's facts, since the context that read them is gone.
@@ -529,6 +535,9 @@ func (s *Supervisor) packFacts(sess Session, t *Track, why string) []byte {
 	}
 	if cp := t.Checkpoint; cp.SHA != "" {
 		f.LastMerge = cutUTF8(shortHash(cp.SHA)+" "+cp.Subject, progressCell)
+	}
+	if id := s.cfg.caseOf(sess); id != "" && s.passesMCP() {
+		f.Tools, f.Items, f.Acknowledge = mcpFacts(s.st, id, name)
 	}
 	var b strings.Builder
 	enc := json.NewEncoder(&b)
@@ -546,13 +555,24 @@ func (s *Supervisor) promptWith(facts []byte, why string) string {
 	return prompt + string(facts)
 }
 
+// passesMCP says whether the restart command passes the session's server.
+func (s *Supervisor) passesMCP() bool {
+	for _, part := range s.cfg.Policies.Restart.Command {
+		if strings.Contains(part, "{mcp}") {
+			return true
+		}
+	}
+	return false
+}
+
 // launchCommand is the restart policy's command for a fresh session, with
-// {brief}, {status}, {session_id} and {prompt} substituted, and the facts
-// the prompt hands it: its case's context pack.
-func (s *Supervisor) launchCommand(sess Session, t *Track, id, why string) ([]string, []byte) {
-	facts := s.packFacts(sess, t, why)
+// {brief}, {status}, {session_id}, {prompt} and {mcp}, the --mcp-config
+// document of its case's server, substituted, and the facts the prompt
+// hands it: its case's context pack.
+func (s *Supervisor) launchCommand(name string, sess Session, t *Track, id, why string) ([]string, []byte) {
+	facts := s.packFacts(name, sess, t, why)
 	r := strings.NewReplacer("{brief}", sess.Workdir+"/BRIEF.md", "{status}", sess.Workdir+"/STATUS.md",
-		"{session_id}", id, "{prompt}", s.promptWith(facts, why))
+		"{session_id}", id, "{prompt}", s.promptWith(facts, why), "{mcp}", mcpLaunchConfig(s.cfg, name, sess))
 	cmd := make([]string, len(s.cfg.Policies.Restart.Command))
 	for i, part := range s.cfg.Policies.Restart.Command {
 		cmd[i] = r.Replace(part)
