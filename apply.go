@@ -157,6 +157,12 @@ func (st *LogState) apply(e Event) {
 		}
 		if o.Dialog && !t.Dialog.Showing {
 			t.Dialog.Episode++
+		}
+		// The decline is timed from the first pass that showed a dialog's
+		// shape, not from words a pattern matched before it.
+		if !o.DialogShape {
+			t.Dialog.Since = time.Time{}
+		} else if t.Dialog.Since.IsZero() {
 			t.Dialog.Since = e.Time
 		}
 		t.Dialog.Showing = o.Dialog

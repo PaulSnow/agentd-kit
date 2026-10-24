@@ -125,7 +125,7 @@ type QuestionsEscalation struct {
 type DialogEscalation struct {
 	Showing    bool      // a dialog shows, as the last observation logged said
 	Episode    int       // dialog episodes seen so far; the one showing, if any
-	Since      time.Time // when the episode showing was first logged
+	Since      time.Time // since when a dialog's shape has shown, or zero
 	Declined   int       // the latest episode declined, or would have been
 	DeclinedAt time.Time // when it was
 	Escalated  int       // the latest episode escalated

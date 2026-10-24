@@ -566,6 +566,7 @@ func (s *Supervisor) logObserve(name string, t *Track, ev Evidence, state State,
 		Limited:         ev.Limited,
 		Trust:           ev.TrustPrompt,
 		Dialog:          ev.Dialog != "",
+		DialogShape:     ev.Dialog != "" && ev.DialogShape,
 		Command:         ev.Command,
 		Head:            ev.Status.Head,
 	}
@@ -731,7 +732,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 		case ev.Status.Questions != "":
 			s.escalateQuestions(name, ev.Status.Questions, t, now)
 		case ev.Dialog != "":
-			s.escalateDialog(name, ev.Dialog, t, now)
+			s.escalateDialog(name, ev.Dialog, ev.DialogShape, t, now)
 			s.declineDialog(name, t, ev, now)
 		default:
 			s.escalate(name, fmt.Sprintf("tool-wait:%s:%d", name, t.HashSince.Unix()),
@@ -813,7 +814,7 @@ func (s *Supervisor) typeInto(name, action string, a *ActPayload, t *Track, seen
 		return s.halt
 	}
 	if t.Parked {
-		s.skipOnce(name, "parked:"+action+":"+name+":"+fmt.Sprint(len(t.Crashes)), "the session is parked; not typing", t, &SkipPayload{Action: action})
+		s.skipOnce(name, "parked:"+action+":"+name+":"+fmt.Sprint(t.Clears), "the session is parked; not typing", t, &SkipPayload{Action: action})
 		return errParked
 	}
 	info, err := s.tmux.Pane(name)
@@ -892,14 +893,14 @@ func (s *Supervisor) escalateQuestions(name, questions string, t *Track, now tim
 // escalateDialog posts one escalation per dialog episode, keyed to the
 // session rather than the screen, so a dialog whose screen keeps changing
 // is one post, and at most one per DialogEscalationGap.
-func (s *Supervisor) escalateDialog(name, pattern string, t *Track, now time.Time) {
+func (s *Supervisor) escalateDialog(name, pattern string, shape bool, t *Track, now time.Time) {
 	dq := &t.Dialog
 	if dq.Open() || (!dq.Last.IsZero() && now.Sub(dq.Last) < DialogEscalationGap) {
 		return
 	}
 	n := dq.N + 1
 	msg := fmt.Sprintf("%s is stopped at a permission or confirmation dialog (the screen matches %q); agentd will not answer it. Attach and answer it.", name, pattern)
-	if after := s.cfg.Policies.Dialog.DeclineAfter.Duration; after > 0 {
+	if after := s.cfg.Policies.Dialog.DeclineAfter.Duration; after > 0 && shape {
 		msg += fmt.Sprintf(" If it still shows at %s, agentd will decline it (Escape).", dq.Since.Add(after).Format(time.RFC3339))
 	}
 	s.post(name, ActEscalate, fmt.Sprintf("dialog:%s:%d", name, n), msg, t, now, settles{Dialog: n, Episode: dq.Episode})
@@ -912,7 +913,8 @@ func (s *Supervisor) escalateDialog(name, pattern string, t *Track, now time.Tim
 // a dialog's shape: a pattern alone may match words in a session's output.
 // A dialog still showing at a later pass, the same one or the next the
 // agent's retry raised, is escalated once more: the owner was told it
-// would be declined.
+// would be declined. Only an episode the owner was told of is declined: one
+// the escalation gap kept quiet waits for its escalation.
 func (s *Supervisor) declineDialog(name string, t *Track, ev Evidence, now time.Time) {
 	after := s.cfg.Policies.Dialog.DeclineAfter.Duration
 	dq := &t.Dialog
@@ -921,12 +923,16 @@ func (s *Supervisor) declineDialog(name string, t *Track, ev Evidence, now time.
 	}
 	if dq.Declined == dq.Episode {
 		if now.After(dq.DeclinedAt) {
+			did := "declined"
+			if s.shadow {
+				did = "would have declined"
+			}
 			s.escalate(name, fmt.Sprintf("dialog-declined:%s:%d", name, dq.Episode),
-				fmt.Sprintf("%s: agentd declined its dialog at %s, but a dialog still shows; it will not decline again. Attach and answer it.", name, dq.DeclinedAt.Format(time.RFC3339)), t, now)
+				fmt.Sprintf("%s: agentd %s its dialog at %s, but a dialog still shows; it will not decline again. Attach and answer it.", name, did, dq.DeclinedAt.Format(time.RFC3339)), t, now)
 		}
 		return
 	}
-	if dq.Declined > dq.Episode || !ev.DialogShape || now.Sub(dq.Since) < after {
+	if dq.Declined > dq.Episode || dq.Escalated != dq.Episode || !ev.DialogShape || dq.Since.IsZero() || now.Sub(dq.Since) < after {
 		return
 	}
 	keys := []string{"Escape"}

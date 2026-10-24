@@ -256,6 +256,42 @@ func TestPatternAloneIsNotDeclined(t *testing.T) {
 	if got := keysSent(h, "s1"); len(got) != 0 {
 		t.Fatalf("keys %v for a pattern without a dialog's shape", got)
 	}
+	if len(h.runner.calls) != 1 || strings.Contains(h.runner.calls[0][4], "decline") {
+		t.Fatalf("escalations = %v, want one that promises no decline", h.runner.calls)
+	}
+	// A real dialog replacing the words, with no pass between them, is
+	// timed from its own first showing.
+	h.tmux.panes["s1"] = screen(t, "subagent-dialog.txt", 0)
+	h.ticks(1, 5*time.Minute)
+	if got := keysSent(h, "s1"); len(got) != 0 {
+		t.Fatalf("keys %v at the dialog's first pass", got)
+	}
+	h.ticks(3, 5*time.Minute)
+	if got := keysSent(h, "s1"); len(got) != 1 {
+		t.Fatalf("keys = %v ten minutes after the dialog showed, want one Escape", got)
+	}
+}
+
+// A dialog the escalation gap kept quiet is not declined: the owner is
+// told of it first.
+func TestUnescalatedDialogIsNotDeclined(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.cfg.Policies.Dialog.DeclineAfter = Duration{10 * time.Minute}
+	h.restart(false)
+	h.status("s1", working)
+	h.alive("s1", screen(t, "subagent-dialog.txt", 0))
+	h.ticks(1, 5*time.Minute) // escalated at 0m
+	h.tmux.panes["s1"] = "busy"
+	h.ticks(1, 5*time.Minute)
+	h.tmux.panes["s1"] = screen(t, "subagent-dialog.txt", 1)
+	h.ticks(4, 5*time.Minute) // 10m..25m: inside the gap, never escalated
+	if got := keysSent(h, "s1"); len(got) != 0 {
+		t.Fatalf("keys %v for a dialog the owner was not told of", got)
+	}
+	h.ticks(3, 5*time.Minute) // 30m: escalated, then declined
+	if len(h.runner.calls) < 2 || len(keysSent(h, "s1")) != 1 {
+		t.Fatalf("escalations %d, keys %v; want the second escalation and then the decline", len(h.runner.calls), keysSent(h, "s1"))
+	}
 }
 
 // The decline time may not be negative.
