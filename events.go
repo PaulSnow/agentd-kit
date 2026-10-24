@@ -49,6 +49,7 @@ type Event struct {
 	Triage      *TriagePayload      `json:"triage,omitempty"`
 	Decision    *DecisionPayload    `json:"decision,omitempty"`
 	Answer      *AnswerPayload      `json:"answer,omitempty"`
+	Deadline    *DeadlinePayload    `json:"deadline,omitempty"`
 	Case        *CasePayload        `json:"case,omitempty"`
 	Turn        *TurnPayload        `json:"turn,omitempty"`
 	Coordinator *CoordinatorPayload `json:"coordinator,omitempty"`
@@ -76,7 +77,8 @@ const (
 	KindPoll        = "poll"        // a poll of a forge that found something, failed, or recovered
 	KindTriage      = "triage"      // the checked answer of a triage job: each item's kind, needs and summary
 	KindDecision    = "decision"    // a session's questions.json changed: the decisions it raises
-	KindAnswer      = "answer"      // the owner answered one of a session's decisions
+	KindAnswer      = "answer"      // the owner answered one of a session's decisions, or agentd applied its default at the owner's deadline
+	KindDeadline    = "deadline"    // the owner set a deadline on one of a session's decisions
 	KindCase        = "case"        // a fact about a case: the pack a session was handed, its report, or the owner's ruling
 	KindTurn        = "turn"        // a prompt or end-of-turn summary read from a session's transcript
 	KindCoordinator = "coordinator" // a session claimed a repository's coordinator, or the owner released it
@@ -310,7 +312,7 @@ func (e Event) check() error {
 		KindSkip: e.Skip != nil, KindCrash: e.Crash != nil, KindClear: e.Clear != nil, KindError: e.Error != nil, KindWarning: e.Warning != nil,
 		KindItem: e.Item != nil, KindSeen: e.Seen != nil, KindCursor: e.Cursor != nil, KindUsage: e.Usage != nil,
 		KindCheckpoint: e.Checkpoint != nil, KindPoll: e.Poll != nil, KindTriage: e.Triage != nil, KindDecision: e.Decision != nil,
-		KindAnswer: e.Answer != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, "act": e.Act != nil,
+		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, "act": e.Act != nil,
 	}
 	want := e.Kind
 	switch e.Kind {
@@ -333,8 +335,10 @@ func (e Event) check() error {
 		return fmt.Errorf("a %s event must not carry mode %q", e.Kind, e.Mode)
 	case e.Kind == KindSeen && e.Mode != ModeOwner:
 		return fmt.Errorf("a seen event is the owner's, not %q", e.Mode)
-	case e.Kind == KindAnswer && (e.Mode != ModeOwner || e.Session == ""):
-		return errors.New("an answer event is the owner's, for one session")
+	case e.Kind == KindAnswer && (e.Session == "" || e.Mode == ModeShared || (e.Mode == ModeOwner) == e.Answer.ByDefault):
+		return errors.New("an answer event is the owner's, or a run's applying a default, for one session")
+	case e.Kind == KindDeadline && (e.Mode != ModeOwner || e.Session == ""):
+		return errors.New("a deadline event is the owner's, for one session")
 	case e.Kind == KindDecision && (e.Mode == ModeOwner || e.Session == ""):
 		return errors.New("a decision event is a run's, for one session")
 	case e.Kind == KindTurn && (e.Mode == ModeOwner || e.Mode == ModeShared || e.Session == "" || e.Turn.Role != TurnPrompt && e.Turn.Role != TurnSummary):

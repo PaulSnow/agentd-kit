@@ -42,7 +42,7 @@ func statusID(text string) string {
 	return statusDecision + shortHash(HashPane(ParseStatus(text).Questions))
 }
 
-const chooseColour = `{"decisions":[{"id":"D1","type":"choose_one","question":"Which colour should the widget be?",` +
+const chooseColour = `{"decisions":[{"id":"Q1","type":"choose_one","question":"Which colour should the widget be?",` +
 	`"context":"The widget is grey today.","why":"The style guide changed.","if_wrong":"A second release; easy to undo.",` +
 	`"recommendation":"b","options":[{"key":"a","label":"Blue","consequence":"Matches the old logo."},` +
 	`{"key":"b","label":"Green","consequence":"Matches the new guide."}],"blocking":true}]}`
@@ -132,25 +132,25 @@ func TestDecisionsFile(t *testing.T) {
 	if msg := h.runner.calls[0][4]; !strings.Contains(msg, "Which colour should the widget be?") {
 		t.Fatalf("escalation %q", msg)
 	}
-	if err := answerAs(h, "s1", AnswerPayload{ID: "D1", Other: "Neither; use the brand red."}); err != nil {
+	if err := answerAs(h, "s1", AnswerPayload{ID: "Q1", Other: "Neither; use the brand red."}); err != nil {
 		t.Fatal(err)
 	}
 	h.ticks(2, 5*time.Minute)
 	if doc, _ := readAnswers(t, h, "s1"); len(doc.Answers) != 1 || doc.Answers[0].Other == "" || h.state("s1") != BlockedOnOwner {
 		t.Fatalf("other: %+v, state %s", doc, h.state("s1"))
 	}
-	if err := answerAs(h, "s1", AnswerPayload{ID: "D1", Choice: "b"}); err != nil {
+	if err := answerAs(h, "s1", AnswerPayload{ID: "Q1", Choice: "b"}); err != nil {
 		t.Fatal(err)
 	}
 	h.ticks(2, 5*time.Minute)
 	b, _ := os.ReadFile(filepath.Join(h.dir, "s1", AnswersFile))
-	if string(b) != `{"answers":[{"id":"D1","choice":"b"}]}`+"\n" || h.state("s1") == BlockedOnOwner {
+	if string(b) != `{"answers":[{"id":"Q1","choice":"b"}]}`+"\n" || h.state("s1") == BlockedOnOwner {
 		t.Fatalf("answers.json %s, state %s", b, h.state("s1"))
 	}
 	before := h.sup.Tracks()["s1"]
 	h.restart(false)
 	after := h.sup.Tracks()["s1"]
-	if len(after.Decisions) != 1 || after.Decisions[0].ID != "D1" || after.waits(after.Decisions[0]) || !after.Answers["D1"].Delivered ||
+	if len(after.Decisions) != 1 || after.Decisions[0].ID != "Q1" || after.waits(after.Decisions[0]) || !after.Answers["Q1"].Delivered ||
 		after.DecisionsHash != before.DecisionsHash {
 		t.Fatalf("replay: %+v", after)
 	}
@@ -167,7 +167,7 @@ func TestRefusedDecisionsFile(t *testing.T) {
 	h.status("s1", working)
 	writeQuestions(t, h, "s1", chooseColour)
 	h.ticks(1, 5*time.Minute)
-	writeQuestions(t, h, "s1", `{"decisions":[{"id":"D2","type":"text","question":"Pick a or b?"}]}`)
+	writeQuestions(t, h, "s1", `{"decisions":[{"id":"Q2","type":"text","question":"Pick a or b?"}]}`)
 	h.ticks(3, 5*time.Minute)
 	var refused []string
 	for _, e := range h.events() {
@@ -175,10 +175,10 @@ func TestRefusedDecisionsFile(t *testing.T) {
 			refused = append(refused, e.Decision.Refused)
 		}
 	}
-	if len(refused) != 1 || !strings.Contains(refused[0], "D2") {
+	if len(refused) != 1 || !strings.Contains(refused[0], "Q2") {
 		t.Fatalf("refusals %q", refused)
 	}
-	if ds := h.sup.Tracks()["s1"].Decisions; len(ds) != 1 || ds[0].ID != "D1" {
+	if ds := h.sup.Tracks()["s1"].Decisions; len(ds) != 1 || ds[0].ID != "Q1" {
 		t.Fatalf("decisions %+v", ds)
 	}
 }
@@ -226,19 +226,19 @@ func TestAnswerIsChecked(t *testing.T) {
 	h.ticks(1, 5*time.Minute)
 	yes := true
 	for name, a := range map[string]AnswerPayload{
-		"unknown decision":  {ID: "D9", Choice: "a"},
-		"not an option":     {ID: "D1", Choice: "c"},
-		"wrong type":        {ID: "D1", Answer: &yes},
-		"both":              {ID: "D1", Choice: "a", Other: "or not"},
-		"none":              {ID: "D1", Note: "only a note"},
+		"unknown decision":  {ID: "Q9", Choice: "a"},
+		"not an option":     {ID: "Q1", Choice: "c"},
+		"wrong type":        {ID: "Q1", Answer: &yes},
+		"both":              {ID: "Q1", Choice: "a", Other: "or not"},
+		"none":              {ID: "Q1", Note: "only a note"},
 		"status, none open": {ID: statusDecision + "abc", Text: "x"},
-		"long note":         {ID: "D1", Choice: "a", Note: strings.Repeat("n", maxNote+1)},
+		"long note":         {ID: "Q1", Choice: "a", Note: strings.Repeat("n", maxNote+1)},
 	} {
 		if err := answerAs(h, "s1", a); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	if err := answerAs(h, "nobody", AnswerPayload{ID: "D1", Choice: "a"}); err == nil {
+	if err := answerAs(h, "nobody", AnswerPayload{ID: "Q1", Choice: "a"}); err == nil {
 		t.Error("an unknown session accepted")
 	}
 	if n := h.count(KindAnswer, "", ""); n != 0 {
@@ -307,7 +307,7 @@ func TestDeadSessionAnsweredOtherIsRestarted(t *testing.T) {
 	if h.state("s1") != BlockedOnOwner || h.tmux.count("new-session", "s1") != 0 {
 		t.Fatalf("state %s", h.state("s1"))
 	}
-	if err := answerAs(h, "s1", AnswerPayload{ID: "D1", Other: "Ask the widgets team."}); err != nil {
+	if err := answerAs(h, "s1", AnswerPayload{ID: "Q1", Other: "Ask the widgets team."}); err != nil {
 		t.Fatal(err)
 	}
 	h.ticks(1, 5*time.Minute)
@@ -336,7 +336,7 @@ func TestAnswerToAChangedQuestionWaits(t *testing.T) {
 	h.status("s1", working)
 	writeQuestions(t, h, "s1", chooseColour)
 	h.ticks(2, 5*time.Minute)
-	if err := answerAs(h, "s1", AnswerPayload{ID: "D1", Choice: "b"}); err != nil {
+	if err := answerAs(h, "s1", AnswerPayload{ID: "Q1", Choice: "b"}); err != nil {
 		t.Fatal(err)
 	}
 	h.ticks(2, 5*time.Minute)
@@ -348,7 +348,7 @@ func TestAnswerToAChangedQuestionWaits(t *testing.T) {
 	if h.state("s1") != BlockedOnOwner {
 		t.Fatalf("reworded question: state %s", h.state("s1"))
 	}
-	if _, ok := h.sup.Tracks()["s1"].answer("D1"); ok {
+	if _, ok := h.sup.Tracks()["s1"].answer("Q1"); ok {
 		t.Fatal("the old answer fits the reworded question")
 	}
 }
@@ -360,16 +360,16 @@ func TestLaterAnswerIsNotTakenAsDelivered(t *testing.T) {
 	st := NewLogState(&cfg, ModeLive)
 	t0 := pageAt
 	t1 := t0.Add(time.Minute)
-	d := Decision{ID: "D1", Type: DecisionText, Question: "q", Blocking: true}
+	d := Decision{ID: "Q1", Type: DecisionText, Question: "q", Blocking: true}
 	for _, e := range []Event{
 		{V: EventVersion, Time: t0, Kind: KindDecision, Mode: ModeLive, Session: "s1", Decision: &DecisionPayload{Hash: "h", Decisions: []Decision{d}}},
-		{V: EventVersion, Time: t0, Kind: KindAnswer, Mode: ModeOwner, Session: "s1", Answer: &AnswerPayload{ID: "D1", Text: "first", Asked: decisionHash(d)}},
-		{V: EventVersion, Time: t1, Kind: KindAnswer, Mode: ModeOwner, Session: "s1", Answer: &AnswerPayload{ID: "D1", Text: "second", Asked: decisionHash(d)}},
-		{V: EventVersion, Time: t1, Kind: KindAction, Mode: ModeLive, Session: "s1", Act: &ActPayload{Action: ActAnswer, Answers: []string{"D1"}, AnswersAt: []time.Time{t0}}},
+		{V: EventVersion, Time: t0, Kind: KindAnswer, Mode: ModeOwner, Session: "s1", Answer: &AnswerPayload{ID: "Q1", Text: "first", Asked: decisionHash(d)}},
+		{V: EventVersion, Time: t1, Kind: KindAnswer, Mode: ModeOwner, Session: "s1", Answer: &AnswerPayload{ID: "Q1", Text: "second", Asked: decisionHash(d)}},
+		{V: EventVersion, Time: t1, Kind: KindAction, Mode: ModeLive, Session: "s1", Act: &ActPayload{Action: ActAnswer, Answers: []string{"Q1"}, AnswersAt: []time.Time{t0}}},
 	} {
 		st.apply(e)
 	}
-	if r := st.Tracks["s1"].Answers["D1"]; r.Text != "second" || r.Delivered {
+	if r := st.Tracks["s1"].Answers["Q1"]; r.Text != "second" || r.Delivered {
 		t.Fatalf("the later answer is %+v", r)
 	}
 }
@@ -399,16 +399,16 @@ func TestDecisionsAreScreened(t *testing.T) {
 func TestCutShortAnswerIsDeliveredAgain(t *testing.T) {
 	cfg := DefaultConfig()
 	st := NewLogState(&cfg, ModeLive)
-	d := Decision{ID: "D1", Type: DecisionText, Question: "q", Blocking: true}
-	act := &ActPayload{Action: ActAnswer, Intent: "i1", Answers: []string{"D1"}, AnswersAt: []time.Time{pageAt}}
+	d := Decision{ID: "Q1", Type: DecisionText, Question: "q", Blocking: true}
+	act := &ActPayload{Action: ActAnswer, Intent: "i1", Answers: []string{"Q1"}, AnswersAt: []time.Time{pageAt}}
 	for _, e := range []Event{
 		{V: EventVersion, Time: pageAt, Kind: KindDecision, Mode: ModeLive, Session: "s1", Decision: &DecisionPayload{Hash: "h", Decisions: []Decision{d}}},
-		{V: EventVersion, Time: pageAt, Kind: KindAnswer, Mode: ModeOwner, Session: "s1", Answer: &AnswerPayload{ID: "D1", Text: "yes", Asked: decisionHash(d)}},
+		{V: EventVersion, Time: pageAt, Kind: KindAnswer, Mode: ModeOwner, Session: "s1", Answer: &AnswerPayload{ID: "Q1", Text: "yes", Asked: decisionHash(d)}},
 		{V: EventVersion, Time: pageAt, Kind: KindWarning, Mode: ModeLive, Session: "s1", Warning: &WarningPayload{Warning: "cut short", Intent: act}},
 	} {
 		st.apply(e)
 	}
-	if st.Tracks["s1"].Answers["D1"].Delivered {
+	if st.Tracks["s1"].Answers["Q1"].Delivered {
 		t.Fatal("an answer cut short is taken as delivered")
 	}
 }

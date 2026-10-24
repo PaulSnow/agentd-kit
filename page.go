@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"html/template"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -17,6 +18,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -94,14 +96,16 @@ type PageData struct {
 }
 
 // PageDecision is one open decision a session raised, with the owner's
-// answer to it so far. A withheld decision is shown by its id and type
-// only, with Withheld saying why, and no form.
+// answer to it so far and the deadline the owner set on it. A withheld
+// decision is shown by its id and type only, with Withheld saying why,
+// and no form.
 type PageDecision struct {
 	Session    string
 	Repository string
 	Decision
-	Answered *AnswerRecord
-	Withheld string
+	Answered      *AnswerRecord
+	OwnerDeadline *DeadlineRecord
+	Withheld      string
 }
 
 // Why a decision on the page is withheld.
@@ -114,8 +118,8 @@ const (
 // session's in the order it raised them: STATUS.md's Questions first, as
 // a text decision whose context is the section read from STATUS.md now,
 // offered only while it is the section agentd last saw, so an answer is
-// to the text the owner read; then those of questions.json. Every text is
-// screened again.
+// to the text the owner read; then those of questions.json, then those
+// raised through the tools. Every text is screened again.
 func DecisionsFrom(cfg *Config, st *LogState, rep Report) []PageDecision {
 	secret := confidentialMatcher(cfg)
 	repoOf := map[string]string{}
@@ -147,13 +151,16 @@ func DecisionsFrom(cfg *Config, st *LogState, rep Report) []PageDecision {
 			}
 			pds = append(pds, pd)
 		}
-		for _, d := range t.Decisions {
+		for _, d := range t.open() {
 			pds = append(pds, PageDecision{Decision: d})
 		}
 		for _, pd := range pds {
 			pd.Session, pd.Repository = n, repoOf[n]
 			if a, ok := t.answer(pd.ID); ok {
 				pd.Answered = &a
+			}
+			if dl, ok := t.deadline(pd.Decision); ok {
+				pd.OwnerDeadline = &dl
 			}
 			if pd.Withheld == "" && (pd.Decision.Withheld || secret(decisionTexts(pd.Decision)...)) {
 				pd.Withheld = withheldSecret
@@ -315,6 +322,17 @@ func (ps *pageState) answer(session string, a AnswerPayload) error {
 	return RecordAnswer(ps.log, ps.st, time.Now(), session, a)
 }
 
+// deadline records the owner's deadline on one of session's open
+// decisions, checked against the decision as the log holds it now.
+func (ps *pageState) deadline(session, id string, at time.Time) error {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if err := ps.catchUp(); err != nil {
+		return err
+	}
+	return RecordDeadline(ps.log, ps.st, time.Now(), session, id, at)
+}
+
 // whoisTTL is how long the page trusts one whois answer for an address,
 // and whoisSlots how many whois commands may run at once: a burst of
 // requests runs no burst of commands.
@@ -340,9 +358,12 @@ type Page struct {
 	load   func() (PageData, error)
 	mark   func(ids []string, from string) error
 	answer func(session string, a AnswerPayload) error
-	self   net.IP // the address the page listens on
-	now    func() time.Time
-	token  string // the form token, new each time the page starts
+	// deadline records the owner's deadline on a decision; nil, the page
+	// takes none.
+	deadline func(session, id string, at time.Time) error
+	self     net.IP // the address the page listens on
+	now      func() time.Time
+	token    string // the form token, new each time the page starts
 
 	mu      sync.Mutex
 	answers map[string]whoisAnswer // by caller IP
@@ -436,7 +457,10 @@ func (p *Page) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/answer" && r.Method == http.MethodPost:
 		p.serveAnswer(w, r)
 		return
-	case r.URL.Path == "/" || r.URL.Path == "/seen" || r.URL.Path == "/answer":
+	case r.URL.Path == "/deadline" && r.Method == http.MethodPost && p.deadline != nil:
+		p.serveDeadline(w, r)
+		return
+	case r.URL.Path == "/" || r.URL.Path == "/seen" || r.URL.Path == "/answer" || r.URL.Path == "/deadline" && p.deadline != nil:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	default:
@@ -519,6 +543,18 @@ func (p *Page) serveAnswer(w http.ResponseWriter, r *http.Request) {
 	f := func(k string) string { return strings.TrimSpace(r.PostForm.Get(k)) }
 	session := f("session")
 	a := AnswerPayload{ID: f("id"), Choice: f("choice"), Text: f("text"), Other: f("other"), Note: f("note"), From: r.RemoteAddr}
+	for _, k := range r.PostForm["choices"] {
+		a.Choices = append(a.Choices, strings.TrimSpace(k))
+	}
+	// A value is a number when it reads as one, else a date's text; the
+	// check against the decision says whether it is the decision's type.
+	if v := f("value"); v != "" {
+		if n, err := strconv.ParseFloat(v, 64); err == nil && !math.IsInf(n, 0) && !math.IsNaN(n) {
+			a.Value = json.RawMessage(strconv.FormatFloat(n, 'f', -1, 64))
+		} else {
+			a.Value, _ = json.Marshal(v)
+		}
+	}
 	switch f("answer") {
 	case "":
 	case "yes", "no":
@@ -534,6 +570,31 @@ func (p *Page) serveAnswer(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := p.answer(session, a); err != nil {
 		http.Error(w, "the answer was not recorded: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	p.back(w, r)
+}
+
+// serveDeadline records the deadline the owner set on one decision, then
+// sends the owner back. The form names the session and the decision and
+// holds the deadline, a local date and time as the browser writes it, or
+// RFC 3339.
+func (p *Page) serveDeadline(w http.ResponseWriter, r *http.Request) {
+	if !p.checkPost(w, r) {
+		return
+	}
+	f := func(k string) string { return strings.TrimSpace(r.PostForm.Get(k)) }
+	session, id, v := f("session"), f("id"), f("deadline")
+	at, err := time.ParseInLocation("2006-01-02T15:04", v, time.Local)
+	if err != nil {
+		at, err = time.Parse(time.RFC3339, v)
+	}
+	if session == "" || id == "" || err != nil {
+		http.Error(w, "name the session and the decision, and give the deadline as a date and time", http.StatusBadRequest)
+		return
+	}
+	if err := p.deadline(session, id, at); err != nil {
+		http.Error(w, "the deadline was not recorded: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	p.back(w, r)
@@ -858,16 +919,22 @@ table { border-collapse: collapse; } td { padding: .1rem .6rem .1rem 0; vertical
 </section>
 {{if .Decisions}}<section id="decisions"><h2>Decisions</h2>
 {{range .Decisions}}<div><span class="needs">{{.Session}}</span> <span class="muted">{{.Repository}}, {{.ID}}, {{.Type}}{{if .Blocking}}, blocking{{end}}</span></div>
-{{with .Answered}}<p>Answered {{when .At}}:{{with .Answer}} {{if .}}yes{{else}}no{{end}}{{end}} {{.Choice}} {{.Text}} {{.Other}}{{if .Delivered}} <span class="muted">(delivered)</span>{{end}}</p>{{end}}
+{{with .Answered}}<p>Answered {{when .At}}:{{with .Answer}} {{if .}}yes{{else}}no{{end}}{{end}} {{.Choice}}{{range .Choices}} {{.}}{{end}} {{.ValueText}} {{.Text}} {{.Other}}{{if .ByDefault}} <span class="muted">(the default, at your deadline)</span>{{end}}{{if .Delivered}} <span class="muted">(delivered)</span>{{end}}</p>{{end}}
 {{if .Withheld}}<p class="muted">{{.Withheld}}</p>
 {{else}}<pre>{{.Question}}</pre>{{if .Context}}<pre class="muted">{{.Context}}</pre>{{end}}
 {{if .Why}}<p class="muted">Why: {{.Why}}</p>{{end}}{{if .IfWrong}}<p class="muted">If wrong: {{.IfWrong}}</p>{{end}}{{if .Recommendation}}<p>Recommended: {{.Recommendation}}</p>{{end}}
+{{if .Default}}<p class="muted">Default: {{.Default}}, applied only if you set a deadline and it passes unanswered.{{if .Deadline}} The session suggests {{.Deadline}}.{{end}}</p>{{end}}
 <form method="post" action="/answer"><input type="hidden" name="token" value="{{$.Token}}"><input type="hidden" name="view" value="{{$.ViewQ}}"><input type="hidden" name="session" value="{{.Session}}"><input type="hidden" name="id" value="{{.ID}}">
 {{if eq .Type "yes_no"}}<label><input type="radio" name="answer" value="yes"> yes</label> <label><input type="radio" name="answer" value="no"> no</label>
 {{else if eq .Type "choose_one"}}{{range .Options}}<div><label><input type="radio" name="choice" value="{{.Key}}"> {{.Key}}: {{.Label}}</label> <span class="muted">{{.Consequence}}</span></div>{{end}}
+{{else if eq .Type "choose_many"}}{{range .Options}}<div><label><input type="checkbox" name="choices" value="{{.Key}}"> {{.Key}}: {{.Label}}</label> <span class="muted">{{.Consequence}}</span></div>{{end}}{{with .Limits}}<p class="muted">Choose{{with .MinText}} at least {{.}}{{end}}{{with .MaxText}} at most {{.}}{{end}}.</p>{{end}}
+{{else if eq .Type "number"}}<div><input type="number" name="value"{{with .Limits}}{{with .MinText}} min="{{.}}"{{end}}{{with .MaxText}} max="{{.}}"{{end}}{{end}} step="any"></div>
+{{else if eq .Type "date"}}<div><input type="date" name="value"{{with .Limits}}{{with .MinText}} min="{{.}}"{{end}}{{with .MaxText}} max="{{.}}"{{end}}{{end}}></div>
 {{else}}<div><textarea name="text" rows="3" cols="60" maxlength="2000"></textarea></div>{{end}}
-<div><textarea name="other" rows="1" cols="60" maxlength="2000" placeholder="or in your own words, which does not settle it"></textarea></div>
-<div><input name="note" size="60" maxlength="500" placeholder="a note"> <button type="submit">Answer</button></div></form>{{end}}
+{{if ne .Type "text"}}<div><textarea name="other" rows="1" cols="60" maxlength="2000" placeholder="or in your own words, which does not settle it"></textarea></div>{{end}}
+<div><input name="note" size="60" maxlength="500" placeholder="a note"> <button type="submit">Answer</button></div></form>
+{{if and .Default (not .Answered)}}<form method="post" action="/deadline"><input type="hidden" name="token" value="{{$.Token}}"><input type="hidden" name="view" value="{{$.ViewQ}}"><input type="hidden" name="session" value="{{.Session}}"><input type="hidden" name="id" value="{{.ID}}">
+{{with .OwnerDeadline}}<span class="muted">Your deadline: {{when .At}}.</span> {{end}}<input type="datetime-local" name="deadline"> <span class="muted">(the page's time zone)</span> <button type="submit">Apply the default after</button></form>{{end}}{{end}}
 {{end}}</section>{{end}}
 <section id="new"><h2>New since last visit</h2>
 {{if .New}}<form method="post" action="/seen"><input type="hidden" name="token" value="{{.Token}}"><input type="hidden" name="view" value="{{.ViewQ}}">
@@ -912,6 +979,7 @@ func pageCmd(args []string) error {
 	if err != nil {
 		return err
 	}
+	page.deadline = ps.deadline
 	srv := &http.Server{Addr: cfg.Page.Address, Handler: page, ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, MaxHeaderBytes: 1 << 16}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -33,12 +34,21 @@ const (
 )
 
 // Decision types: the narrowest that fits. A yes_no is answered true or
-// false, a choose_one with one option's key, a text in words.
+// false, a choose_one with one option's key, a choose_many with some of
+// its keys, a number or a date with a value within its limits, a text in
+// words.
 const (
-	DecisionYesNo     = "yes_no"
-	DecisionChooseOne = "choose_one"
-	DecisionText      = "text"
+	DecisionYesNo      = "yes_no"
+	DecisionChooseOne  = "choose_one"
+	DecisionChooseMany = "choose_many"
+	DecisionNumber     = "number"
+	DecisionDate       = "date"
+	DecisionText       = "text"
 )
+
+// dateLayout is how a date question's limits, default and answer are
+// written.
+const dateLayout = "2006-01-02"
 
 // Limits on what a session may raise and the owner may answer, in
 // characters.
@@ -59,9 +69,20 @@ const (
 // again.
 const statusDecision = "status-"
 
+// raisedID is the form of the ids agentd gives the decisions a session
+// raises through its tools, D1 on, and directiveID that of the owner's
+// rulings, R1 on; a session's own ids in questions.json take neither.
+var (
+	raisedID    = regexp.MustCompile(`^D[0-9]+$`)
+	directiveID = regexp.MustCompile(`^R[0-9]+$`)
+)
+
 // Decision is one question a session raises, in raise_decision's shape:
 // the decision form (context, why, what breaks if the call is wrong, the
-// recommendation) and, for choose_one, the options.
+// recommendation) and, for choose_one and choose_many, the options. The
+// default is written as a string: yes or no, a key, keys joined by
+// commas, a number or a date. Deadline is the session's suggestion, shown
+// to the owner; only a deadline the owner sets applies the default.
 type Decision struct {
 	ID             string           `json:"id"`
 	Type           string           `json:"type"`
@@ -71,14 +92,38 @@ type Decision struct {
 	IfWrong        string           `json:"if_wrong"`
 	Recommendation string           `json:"recommendation"`
 	Options        []DecisionOption `json:"options,omitempty"`
+	Limits         *DecisionLimits  `json:"limits,omitempty"`
 	Default        string           `json:"default,omitempty"`
+	Deadline       string           `json:"deadline,omitempty"`
 	Blocking       bool             `json:"blocking"`
+	// Supersedes is the open decision a raise replaces, one the owner
+	// answered in their own words.
+	Supersedes string `json:"supersedes,omitempty"`
 	// Withheld is set by agentd, never read from the file: the texts
 	// matched a confidential pattern and were left out of the log.
 	Withheld bool `json:"withheld,omitempty"`
 }
 
-// DecisionOption is one of a choose_one's answers.
+// DecisionLimits bound a number's value, a date's (as YYYY-MM-DD) or how
+// many keys a choose_many takes. Either may be left out.
+type DecisionLimits struct {
+	Min json.RawMessage `json:"min,omitempty"`
+	Max json.RawMessage `json:"max,omitempty"`
+}
+
+// MinText and MaxText are the limits as the page writes them.
+func (l *DecisionLimits) MinText() string { return limitText(l.Min) }
+func (l *DecisionLimits) MaxText() string { return limitText(l.Max) }
+
+func limitText(raw json.RawMessage) string {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	return string(raw)
+}
+
+// DecisionOption is one of a choose_one's or a choose_many's answers.
 type DecisionOption struct {
 	Key         string `json:"key"`
 	Label       string `json:"label"`
@@ -100,20 +145,25 @@ type DecisionPayload struct {
 }
 
 // AnswerPayload is the owner's answer to one decision, in the JSON the
-// session receives: answer for a yes_no, choice for a choose_one, text for
-// a text, or other, the owner's own words instead, which answers but does
-// not settle the decision. A note is context beside a binding answer.
+// session receives: answer for a yes_no, choice for a choose_one, choices
+// for a choose_many, value for a number or a date, text for a text, or
+// other, the owner's own words instead, which answers but does not settle
+// the decision. A note is context beside a binding answer.
 type AnswerPayload struct {
-	ID     string `json:"id"`
-	Answer *bool  `json:"answer,omitempty"`
-	Choice string `json:"choice,omitempty"`
-	Text   string `json:"text,omitempty"`
-	Other  string `json:"other,omitempty"`
-	Note   string `json:"note,omitempty"`
-	// From is the address the page was asked from, and Asked the hash of
-	// the decision as the owner answered it; neither is sent on.
-	From  string `json:"from,omitempty"`
-	Asked string `json:"asked,omitempty"`
+	ID      string          `json:"id"`
+	Answer  *bool           `json:"answer,omitempty"`
+	Choice  string          `json:"choice,omitempty"`
+	Choices []string        `json:"choices,omitempty"`
+	Value   json.RawMessage `json:"value,omitempty"`
+	Text    string          `json:"text,omitempty"`
+	Other   string          `json:"other,omitempty"`
+	Note    string          `json:"note,omitempty"`
+	// From is the address the page was asked from, Asked the hash of the
+	// decision as the owner answered it, and ByDefault says agentd applied
+	// the default at the owner's deadline; none is sent on.
+	From      string `json:"from,omitempty"`
+	Asked     string `json:"asked,omitempty"`
+	ByDefault bool   `json:"by_default,omitempty"`
 }
 
 // AnswerRecord is an answer as a session's Track holds it.
@@ -126,8 +176,11 @@ type AnswerRecord struct {
 // Binding says whether the answer settles its decision: anything but
 // other.
 func (a AnswerPayload) Binding() bool {
-	return a.Answer != nil || a.Choice != "" || a.Text != ""
+	return a.Answer != nil || a.Choice != "" || len(a.Choices) > 0 || len(a.Value) > 0 || a.Text != ""
 }
+
+// ValueText is a number's or a date's value as the page shows it.
+func (a AnswerPayload) ValueText() string { return limitText(a.Value) }
 
 var decisionID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$`)
 
@@ -139,46 +192,223 @@ func checkDecisions(ds []Decision) error {
 		return fmt.Errorf("%d decisions; at most %d may be open", len(ds), maxDecisions)
 	}
 	seen := map[string]bool{}
-	long := func(s string, n int) bool { return utf8.RuneCountInString(s) > n }
 	for _, d := range ds {
 		switch {
-		case !decisionID.MatchString(d.ID) || strings.HasPrefix(d.ID, statusDecision):
-			return fmt.Errorf("decision id %q: use up to 32 letters, digits, - or _, not starting with %q", cutUTF8(d.ID, 40), statusDecision)
+		case !decisionID.MatchString(d.ID) || strings.HasPrefix(d.ID, statusDecision) || raisedID.MatchString(d.ID) || directiveID.MatchString(d.ID):
+			return fmt.Errorf("decision id %q: use up to 32 letters, digits, - or _, not starting with %q, and not D or R and a number, which agentd gives", cutUTF8(d.ID, 40), statusDecision)
 		case seen[d.ID]:
 			return fmt.Errorf("decision %s is raised twice", d.ID)
-		case strings.TrimSpace(d.Question) == "" || long(d.Question, maxQuestion):
-			return fmt.Errorf("decision %s: the question must be set and at most %d characters", d.ID, maxQuestion)
-		case strings.TrimSpace(d.Context) == "" || strings.TrimSpace(d.Why) == "" || strings.TrimSpace(d.IfWrong) == "" || strings.TrimSpace(d.Recommendation) == "":
-			return fmt.Errorf("decision %s: context, why, if_wrong and recommendation must all be set", d.ID)
-		case long(d.Context, maxDecisionField) || long(d.Why, maxDecisionField) || long(d.IfWrong, maxDecisionField) || long(d.Recommendation, maxDecisionField):
-			return fmt.Errorf("decision %s: context, why, if_wrong and recommendation are at most %d characters each", d.ID, maxDecisionField)
+		case d.Supersedes != "":
+			return fmt.Errorf("decision %s: supersedes is for a decision raised through raise_decision", d.ID)
 		}
 		seen[d.ID] = true
-		switch d.Type {
-		case DecisionYesNo, DecisionText:
-			if len(d.Options) > 0 {
-				return fmt.Errorf("decision %s: a %s question lists no options; use choose_one", d.ID, d.Type)
-			}
-			if d.Default != "" && d.Type == DecisionText {
-				return fmt.Errorf("decision %s: a text question has no default", d.ID)
-			}
-			if d.Type == DecisionYesNo && d.Default != "" && d.Default != "yes" && d.Default != "no" {
-				return fmt.Errorf("decision %s: a yes_no default is yes or no", d.ID)
-			}
-		case DecisionChooseOne:
-			if err := checkOptions(d); err != nil {
-				return err
-			}
-		default:
-			return fmt.Errorf("decision %s: type %q is not yes_no, choose_one or text", d.ID, d.Type)
+		if err := checkDecision(d); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
+// optionMarker is an option a question names in its own words, (a) or
+// a), and yesOrNo a question that asks for yes or no. Only the question is
+// read, not its context, and a list counts only when it starts at its
+// first marker, (a) and (b) or (1) and (2), so a sentence such as "the
+// retry count is 3." is not taken for one.
+var (
+	optionMarker = regexp.MustCompile(`(?i)\(([a-e1-5])\)|(?:^|\s)([a-e])\)`)
+	yesOrNo      = regexp.MustCompile(`(?i)\byes\s*(?:or|/)\s*no\s*\??\s*$`)
+)
+
+// checkDecision checks one decision's type against what it asks: options
+// only for the types that list them, limits only for those that take
+// them, a default the decision could be answered with, and no type wider
+// than it needs. A refusal names the type to use.
+func checkDecision(d Decision) error {
+	long := func(s string, n int) bool { return utf8.RuneCountInString(s) > n }
+	switch {
+	case strings.TrimSpace(d.Question) == "" || long(d.Question, maxQuestion):
+		return fmt.Errorf("decision %s: the question must be set and at most %d characters", d.ID, maxQuestion)
+	case strings.TrimSpace(d.Context) == "" || strings.TrimSpace(d.Why) == "" || strings.TrimSpace(d.IfWrong) == "" || strings.TrimSpace(d.Recommendation) == "":
+		return fmt.Errorf("decision %s: context, why, if_wrong and recommendation must all be set", d.ID)
+	case long(d.Context, maxDecisionField) || long(d.Why, maxDecisionField) || long(d.IfWrong, maxDecisionField) || long(d.Recommendation, maxDecisionField):
+		return fmt.Errorf("decision %s: context, why, if_wrong and recommendation are at most %d characters each", d.ID, maxDecisionField)
+	case long(d.Default, maxOptionField) || long(d.Deadline, 40):
+		return fmt.Errorf("decision %s: the default is at most %d characters, the deadline 40", d.ID, maxOptionField)
+	}
+	switch d.Type {
+	case DecisionYesNo, DecisionText, DecisionNumber, DecisionDate:
+		if len(d.Options) > 0 {
+			return fmt.Errorf("decision %s: a %s question lists no options; use choose_one", d.ID, d.Type)
+		}
+	case DecisionChooseOne, DecisionChooseMany:
+		if err := checkOptions(d); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("decision %s: type %q is not yes_no, choose_one, choose_many, number, date or text", d.ID, cutUTF8(d.Type, 40))
+	}
+	if d.Type == DecisionText {
+		if yesOrNo.MatchString(d.Question) {
+			return fmt.Errorf("decision %s: a text question answered yes or no is a yes_no; use yes_no", d.ID)
+		}
+		marks := map[string]bool{}
+		for _, m := range optionMarker.FindAllStringSubmatch(d.Question, -1) {
+			marks[strings.ToLower(m[1]+m[2])] = true
+		}
+		if marks["a"] && marks["b"] || marks["1"] && marks["2"] {
+			return fmt.Errorf("decision %s: a text question that names its own options is a choice; use choose_one or choose_many", d.ID)
+		}
+		if d.Default != "" {
+			return fmt.Errorf("decision %s: a text question has no default", d.ID)
+		}
+	}
+	if err := checkLimits(d); err != nil {
+		return err
+	}
+	if d.Deadline != "" {
+		if _, err := parseDeadline(d.Deadline); err != nil {
+			return fmt.Errorf("decision %s: the deadline is a time (RFC 3339) or a date (YYYY-MM-DD)", d.ID)
+		}
+	}
+	if d.Default != "" {
+		a, err := defaultAnswer(d)
+		if err == nil {
+			err = checkAnswer(d, a)
+		}
+		if err != nil {
+			return fmt.Errorf("decision %s: the default %q is not an answer it takes: %v", d.ID, cutUTF8(d.Default, 40), err)
+		}
+	}
+	return nil
+}
+
+// checkLimits checks a decision's limits: numbers for a number, dates for
+// a date, counts within its options for a choose_many, and min not above
+// max.
+func checkLimits(d Decision) error {
+	l := d.Limits
+	if l == nil {
+		return nil
+	}
+	if d.Type != DecisionNumber && d.Type != DecisionDate && d.Type != DecisionChooseMany {
+		return fmt.Errorf("decision %s: a %s question takes no limits", d.ID, d.Type)
+	}
+	if len(l.Min) > 40 || len(l.Max) > 40 {
+		return fmt.Errorf("decision %s: limits min and max are at most 40 characters each", d.ID)
+	}
+	var bounds []float64
+	for _, raw := range []json.RawMessage{l.Min, l.Max} {
+		if len(raw) == 0 {
+			bounds = append(bounds, math.NaN())
+			continue
+		}
+		v, err := limitValue(d, raw)
+		if err != nil {
+			return fmt.Errorf("decision %s: limits min and max are %s", d.ID, limitKind(d.Type))
+		}
+		bounds = append(bounds, v)
+	}
+	if bounds[0] > bounds[1] {
+		return fmt.Errorf("decision %s: the limit min is above max", d.ID)
+	}
+	if d.Type == DecisionChooseMany && (bounds[0] < 1 || bounds[1] < 1 || bounds[0] > float64(len(d.Options)) || bounds[1] > float64(len(d.Options))) {
+		return fmt.Errorf("decision %s: a choose_many's limits min and max count keys, 1 to its %d options", d.ID, len(d.Options))
+	}
+	return nil
+}
+
+func limitKind(typ string) string {
+	switch typ {
+	case DecisionDate:
+		return "dates, YYYY-MM-DD"
+	case DecisionChooseMany:
+		return "whole numbers of keys"
+	}
+	return "numbers"
+}
+
+// limitValue is a limit or a value as a number to compare: the number, a
+// date's day, or a count, which must be whole.
+func limitValue(d Decision, raw json.RawMessage) (float64, error) {
+	if d.Type == DecisionDate {
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return 0, err
+		}
+		t, err := time.Parse(dateLayout, s)
+		if err != nil {
+			return 0, err
+		}
+		return float64(t.Unix()), nil
+	}
+	var v float64
+	if err := json.Unmarshal(raw, &v); err != nil || math.IsInf(v, 0) {
+		return 0, errors.New("not a number")
+	}
+	if d.Type == DecisionChooseMany && v != math.Trunc(v) {
+		return 0, errors.New("not a whole number")
+	}
+	return v, nil
+}
+
+// within says whether v is within the decision's limits.
+func within(d Decision, v float64) bool {
+	if d.Limits == nil {
+		return true
+	}
+	for i, raw := range []json.RawMessage{d.Limits.Min, d.Limits.Max} {
+		if len(raw) == 0 {
+			continue
+		}
+		b, err := limitValue(d, raw)
+		if err != nil || i == 0 && v < b || i == 1 && v > b {
+			return false
+		}
+	}
+	return true
+}
+
+// defaultAnswer is the answer a decision's default stands for.
+func defaultAnswer(d Decision) (AnswerPayload, error) {
+	a := AnswerPayload{ID: d.ID}
+	switch d.Type {
+	case DecisionYesNo:
+		if d.Default != "yes" && d.Default != "no" {
+			return a, errors.New("a yes_no default is yes or no")
+		}
+		yes := d.Default == "yes"
+		a.Answer = &yes
+	case DecisionChooseOne:
+		a.Choice = d.Default
+	case DecisionChooseMany:
+		for _, k := range strings.Split(d.Default, ",") {
+			a.Choices = append(a.Choices, strings.TrimSpace(k))
+		}
+	case DecisionNumber:
+		a.Value = json.RawMessage(strings.TrimSpace(d.Default))
+		if !json.Valid(a.Value) {
+			return a, errors.New("a number default is a number")
+		}
+	case DecisionDate:
+		a.Value, _ = json.Marshal(d.Default)
+	default:
+		return a, fmt.Errorf("a %s question has no default", d.Type)
+	}
+	return a, nil
+}
+
+// parseDeadline reads a deadline: a time in RFC 3339, or a date, which
+// ends at midnight UTC.
+func parseDeadline(s string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	return time.Parse(dateLayout, s)
+}
+
 func checkOptions(d Decision) error {
 	if len(d.Options) < 2 || len(d.Options) > maxOptions {
-		return fmt.Errorf("decision %s: a choose_one lists 2 to %d options", d.ID, maxOptions)
+		return fmt.Errorf("decision %s: a %s lists 2 to %d options; a question of one option is a yes_no", d.ID, d.Type, maxOptions)
 	}
 	keys := map[string]bool{}
 	yesNo := 0
@@ -197,10 +427,7 @@ func checkOptions(d Decision) error {
 		}
 	}
 	if len(d.Options) == 2 && yesNo == 2 {
-		return fmt.Errorf("decision %s: a choose_one of yes and no is a yes_no", d.ID)
-	}
-	if d.Default != "" && !keys[d.Default] {
-		return fmt.Errorf("decision %s: the default %q is not an option's key", d.ID, d.Default)
+		return fmt.Errorf("decision %s: a %s of yes and no is a yes_no; use yes_no", d.ID, d.Type)
 	}
 	return nil
 }
@@ -214,7 +441,7 @@ func checkAnswer(d Decision, a AnswerPayload) error {
 		return fmt.Errorf("the answer is for %q, not %q", a.ID, d.ID)
 	}
 	given := 0
-	for _, set := range []bool{a.Answer != nil, a.Choice != "", strings.TrimSpace(a.Text) != "", strings.TrimSpace(a.Other) != ""} {
+	for _, set := range []bool{a.Answer != nil, a.Choice != "", a.Choices != nil, len(a.Value) > 0, strings.TrimSpace(a.Text) != "", strings.TrimSpace(a.Other) != ""} {
 		if set {
 			given++
 		}
@@ -227,16 +454,40 @@ func checkAnswer(d Decision, a AnswerPayload) error {
 		return fmt.Errorf("decision %s: a note is at most %d characters, an answer %d", d.ID, maxNote, maxAnswerText)
 	case a.Other != "" && d.Type == DecisionText:
 		return fmt.Errorf("decision %s: a text question is answered in text, not other", d.ID)
-	case a.Answer != nil && d.Type != DecisionYesNo, a.Choice != "" && d.Type != DecisionChooseOne, a.Text != "" && d.Type != DecisionText:
+	case a.Answer != nil && d.Type != DecisionYesNo, a.Choice != "" && d.Type != DecisionChooseOne, a.Choices != nil && d.Type != DecisionChooseMany,
+		len(a.Value) > 0 && d.Type != DecisionNumber && d.Type != DecisionDate, a.Text != "" && d.Type != DecisionText:
 		return fmt.Errorf("decision %s: the answer is not of its type, %s", d.ID, d.Type)
 	}
-	if a.Choice != "" {
-		for _, o := range d.Options {
-			if o.Key == a.Choice {
-				return nil
+	keys := map[string]bool{}
+	for _, o := range d.Options {
+		keys[o.Key] = true
+	}
+	switch {
+	case a.Choice != "" && !keys[a.Choice]:
+		return fmt.Errorf("decision %s: %q is not one of its options", d.ID, cutUTF8(a.Choice, 40))
+	case a.Choices != nil:
+		chosen := map[string]bool{}
+		for _, k := range a.Choices {
+			if !keys[k] || chosen[k] {
+				return fmt.Errorf("decision %s: choices are distinct keys of its options", d.ID)
 			}
+			chosen[k] = true
 		}
-		return fmt.Errorf("decision %s: %q is not one of its options", d.ID, a.Choice)
+		if len(a.Choices) == 0 || !within(d, float64(len(a.Choices))) {
+			return fmt.Errorf("decision %s: %d choices is not within its limits", d.ID, len(a.Choices))
+		}
+	case len(a.Value) > 0:
+		v, err := limitValue(d, a.Value)
+		if err != nil {
+			what := "a number"
+			if d.Type == DecisionDate {
+				what = "a date, YYYY-MM-DD"
+			}
+			return fmt.Errorf("decision %s: the value is not %s", d.ID, what)
+		}
+		if !within(d, v) {
+			return fmt.Errorf("decision %s: the value is not within its limits", d.ID)
+		}
 	}
 	return nil
 }
@@ -282,7 +533,10 @@ func decisionHash(d Decision) string {
 
 // decisionTexts are the words of a decision, for screening.
 func decisionTexts(d Decision) []string {
-	texts := []string{d.Question, d.Context, d.Why, d.IfWrong, d.Recommendation, d.Default}
+	texts := []string{d.Question, d.Context, d.Why, d.IfWrong, d.Recommendation, d.Default, d.Deadline}
+	if l := d.Limits; l != nil {
+		texts = append(texts, string(l.Min), string(l.Max))
+	}
 	for _, o := range d.Options {
 		texts = append(texts, o.Label, o.Consequence)
 	}
@@ -307,9 +561,9 @@ func readRegular(path string, max int64) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(f, max))
 }
 
-// decision is the open decision id names: one raised in questions.json,
-// or the one STATUS.md's current Questions section stands for, a text
-// question.
+// decision is the open decision id names: one raised in questions.json
+// or through the session's tools, or the one STATUS.md's current
+// Questions section stands for, a text question.
 func (t *Track) decision(id string) (Decision, bool) {
 	if t.StatusQuestions != "" && id == statusDecision+t.StatusQuestions {
 		return statusDecisionFor(t.StatusQuestions), true
@@ -319,7 +573,18 @@ func (t *Track) decision(id string) (Decision, bool) {
 			return d, true
 		}
 	}
+	for _, d := range t.Raised {
+		if d.ID == id {
+			return d, true
+		}
+	}
 	return Decision{}, false
+}
+
+// open is every decision the session has open: those of questions.json,
+// then those it raised through its tools.
+func (t *Track) open() []Decision {
+	return append(t.Decisions[:len(t.Decisions):len(t.Decisions)], t.Raised...)
 }
 
 // answer is the owner's answer to the open decision id, when it was given
@@ -357,7 +622,7 @@ func (t *Track) answersFor(undelivered bool) []AnswerPayload {
 			continue
 		}
 		p := a.AnswerPayload
-		p.From, p.Asked = "", ""
+		p.From, p.Asked, p.ByDefault = "", "", false
 		out = append(out, p)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -383,7 +648,7 @@ func (t *Track) openQuestions(status, statusHash string) string {
 	if status != "" && t.waits(statusDecisionFor(statusHash)) {
 		parts = append(parts, status)
 	}
-	for _, d := range t.Decisions {
+	for _, d := range t.open() {
 		if d.Blocking && t.waits(d) {
 			parts = append(parts, fmt.Sprintf("%s (%s): %s Recommended: %s", d.ID, d.Type, d.Question, d.Recommendation))
 		}
@@ -477,6 +742,9 @@ func (s *Supervisor) readDecisions(name string, sess Session, t *Track, ev *Evid
 			return
 		}
 	}
+	if s.applyDefaults(name, t); s.halt != nil {
+		return
+	}
 	if ev.Status.Questions != "" {
 		ev.StatusQuestions = shortHash(HashPane(ev.Status.Questions))
 	}
@@ -484,8 +752,7 @@ func (s *Supervisor) readDecisions(name string, sess Session, t *Track, ev *Evid
 }
 
 // screenDecisions leaves out the words of each decision that match a
-// confidential pattern, keeping its id, type, option keys and whether it
-// blocks, so it can still be answered from the session's own screen.
+// confidential pattern (see withholdDecision).
 func (s *Supervisor) screenDecisions(ds []Decision) []Decision {
 	out := make([]Decision, len(ds))
 	for i, d := range ds {
@@ -493,11 +760,7 @@ func (s *Supervisor) screenDecisions(ds []Decision) []Decision {
 			out[i] = d
 			continue
 		}
-		w := Decision{ID: d.ID, Type: d.Type, Blocking: d.Blocking, Withheld: true}
-		for _, o := range d.Options {
-			w.Options = append(w.Options, DecisionOption{Key: o.Key})
-		}
-		out[i] = w
+		out[i] = withholdDecision(d)
 	}
 	return out
 }

@@ -134,6 +134,9 @@ type Case struct {
 	Steps    []StepRecord        // every step a session asked for
 	Refused  int                 // calls refused
 	Acked    map[string][]string // the rulings each session acknowledged
+	// Decisions is every decision its sessions raised through their
+	// tools, the superseded too, in order.
+	Decisions []RaisedRecord
 }
 
 // RulingRecord is a ruling and when it was made.
@@ -192,6 +195,9 @@ func (st *LogState) applyCase(e Event) {
 		c.applyGoal(p.Goal)
 	case p.Call != nil:
 		c.applyCall(e)
+		if d := p.Call.Raised; d != nil && e.Session != "" {
+			st.track(e.Session).raise(*d)
+		}
 	}
 	st.Cases[p.Case] = &c
 }

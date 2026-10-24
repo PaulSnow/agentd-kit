@@ -19,7 +19,8 @@ import (
 )
 
 // agentd mcp serves the session's tools over stdio (#3 §2): the session
-// reports progress and asks for a step only through calls agentd checks
+// reports progress, raises decisions (decisions.go) and asks for a step
+// only through calls agentd checks
 // against its case. The server is started for one session, bound to that
 // session's case, so a call never names a case. Every call, accepted or
 // refused, is a case event in the one log; the case's state still comes
@@ -57,6 +58,7 @@ type CaseCall struct {
 	Progress *CaseProgress `json:"progress,omitempty"`
 	Drift    []DriftFlag   `json:"drift,omitempty"`
 	Step     *CaseStep     `json:"step,omitempty"`
+	Raised   *Decision     `json:"raised,omitempty"`
 }
 
 // Tool names.
@@ -66,7 +68,7 @@ const (
 )
 
 // mcpTools are the tools a session's facts name, in the order they list.
-var mcpTools = []string{ToolReportProgress, ToolRequestStep}
+var mcpTools = []string{ToolReportProgress, ToolRaiseDecision, ToolRequestStep}
 
 // CaseProgress is an accepted report_progress, its text screened.
 type CaseProgress struct {
@@ -162,13 +164,15 @@ type StepRecord struct {
 func (c *CaseCall) check() error {
 	refused := c.Refused != ""
 	switch {
-	case c.Tool == ToolReportProgress && !refused && (c.Progress == nil || c.Step != nil):
+	case c.Tool == ToolReportProgress && !refused && (c.Progress == nil || c.Step != nil || c.Raised != nil):
 		return errors.New("an accepted report_progress carries its progress")
-	case c.Tool == ToolRequestStep && !refused && (c.Step == nil || c.Progress != nil || c.Drift != nil):
+	case c.Tool == ToolRequestStep && !refused && (c.Step == nil || c.Progress != nil || c.Drift != nil || c.Raised != nil):
 		return errors.New("an accepted request_step carries its step")
-	case c.Tool != ToolReportProgress && c.Tool != ToolRequestStep:
+	case c.Tool == ToolRaiseDecision && !refused && (c.Raised == nil || !raisedID.MatchString(c.Raised.ID) || c.Progress != nil || c.Step != nil || c.Drift != nil):
+		return errors.New("an accepted raise_decision carries its decision, numbered D1 on")
+	case !contains(mcpTools, c.Tool):
 		return fmt.Errorf("unknown tool %q", c.Tool)
-	case refused && (c.Progress != nil || c.Step != nil || c.Drift != nil):
+	case refused && (c.Progress != nil || c.Step != nil || c.Drift != nil || c.Raised != nil):
 		return errors.New("a refused call carries only why")
 	}
 	return nil
@@ -197,6 +201,8 @@ func (c *Case) applyCall(e Event) {
 		}
 	case call.Step != nil:
 		c.Steps = append(c.Steps[:len(c.Steps):len(c.Steps)], StepRecord{CaseStep: *call.Step, Session: e.Session, At: e.Time})
+	case call.Raised != nil && e.Session != "":
+		c.raiseOnCase(e, *call.Raised)
 	}
 }
 
@@ -526,8 +532,8 @@ func (srv *MCPServer) handle(req rpcRequest) (any, *rpcError) {
 		}
 		return map[string]any{"protocolVersion": version, "capabilities": map[string]any{"tools": map[string]any{}},
 			"serverInfo": map[string]any{"name": "agentd", "version": version},
-			"instructions": "Report progress on case " + srv.caseID + " with report_progress and ask for review, delivery or stop with request_step. " +
-				"Arguments are JSON data; evidence is a typed reference agentd checks, never prose."}, nil
+			"instructions": "Report progress on case " + srv.caseID + " with report_progress, ask the owner with raise_decision, and ask for review, delivery or stop with request_step. " +
+				"Arguments are JSON data; evidence is a typed reference agentd checks, never prose. The owner's answers arrive in " + AnswersFile + " in your workdir."}, nil
 	case "ping":
 		return map[string]any{}, nil
 	case "tools/list":
@@ -542,8 +548,8 @@ func (srv *MCPServer) handle(req rpcRequest) (any, *rpcError) {
 		}
 		// A tool the server does not have is a protocol error, answered
 		// and not logged: nothing reached the case.
-		if p.Name != ToolReportProgress && p.Name != ToolRequestStep {
-			return nil, &rpcError{rpcInvalidParams, fmt.Sprintf("no tool %q: report_progress or request_step", p.Name)}
+		if !contains(mcpTools, p.Name) {
+			return nil, &rpcError{rpcInvalidParams, fmt.Sprintf("no tool %q: report_progress, raise_decision or request_step", p.Name)}
 		}
 		reply, refused := srv.call(p.Name, p.Arguments)
 		return map[string]any{"content": []map[string]string{{"type": "text", "text": reply}}, "isError": refused}, nil
@@ -575,6 +581,15 @@ func (srv *MCPServer) call(tool string, args json.RawMessage) (string, bool) {
 		reply = map[string]any{"accepted": true, "case": srv.caseID, "drift": rec.Drift}
 		if len(rec.Drift) == 0 {
 			delete(reply, "drift")
+		}
+	} else if tool == ToolRaiseDecision {
+		var withheld bool
+		rec.Raised, withheld, problems = srv.checkRaise(args, st.Tracks[srv.name])
+		if rec.Raised != nil {
+			reply = map[string]any{"raised": true, "id": rec.Raised.ID, "case": srv.caseID, "answers": AnswersFile}
+			if withheld {
+				reply["withheld"] = "the decision's words match a confidential pattern; the owner sees its id and type only"
+			}
 		}
 	} else {
 		var facts string
@@ -632,15 +647,21 @@ func (srv *MCPServer) decodeArgs(args json.RawMessage, v any) []problem {
 type problem struct {
 	format string
 	args   []any
+	log    string // when set, what the log keeps instead of the wording
 }
 
-func problemOf(format string, args ...any) *problem { return &problem{format, args} }
+func problemOf(format string, args ...any) *problem { return &problem{format: format, args: args} }
 
 func (p problem) reply() string { return fmt.Sprintf(p.format, p.args...) }
 
 var formatVerb = regexp.MustCompile(`%[-+# 0-9.]*[a-zA-Z]`)
 
-func (p problem) logged() string { return formatVerb.ReplaceAllString(p.format, "…") }
+func (p problem) logged() string {
+	if p.log != "" {
+		return p.log
+	}
+	return formatVerb.ReplaceAllString(p.format, "…")
+}
 
 // Report limits.
 const (
@@ -680,7 +701,7 @@ func (srv *MCPServer) checkProgress(args json.RawMessage, c *Case, t *Track) (*C
 		return nil, nil, p
 	}
 	var problems []problem
-	bad := func(format string, v ...any) { problems = append(problems, problem{format, v}) }
+	bad := func(format string, v ...any) { problems = append(problems, problem{format: format, args: v}) }
 	text := func(field, s string, max int) {
 		if !utf8.ValidString(s) || utf8.RuneCountInString(s) > max {
 			bad("%s is over %d characters", field, max)
@@ -963,8 +984,24 @@ func toolList() []MCPTool {
 		`"goal_restatement":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"text":{"type":"string"}},"required":["id","text"],"additionalProperties":false}}},` +
 		`"required":["summary","items","next_action","acknowledged","goal_restatement"],"additionalProperties":false}`
 	step := `{"type":"object","properties":{"kind":{"enum":["review","delivery","stop"]}},"required":["kind"],"additionalProperties":false}`
+	limit := `{"type":["number","string"],"description":"a number, a date YYYY-MM-DD, or for choose_many a count of keys"}`
+	raise := `{"type":"object","properties":{` +
+		`"type":{"enum":["yes_no","choose_one","choose_many","number","date","text"],"description":"the narrowest that fits; text only when the answers cannot be listed"},` +
+		`"question":{"type":"string","description":"plain text, at most 500 characters"},` +
+		`"context":{"type":"string","description":"what is true today"},` +
+		`"why":{"type":"string","description":"why it came up"},` +
+		`"if_wrong":{"type":"string","description":"what breaks if the call is wrong, and whether that can be undone"},` +
+		`"recommendation":{"type":"string"},` +
+		`"options":{"type":"array","description":"for choose_one and choose_many, 2 to 9","items":{"type":"object","properties":{"key":{"type":"string","description":"a, b, c…"},"label":{"type":"string"},"consequence":{"type":"string"}},"required":["key","label","consequence"],"additionalProperties":false}},` +
+		`"limits":{"type":"object","properties":{"min":` + limit + `,"max":` + limit + `},"additionalProperties":false},` +
+		`"default":{"type":"string","description":"yes or no, a key, keys joined by commas, a number or a date; applied only if the owner sets a deadline"},` +
+		`"deadline":{"type":"string","description":"a suggested deadline, RFC 3339 or YYYY-MM-DD; the owner sets the one that applies"},` +
+		`"blocking":{"type":"boolean"},` +
+		`"supersedes":{"type":"string","description":"the open decision this replaces, after the owner answered it in their own words"}},` +
+		`"required":["type","question","context","why","if_wrong","recommendation","blocking"],"additionalProperties":false}`
 	return []MCPTool{
 		{Name: ToolReportProgress, Description: "Report progress on this session's case. Item ids and restriction ids are the case's; evidence is a typed reference agentd checks, never prose. Restate each done-when item in the issue's words.", InputSchema: json.RawMessage(report)},
+		{Name: ToolRaiseDecision, Description: "Ask the owner a decision, with its whole form. agentd gives it an id, D1 on; the answer arrives in answers.json as JSON of its type. An answer in the owner's own words (other) does not settle it: raise it again with options drawn from it, superseding it.", InputSchema: json.RawMessage(raise)},
 		{Name: ToolRequestStep, Description: "Ask for review, delivery or stop. A request is recorded, never evidence; agentd moves the case only on the facts.", InputSchema: json.RawMessage(step)},
 	}
 }

@@ -214,8 +214,16 @@ func (st *LogState) apply(e Event) {
 			t.Decisions = e.Decision.Decisions
 		}
 	case KindAnswer:
-		// The latest answer to a decision stands, to be delivered anew.
+		// The latest answer to a decision stands, to be delivered anew; a
+		// default never replaces an answer to the decision as it was
+		// asked, such as one the owner gave while the pass that applied
+		// it was under way.
+		if prev, ok := t.Answers[e.Answer.ID]; e.Answer.ByDefault && ok && prev.Asked == e.Answer.Asked {
+			break
+		}
 		t.Answers[e.Answer.ID] = AnswerRecord{AnswerPayload: *e.Answer, At: e.Time}
+	case KindDeadline:
+		t.Deadlines[e.Deadline.ID] = DeadlineRecord{DeadlinePayload: *e.Deadline, Set: e.Time}
 	case KindClear:
 		if b := e.Clear.Base; b != nil {
 			t.SpendBase = *b
