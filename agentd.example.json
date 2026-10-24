@@ -4,7 +4,8 @@
   "transcript_dir": "~/.claude/projects",
   "tracking": {
     "manifest": "~/tracking/manifest/repositories.json",
-    "snapshot": "~/tracking/data/snapshot.json"
+    "snapshot": "~/tracking/data/snapshot.json",
+    "mail": "~/tracking/data/mail-findings.json"
   },
   "confidential_patterns": ["(?i)embargoed", "(?i)customer:\\s*\\w+"],
   "timeouts": {

@@ -40,6 +40,9 @@ type Event struct {
 	Clear      *ClearPayload      `json:"clear,omitempty"`
 	Error      *ErrorPayload      `json:"error,omitempty"`
 	Warning    *WarningPayload    `json:"warning,omitempty"`
+	Item       *ItemPayload       `json:"item,omitempty"`
+	Seen       *SeenPayload       `json:"seen,omitempty"`
+	Cursor     *CursorPayload     `json:"cursor,omitempty"`
 }
 
 // Event kinds.
@@ -56,6 +59,9 @@ const (
 	KindClear      = "clear"      // the owner cleared a parked session (agentd clear)
 	KindError      = "error"      // observation or action failed
 	KindWarning    = "warning"    // agentd itself noticed something: a torn log line, an intent cut short
+	KindItem       = "item"       // something new the owner may want to know: an issue, a request, a discussion, mail
+	KindSeen       = "seen"       // the owner marked items seen
+	KindCursor     = "cursor"     // how far a source of items has been read
 )
 
 // Modes, in the mode every event carries. A run reads only the events of
@@ -63,7 +69,8 @@ const (
 const (
 	ModeLive   = "live"
 	ModeShadow = "shadow"
-	ModeOwner  = "owner" // an owner's record, such as mark-delivered, read by both
+	ModeOwner  = "owner"  // an owner's record, such as mark-delivered, read by both
+	ModeShared = "shared" // a fact about the world, not a run's, such as a new item, read by both
 )
 
 // Action names, in the Act payload of intent, action and would events.
@@ -246,7 +253,7 @@ func (e Event) check() error {
 	payloads := map[string]bool{
 		KindStart: e.Start != nil, KindStop: e.Stop != nil, KindObserve: e.Observe != nil, KindTransition: e.Transition != nil,
 		KindSkip: e.Skip != nil, KindCrash: e.Crash != nil, KindClear: e.Clear != nil, KindError: e.Error != nil, KindWarning: e.Warning != nil,
-		"act": e.Act != nil,
+		KindItem: e.Item != nil, KindSeen: e.Seen != nil, KindCursor: e.Cursor != nil, "act": e.Act != nil,
 	}
 	want := e.Kind
 	switch e.Kind {
@@ -261,8 +268,15 @@ func (e Event) check() error {
 			return fmt.Errorf("a %s event must carry its own payload and no other", e.Kind)
 		}
 	}
+	// Items and cursors are facts both modes read; the owner marks items seen.
+	switch {
+	case (e.Kind == KindItem || e.Kind == KindCursor) != (e.Mode == ModeShared):
+		return fmt.Errorf("a %s event must not carry mode %q", e.Kind, e.Mode)
+	case e.Kind == KindSeen && e.Mode != ModeOwner:
+		return fmt.Errorf("a seen event is the owner's, not %q", e.Mode)
+	}
 	switch e.Mode {
-	case ModeLive, ModeShadow, ModeOwner:
+	case ModeLive, ModeShadow, ModeOwner, ModeShared:
 	case "":
 		if e.Kind != KindWarning {
 			return fmt.Errorf("a %s event must carry its mode", e.Kind)
