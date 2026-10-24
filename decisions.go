@@ -180,7 +180,8 @@ func (srv *MCPServer) checkRaise(args json.RawMessage, t *Track) (*Decision, boo
 	}
 	open := 0
 	for _, o := range t.Raised {
-		if !t.waits(o) || o.ID == d.Supersedes {
+		// agentd's own CI decisions do not count against the session's.
+		if !t.waits(o) || o.ID == d.Supersedes || ciRaisedID.MatchString(o.ID) {
 			continue
 		}
 		open++
@@ -191,7 +192,7 @@ func (srv *MCPServer) checkRaise(args json.RawMessage, t *Track) (*Decision, boo
 	if d.Supersedes != "" {
 		found := false
 		for _, o := range t.Raised {
-			found = found || o.ID == d.Supersedes && t.waits(o)
+			found = found || o.ID == d.Supersedes && t.waits(o) && !ciRaisedID.MatchString(o.ID)
 		}
 		if !found {
 			return nil, false, []problem{{format: "supersedes %q: not a decision this session raised that still waits on the owner", args: []any{cutUTF8(d.Supersedes, 40)}}}

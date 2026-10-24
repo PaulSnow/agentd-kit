@@ -53,6 +53,7 @@ type Event struct {
 	Case        *CasePayload        `json:"case,omitempty"`
 	Turn        *TurnPayload        `json:"turn,omitempty"`
 	Coordinator *CoordinatorPayload `json:"coordinator,omitempty"`
+	CI          *CIPayload          `json:"ci,omitempty"`
 }
 
 // Event kinds.
@@ -82,6 +83,7 @@ const (
 	KindCase        = "case"        // a fact about a case: the pack a session was handed, its report, or the owner's ruling
 	KindTurn        = "turn"        // a prompt or end-of-turn summary read from a session's transcript
 	KindCoordinator = "coordinator" // a session claimed a repository's coordinator, or the owner released it
+	KindCI          = "ci"          // a delivered request's pipeline changed state
 )
 
 // Modes, in the mode every event carries. A run reads only the events of
@@ -110,6 +112,8 @@ const (
 	ActStop     = "stop"   // the budget or the stop time was reached
 	ActAnswer   = "answer" // the owner's answers written to answers.json and the pointer typed
 	ActWake     = "wake"   // a coordinator's pack written and its pointer typed: a judgment is due
+	ActCIFix    = "ci-fix" // a session relaunched to fix its request's own CI failure
+	ActRaise    = "raise"  // agentd raised a decision for the owner on a session: a CI failure it will not fix again
 )
 
 // StartPayload is a run's start: the sessions it supervises.
@@ -213,6 +217,12 @@ type ActPayload struct {
 	Ref        string `json:"ref,omitempty"`
 	URL        string `json:"url,omitempty"`
 
+	// A CI fix or the decision a repeated failure raised: the failure's
+	// cause, the decision whose retry a fix took, and the decision raised.
+	Cause    string    `json:"cause,omitempty"`
+	Decision string    `json:"decision,omitempty"`
+	Raised   *Decision `json:"raised,omitempty"`
+
 	// A gate run.
 	Gate []string `json:"gate,omitempty"`
 	// Reachable are the credential paths under the real HOME a gate could
@@ -312,7 +322,7 @@ func (e Event) check() error {
 		KindSkip: e.Skip != nil, KindCrash: e.Crash != nil, KindClear: e.Clear != nil, KindError: e.Error != nil, KindWarning: e.Warning != nil,
 		KindItem: e.Item != nil, KindSeen: e.Seen != nil, KindCursor: e.Cursor != nil, KindUsage: e.Usage != nil,
 		KindCheckpoint: e.Checkpoint != nil, KindPoll: e.Poll != nil, KindTriage: e.Triage != nil, KindDecision: e.Decision != nil,
-		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, "act": e.Act != nil,
+		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, "act": e.Act != nil,
 	}
 	want := e.Kind
 	switch e.Kind {
@@ -345,6 +355,8 @@ func (e Event) check() error {
 		return errors.New("a turn event is a run's, for one session, and a prompt or a summary")
 	case e.Kind == KindCoordinator && (e.Coordinator.Repository == "" || !(e.Mode == ModeShared && e.Session != "" || e.Mode == ModeOwner && e.Session == "")):
 		return errors.New("a coordinator claim is a shared fact of one session; a release is the owner's, for no session")
+	case e.Kind == KindCI && (e.Mode == ModeOwner || e.Mode == ModeShared || e.Session == "" || e.CI.Repository == "" || e.CI.Ref == ""):
+		return errors.New("a ci event is a run's, for the session that delivered the request, and names its repository and request")
 	case e.Kind == KindCase:
 		if err := e.Case.check(); err != nil {
 			return err

@@ -70,11 +70,19 @@ func (f *fakeForgeAPI) GitLab(path string) (APIResponse, error) {
 			match = key
 		}
 	}
+	if match != "" && f.gitlab[match] == fakeNotFound {
+		return APIResponse{Status: http.StatusNotFound, Body: []byte(`{"message":"404 Not found"}`)}, nil
+	}
 	if match != "" {
 		return APIResponse{Status: http.StatusOK, Body: []byte(f.gitlab[match])}, nil
 	}
 	return APIResponse{Status: http.StatusOK, Body: []byte("[]")}, nil
 }
+
+func (f *fakeForgeAPI) At(string) ForgeAPI { return f }
+
+// fakeNotFound, as a GitLab path's body, makes the fake answer 404.
+const fakeNotFound = "<404>"
 
 func (f *fakeForgeAPI) set(fn func()) {
 	f.mu.Lock()

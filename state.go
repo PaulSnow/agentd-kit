@@ -108,6 +108,11 @@ type Track struct {
 	WakeCount int
 	WakeBase  *int64
 	Woken     map[string]bool // the due keys the wakes within the margin covered
+	// CI: the fix sessions started for the requests the session delivered,
+	// oldest first, and the decisions raised on a repeated failure, by
+	// request and cause.
+	CIFixes  []CIFixRecord
+	CIRaised map[string]string
 }
 
 // DeliveryRecord is one request a delivery opened, found, or was told of.
@@ -206,7 +211,7 @@ func (t *Track) clear() {
 func newTrack() *Track {
 	return &Track{Posted: map[string]bool{}, Delivered: map[string]string{}, Skipped: map[string]bool{}, Failures: map[string][]time.Time{},
 		Blocked: map[string]string{}, Filtered: map[string]bool{}, Usage: map[string]UsagePayload{},
-		Answers: map[string]AnswerRecord{}, Deadlines: map[string]DeadlineRecord{}}
+		Answers: map[string]AnswerRecord{}, Deadlines: map[string]DeadlineRecord{}, CIRaised: map[string]string{}}
 }
 
 // restartsInWindow counts restarts inside the backoff window.

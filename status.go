@@ -70,6 +70,17 @@ func SummarizeState(cfg *Config, st *LogState) ([]SessionStatus, map[string]any)
 		meta["polls"] = polls
 		meta["poll_stale"] = pollHeartbeat + 2*cfg.Poll.Every.Duration
 	}
+	if cfg.Poll.CI && len(st.CI) > 0 {
+		// A record of a head before the one a fix delivered is unknown.
+		ci := make(map[string]CIRecord, len(st.CI))
+		for k, c := range st.CI {
+			if t := st.Tracks[c.Session]; t != nil && c.State != CIMerged && c.State != CIClosed && t.ciStale(c) {
+				c.State, c.Error = CIUnknown, "waiting for the head a fix delivered"
+			}
+			ci[k] = c
+		}
+		meta["ci"] = ci
+	}
 	tracks := copyMap(st.Tracks)
 	for _, n := range cfg.SessionNames() {
 		if tracks[n] == nil {
@@ -134,6 +145,29 @@ func PrintStatus(w io.Writer, rows []SessionStatus, meta map[string]any, now tim
 			line += ", stopped " + st.Local().Format("2006-01-02 15:04")
 		}
 		fmt.Fprintf(w, "%s; %d events\n", line, meta["events"])
+	}
+	// A request's CI as the watcher last saw it; once agentd has stopped,
+	// no one is watching, so it is unknown.
+	if ci, ok := meta["ci"].(map[string]CIRecord); ok {
+		stopped, _ := meta["stopped"].(time.Time)
+		keys := make([]string, 0, len(ci))
+		for k := range ci {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			c := ci[k]
+			line := fmt.Sprintf("ci %s %s (%s): %s", c.Repository, c.Ref, c.Session, c.State)
+			switch {
+			case !stopped.IsZero() && c.State != CIMerged && c.State != CIClosed:
+				line = fmt.Sprintf("ci %s %s (%s): unknown, agentd stopped %s ago; last %s", c.Repository, c.Ref, c.Session, ago(now, stopped), c.State)
+			case c.State == CIUnknown:
+				line += ": " + c.Error
+			case c.State == CIFailed:
+				line += fmt.Sprintf(" (%s: %s)", c.Verdict, strings.Join(c.Jobs, ", "))
+			}
+			fmt.Fprintf(w, "%s, since %s ago\n", line, ago(now, c.At))
+		}
 	}
 	// A quiet poll makes no event, but a source still polled has a record
 	// at least every pollHeartbeat: an older one means no one is polling

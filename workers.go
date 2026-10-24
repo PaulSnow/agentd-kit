@@ -171,6 +171,8 @@ func (t *Track) clone() *Track {
 	c.TurnLines = copyMap(t.TurnLines)
 	c.Wakes = append([]WakeRecord(nil), t.Wakes...) // a wake's spend is never changed in place
 	c.Woken = copyMap(t.Woken)
+	c.CIFixes = append([]CIFixRecord(nil), t.CIFixes...)
+	c.CIRaised = copyMap(t.CIRaised)
 	if t.WakeBase != nil {
 		b := *t.WakeBase
 		c.WakeBase = &b

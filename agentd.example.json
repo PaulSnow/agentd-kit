@@ -23,7 +23,9 @@
   "poll": {
     "every": "15m",
     "github": false,
-    "gitlab": false
+    "gitlab": false,
+    "ci": false,
+    "ci_every": "5m"
   },
   "jobs": {
     "triage": false,

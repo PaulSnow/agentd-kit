@@ -57,6 +57,10 @@ type PollConfig struct {
 	Every  Duration `json:"every"`
 	GitHub bool     `json:"github"`
 	GitLab bool     `json:"gitlab"`
+	// CI turns on the CI watcher (#25): each delivered request's pipeline
+	// is asked about every CIEvery.
+	CI      bool     `json:"ci"`
+	CIEvery Duration `json:"ci_every"`
 }
 
 // PollPayload is a poll of a source that changed something: it found
@@ -87,17 +91,28 @@ type APIResponse struct {
 }
 
 // ForgeAPI makes read-only forge API calls through the forge CLIs' own
-// logins: agentd holds no credentials of its own.
+// logins: agentd holds no credentials of its own. At is the same API on
+// a repository's host, "" for the CLI's own.
 type ForgeAPI interface {
 	GitHub(path string, header map[string]string) (APIResponse, error)
 	GitLab(path string) (APIResponse, error)
+	At(host string) ForgeAPI
 }
 
-// ExecForgeAPI calls gh api and glab api, each bounded by Timeout.
-type ExecForgeAPI struct{ Timeout time.Duration }
+// ExecForgeAPI calls gh api and glab api, each bounded by Timeout, on Host
+// when it is set.
+type ExecForgeAPI struct {
+	Timeout time.Duration
+	Host    string
+}
+
+func (a ExecForgeAPI) At(host string) ForgeAPI { a.Host = host; return a }
 
 func (a ExecForgeAPI) GitHub(path string, header map[string]string) (APIResponse, error) {
 	args := []string{"api", "--include", "--method", "GET", path}
+	if a.Host != "" {
+		args = append(args, "--hostname", a.Host)
+	}
 	for k, v := range header {
 		args = append(args, "-H", k+": "+v)
 	}
@@ -106,7 +121,11 @@ func (a ExecForgeAPI) GitHub(path string, header map[string]string) (APIResponse
 }
 
 func (a ExecForgeAPI) GitLab(path string) (APIResponse, error) {
-	out, err := runTimed(a.Timeout, "", nil, false, "glab", "api", "--include", path)
+	args := []string{"api", "--include", path}
+	if a.Host != "" {
+		args = append(args, "--hostname", a.Host)
+	}
+	out, err := runTimed(a.Timeout, "", nil, false, "glab", args...)
 	return included("glab api "+path, out, err)
 }
 
