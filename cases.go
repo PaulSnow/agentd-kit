@@ -157,6 +157,17 @@ func (st *LogState) applyCase(e Event) {
 	case p.Pack != nil:
 		c.Pack, c.PackAt = *p.Pack, e.Time
 		c.Packs++
+		// A launch is a fresh context: what the session acknowledged
+		// before, it has not seen, and acknowledges again.
+		if _, ok := c.Acked[e.Session]; ok {
+			acked := make(map[string][]string, len(c.Acked))
+			for k, v := range c.Acked {
+				if k != e.Session {
+					acked[k] = v
+				}
+			}
+			c.Acked = acked
+		}
 	case p.Report != nil:
 		c.Report, c.ReportAt = *p.Report, e.Time
 		reports := make(map[string]string, len(c.Reports)+1)

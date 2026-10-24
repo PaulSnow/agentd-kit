@@ -509,9 +509,9 @@ type restartFacts struct {
 	// With the case's server passed at launch: the tools to report
 	// through, the done-when items they name, and the rulings the first
 	// report must acknowledge.
-	Tools       []string   `json:"tools,omitempty"`
-	Items       []GoalItem `json:"items,omitempty"`
-	Acknowledge []string   `json:"acknowledge,omitempty"`
+	Tools       []string     `json:"tools,omitempty"`
+	Items       []GoalItem   `json:"items,omitempty"`
+	Acknowledge []FactRuling `json:"acknowledge,omitempty"`
 }
 
 // restartPrompt is the fresh session's prompt: the fixed instruction, then
@@ -537,7 +537,7 @@ func (s *Supervisor) packFacts(name string, sess Session, t *Track, why string) 
 		f.LastMerge = cutUTF8(shortHash(cp.SHA)+" "+cp.Subject, progressCell)
 	}
 	if id := s.cfg.caseOf(sess); id != "" && s.passesMCP() {
-		f.Tools, f.Items, f.Acknowledge = mcpFacts(s.st, id, name)
+		f.Tools, f.Items, f.Acknowledge = mcpFacts(s.st, id)
 	}
 	var b strings.Builder
 	enc := json.NewEncoder(&b)

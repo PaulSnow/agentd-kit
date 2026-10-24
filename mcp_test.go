@@ -443,7 +443,7 @@ func TestFactsPackNamesTheTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(f.Tools, []string{"report_progress", "request_step"}) || len(f.Items) != 2 || f.Items[0].ID != "A1" ||
-		!reflect.DeepEqual(f.Acknowledge, []string{"R1"}) {
+		!reflect.DeepEqual(f.Acknowledge, []FactRuling{{ID: "R1", Kind: RulingRestriction, Text: "Do not touch the gears."}}) {
 		t.Fatalf("facts %s", facts)
 	}
 	var mcp struct {
@@ -527,6 +527,11 @@ func TestMCPOversizedMessage(t *testing.T) {
 	if len(rs) != 2 || rs[0].Error == nil || rs[0].Error.Code != -32700 || rs[1].Error != nil || string(rs[1].ID) != "2" {
 		t.Fatalf("replies %+v", rs)
 	}
+	head, tail := `{"jsonrpc":"2.0","id":3,"method":"ping","params":{"pad":"`, `"}}`
+	exact := head + strings.Repeat("x", mcpMaxLine-len(head)-len(tail)) + tail
+	if rs := session(t, h.mcpServerFor("s1"), exact); len(rs) != 1 || rs[0].Error != nil {
+		t.Fatalf("a message of exactly the limit: %+v", rs)
+	}
 }
 
 // A refusal tells the session what it sent; the log keeps only the
@@ -550,8 +555,9 @@ func TestRefusalLogsNoArguments(t *testing.T) {
 }
 
 // A call the session's server logged while agentd runs is folded into the
-// running state as replay folds it: the next fresh session is not asked to
-// acknowledge again.
+// running state as replay folds it. A fresh launch is a fresh context: its
+// facts give the rulings' text, and its first report acknowledges them
+// again.
 func TestRunningAgentdFoldsCalls(t *testing.T) {
 	h, head := mcpHarness(t)
 	restrict(t, h, "Do not touch the gears.")
@@ -564,9 +570,18 @@ func TestRunningAgentdFoldsCalls(t *testing.T) {
 	if c := h.sup.st.Cases[widgetsCase]; c == nil || c.Progress == nil || !reflect.DeepEqual(c.Acked["s1"], []string{"R1"}) {
 		t.Fatalf("running case %+v", c)
 	}
+	r := validReport(head)
+	r["acknowledged"] = []any{}
+	if text, refused := callOne(t, h.mcpServerFor("s1"), "report_progress", r); refused {
+		t.Fatalf("the same context asked again: %s", text)
+	}
 	_, facts := h.sup.launchCommand("s1", h.cfg.Sessions["s1"], h.sup.Tracks()["s1"], "id-2", "restart")
-	if strings.Contains(string(facts), `"acknowledge"`) {
-		t.Fatalf("facts ask again: %s", facts)
+	if !strings.Contains(string(facts), `"acknowledge":[{"id":"R1","kind":"restriction","text":"Do not touch the gears."}]`) {
+		t.Fatalf("facts %s", facts)
+	}
+	h.sup.notePack("s1", h.cfg.Sessions["s1"], facts)
+	if text, refused := callOne(t, h.mcpServerFor("s1"), "report_progress", r); !refused || !strings.Contains(text, "R1") {
+		t.Fatalf("a fresh launch's report without the acknowledgement: %s", text)
 	}
 }
 
@@ -600,5 +615,30 @@ func TestDoneWhenNestedAndBold(t *testing.T) {
 	got = DoneWhen("**Done when**\n- a\n\n**Notes**\n- not an item\n")
 	if !reflect.DeepEqual(got, []string{"a"}) {
 		t.Fatalf("bold %q", got)
+	}
+}
+
+// An evidence reference carries only its kind's fields; a top-level list
+// indented a little is still a list of items; a call sent as a
+// notification is not acted on; two short items sharing a word are not
+// alike.
+func TestReview2Edges(t *testing.T) {
+	h, head := mcpHarness(t)
+	r := validReport(head)
+	r["acknowledged"] = []any{}
+	r["items"] = []any{map[string]any{"id": "A1", "status": "met", "evidence": []any{map[string]any{"kind": "commit", "sha": head, "path": "anything at all"}}}}
+	if text, refused := callOne(t, h.mcpServerFor("s1"), "report_progress", r); !refused || !strings.Contains(text, "only its own fields") {
+		t.Fatalf("extra fields: %s", text)
+	}
+	if got := DoneWhen("## Done when\n  - a\n  - b\n"); !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Fatalf("indented list %q", got)
+	}
+	before := len(h.events())
+	b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "tools/call", "params": map[string]any{"name": "request_step", "arguments": map[string]any{"kind": "review"}}})
+	if rs := session(t, h.mcpServerFor("s1"), string(b)); len(rs) != 0 || len(h.events()) != before {
+		t.Fatalf("a call as a notification: replies %+v, events %d to %d", rs, before, len(h.events()))
+	}
+	if _, ok := alike("tests pass", "docs pass"); ok {
+		t.Fatal("tests pass and docs pass are alike")
 	}
 }

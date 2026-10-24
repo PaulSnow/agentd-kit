@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -238,6 +239,7 @@ var boldHeading = regexp.MustCompile(`^\s*\*\*[^*]+\*\*\s*:?\s*$`)
 func DoneWhen(body string) []string {
 	var items []string
 	in := false
+	indent := -1 // the first item's indent: a deeper item is nested
 	for _, line := range strings.Split(body, "\n") {
 		if doneWhenHeading.MatchString(line) {
 			in, items = true, nil
@@ -249,10 +251,13 @@ func DoneWhen(body string) []string {
 		if anyHeading.MatchString(line) || boldHeading.MatchString(line) {
 			break
 		}
-		indented := line != strings.TrimLeft(line, " \t")
-		if m := listItem.FindStringSubmatch(line); m != nil && !(indented && len(items) > 0) {
+		depth := len(line) - len(strings.TrimLeft(line, " \t"))
+		if m := listItem.FindStringSubmatch(line); m != nil && (indent < 0 || depth <= indent) {
+			if indent < 0 {
+				indent = depth
+			}
 			items = append(items, strings.TrimSpace(m[3]))
-		} else if t := strings.TrimSpace(line); t != "" && len(items) > 0 && indented {
+		} else if t := strings.TrimSpace(line); t != "" && len(items) > 0 && depth > indent {
 			items[len(items)-1] += " " + t
 		}
 	}
@@ -316,38 +321,48 @@ func RecordGoal(log *Log, cfg *Config, st *LogState, now time.Time, id, body str
 		kept = append(kept, found)
 	}
 	// What the list no longer has is superseded by the new item most like
-	// it, each new item taking at most one, or else removed.
-	var fresh []GoalItem
-	for _, it := range goal {
-		if contains(kept, it.ID) && !hasGoal(old, it.ID) {
-			fresh = append(fresh, it)
-		}
+	// it, the closest pairs first and each item in one pair at most, or
+	// else removed.
+	type pair struct {
+		old, fresh int
+		score      float64
 	}
-	for i := range goal {
-		if it := goal[i]; it.SupersededBy == "" && !contains(kept, it.ID) {
-			goal[i].SupersededBy = "removed"
-			best, score := -1, 0.5
-			for j, f := range fresh {
-				if s := wordOverlap(it.Text, f.Text); s >= score {
-					best, score = j, s
+	var pairs []pair
+	for i, it := range goal {
+		if it.SupersededBy != "" || contains(kept, it.ID) {
+			continue
+		}
+		goal[i].SupersededBy = "removed"
+		for j, f := range goal {
+			if contains(kept, f.ID) && !hasGoal(old, f.ID) {
+				if score, ok := alike(it.Text, f.Text); ok {
+					pairs = append(pairs, pair{i, j, score})
 				}
 			}
-			if best >= 0 {
-				goal[i].SupersededBy = fresh[best].ID
-				fresh = append(fresh[:best:best], fresh[best+1:]...)
-			}
+		}
+	}
+	sort.SliceStable(pairs, func(a, b int) bool { return pairs[a].score > pairs[b].score })
+	taken := map[int]bool{}
+	for _, p := range pairs {
+		if goal[p.old].SupersededBy == "removed" && !taken[p.fresh] {
+			goal[p.old].SupersededBy, taken[p.fresh] = goal[p.fresh].ID, true
 		}
 	}
 	return log.Append(Event{V: EventVersion, Time: now, Kind: KindCase, Mode: ModeOwner, Case: &CasePayload{Case: id, Goal: &CaseGoal{Items: goal}}})
 }
 
-// wordOverlap is the share of the longer text's words the two have in
-// common, case and punctuation aside.
-func wordOverlap(a, b string) float64 {
+// stopWords do not count toward two items being alike.
+var stopWords = map[string]bool{"a": true, "an": true, "the": true, "and": true, "or": true, "of": true, "to": true, "in": true,
+	"on": true, "is": true, "are": true, "be": true, "it": true, "its": true, "with": true, "for": true, "when": true, "that": true}
+
+// alike says whether an edited item's text b is a's: they share at least
+// two words that are not stop words, more than half of the longer one's.
+// The score is that share.
+func alike(a, b string) (float64, bool) {
 	words := func(s string) map[string]bool {
 		m := map[string]bool{}
 		for _, w := range strings.Fields(strings.ToLower(s)) {
-			if w = strings.Trim(w, ".,;:!?`*()[]\"'"); w != "" {
+			if w = strings.Trim(w, ".,;:!?`*()[]\"'"); w != "" && !stopWords[w] {
 				m[w] = true
 			}
 		}
@@ -360,10 +375,8 @@ func wordOverlap(a, b string) float64 {
 			n++
 		}
 	}
-	if d := max(len(wa), len(wb)); d > 0 {
-		return float64(n) / float64(d)
-	}
-	return 0
+	score := float64(n) / float64(max(len(wa), len(wb), 1))
+	return score, n >= 2 && score > 0.5
 }
 
 func hasGoal(goal []GoalItem, id string) bool {
@@ -464,7 +477,8 @@ func (srv *MCPServer) Serve(r io.Reader, w io.Writer) error {
 				if werr := unreadable(); werr != nil {
 					return werr
 				}
-			} else if result, rerr := srv.handle(req); len(req.ID) > 0 { // a notification has no reply
+			} else if len(req.ID) > 0 { // a notification is not acted on, nor answered
+				result, rerr := srv.handle(req)
 				reply := map[string]any{"jsonrpc": "2.0", "id": req.ID}
 				if rerr != nil {
 					reply["error"] = rerr
@@ -489,7 +503,7 @@ func readLine(br *bufio.Reader, max int) (line []byte, long bool, err error) {
 		chunk, err := br.ReadSlice('\n')
 		if !long {
 			line = append(line, chunk...)
-			if len(line) > max {
+			if n := len(line); n > max+1 || n == max+1 && line[max] != '\n' {
 				line, long = nil, true
 			}
 		}
@@ -630,13 +644,14 @@ func (p problem) logged() string { return formatVerb.ReplaceAllString(p.format, 
 
 // Report limits.
 const (
-	maxSummary    = 600
-	maxSentences  = 3
-	maxApproach   = 1000
-	maxNextAction = 300
-	maxRisk       = 300
-	maxRisks      = 10
-	maxEvidence   = 10
+	maxSummary      = 600
+	maxSentences    = 3
+	maxApproach     = 1000
+	maxNextAction   = 300
+	maxRisk         = 300
+	maxRisks        = 10
+	maxEvidence     = 10
+	maxEvidencePath = 300
 )
 
 var sentenceEnd = regexp.MustCompile(`[.!?](\s|$)`)
@@ -812,6 +827,21 @@ func (srv *MCPServer) checkEvidence(raw json.RawMessage, t *Track) (EvidenceRef,
 	if err := dec.Decode(&ref); err != nil {
 		return ref, problemOf("evidence is not a typed reference: %s", strings.TrimPrefix(err.Error(), "json: "))
 	}
+	// A reference carries only its kind's fields, so no other text rides
+	// along into the log.
+	extra := map[string]bool{
+		EvidenceCommit:  ref.Path != "" || ref.Line != 0 || ref.Job != "" || ref.ID != "",
+		EvidenceGate:    ref.Path != "" || ref.Line != 0 || ref.Job != "" || ref.ID != "",
+		EvidenceFile:    ref.SHA != "" || ref.Job != "" || ref.ID != "",
+		EvidenceCI:      ref.Path != "" || ref.Line != 0 || ref.ID != "",
+		EvidenceFinding: ref.SHA != "" || ref.Path != "" || ref.Line != 0 || ref.Job != "",
+	}
+	if extra[ref.Kind] {
+		return ref, problemOf("%s evidence takes only its own fields: commit and gate a sha, file a path and line, ci a sha and job, finding an id", ref.Kind)
+	}
+	if utf8.RuneCountInString(ref.Path) > maxEvidencePath {
+		return ref, problemOf("file evidence's path is over %d characters", maxEvidencePath)
+	}
 	wt := srv.sess.Cwd
 	switch ref.Kind {
 	case EvidenceCommit, EvidenceGate, EvidenceCI:
@@ -958,15 +988,29 @@ func mcpLaunchConfig(cfg *Config, name string, sess Session) string {
 	return compact(map[string]any{"mcpServers": map[string]any{"agentd": map[string]any{"type": "stdio", "command": exe, "args": args}}})
 }
 
+// FactRuling is an active restriction or waiver as a fresh session's
+// facts give it, to acknowledge in its first report.
+type FactRuling struct {
+	ID   string `json:"id"`
+	Kind string `json:"kind"`
+	Text string `json:"text"`
+}
+
 // mcpFacts is what a fresh session's facts say of its case, when its
 // launch passes the server: the tools, the current done-when items and
-// the rulings it has yet to acknowledge.
-func mcpFacts(st *LogState, id, name string) ([]string, []GoalItem, []string) {
+// every active ruling, each of which the launch's first report
+// acknowledges, since the launch's pack clears what an earlier context
+// acknowledged.
+func mcpFacts(st *LogState, id string) ([]string, []GoalItem, []FactRuling) {
 	c := st.Cases[id]
 	if c == nil {
 		return mcpTools, nil, nil
 	}
-	return mcpTools, current(c.Goal), c.unacknowledged(name)
+	var rs []FactRuling
+	for _, r := range c.Active {
+		rs = append(rs, FactRuling{ID: r.ID, Kind: r.Kind, Text: r.Text})
+	}
+	return mcpTools, current(c.Goal), rs
 }
 
 // mcpCmd is agentd mcp --session NAME: the session's server on stdio.
