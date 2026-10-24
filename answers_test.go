@@ -150,7 +150,7 @@ func TestDecisionsFile(t *testing.T) {
 	before := h.sup.Tracks()["s1"]
 	h.restart(false)
 	after := h.sup.Tracks()["s1"]
-	if len(after.Decisions) != 1 || after.Decisions[0].ID != "D1" || !after.settled("D1") || !after.Answers["D1"].Delivered ||
+	if len(after.Decisions) != 1 || after.Decisions[0].ID != "D1" || after.waits(after.Decisions[0]) || !after.Answers["D1"].Delivered ||
 		after.DecisionsHash != before.DecisionsHash {
 		t.Fatalf("replay: %+v", after)
 	}
@@ -204,7 +204,7 @@ func TestDeadBlockedSessionRestartsWithAnswers(t *testing.T) {
 		}
 	}
 	file := filepath.Join(h.dir, "s1", AnswersFile)
-	if !strings.Contains(cmd, `"why":"answered"`) || !strings.Contains(cmd, file) {
+	if !strings.Contains(cmd, `"why":"answered"`) || !strings.Contains(cmd, file) || !strings.Contains(cmd, h.cfg.Policies.Answers.Pointer) {
 		t.Fatalf("restart command %q", cmd)
 	}
 	if doc, ok := readAnswers(t, h, "s1"); !ok || doc.Answers[0].Text != "Use version 3." {
@@ -293,5 +293,103 @@ func TestAnswersPointerIsChecked(t *testing.T) {
 		if err := cfg.finish(t.TempDir()); err == nil || !strings.Contains(err.Error(), "answers.pointer") {
 			t.Errorf("pointer %q: %v", p, err)
 		}
+	}
+}
+
+// A dead session answered in the owner's own words is restarted with the
+// answer, and waits on the owner again once it is delivered. A later
+// restart's facts still name answers.json.
+func TestDeadSessionAnsweredOtherIsRestarted(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.status("s1", working)
+	writeQuestions(t, h, "s1", chooseColour)
+	h.ticks(2, 5*time.Minute)
+	if h.state("s1") != BlockedOnOwner || h.tmux.count("new-session", "s1") != 0 {
+		t.Fatalf("state %s", h.state("s1"))
+	}
+	if err := answerAs(h, "s1", AnswerPayload{ID: "D1", Other: "Ask the widgets team."}); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(1, 5*time.Minute)
+	if n := h.tmux.count("new-session", "s1"); n != 1 {
+		t.Fatalf("%d starts, want 1", n)
+	}
+	if doc, ok := readAnswers(t, h, "s1"); !ok || doc.Answers[0].Other != "Ask the widgets team." {
+		t.Fatalf("answers.json %+v", doc)
+	}
+	h.alive("s1", "waiting")
+	h.ticks(2, 5*time.Minute)
+	if h.state("s1") != BlockedOnOwner {
+		t.Fatalf("after the delivery: state %s", h.state("s1"))
+	}
+	tr := h.sup.Tracks()["s1"]
+	if p := h.sup.restartPrompt(h.cfg.Sessions["s1"], tr, "restart"); !strings.Contains(p, `"answers":`) || strings.Contains(p, h.cfg.Policies.Answers.Pointer) {
+		t.Fatalf("a later restart's prompt %q", p)
+	}
+}
+
+// An answer is to the decision as it was raised: a reworded question, or
+// an id raised again for another, waits for the owner again.
+func TestAnswerToAChangedQuestionWaits(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.alive("s1", "waiting")
+	h.status("s1", working)
+	writeQuestions(t, h, "s1", chooseColour)
+	h.ticks(2, 5*time.Minute)
+	if err := answerAs(h, "s1", AnswerPayload{ID: "D1", Choice: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(2, 5*time.Minute)
+	if h.state("s1") == BlockedOnOwner {
+		t.Fatal("still blocked after the answer")
+	}
+	writeQuestions(t, h, "s1", strings.Replace(chooseColour, "Which colour should the widget be?", "Which colour should the gadget be?", 1))
+	h.ticks(2, 5*time.Minute)
+	if h.state("s1") != BlockedOnOwner {
+		t.Fatalf("reworded question: state %s", h.state("s1"))
+	}
+	if _, ok := h.sup.Tracks()["s1"].answer("D1"); ok {
+		t.Fatal("the old answer fits the reworded question")
+	}
+}
+
+// Delivering marks the answers it delivered only: an answer given between
+// the delivery's intent and its action is delivered again after a replay.
+func TestLaterAnswerIsNotTakenAsDelivered(t *testing.T) {
+	cfg := DefaultConfig()
+	st := NewLogState(&cfg, ModeLive)
+	t0 := pageAt
+	t1 := t0.Add(time.Minute)
+	d := Decision{ID: "D1", Type: DecisionText, Question: "q", Blocking: true}
+	for _, e := range []Event{
+		{V: EventVersion, Time: t0, Kind: KindDecision, Mode: ModeLive, Session: "s1", Decision: &DecisionPayload{Hash: "h", Decisions: []Decision{d}}},
+		{V: EventVersion, Time: t0, Kind: KindAnswer, Mode: ModeOwner, Session: "s1", Answer: &AnswerPayload{ID: "D1", Text: "first", Asked: decisionHash(d)}},
+		{V: EventVersion, Time: t1, Kind: KindAnswer, Mode: ModeOwner, Session: "s1", Answer: &AnswerPayload{ID: "D1", Text: "second", Asked: decisionHash(d)}},
+		{V: EventVersion, Time: t1, Kind: KindAction, Mode: ModeLive, Session: "s1", Act: &ActPayload{Action: ActAnswer, Answers: []string{"D1"}, AnswersAt: []time.Time{t0}}},
+	} {
+		st.apply(e)
+	}
+	if r := st.Tracks["s1"].Answers["D1"]; r.Text != "second" || r.Delivered {
+		t.Fatalf("the later answer is %+v", r)
+	}
+}
+
+// What a session raises is screened before it is logged: a decision whose
+// words match a confidential pattern is logged by id, type and option keys
+// only.
+func TestDecisionsAreScreened(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.cfg.ConfidentialPatterns = []string{"(?i)style guide"}
+	h.restart(false)
+	h.alive("s1", "waiting")
+	h.status("s1", working)
+	writeQuestions(t, h, "s1", chooseColour)
+	h.ticks(2, 5*time.Minute)
+	if strings.Contains(h.buf.String(), "style guide") || strings.Contains(h.buf.String(), "Which colour") {
+		t.Fatalf("the log holds the decision's words:\n%s", h.buf.String())
+	}
+	ds := h.sup.Tracks()["s1"].Decisions
+	if len(ds) != 1 || !ds[0].Withheld || len(ds[0].Options) != 2 || ds[0].Options[1].Key != "b" || h.state("s1") != BlockedOnOwner {
+		t.Fatalf("decisions %+v, state %s", ds, h.state("s1"))
 	}
 }

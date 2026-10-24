@@ -508,7 +508,9 @@ type restartFacts struct {
 // the facts agentd recorded, from the progress file and the last merge.
 func (s *Supervisor) restartPrompt(sess Session, t *Track, why string) string {
 	f := restartFacts{Why: why, Brief: sess.Workdir + "/BRIEF.md", Progress: sess.Workdir + "/STATUS.md"}
-	if why == "answered" {
+	// Answers the owner gave stay in the file and are named in every
+	// fresh session's facts, since the context that read them is gone.
+	if len(t.answersFor(false)) > 0 {
 		f.Answers = sess.Workdir + "/" + AnswersFile
 	}
 	if b, err := os.ReadFile(f.Progress); err == nil {
@@ -522,7 +524,11 @@ func (s *Supervisor) restartPrompt(sess Session, t *Track, why string) string {
 	enc := json.NewEncoder(&b)
 	enc.SetEscapeHTML(false)
 	enc.Encode(f)
-	return DefaultRestartPrompt + " " + strings.TrimSuffix(b.String(), "\n")
+	prompt := DefaultRestartPrompt + " "
+	if why == "answered" {
+		prompt += s.cfg.Policies.Answers.Pointer + " "
+	}
+	return prompt + strings.TrimSuffix(b.String(), "\n")
 }
 
 // launchCommand is the restart policy's command for a fresh session, with

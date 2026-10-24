@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -555,7 +556,9 @@ func TestPageAnswers(t *testing.T) {
 // when it fits an open decision.
 func TestPageStateDecisions(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.Sessions = map[string]Session{"s1": {Workdir: "/nonexistent/s1", Repository: "gitlab/example-org/widgets"}}
+	dir := t.TempDir()
+	cfg.Sessions = map[string]Session{"s1": {Workdir: dir, Repository: "gitlab/example-org/widgets"}}
+	writeFile(t, filepath.Join(dir, "STATUS.md"), question(1))
 	cfg.ConfidentialPatterns = []string{"secret-word"}
 	var buf bytes.Buffer
 	log := NewLogWriter(&buf)
@@ -566,7 +569,7 @@ func TestPageStateDecisions(t *testing.T) {
 	hidden := doc.Decisions[0]
 	hidden.ID, hidden.Context = "D2", "about secret-word"
 	for _, e := range []Event{
-		{V: EventVersion, Time: pageAt, Kind: KindObserve, Mode: ModeLive, Session: "s1", Observe: &ObservePayload{State: string(BlockedOnOwner), Alive: true}},
+		{V: EventVersion, Time: pageAt, Kind: KindObserve, Mode: ModeLive, Session: "s1", Observe: &ObservePayload{State: string(BlockedOnOwner), Alive: true, StatusQuestions: strings.TrimPrefix(statusID(question(1)), statusDecision)}},
 		{V: EventVersion, Time: pageAt, Kind: KindDecision, Mode: ModeLive, Session: "s1", Decision: &DecisionPayload{Hash: "h1", Decisions: append(doc.Decisions, hidden)}},
 	} {
 		if err := log.Append(e); err != nil {
@@ -575,14 +578,22 @@ func TestPageStateDecisions(t *testing.T) {
 	}
 	ps := newPageState(&cfg, log, ModeLive, "host-a")
 	data, err := ps.load()
-	if err != nil || len(data.Decisions) != 2 {
+	if err != nil || len(data.Decisions) != 3 {
 		t.Fatalf("decisions %+v, %v", data.Decisions, err)
 	}
-	if d := data.Decisions[0]; d.ID != "D1" || d.Withheld || d.Answered != nil {
+	if d := data.Decisions[0]; d.ID != statusID(question(1)) || d.Withheld != "" || d.Context != ParseStatus(question(1)).Questions {
+		t.Fatalf("STATUS.md's Questions: %+v", d)
+	}
+	if d := data.Decisions[1]; d.ID != "D1" || d.Withheld != "" || d.Answered != nil {
 		t.Fatalf("D1: %+v", d)
 	}
-	if d := data.Decisions[1]; d.ID != "D2" || !d.Withheld || strings.Contains(fmt.Sprint(d), "secret-word") {
+	if d := data.Decisions[2]; d.ID != "D2" || d.Withheld != withheldSecret || strings.Contains(fmt.Sprint(d), "secret-word") {
 		t.Fatalf("D2 is not withheld: %+v", d)
+	}
+	// Reworded since agentd last read them: no form until it reads them.
+	writeFile(t, filepath.Join(dir, "STATUS.md"), question(2))
+	if data, _ = ps.load(); data.Decisions[0].Withheld != withheldChanged || data.Decisions[0].Context != "" {
+		t.Fatalf("reworded: %+v", data.Decisions[0])
 	}
 	if err := ps.answer("s1", AnswerPayload{ID: "D1", Choice: "z"}); err == nil {
 		t.Fatal("recorded a choice that is not an option")
@@ -593,7 +604,7 @@ func TestPageStateDecisions(t *testing.T) {
 	if err := ps.answer("s1", AnswerPayload{ID: "D1", Choice: "b", From: "192.0.2.20:1"}); err != nil {
 		t.Fatal(err)
 	}
-	if data, _ = ps.load(); data.Decisions[0].Answered == nil || data.Decisions[0].Answered.Choice != "b" {
-		t.Fatalf("after the answer: %+v", data.Decisions[0])
+	if data, _ = ps.load(); data.Decisions[1].Answered == nil || data.Decisions[1].Answered.Choice != "b" {
+		t.Fatalf("after the answer: %+v", data.Decisions[1])
 	}
 }

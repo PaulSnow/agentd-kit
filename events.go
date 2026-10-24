@@ -169,6 +169,9 @@ type ActPayload struct {
 	// An answer, or a restart that hands answers over: the decisions whose
 	// answers answers.json holds, newly delivered.
 	Answers []string `json:"answers,omitempty"`
+	// AnswersAt is when each of Answers was given, so a later answer to
+	// the same decision is not taken as delivered.
+	AnswersAt []time.Time `json:"answers_at,omitempty"`
 
 	// Typing: a nudge, a resume, the trust keys.
 	Message  string   `json:"message,omitempty"`

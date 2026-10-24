@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -93,30 +94,34 @@ type PageData struct {
 }
 
 // PageDecision is one open decision a session raised, with the owner's
-// answer to it so far. A withheld decision matched a confidential pattern:
-// only its id and type are shown, and no form.
+// answer to it so far. A withheld decision is shown by its id and type
+// only, with Withheld saying why, and no form.
 type PageDecision struct {
 	Session    string
 	Repository string
 	Decision
 	Answered *AnswerRecord
-	Withheld bool
+	Withheld string
 }
+
+// Why a decision on the page is withheld.
+const (
+	withheldSecret  = "The details were withheld because they matched a confidential pattern. Look at the session directly."
+	withheldChanged = "STATUS.md's Questions changed since agentd last read them; reload the page after its next pass."
+)
 
 // DecisionsFrom lists the open decisions of the report's sessions, each
 // session's in the order it raised them: STATUS.md's Questions first, as
-// a text decision whose context is the text the report shows, then those
-// of questions.json. Every text is screened again.
+// a text decision whose context is the section read from STATUS.md now,
+// offered only while it is the section agentd last saw, so an answer is
+// to the text the owner read; then those of questions.json. Every text is
+// screened again.
 func DecisionsFrom(cfg *Config, st *LogState, rep Report) []PageDecision {
 	secret := confidentialMatcher(cfg)
 	repoOf := map[string]string{}
-	asked := map[string]string{}
 	for _, rr := range rep.Repositories {
 		for _, c := range rr.Cases {
 			repoOf[c.Session] = rr.Name
-		}
-		for _, q := range rr.Questions {
-			asked[q.Session] = q.Text
 		}
 	}
 	names := make([]string, 0, len(repoOf))
@@ -130,26 +135,30 @@ func DecisionsFrom(cfg *Config, st *LogState, rep Report) []PageDecision {
 		if t == nil {
 			continue
 		}
-		ds := t.Decisions
+		var pds []PageDecision
 		if t.StatusQuestions != "" {
-			d, _ := t.decision(statusDecision + t.StatusQuestions)
-			d.Context = asked[n]
-			ds = append([]Decision{d}, ds...)
+			pd := PageDecision{Decision: statusDecisionFor(t.StatusQuestions)}
+			sts, err := ReadStatus(filepath.Join(cfg.Sessions[n].Workdir, "STATUS.md"))
+			if q := sts.Questions; err != nil || shortHash(HashPane(q)) != t.StatusQuestions {
+				pd.Withheld = withheldChanged
+			} else {
+				pd.Context = q
+			}
+			pds = append(pds, pd)
 		}
-		for _, d := range ds {
-			pd := PageDecision{Session: n, Repository: repoOf[n], Decision: d}
-			if a, ok := t.answer(d.ID); ok {
+		for _, d := range t.Decisions {
+			pds = append(pds, PageDecision{Decision: d})
+		}
+		for _, pd := range pds {
+			pd.Session, pd.Repository = n, repoOf[n]
+			if a, ok := t.answer(pd.ID); ok {
 				pd.Answered = &a
 			}
-			texts := []string{d.Question, d.Context, d.Why, d.IfWrong, d.Recommendation}
-			for _, o := range d.Options {
-				texts = append(texts, o.Label, o.Consequence)
+			if pd.Withheld == "" && (pd.Decision.Withheld || secret(decisionTexts(pd.Decision)...)) {
+				pd.Withheld = withheldSecret
 			}
-			// STATUS.md's Questions with no text in the report were
-			// withheld when they were posted, or were never posted.
-			if secret(texts...) || strings.HasPrefix(d.ID, statusDecision) && d.Context == "" {
-				pd.Decision = Decision{ID: d.ID, Type: d.Type, Blocking: d.Blocking}
-				pd.Withheld = true
+			if pd.Withheld != "" {
+				pd.Decision = Decision{ID: pd.ID, Type: pd.Type, Blocking: pd.Blocking}
 			}
 			out = append(out, pd)
 		}
@@ -843,10 +852,10 @@ table { border-collapse: collapse; } td { padding: .1rem .6rem .1rem 0; vertical
 </section>
 {{if .Decisions}}<section id="decisions"><h2>Decisions</h2>
 {{range .Decisions}}<div><span class="needs">{{.Session}}</span> <span class="muted">{{.Repository}}, {{.ID}}, {{.Type}}{{if .Blocking}}, blocking{{end}}</span></div>
-{{if .Withheld}}<p class="muted">The details were withheld because they matched a confidential pattern, or were never posted. Look at the session directly.</p>
+{{with .Answered}}<p>Answered {{when .At}}:{{with .Answer}} {{if .}}yes{{else}}no{{end}}{{end}} {{.Choice}} {{.Text}} {{.Other}}{{if .Delivered}} <span class="muted">(delivered)</span>{{end}}</p>{{end}}
+{{if .Withheld}}<p class="muted">{{.Withheld}}</p>
 {{else}}<pre>{{.Question}}</pre>{{if .Context}}<pre class="muted">{{.Context}}</pre>{{end}}
 {{if .Why}}<p class="muted">Why: {{.Why}}</p>{{end}}{{if .IfWrong}}<p class="muted">If wrong: {{.IfWrong}}</p>{{end}}{{if .Recommendation}}<p>Recommended: {{.Recommendation}}</p>{{end}}
-{{with .Answered}}<p>Answered {{when .At}}:{{with .Answer}} {{if .}}yes{{else}}no{{end}}{{end}} {{.Choice}} {{.Text}} {{.Other}}{{if .Delivered}} <span class="muted">(delivered)</span>{{end}}</p>{{end}}
 <form method="post" action="/answer"><input type="hidden" name="token" value="{{$.Token}}"><input type="hidden" name="view" value="{{$.ViewQ}}"><input type="hidden" name="session" value="{{.Session}}"><input type="hidden" name="id" value="{{.ID}}">
 {{if eq .Type "yes_no"}}<label><input type="radio" name="answer" value="yes"> yes</label> <label><input type="radio" name="answer" value="no"> no</label>
 {{else if eq .Type "choose_one"}}{{range .Options}}<div><label><input type="radio" name="choice" value="{{.Key}}"> {{.Key}}: {{.Label}}</label> <span class="muted">{{.Consequence}}</span></div>{{end}}

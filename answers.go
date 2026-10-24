@@ -71,6 +71,9 @@ type Decision struct {
 	Options        []DecisionOption `json:"options,omitempty"`
 	Default        string           `json:"default,omitempty"`
 	Blocking       bool             `json:"blocking"`
+	// Withheld is set by agentd, never read from the file: the texts
+	// matched a confidential pattern and were left out of the log.
+	Withheld bool `json:"withheld,omitempty"`
 }
 
 // DecisionOption is one of a choose_one's answers.
@@ -105,8 +108,10 @@ type AnswerPayload struct {
 	Text   string `json:"text,omitempty"`
 	Other  string `json:"other,omitempty"`
 	Note   string `json:"note,omitempty"`
-	// From is the address the page was asked from; never sent on.
-	From string `json:"from,omitempty"`
+	// From is the address the page was asked from, and Asked the hash of
+	// the decision as the owner answered it; neither is sent on.
+	From  string `json:"from,omitempty"`
+	Asked string `json:"asked,omitempty"`
 }
 
 // AnswerRecord is an answer as a session's Track holds it.
@@ -136,7 +141,7 @@ func checkDecisions(ds []Decision) error {
 	for _, d := range ds {
 		switch {
 		case !decisionID.MatchString(d.ID) || strings.HasPrefix(d.ID, statusDecision):
-			return fmt.Errorf("decision id %q: use up to 32 letters, digits, - or _, not starting with %q", d.ID, statusDecision)
+			return fmt.Errorf("decision id %q: use up to 32 letters, digits, - or _, not starting with %q", cutUTF8(d.ID, 40), statusDecision)
 		case seen[d.ID]:
 			return fmt.Errorf("decision %s is raised twice", d.ID)
 		case strings.TrimSpace(d.Question) == "" || long(d.Question, maxQuestion):
@@ -260,12 +265,34 @@ func readQuestions(workdir string) (hash string, ds []Decision, refused error) {
 	return hash, doc.Decisions, nil
 }
 
+// statusDecisionFor is the text decision STATUS.md's Questions section
+// with hash stands for.
+func statusDecisionFor(hash string) Decision {
+	return Decision{ID: statusDecision + hash, Type: DecisionText, Question: "the Questions in STATUS.md", Blocking: true}
+}
+
+// decisionHash identifies a decision as it was raised, every field of it,
+// so an answer is to that question only.
+func decisionHash(d Decision) string {
+	b, _ := json.Marshal(d)
+	return shortHash(HashPane(string(b)))
+}
+
+// decisionTexts are the words of a decision, for screening.
+func decisionTexts(d Decision) []string {
+	texts := []string{d.Question, d.Context, d.Why, d.IfWrong, d.Recommendation, d.Default}
+	for _, o := range d.Options {
+		texts = append(texts, o.Label, o.Consequence)
+	}
+	return texts
+}
+
 // decision is the open decision id names: one raised in questions.json,
 // or the one STATUS.md's current Questions section stands for, a text
 // question.
 func (t *Track) decision(id string) (Decision, bool) {
 	if t.StatusQuestions != "" && id == statusDecision+t.StatusQuestions {
-		return Decision{ID: id, Type: DecisionText, Question: "the Questions in STATUS.md", Blocking: true}, true
+		return statusDecisionFor(t.StatusQuestions), true
 	}
 	for _, d := range t.Decisions {
 		if d.ID == id {
@@ -275,22 +302,29 @@ func (t *Track) decision(id string) (Decision, bool) {
 	return Decision{}, false
 }
 
-// answer is the owner's answer to the open decision id, when it still
-// fits the decision as the session last raised it: one given for options
-// since changed fits no longer, and waits for the owner again.
+// answer is the owner's answer to the open decision id, when it was given
+// to the decision as the session last raised it: a reworded question, or
+// an id raised again for another, waits for the owner again.
 func (t *Track) answer(id string) (AnswerRecord, bool) {
-	a, ok := t.Answers[id]
-	if !ok {
-		return a, false
-	}
 	d, open := t.decision(id)
-	return a, open && checkAnswer(d, a.AnswerPayload) == nil
+	if !open {
+		return AnswerRecord{}, false
+	}
+	return t.answerTo(d)
 }
 
-// settled says whether the decision id has a binding answer.
-func (t *Track) settled(id string) bool {
-	a, ok := t.answer(id)
-	return ok && a.Binding()
+// answerTo is the owner's answer to d, when it was given to d as it is.
+func (t *Track) answerTo(d Decision) (AnswerRecord, bool) {
+	a, ok := t.Answers[d.ID]
+	return a, ok && a.Asked == decisionHash(d) && checkAnswer(d, a.AnswerPayload) == nil
+}
+
+// waits says whether d still waits on the owner: it has no answer, or
+// one that does not settle it and has been delivered. An answer not yet
+// delivered holds nothing up, so a session gone is restarted with it.
+func (t *Track) waits(d Decision) bool {
+	a, ok := t.answerTo(d)
+	return !ok || !a.Binding() && a.Delivered
 }
 
 // answersFor lists the answers to the session's open decisions, by id;
@@ -303,23 +337,34 @@ func (t *Track) answersFor(undelivered bool) []AnswerPayload {
 			continue
 		}
 		p := a.AnswerPayload
-		p.From = ""
+		p.From, p.Asked = "", ""
 		out = append(out, p)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
+// freshAnswers names the answers to the session's open decisions not yet
+// delivered, and when each was given, so that delivering them marks those
+// answers only and not one given since.
+func (t *Track) freshAnswers() (ids []string, at []time.Time) {
+	for _, a := range t.answersFor(true) {
+		ids = append(ids, a.ID)
+		at = append(at, t.Answers[a.ID].At)
+	}
+	return ids, at
+}
+
 // openQuestions is the text the session waits on the owner for: STATUS.md's
-// Questions unless the owner has answered them as they stand, and each
-// blocking decision with no binding answer. "" when nothing blocks.
+// Questions as they stand this pass, and each blocking decision, unless
+// they are answered (see waits). "" when nothing blocks.
 func (t *Track) openQuestions(status, statusHash string) string {
 	var parts []string
-	if status != "" && !t.settled(statusDecision+statusHash) {
+	if status != "" && t.waits(statusDecisionFor(statusHash)) {
 		parts = append(parts, status)
 	}
 	for _, d := range t.Decisions {
-		if d.Blocking && !t.settled(d.ID) {
+		if d.Blocking && t.waits(d) {
 			parts = append(parts, fmt.Sprintf("%s (%s): %s Recommended: %s", d.ID, d.Type, d.Question, d.Recommendation))
 		}
 	}
@@ -385,6 +430,7 @@ func RecordAnswer(log *Log, st *LogState, now time.Time, session string, a Answe
 	if err := checkAnswer(d, a); err != nil {
 		return err
 	}
+	a.Asked = decisionHash(d)
 	return log.Append(Event{V: EventVersion, Time: now, Kind: KindAnswer, Mode: ModeOwner, Session: session, Answer: &a})
 }
 
@@ -400,9 +446,12 @@ func (s *Supervisor) readDecisions(name string, sess Session, t *Track, ev *Evid
 		hash = "unreadable"
 	}
 	if hash != t.DecisionsHash {
-		p := &DecisionPayload{Hash: hash, Decisions: ds}
+		p := &DecisionPayload{Hash: hash, Decisions: s.screenDecisions(ds)}
 		if err != nil {
-			p.Decisions, p.Refused = nil, err.Error()
+			p.Decisions, p.Refused = nil, cutUTF8(err.Error(), 300)
+			if s.confidentialMatch(p.Refused) > 0 {
+				p.Refused = QuestionsFile + " was refused (the reason is withheld: it matches a confidential pattern)"
+			}
 		}
 		if s.emit(name, Event{Kind: KindDecision, Decision: p}); s.halt != nil {
 			return
@@ -414,6 +463,25 @@ func (s *Supervisor) readDecisions(name string, sess Session, t *Track, ev *Evid
 	ev.Status.Questions = t.openQuestions(ev.Status.Questions, ev.StatusQuestions)
 }
 
+// screenDecisions leaves out the words of each decision that match a
+// confidential pattern, keeping its id, type, option keys and whether it
+// blocks, so it can still be answered from the session's own screen.
+func (s *Supervisor) screenDecisions(ds []Decision) []Decision {
+	out := make([]Decision, len(ds))
+	for i, d := range ds {
+		if s.confidentialMatch(decisionTexts(d)...) == 0 {
+			out[i] = d
+			continue
+		}
+		w := Decision{ID: d.ID, Type: d.Type, Blocking: d.Blocking, Withheld: true}
+		for _, o := range d.Options {
+			w.Options = append(w.Options, DecisionOption{Key: o.Key})
+		}
+		out[i] = w
+	}
+	return out
+}
+
 // deliverAnswers hands the owner's new answers to a live session: it
 // writes every answer to its open decisions to answers.json, then types
 // the fixed pointer line, through the typing safeguards and only into a
@@ -421,20 +489,21 @@ func (s *Supervisor) readDecisions(name string, sess Session, t *Track, ev *Evid
 // questions, never one showing a dialog, the trust prompt or the usage
 // limit. In shadow mode it is a would event; nothing is written or typed.
 func (s *Supervisor) deliverAnswers(name string, sess Session, t *Track, ev Evidence, state State) {
-	fresh := t.answersFor(true)
-	if len(fresh) == 0 || !ev.Alive || t.Limited || ev.Dialog != "" || ev.TrustPrompt {
+	ids, at := t.freshAnswers()
+	if len(ids) == 0 || !ev.Alive || t.Limited || ev.Dialog != "" || ev.TrustPrompt {
 		return
 	}
 	if state != Working && state != Idle && !(state == BlockedOnOwner && ev.Status.Questions != "") {
 		return
 	}
-	ids := make([]string, len(fresh))
-	for i, a := range fresh {
-		ids[i] = a.ID
+	// A file that cannot be written is tried again on the restart backoff.
+	key := "answer:" + name
+	if !s.retryDue(t, key, s.clock.Now()) {
+		return
 	}
 	answers := t.answersFor(false)
 	pointer := s.cfg.Policies.Answers.Pointer
-	s.typeInto(name, ActAnswer, &ActPayload{Answers: ids, Message: pointer}, t, ev.PaneHash, func() error {
+	s.typeInto(name, ActAnswer, &ActPayload{Key: key, Answers: ids, AnswersAt: at, Message: pointer}, t, ev.PaneHash, func() error {
 		if err := writeAnswers(sess.Workdir, answers); err != nil {
 			return err
 		}

@@ -622,11 +622,8 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 		}
 		// A session gone with answers waiting is restarted with them: the
 		// file is written first, and the prompt names it.
-		why, fresh := "restart", t.answersFor(true)
-		var ids []string
-		for _, a := range fresh {
-			ids = append(ids, a.ID)
-		}
+		why := "restart"
+		ids, at := t.freshAnswers()
 		if len(ids) > 0 {
 			why = "answered"
 		}
@@ -640,7 +637,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			return state
 		}
 		answers := t.answersFor(false)
-		err = s.act(name, ActRestart, &ActPayload{Attempt: n + 1, Cwd: sess.Cwd, Respawn: ev.PaneDead, Account: sess.Account, Command: line, Transcript: id, Answers: ids}, func() error {
+		err = s.act(name, ActRestart, &ActPayload{Attempt: n + 1, Cwd: sess.Cwd, Respawn: ev.PaneDead, Account: sess.Account, Command: line, Transcript: id, Answers: ids, AnswersAt: at}, func() error {
 			if len(ids) > 0 {
 				if err := writeAnswers(sess.Workdir, answers); err != nil {
 					return err

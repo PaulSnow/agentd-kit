@@ -283,8 +283,8 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 	}
 	// The answers an answer or a restart handed over are delivered, a
 	// would-be one's too, so shadow mode records each once.
-	for _, id := range a.Answers {
-		if r, ok := t.Answers[id]; ok {
+	for i, id := range a.Answers {
+		if r, ok := t.Answers[id]; ok && (i >= len(a.AnswersAt) || r.At.Equal(a.AnswersAt[i])) {
 			r.Delivered = true
 			t.Answers[id] = r
 		}
