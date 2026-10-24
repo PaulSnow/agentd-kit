@@ -167,6 +167,9 @@ type Repository struct {
 	Gate        []string `json:"gate"`
 	GateTimeout Duration `json:"gate_timeout"`
 	GateEnv     []string `json:"gate_env"`
+	// OwnerOnly marks every entry the report publishes for this repository
+	// as for the owner alone.
+	OwnerOnly bool `json:"owner_only"`
 }
 
 // Session is one tmux session running Claude Code. Workdir holds BRIEF.md
