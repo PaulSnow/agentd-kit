@@ -3,13 +3,14 @@
 // judgment, through escalation.
 //
 //	agentd run [--config PATH] [--log PATH] [--shadow] [--once] [--every 5m]
-//	agentd status [--config PATH] [--log PATH]
+//	agentd status [--config PATH] [--log PATH] [--mode live|shadow]
 //	agentd config [--config PATH]
 //	agentd mark-delivered [--config PATH] [--log PATH] SESSION WORKTREE REF
 //	agentd clear [--config PATH] [--log PATH] SESSION
 //	agentd inventory [--config PATH]
 //	agentd report [--config PATH] [--log PATH] [--shadow] [--host NAME] --out PATH
 //	agentd page [--config PATH] [--log PATH] [--shadow]
+//	agentd items [--config PATH] [--log PATH] [--new] [--seen ID,...]
 package main
 
 import (
@@ -53,6 +54,8 @@ func main() {
 		err = reportCmd(os.Args[2:])
 	case "page":
 		err = pageCmd(os.Args[2:])
+	case "items":
+		err = itemsCmd(os.Args[2:], os.Stdout)
 	case "version", "--version":
 		fmt.Println("agentd", version)
 		return
@@ -72,13 +75,14 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   agentd run [--config PATH] [--log PATH] [--shadow] [--once] [--every 5m]
-  agentd status [--config PATH] [--log PATH]
+  agentd status [--config PATH] [--log PATH] [--mode live|shadow]
   agentd config [--config PATH]
   agentd mark-delivered [--config PATH] [--log PATH] SESSION WORKTREE REF
   agentd clear [--config PATH] [--log PATH] SESSION
   agentd inventory [--config PATH]
   agentd report [--config PATH] [--log PATH] [--shadow] [--host NAME] --out PATH
   agentd page [--config PATH] [--log PATH] [--shadow]
+  agentd items [--config PATH] [--log PATH] [--new] [--seen ID,...]
   agentd version
 
 run supervises the configured sessions; --shadow observes and logs what it
@@ -89,7 +93,10 @@ it again. clear lifts a crash-looping session's park, so it may be
 restarted again. inventory lists every repository in the tracking system's
 manifest with its open work and clones, from the tracking snapshot. report
 writes report.json for the tracking site from the event log, atomically.
-page serves the owner's read-only page on page.address, to the owner only.`)
+items lists what is new since the owner last looked: issues, requests and
+discussions from the tracking snapshots, and mail findings; --seen marks
+items seen. page serves the owner's read-only page on page.address, to
+the owner only.`)
 }
 
 func loadConfigFlag(fs *flag.FlagSet, args []string) (*Config, *string, error) {
@@ -133,6 +140,9 @@ func runCmd(args []string) error {
 	to := cfg.Timeouts
 	sup := NewSupervisor(cfg, log, RealClock{}, ExecTmux{Timeout: to.Tmux.Duration}, ExecGit{Timeout: to.Forge.Duration},
 		ExecForge{Timeout: to.Forge.Duration}, ExecRunner{Timeout: to.Escalate.Duration}, *shadow)
+	if cfg.Poll.GitHub || cfg.Poll.GitLab {
+		sup.api = ExecForgeAPI{Timeout: to.Forge.Duration}
+	}
 	sup.Replay(events)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -202,6 +212,7 @@ func openLoaded(path string) (*Log, []Event, error) {
 
 func statusCmd(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	modeFlag := fs.String("mode", "", "live or shadow (default: the latest run's mode)")
 	cfg, _, err := loadConfigFlag(fs, args)
 	if err != nil {
 		return err
@@ -210,7 +221,15 @@ func statusCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	rows, meta := Summarize(events)
+	mode := *modeFlag
+	switch mode {
+	case "":
+		mode = statusMode(events)
+	case ModeLive, ModeShadow:
+	default:
+		return fmt.Errorf("--mode must be live or shadow")
+	}
+	rows, meta := Summarize(cfg, events, mode)
 	PrintStatus(os.Stdout, rows, meta, time.Now())
 	return nil
 }

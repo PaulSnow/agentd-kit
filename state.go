@@ -17,6 +17,7 @@ const (
 	Done           State = "done"
 	Failed         State = "failed"
 	CrashLooping   State = "crash-looping"
+	Stopped        State = "stopped" // the budget or the stop time was reached
 )
 
 // Track is what the supervisor remembers about one session between passes.
@@ -42,13 +43,51 @@ type Track struct {
 	// that is not Claude, or zero while it runs Claude.
 	NotClaudeSince time.Time
 
+	// Context and spend. Transcript is the Claude Code session id agentd
+	// last launched the session under, or "" when it has not; Measured is
+	// the transcript last measured; Usage is every transcript's totals.
+	Transcript string
+	Measured   string
+	Usage      map[string]UsagePayload
+	Checkpoint Checkpoint // the latest merge seen at the worktree's head
+	Launched   time.Time  // the latest restart or rotation started
+	RotatedFor string     // the merge the latest rotation was at
+	Rotations  int        // rotations, taken or would-be, ever
+	Stopped    string     // why the session was stopped, until the owner clears it
+	SpendBase  int64      // the spend when the owner last cleared it, which its cap counts from
+
 	Posted    map[string]bool        // escalation keys already posted, or given up on
 	Questions QuestionsEscalation    // the escalation of the Questions section
 	Dialog    DialogEscalation       // the escalations of dialogs on screen
 	Delivered map[string]string      // delivery keys: MR reference or the reason none was made
 	Skipped   map[string]bool        // skip reasons already logged
 	Failures  map[string][]time.Time // failed tries of a keyed action; retries follow the restart backoff
-	LastObs   map[string]any         // last observe details, to log only changes
+	LastObs   *ObservePayload        // last observation logged, to log only changes
+
+	// What the views show, folded from the log by apply alone.
+	LastSeen      time.Time
+	Head, Reason  string
+	RestartCount  int               // restarts, taken or would-be, ever
+	NudgeCount    int               // nudges ever
+	Escalations   int               // escalations and updates posted
+	Would         int               // would events (shadow mode)
+	Errors        int               // error events
+	DeliveredRefs []string          // what each delivery opened
+	Blocked       map[string]string // worktree: the last reason its delivery was declined
+	GaveUp        []string          // escalation keys given up on
+	CutShort      []string          // actions a crash of agentd cut short
+	Asked         string            // the Questions text last posted, while they stay open
+	AskedAt       time.Time
+	Filtered      map[string]bool // escalation keys whose text was withheld
+	Deliveries    []DeliveryRecord
+}
+
+// DeliveryRecord is one request a delivery opened, found, or was told of.
+type DeliveryRecord struct {
+	Ref        string
+	Repository string // as configured; "" for an owner's mark-delivered record
+	Delivered  string // the delivery key, session:worktree
+	At         time.Time
 }
 
 // QuestionsEscalation is the one escalation a session's Questions section
@@ -69,13 +108,21 @@ type QuestionsEscalation struct {
 
 // DialogEscalation tracks a session's dialog escalations: one per dialog
 // episode (a dialog showing, whatever its screen does, until a pass sees
-// none), and at most one per DialogEscalationGap. Open follows the observe
-// events; N and Last follow the escalations, so replay rebuilds them.
+// none), and at most one per DialogEscalationGap. Showing and Episode
+// follow the observe events; Escalated, N and Last follow the escalations,
+// which carry the episode they were made for, so they settle the same
+// whichever comes first: an escalation a worker finishes after the dialog
+// went away settles an episode that is over.
 type DialogEscalation struct {
-	Open bool      // the dialog now showing has been escalated
-	N    int       // dialog escalations so far, numbering their keys
-	Last time.Time // when the last was posted
+	Showing   bool      // a dialog shows, as the last observation logged said
+	Episode   int       // dialog episodes seen so far; the one showing, if any
+	Escalated int       // the latest episode escalated
+	N         int       // dialog escalations so far, numbering their keys
+	Last      time.Time // when the last was posted
 }
+
+// Open says whether the dialog now showing has been escalated.
+func (d DialogEscalation) Open() bool { return d.Showing && d.Escalated == d.Episode }
 
 // DialogEscalationGap is the least time between two dialog escalations of
 // one session.
@@ -121,12 +168,13 @@ func (t *Track) noteCrash(c Crash, max int) {
 
 // clear is the owner's clearing of a parked session.
 func (t *Track) clear() {
-	t.Crashes, t.Parked = nil, false
+	t.Crashes, t.Parked, t.Stopped = nil, false, ""
 	t.Clears++
 }
 
 func newTrack() *Track {
-	return &Track{Posted: map[string]bool{}, Delivered: map[string]string{}, Skipped: map[string]bool{}, Failures: map[string][]time.Time{}}
+	return &Track{Posted: map[string]bool{}, Delivered: map[string]string{}, Skipped: map[string]bool{}, Failures: map[string][]time.Time{},
+		Blocked: map[string]string{}, Filtered: map[string]bool{}, Usage: map[string]UsagePayload{}}
 }
 
 // restartsInWindow counts restarts inside the backoff window.
@@ -201,6 +249,8 @@ func Classify(t *Track, ev Evidence, pol Policies, now time.Time) (State, string
 		return CrashLooping, fmt.Sprintf("parked after %d crashes; waiting for the owner to run agentd clear", len(t.Crashes))
 	case ev.Status.Done:
 		return Done, "STATUS.md ends with DONE"
+	case t.Stopped != "":
+		return Stopped, "stopped: " + t.Stopped + "; waiting for the owner to run agentd clear"
 	case !ev.Alive && ev.Status.Questions != "":
 		return BlockedOnOwner, "tmux session gone and STATUS.md has open Questions; parked for the owner, not restarted"
 	case !ev.Alive:

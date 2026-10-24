@@ -82,7 +82,7 @@ func TestClearCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	events, _, err := ReadLog(logPath)
-	if err != nil || len(events) != 1 || events[0].Kind != KindClear || events[0].Session != "s1" || detailString(events[0], "mode") != ModeOwner {
+	if err != nil || len(events) != 1 || events[0].Kind != KindClear || events[0].Session != "s1" || events[0].Mode != ModeOwner {
 		t.Fatalf("events = %+v, %v", events, err)
 	}
 }

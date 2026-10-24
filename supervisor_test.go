@@ -53,7 +53,7 @@ func TestRestartBackoffDoubles(t *testing.T) {
 	var at []time.Duration
 	start := time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC)
 	for _, e := range h.events() {
-		if e.Kind == KindAction && detailString(e, "action") == ActRestart {
+		if e.Kind == KindAction && actionOf(e) == ActRestart {
 			at = append(at, e.Time.Sub(start))
 		}
 	}
@@ -68,7 +68,7 @@ func actionTimes(h *harness, kind, action string) []time.Duration {
 	var at []time.Duration
 	start := time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC)
 	for _, e := range h.events() {
-		if e.Kind == kind && detailString(e, "action") == action {
+		if e.Kind == kind && actionOf(e) == action {
 			at = append(at, e.Time.Sub(start))
 		}
 	}
@@ -118,7 +118,7 @@ func TestFailingEscalationStops(t *testing.T) {
 	}
 	gaveUp := 0
 	for _, e := range h.events() {
-		if e.Kind == KindSkip && e.Session == "s1" && strings.Contains(detailString(e, "reason"), "failed 3 times") {
+		if e.Kind == KindSkip && e.Session == "s1" && strings.Contains(skipReason(e), "failed 3 times") {
 			gaveUp++
 		}
 	}
@@ -290,7 +290,7 @@ func TestIdleIsNudgedAtMostKTimes(t *testing.T) {
 	}
 	var at []time.Time
 	for _, e := range h.events() {
-		if e.Kind == KindAction && detailString(e, "action") == ActNudge {
+		if e.Kind == KindAction && actionOf(e) == ActNudge {
 			at = append(at, e.Time)
 		}
 	}
@@ -626,7 +626,7 @@ func TestTargetOrDetachedBranchIsNotPushed(t *testing.T) {
 	for _, n := range []string{"onmain", "detached", "empty"} {
 		skips := 0
 		for _, e := range h.events() {
-			if e.Kind == KindSkip && e.Session == n && strings.Contains(detailString(e, "reason"), "not delivering") {
+			if e.Kind == KindSkip && e.Session == n && strings.Contains(skipReason(e), "not delivering") {
 				skips++
 			}
 		}
@@ -701,7 +701,7 @@ func TestConfidentialEscalationIsWithheld(t *testing.T) {
 	}
 	filtered := 0
 	for _, e := range h.events() {
-		if e.Kind == KindSkip && e.Session == "s1" && detailString(e, "filtered") != "" {
+		if e.Kind == KindSkip && e.Session == "s1" && e.Skip.Filtered != "" {
 			filtered++
 		}
 	}
@@ -740,7 +740,7 @@ func TestRebasedMergesAreNotDeliveredAgain(t *testing.T) {
 		t.Fatalf("pushes = %v, want only the branch with new work", h.forge.pushes)
 	}
 	for _, e := range h.events() {
-		if detailString(e, "delivered") != "" && (e.Kind == KindSkip || detailString(e, "action") == ActOpen) && detailString(e, "head") != "c0ffee" {
+		if e.Skip != nil && e.Skip.Delivered != "" && e.Skip.Head != "c0ffee" || e.Kind == KindAction && actionOf(e) == ActOpen && e.Act.Head != "c0ffee" {
 			t.Fatalf("delivery event without the head it covered: %+v", e)
 		}
 	}

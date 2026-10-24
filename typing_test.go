@@ -147,7 +147,7 @@ func TestNoTypingIntoAPaneNotRunningClaude(t *testing.T) {
 		}
 		skips := 0
 		for _, e := range h.events() {
-			if e.Kind == KindSkip && e.Session == n && strings.Contains(detailString(e, "reason"), "bash") {
+			if e.Kind == KindSkip && e.Session == n && strings.Contains(skipReason(e), "bash") {
 				skips++
 			}
 		}
@@ -312,7 +312,7 @@ func TestScreenChangedJustBeforeTypingIsNotTyped(t *testing.T) {
 	}
 	skips := 0
 	for _, e := range h.events() {
-		if e.Kind == KindSkip && strings.Contains(detailString(e, "reason"), "screen changed") {
+		if e.Kind == KindSkip && strings.Contains(skipReason(e), "screen changed") {
 			skips++
 		}
 	}
