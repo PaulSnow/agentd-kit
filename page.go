@@ -136,9 +136,10 @@ func DecisionsFrom(cfg *Config, st *LogState, rep Report) []PageDecision {
 			continue
 		}
 		var pds []PageDecision
-		if t.StatusQuestions != "" {
+		sess, configured := cfg.Sessions[n]
+		if t.StatusQuestions != "" && configured {
 			pd := PageDecision{Decision: statusDecisionFor(t.StatusQuestions)}
-			sts, err := ReadStatus(filepath.Join(cfg.Sessions[n].Workdir, "STATUS.md"))
+			sts, err := ReadStatus(filepath.Join(sess.Workdir, "STATUS.md"))
 			if q := sts.Questions; err != nil || shortHash(HashPane(q)) != t.StatusQuestions {
 				pd.Withheld = withheldChanged
 			} else {

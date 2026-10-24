@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -242,7 +244,7 @@ func checkAnswer(d Decision, a AnswerPayload) error {
 // readQuestions reads a session's questions.json: its hash, "" when there
 // is none, and its decisions, or the reason it is refused.
 func readQuestions(workdir string) (hash string, ds []Decision, refused error) {
-	b, err := os.ReadFile(filepath.Join(workdir, QuestionsFile))
+	b, err := readRegular(filepath.Join(workdir, QuestionsFile), maxQuestionsFile+1)
 	if errors.Is(err, os.ErrNotExist) {
 		return "", nil, nil
 	}
@@ -285,6 +287,24 @@ func decisionTexts(d Decision) []string {
 		texts = append(texts, o.Label, o.Consequence)
 	}
 	return texts
+}
+
+// readRegular reads at most max bytes of path, which must be a regular
+// file and not a link: a session's file must not make agentd read a
+// device, wait on a pipe, or read a file the session links to.
+func readRegular(path string, max int64) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			return nil, fmt.Errorf("%s is a link; only a regular file is read", filepath.Base(path))
+		}
+		return nil, err
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", filepath.Base(path))
+	}
+	return io.ReadAll(io.LimitReader(f, max))
 }
 
 // decision is the open decision id names: one raised in questions.json,
@@ -488,18 +508,19 @@ func (s *Supervisor) screenDecisions(ds []Decision) []Decision {
 // session that can take a line: working, idle, or waiting on its own
 // questions, never one showing a dialog, the trust prompt or the usage
 // limit. In shadow mode it is a would event; nothing is written or typed.
-func (s *Supervisor) deliverAnswers(name string, sess Session, t *Track, ev Evidence, state State) {
+// It says whether it tried to type.
+func (s *Supervisor) deliverAnswers(name string, sess Session, t *Track, ev Evidence, state State) bool {
 	ids, at := t.freshAnswers()
 	if len(ids) == 0 || !ev.Alive || t.Limited || ev.Dialog != "" || ev.TrustPrompt {
-		return
+		return false
 	}
 	if state != Working && state != Idle && !(state == BlockedOnOwner && ev.Status.Questions != "") {
-		return
+		return false
 	}
 	// A file that cannot be written is tried again on the restart backoff.
 	key := "answer:" + name
 	if !s.retryDue(t, key, s.clock.Now()) {
-		return
+		return false
 	}
 	answers := t.answersFor(false)
 	pointer := s.cfg.Policies.Answers.Pointer
@@ -509,4 +530,5 @@ func (s *Supervisor) deliverAnswers(name string, sess Session, t *Track, ev Evid
 		}
 		return s.tmux.Type(name, pointer)
 	})
+	return true
 }

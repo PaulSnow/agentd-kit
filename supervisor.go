@@ -588,12 +588,18 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 	}
 	// The limit has cleared. Only a session that can take a line is told to
 	// go on: never one that is DONE, waits on the owner, or shows a dialog.
+	// One line is typed per pass at most: the screen a second line would
+	// go to has not been read since the first.
+	typed := false
 	if t.Limited && ev.Alive && (state == Working || state == Idle) {
+		typed = true
 		s.typeInto(name, ActResume, &ActPayload{Message: pol.Nudge.ResumeMessage}, t, ev.PaneHash, func() error {
 			return s.tmux.Type(name, pol.Nudge.ResumeMessage)
 		})
 	}
-	s.deliverAnswers(name, sess, t, ev, state)
+	if !typed {
+		typed = s.deliverAnswers(name, sess, t, ev, state)
+	}
 	switch state {
 	case Done:
 		// Each delivery runs in a worker: its gate and forge calls take
@@ -698,7 +704,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 				fmt.Sprintf("%s has shown the same screen since %s with a tool call as its last turn; it is probably waiting at a permission prompt. Attach and answer it.", name, t.HashSince.Format(time.RFC3339)), t, now)
 		}
 	case Idle:
-		if !pol.Nudge.Enabled {
+		if !pol.Nudge.Enabled || typed {
 			return state
 		}
 		if t.Nudges >= pol.Nudge.Max {
@@ -789,7 +795,13 @@ func (s *Supervisor) typeInto(name, action string, a *ActPayload, t *Track, seen
 			return err
 		}
 		if now := HashPane(pane); now != seen {
-			s.skipOnce(name, "screen-changed:"+action+":"+shortHash(now), "the screen changed since it was read this pass; not typing", t,
+			// Answers wait for a working session whose screen may move
+			// every pass: that is logged once for the answers.
+			key := "screen-changed:" + action + ":" + shortHash(now)
+			if len(a.Answers) > 0 {
+				key = "screen-changed:" + action + ":" + strings.Join(a.Answers, ",") + ":" + fmt.Sprint(a.AnswersAt[len(a.AnswersAt)-1].Unix())
+			}
+			s.skipOnce(name, key, "the screen changed since it was read this pass; not typing", t,
 				&SkipPayload{Action: action})
 			return errScreenChanged
 		}

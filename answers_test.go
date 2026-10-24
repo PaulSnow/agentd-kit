@@ -393,3 +393,40 @@ func TestDecisionsAreScreened(t *testing.T) {
 		t.Fatalf("decisions %+v, state %s", ds, h.state("s1"))
 	}
 }
+
+// An answer delivery cut short by a crash of agentd may not have written
+// the file, so it is not taken as delivered and is delivered again.
+func TestCutShortAnswerIsDeliveredAgain(t *testing.T) {
+	cfg := DefaultConfig()
+	st := NewLogState(&cfg, ModeLive)
+	d := Decision{ID: "D1", Type: DecisionText, Question: "q", Blocking: true}
+	act := &ActPayload{Action: ActAnswer, Intent: "i1", Answers: []string{"D1"}, AnswersAt: []time.Time{pageAt}}
+	for _, e := range []Event{
+		{V: EventVersion, Time: pageAt, Kind: KindDecision, Mode: ModeLive, Session: "s1", Decision: &DecisionPayload{Hash: "h", Decisions: []Decision{d}}},
+		{V: EventVersion, Time: pageAt, Kind: KindAnswer, Mode: ModeOwner, Session: "s1", Answer: &AnswerPayload{ID: "D1", Text: "yes", Asked: decisionHash(d)}},
+		{V: EventVersion, Time: pageAt, Kind: KindWarning, Mode: ModeLive, Session: "s1", Warning: &WarningPayload{Warning: "cut short", Intent: act}},
+	} {
+		st.apply(e)
+	}
+	if st.Tracks["s1"].Answers["D1"].Delivered {
+		t.Fatal("an answer cut short is taken as delivered")
+	}
+}
+
+// questions.json is read only as a regular file, never through a link,
+// and never more than its limit.
+func TestQuestionsFileMustBeRegular(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "elsewhere.json"), chooseColour)
+	if err := os.Symlink(filepath.Join(dir, "elsewhere.json"), filepath.Join(dir, QuestionsFile)); err != nil {
+		t.Fatal(err)
+	}
+	if _, ds, err := readQuestions(dir); err == nil || ds != nil {
+		t.Fatalf("read through a link: %v, %v", ds, err)
+	}
+	os.Remove(filepath.Join(dir, QuestionsFile))
+	writeFile(t, filepath.Join(dir, QuestionsFile), strings.Repeat(" ", maxQuestionsFile+10))
+	if _, _, err := readQuestions(dir); err == nil || !strings.Contains(err.Error(), "over") {
+		t.Fatalf("an oversized file: %v", err)
+	}
+}

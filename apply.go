@@ -259,9 +259,11 @@ func (st *LogState) apply(e Event) {
 				at = *e.Warning.IntentAt
 			}
 			switch a.Action {
-			case ActEscalate, ActUpdate, ActNudge, ActResume, ActTrust, ActRotate, ActAnswer:
+			case ActEscalate, ActUpdate, ActNudge, ActResume, ActTrust, ActRotate:
 				t.applyAction(a, false, false, at)
 			}
+			// An answer cut short may not have reached the file: it is
+			// delivered again, and the fixed pointer typed twice is harmless.
 			// A rotation cut short may have started its session: measure
 			// the transcript it named, which a guess replaces if it never
 			// appears. A stop cut short is simply tried again.
