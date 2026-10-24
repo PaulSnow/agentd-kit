@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -25,6 +26,7 @@ type Evidence struct {
 	Limited     bool
 	TrustPrompt bool
 	Dialog      string // the dialog pattern the visible screen matches, or ""
+	DialogShape bool   // the visible screen has a dialog's shape, which alone may be declined
 	Status      StatusEvidence
 	// StatusQuestions is the hash of STATUS.md's own Questions section;
 	// Status.Questions is what still waits on the owner once the answers
@@ -171,6 +173,69 @@ func fenceOf(line string) (string, string) {
 func HashPane(text string) string {
 	sum := sha256.Sum256([]byte(text))
 	return hex.EncodeToString(sum[:])
+}
+
+// The parts of a Claude Code screen that move while nothing else does: the
+// spinner glyph and its rotating verb, elapsed-time counters, token counts
+// and clock times. A session at a dialog under a running subagent shows
+// all of them ticking. Timings in a session's own output, such as a test
+// run's, read as fixed too: they are no progress of their own.
+var (
+	spinnerLine  = regexp.MustCompile(`(?m)^(\s*)[·✢✳✶✻✽*](\s+)[\p{L}-]+…`)
+	elapsedCount = regexp.MustCompile(`\b(?:\d+h\s?)?(?:\d+m\s?)?\d+(?:\.\d+)?s\b|\b\d+h\s?\d+m\b`)
+	tokenCount   = regexp.MustCompile(`[↑↓]?\s*\d[\d,]*(?:\.\d+)?k?\s+tokens\b`)
+	// A clock time stands after a space or a bracket, so a file:line:col
+	// position is left as it is.
+	clockTime = regexp.MustCompile(`(^|[\s(\[])\d{1,2}:\d{2}(?::\d{2})?\b`)
+)
+
+// stillText is screen with what moves on its own replaced by fixed text,
+// so a screen that differs only in its counters reads the same.
+func stillText(screen string) string {
+	screen = spinnerLine.ReplaceAllString(screen, "$1*$2…")
+	screen = elapsedCount.ReplaceAllString(screen, "#s")
+	screen = tokenCount.ReplaceAllString(screen, "# tokens")
+	return clockTime.ReplaceAllString(screen, "$1#:#")
+}
+
+// StillHash hashes screen text without its counters and spinners: the hash
+// stillness is judged by, and the one a typing action compares before it
+// types.
+func StillHash(screen string) string { return HashPane(stillText(screen)) }
+
+// dialogOption is a dialog's numbered option, the selected one marked.
+var dialogOption = regexp.MustCompile(`^(?:❯\s*)?(\d)\.\s+\S`)
+
+// dialogShape says whether the screen shows a dialog's shape wherever it
+// comes from, the main session or a subagent: a question line, not a quote
+// or a session's own ⏺ line, followed within a few lines by options
+// numbered 1 and 2, one of them under the ❯ cursor. A question the session
+// asks in prose, with a numbered list after it, has no cursor.
+func dialogShape(screen string) bool {
+	lines := strings.Split(screen, "\n")
+	for i := range lines {
+		lines[i] = strings.Trim(lines[i], " \t│┃|")
+	}
+	for i, line := range lines {
+		if !strings.HasSuffix(line, "?") || strings.HasPrefix(line, ">") || strings.HasPrefix(line, "⏺") {
+			continue
+		}
+		next, cursor := 1, false
+		for j := i + 1; j < len(lines) && j <= i+4; j++ {
+			m := dialogOption.FindStringSubmatch(lines[j])
+			if m == nil || m[1] != fmt.Sprint(next) {
+				if next > 1 {
+					break
+				}
+				continue
+			}
+			cursor = cursor || strings.HasPrefix(lines[j], "❯")
+			if next++; next > 2 && cursor {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // shortHash abbreviates a hash for keys and the status table.

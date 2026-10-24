@@ -56,7 +56,8 @@
       "keys": ["Enter"]
     },
     "dialog": {
-      "patterns": ["Do you want to", "❯\\s*1\\.", "(?i)enter to confirm"]
+      "patterns": ["Do you want to", "❯\\s*1\\.", "(?i)enter to confirm"],
+      "decline_after": "0s"
     },
     "pane_commands": ["claude"],
     "context": {

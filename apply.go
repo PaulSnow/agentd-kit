@@ -158,6 +158,13 @@ func (st *LogState) apply(e Event) {
 		if o.Dialog && !t.Dialog.Showing {
 			t.Dialog.Episode++
 		}
+		// The decline is timed from the first pass that showed a dialog's
+		// shape, not from words a pattern matched before it.
+		if !o.DialogShape {
+			t.Dialog.Since = time.Time{}
+		} else if t.Dialog.Since.IsZero() {
+			t.Dialog.Since = e.Time
+		}
 		t.Dialog.Showing = o.Dialog
 		t.StatusQuestions = o.StatusQuestions
 		t.Questions.observeQuestions(o.Questions, o.Done)
@@ -264,7 +271,7 @@ func (st *LogState) apply(e Event) {
 				at = *e.Warning.IntentAt
 			}
 			switch a.Action {
-			case ActEscalate, ActUpdate, ActNudge, ActResume, ActTrust, ActRotate:
+			case ActEscalate, ActUpdate, ActNudge, ActResume, ActTrust, ActRotate, ActDecline:
 				t.applyAction(a, false, false, at)
 			}
 			// An answer cut short may not have reached the file: it is
@@ -331,6 +338,12 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 		t.Limited = false
 	case ActTrust:
 		t.TrustHash = a.PaneHash
+	case ActDecline:
+		// Once per episode, a would-be or cut-short one too: Escape twice
+		// could reach whatever the first left on screen.
+		if a.Episode > t.Dialog.Declined {
+			t.Dialog.Declined, t.Dialog.DeclinedAt = a.Episode, at
+		}
 	case ActEscalate, ActUpdate:
 		t.Posted[a.Key] = true
 		if a.Action == ActEscalate {

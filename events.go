@@ -93,6 +93,7 @@ const (
 	ActNudge    = "nudge"
 	ActResume   = "resume"
 	ActTrust    = "trust"
+	ActDecline  = "decline" // Escape sent to a dialog shown past the policy's time
 	ActFetch    = "fetch"
 	ActPush     = "push"
 	ActOpen     = "open"
@@ -129,6 +130,7 @@ type ObservePayload struct {
 	Limited         bool       `json:"limited"`
 	Trust           bool       `json:"trust"`
 	Dialog          bool       `json:"dialog"`
+	DialogShape     bool       `json:"dialog_shape,omitempty"` // the dialog has a dialog's shape, which alone may be declined
 	Command         string     `json:"command"`
 	Head            string     `json:"head"`
 	PaneHash        string     `json:"pane_hash,omitempty"`
