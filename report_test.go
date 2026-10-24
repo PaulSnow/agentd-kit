@@ -363,8 +363,7 @@ func TestReportItems(t *testing.T) {
 	if !strings.Contains(r.Digest, "1 new item") || !strings.Contains(r.OwnerDigest, "4 new items") {
 		t.Fatalf("digests = %q, %q", r.Digest, r.OwnerDigest)
 	}
-	// Nothing about a mail item reaches anyone but the owner, its triage
-	// included.
+	// A mail item's triage is the owner's as the item is.
 	appendItem(h, now, ItemPayload{ID: "mail:t3", Kind: ItemMailReport, Repository: widgets, Title: "Quarterly", OwnerOnly: true},
 		&TriageResult{Kind: "report", NeedsOwner: "no", Urgency: "later", Summary: "Numbers are in.", Suggested: "read"})
 	r = BuildReport(h.cfg, h.events(), ModeLive, "host-a", now)
@@ -372,6 +371,108 @@ func TestReportItems(t *testing.T) {
 		for _, it := range rr.Items {
 			if strings.HasPrefix(it.ID, "mail:") && !it.OwnerOnly {
 				t.Fatalf("mail item published: %+v", it)
+			}
+			if it.ID == "mail:t3" && it.Summary != "Numbers are in." {
+				t.Fatalf("mail triage %+v", it)
+			}
+		}
+	}
+}
+
+// reportItems is every item of the report by id, and the repository it is
+// filed under.
+func reportItems(r Report) (map[string]ReportItem, map[string]ReportRepo) {
+	items, repoOf := map[string]ReportItem{}, map[string]ReportRepo{}
+	for _, rr := range r.Repositories {
+		for _, it := range rr.Items {
+			items[it.ID], repoOf[it.ID] = it, rr
+		}
+	}
+	return items, repoOf
+}
+
+// An item stays until the owner has seen it and seven days have passed; a
+// triage of an older text is not published; any mark of mail makes an item
+// the owner's.
+func TestReportItemWindowTriageAndMailMarks(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	now := h.clock.Now()
+	widgets := "gitlab/example-org/widgets"
+	appendItem(h, now.Add(-30*24*time.Hour), ItemPayload{ID: widgets + "#1", Kind: ItemIssue, Repository: widgets, Title: "Old, unseen"}, nil)
+	appendItem(h, now.Add(-2*24*time.Hour), ItemPayload{ID: widgets + "#2", Kind: ItemIssue, Repository: widgets, Title: "Recent, seen"}, nil)
+	if err := MarkSeen(NewLogWriter(h.buf), now, []string{widgets + "#2"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	appendItem(h, now, ItemPayload{ID: widgets + "#3", Kind: ItemIssue, Repository: widgets, Title: "Before"},
+		&TriageResult{Kind: "bug", NeedsOwner: "no", Urgency: "now", Summary: "Stale summary.", Suggested: "fix"})
+	appendItem(h, now, ItemPayload{ID: widgets + "#3", Kind: ItemIssue, Repository: widgets, Title: "After"}, nil)
+	appendItem(h, now, ItemPayload{ID: "x1", Kind: ItemMailReport, Repository: widgets, Title: "By kind"}, nil)
+	appendItem(h, now, ItemPayload{ID: "mail:x2", Kind: ItemIssue, Repository: widgets, Title: "By id"}, nil)
+	items, _ := reportItems(BuildReport(h.cfg, h.events(), ModeLive, "host-a", now))
+	if _, ok := items[widgets+"#1"]; !ok {
+		t.Fatal("an unseen item left the report")
+	}
+	if it, ok := items[widgets+"#2"]; !ok || !it.Seen {
+		t.Fatalf("a recently seen item: %+v, %v", it, ok)
+	}
+	if it := items[widgets+"#3"]; it.Title != "After" || it.Summary != "" || it.Urgency != "" {
+		t.Fatalf("a stale triage was published: %+v", it)
+	}
+	if !items["x1"].OwnerOnly || !items["mail:x2"].OwnerOnly {
+		t.Fatalf("mail marks: %+v, %+v", items["x1"], items["mail:x2"])
+	}
+	// Seen, and first seen over seven days ago: gone.
+	if err := MarkSeen(NewLogWriter(h.buf), now, []string{widgets + "#1"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if items, _ := reportItems(BuildReport(h.cfg, h.events(), ModeLive, "host-a", now)); items[widgets+"#1"].ID != "" {
+		t.Fatal("an old seen item stayed")
+	}
+}
+
+// A confidential match in any published field of an item leaves the item
+// out whole: its id, title, link or triage summary.
+func TestReportItemsScreenEveryField(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.cfg.ConfidentialPatterns = []string{`(?i)hush`}
+	now := h.clock.Now()
+	widgets := "gitlab/example-org/widgets"
+	appendItem(h, now, ItemPayload{ID: widgets + "#1", Kind: ItemIssue, Repository: widgets, Title: "Plain"}, nil)
+	appendItem(h, now, ItemPayload{ID: widgets + "#hush", Kind: ItemIssue, Repository: widgets, Title: "By id"}, nil)
+	appendItem(h, now, ItemPayload{ID: widgets + "#3", Kind: ItemIssue, Repository: widgets, Title: "By link", Link: "https://example.com/hush"}, nil)
+	appendItem(h, now, ItemPayload{ID: widgets + "#4", Kind: ItemIssue, Repository: widgets, Title: "By summary"},
+		&TriageResult{Kind: "bug", NeedsOwner: "no", Urgency: "later", Summary: "Hush now.", Suggested: "fix"})
+	r := BuildReport(h.cfg, h.events(), ModeLive, "host-a", now)
+	b, _ := json.Marshal(r)
+	items, _ := reportItems(r)
+	if strings.Contains(strings.ToLower(string(b)), "hush") || len(items) != 1 {
+		t.Fatalf("report %s", b)
+	}
+}
+
+// Repositories that share a forge and project share one entry, for the
+// owner only when any of them is, however the configuration is read; a
+// public repository with only the owner's entries is the owner's too.
+func TestReportSharedKeyAndOwnerOnlyRepository(t *testing.T) {
+	h := reportHarness(t)
+	inner := h.cfg.Repositories["widgets"]
+	inner.Host, inner.OwnerOnly = "gitlab.internal.example", true
+	h.cfg.Repositories["a-inner"] = inner
+	appendItem(h, h.clock.Now(), ItemPayload{ID: "mail:m1", Kind: ItemMailReport, Repository: "github/example-org/gadgets", Title: "Mail", OwnerOnly: true}, nil)
+	h.cfg.Repositories["gadgets"] = Repository{Forge: "github", Project: "example-org/gadgets"}
+	for i := 0; i < 20; i++ {
+		r := BuildReport(h.cfg, h.events(), ModeLive, "host-a", h.clock.Now())
+		for _, rr := range r.Repositories {
+			if !rr.OwnerOnly {
+				t.Fatalf("repository %q (%s) is public", rr.Repository, rr.Name)
+			}
+			if rr.Repository == "gitlab/example-org/widgets" && rr.Name != "a-inner" {
+				t.Fatalf("name %q", rr.Name)
+			}
+			for _, c := range rr.Cases {
+				if !c.OwnerOnly {
+					t.Fatalf("case %+v public", c)
+				}
 			}
 		}
 	}

@@ -68,6 +68,26 @@ type ReportItem struct {
 	OwnerOnly  bool      `json:"owner_only"`
 }
 
+// allOwnerOnly says whether every entry of rr is for the owner only.
+func allOwnerOnly(rr ReportRepo) bool {
+	for _, c := range rr.Cases {
+		if !c.OwnerOnly {
+			return false
+		}
+	}
+	for _, d := range rr.Deliveries {
+		if !d.OwnerOnly {
+			return false
+		}
+	}
+	for _, it := range rr.Items {
+		if !it.OwnerOnly {
+			return false
+		}
+	}
+	return true // questions are always the owner's
+}
+
 // fromMail says whether an item is derived from mail, by any of the marks
 // a mail finding carries: everything from mail is for the owner only.
 func fromMail(it ItemPayload) bool {
@@ -180,18 +200,31 @@ func ReportFrom(cfg *Config, st *LogState, host string, now time.Time) Report {
 		}
 		return rr
 	}
+	// configured names the configured repository with each key, the first
+	// by name when several share one (the key leaves out the host), and
+	// keyOwnerOnly says whether any of them is for the owner only.
+	configured, keyOwnerOnly := map[string]string{}, map[string]bool{}
+	repoNames := make([]string, 0, len(cfg.Repositories))
+	for name := range cfg.Repositories {
+		repoNames = append(repoNames, name)
+	}
+	sort.Strings(repoNames)
+	for _, name := range repoNames {
+		r := cfg.Repositories[name]
+		key := repoKey(r.Forge, r.Project)
+		if _, ok := configured[key]; !ok {
+			configured[key] = name
+		}
+		keyOwnerOnly[key] = keyOwnerOnly[key] || r.OwnerOnly
+	}
 	// group is the entry for the configured repository name.
 	group := func(name string) *ReportRepo {
 		r, ok := cfg.Repositories[name]
 		if !ok {
 			return entry("", "", true)
 		}
-		return entry(repoKey(r.Forge, r.Project), name, r.OwnerOnly)
-	}
-	// configured is the configured repository with key, by name.
-	configured := map[string]string{}
-	for name, r := range cfg.Repositories {
-		configured[repoKey(r.Forge, r.Project)] = name
+		key := repoKey(r.Forge, r.Project)
+		return entry(key, configured[key], keyOwnerOnly[key])
 	}
 	var names []string
 	for n := range st.Tracks {
@@ -201,10 +234,10 @@ func ReportFrom(cfg *Config, st *LogState, host string, now time.Time) Report {
 	}
 	sort.Strings(names)
 	var public, all digestCounts
-	count := func(state string, delivered, asked int, ownerOnly bool) {
-		all.add(state, delivered, asked)
+	count := func(state string, delivered, asked, items int, ownerOnly bool) {
+		all.add(state, delivered, asked, items)
 		if !ownerOnly {
-			public.add(state, delivered, asked)
+			public.add(state, delivered, asked, items)
 		}
 	}
 	for _, it := range st.SortedItems(false) {
@@ -212,14 +245,14 @@ func ReportFrom(cfg *Config, st *LogState, host string, now time.Time) Report {
 			continue
 		}
 		var rr *ReportRepo
-		if name, ok := configured[it.Repository]; ok && it.Repository != "" {
+		if name, ok := configured[it.Repository]; ok {
 			rr = group(name)
 		} else {
 			rr = entry(it.Repository, "", true)
 		}
 		ri := ReportItem{ID: it.ID, Kind: it.Kind, Title: it.Title, Link: it.Link, SourceTime: it.SourceTime, FirstSeen: it.FirstSeen,
 			Seen: it.Seen, OwnerOnly: fromMail(it.ItemPayload)}
-		if tr := it.Triage; tr != nil && tr.Hash == ItemHash(it.ItemPayload) {
+		if tr := it.Triaged(); tr != nil {
 			ri.NeedsOwner, ri.Urgency, ri.Summary = tr.NeedsOwner, tr.Urgency, tr.Summary
 		}
 		if rr == nil || secret(ri.ID, ri.Title, ri.Link, ri.Summary) {
@@ -227,10 +260,7 @@ func ReportFrom(cfg *Config, st *LogState, host string, now time.Time) Report {
 		}
 		ri.OwnerOnly = ri.OwnerOnly || rr.OwnerOnly
 		rr.Items = append(rr.Items, ri)
-		all.items++
-		if !ri.OwnerOnly {
-			public.items++
-		}
+		count("", 0, 0, 1, ri.OwnerOnly)
 	}
 	for _, n := range names {
 		rs := st.Tracks[n]
@@ -244,7 +274,7 @@ func ReportFrom(cfg *Config, st *LogState, host string, now time.Time) Report {
 				c.Head = ""
 			}
 			rr.Cases = append(rr.Cases, c)
-			count(c.State, 0, 0, c.OwnerOnly)
+			count(c.State, 0, 0, 0, c.OwnerOnly)
 		}
 		for _, d := range rs.Deliveries {
 			repo := d.Repository
@@ -256,17 +286,20 @@ func ReportFrom(cfg *Config, st *LogState, host string, now time.Time) Report {
 				continue
 			}
 			dr.Deliveries = append(dr.Deliveries, ReportDelivery{Session: n, Ref: d.Ref, At: d.At, OwnerOnly: dr.OwnerOnly})
-			count("", 1, 0, dr.OwnerOnly)
+			count("", 1, 0, 0, dr.OwnerOnly)
 		}
 		if rr != nil && rs.Questions.Open && rs.Asked != "" && !secret(rs.Asked) {
 			rr.Questions = append(rr.Questions, ReportQuestion{Session: n, Since: rs.AskedAt, Text: rs.Asked, OwnerOnly: true})
-			count("", 0, 1, true)
+			count("", 0, 1, 0, true)
 		}
 	}
 	report := Report{Schema: ReportSchema, WrittenAt: now, Host: host, Mode: mode, Repositories: []ReportRepo{},
 		Digest: public.digest(), OwnerDigest: all.digest()}
 	for _, rr := range repos {
 		if len(rr.Cases)+len(rr.Deliveries)+len(rr.Questions)+len(rr.Items) > 0 {
+			// A repository whose every entry is the owner's is too: a mail
+			// item alone does not show the site that something is there.
+			rr.OwnerOnly = rr.OwnerOnly || allOwnerOnly(*rr)
 			report.Repositories = append(report.Repositories, *rr)
 		}
 	}
@@ -284,8 +317,9 @@ type digestCounts struct {
 	items     int
 }
 
-// add counts a case in state (when not ""), deliveries and questions.
-func (d *digestCounts) add(state string, delivered, asked int) {
+// add counts a case in state (when not ""), deliveries, questions and
+// items.
+func (d *digestCounts) add(state string, delivered, asked, items int) {
 	if d.states == nil {
 		d.states = map[State]int{}
 	}
@@ -294,6 +328,7 @@ func (d *digestCounts) add(state string, delivered, asked int) {
 	}
 	d.delivered += delivered
 	d.asked += asked
+	d.items += items
 }
 
 // digest is one plain summary: sessions by state, the deliveries, the
