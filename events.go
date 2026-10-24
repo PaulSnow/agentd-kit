@@ -14,13 +14,32 @@ import (
 	"time"
 )
 
+// EventVersion is the version of the event format this agentd writes and
+// the only one it reads. A log of another version is refused whole: start
+// a fresh log rather than guess at an old shape.
+const EventVersion = 2
+
 // Event is one line of the event log: an observation, a transition, an
-// action taken, an action shadow mode would have taken, or an error.
+// action taken, an action shadow mode would have taken, or an error. Every
+// event carries the version, the mode of the run that wrote it, and exactly
+// one typed payload, the one its kind names; there is no untyped detail.
 type Event struct {
-	Time    time.Time      `json:"time"`
-	Session string         `json:"session,omitempty"`
-	Kind    string         `json:"kind"`
-	Details map[string]any `json:"details,omitempty"`
+	V       int       `json:"v"`
+	Time    time.Time `json:"time"`
+	Session string    `json:"session,omitempty"`
+	Kind    string    `json:"kind"`
+	Mode    string    `json:"mode,omitempty"`
+
+	Start      *StartPayload      `json:"start,omitempty"`
+	Stop       *StopPayload       `json:"stop,omitempty"`
+	Observe    *ObservePayload    `json:"observe,omitempty"`
+	Transition *TransitionPayload `json:"transition,omitempty"`
+	Act        *ActPayload        `json:"act,omitempty"` // intent, action and would
+	Skip       *SkipPayload       `json:"skip,omitempty"`
+	Crash      *CrashPayload      `json:"crash,omitempty"`
+	Clear      *ClearPayload      `json:"clear,omitempty"`
+	Error      *ErrorPayload      `json:"error,omitempty"`
+	Warning    *WarningPayload    `json:"warning,omitempty"`
 }
 
 // Event kinds.
@@ -36,18 +55,18 @@ const (
 	KindCrash      = "crash"      // a session agentd saw alive, or restarted, is gone: its cause
 	KindClear      = "clear"      // the owner cleared a parked session (agentd clear)
 	KindError      = "error"      // observation or action failed
-	KindWarning    = "warning"    // agentd itself noticed something: a torn log line dropped
+	KindWarning    = "warning"    // agentd itself noticed something: a torn log line, an intent cut short
 )
 
-// Modes, in the mode detail every event carries. A run replays only the
-// events of its own mode, and the owner's: live and shadow never share state.
+// Modes, in the mode every event carries. A run reads only the events of
+// its own mode, and the owner's: live and shadow never share state.
 const (
 	ModeLive   = "live"
 	ModeShadow = "shadow"
 	ModeOwner  = "owner" // an owner's record, such as mark-delivered, read by both
 )
 
-// Action names, used in the details of action and would events.
+// Action names, in the Act payload of intent, action and would events.
 const (
 	ActRestart  = "restart"
 	ActNudge    = "nudge"
@@ -60,6 +79,197 @@ const (
 	ActEscalate = "escalate"
 	ActUpdate   = "update" // the open Questions escalation's text changed
 )
+
+// StartPayload is a run's start: the sessions it supervises.
+type StartPayload struct {
+	Sessions []string `json:"sessions"`
+}
+
+// StopPayload is why a run stopped.
+type StopPayload struct {
+	Reason string `json:"reason"`
+}
+
+// ObservePayload is a session's evidence, logged when it changes.
+// UnchangedS is absent until the screen has been seen, since until then
+// the time is unknown; Restarts is absent when restarts are off.
+type ObservePayload struct {
+	State          string     `json:"state"`
+	Reason         string     `json:"reason"`
+	Alive          bool       `json:"alive"`
+	Done           bool       `json:"done"`
+	Questions      bool       `json:"questions"`
+	Limited        bool       `json:"limited"`
+	Trust          bool       `json:"trust"`
+	Dialog         bool       `json:"dialog"`
+	Command        string     `json:"command"`
+	Head           string     `json:"head"`
+	PaneHash       string     `json:"pane_hash,omitempty"`
+	PaneSince      *time.Time `json:"pane_since,omitempty"`
+	TranscriptRole string     `json:"transcript_role,omitempty"`
+	TranscriptStop string     `json:"transcript_stop,omitempty"`
+	TranscriptAt   *time.Time `json:"transcript_at,omitempty"`
+	Restarts       *int       `json:"restarts,omitempty"`
+	UnchangedS     *int       `json:"unchanged_s,omitempty"`
+}
+
+// TransitionPayload is a change of state and the evidence for it.
+type TransitionPayload struct {
+	From   string `json:"from"`
+	To     string `json:"to"`
+	Reason string `json:"reason"`
+}
+
+// ActPayload is one action: its name, the intent id that pairs an intent
+// with its outcome, the key it settles, and the facts of its kind.
+type ActPayload struct {
+	Action string `json:"action"`
+	Intent string `json:"intent,omitempty"`
+	Key    string `json:"key,omitempty"`
+	By     string `json:"by,omitempty"` // an owner's record: mark-delivered
+
+	// A restart.
+	Attempt int    `json:"attempt,omitempty"`
+	Cwd     string `json:"cwd,omitempty"`
+	Respawn bool   `json:"respawn,omitempty"`
+	Account string `json:"account,omitempty"`
+	Command string `json:"command,omitempty"`
+
+	// Typing: a nudge, a resume, the trust keys.
+	Message  string   `json:"message,omitempty"`
+	Nudge    int      `json:"nudge,omitempty"`
+	Keys     []string `json:"keys,omitempty"`
+	PaneHash string   `json:"pane_hash,omitempty"`
+
+	// An escalation or Questions update; Message is its text.
+	Console       string `json:"console,omitempty"`
+	QuestionsHash string `json:"questions_hash,omitempty"`
+	Update        int    `json:"update,omitempty"`
+	Dialog        int    `json:"dialog,omitempty"`
+
+	// Delivery: a fetch, push or open.
+	Delivered  string `json:"delivered,omitempty"`
+	Repository string `json:"repository,omitempty"`
+	Worktree   string `json:"worktree,omitempty"`
+	Branch     string `json:"branch,omitempty"`
+	Head       string `json:"head,omitempty"`
+	Target     string `json:"target,omitempty"`
+	Title      string `json:"title,omitempty"`
+	Draft      bool   `json:"draft,omitempty"`
+	Ref        string `json:"ref,omitempty"`
+	URL        string `json:"url,omitempty"`
+
+	// A gate run.
+	Gate      []string `json:"gate,omitempty"`
+	SHA       string   `json:"sha,omitempty"`
+	Exit      *int     `json:"exit,omitempty"`
+	DurationS *float64 `json:"duration_s,omitempty"`
+	Output    string   `json:"output,omitempty"`
+}
+
+// SkipPayload is an action a policy declined, keyed so it is logged once,
+// with the reason and the facts it was declined on. Escalation names an
+// escalation given up on; Delivered and Outcome settle a delivery without
+// one (found already open, nothing to deliver, given up); Filtered names an
+// escalation whose text was withheld.
+type SkipPayload struct {
+	Key    string `json:"key"`
+	Reason string `json:"reason"`
+
+	Action     string `json:"action,omitempty"`
+	Command    string `json:"command,omitempty"`
+	Account    string `json:"account,omitempty"`
+	Worktree   string `json:"worktree,omitempty"`
+	Repository string `json:"repository,omitempty"`
+	Target     string `json:"target,omitempty"`
+	MRFile     string `json:"mr_file,omitempty"`
+	Origin     string `json:"origin,omitempty"`
+	Branch     string `json:"branch,omitempty"`
+	SHA        string `json:"sha,omitempty"`
+	Head       string `json:"head,omitempty"`
+	Delivered  string `json:"delivered,omitempty"`
+	Outcome    string `json:"outcome,omitempty"`
+	URL        string `json:"url,omitempty"`
+
+	Escalation    string `json:"escalation,omitempty"`
+	Console       string `json:"console,omitempty"`
+	Message       string `json:"message,omitempty"`
+	Filtered      string `json:"filtered,omitempty"`
+	QuestionsHash string `json:"questions_hash,omitempty"`
+	Update        int    `json:"update,omitempty"`
+	Dialog        int    `json:"dialog,omitempty"`
+}
+
+// CrashPayload is one crash: its cause (exit status when known, and the
+// last screen's hash), the crashes since the owner last cleared the
+// session, and whether it is now parked.
+type CrashPayload struct {
+	ScreenHash   string `json:"screen_hash"`
+	Exit         *int   `json:"exit,omitempty"`
+	Crashes      int    `json:"crashes"`
+	Parked       bool   `json:"parked"`
+	RestartError bool   `json:"restart_error,omitempty"`
+}
+
+// ClearPayload is the owner's clearing of a parked session.
+type ClearPayload struct {
+	By string `json:"by"`
+}
+
+// ErrorPayload is a failed step or action. Key, when set, is the keyed
+// action whose failed try this is; Act is the action that failed.
+type ErrorPayload struct {
+	Step  string      `json:"step,omitempty"`
+	Key   string      `json:"key,omitempty"`
+	Error string      `json:"error"`
+	Act   *ActPayload `json:"act,omitempty"`
+}
+
+// WarningPayload is something agentd noticed about itself: a torn last
+// line of the log it cut off, or an intent with no outcome, an action cut
+// short by a crash of agentd, which is shown and never silently repeated.
+type WarningPayload struct {
+	Warning  string      `json:"warning"`
+	Bytes    int         `json:"bytes,omitempty"`
+	Intent   *ActPayload `json:"intent,omitempty"`
+	IntentAt *time.Time  `json:"intent_at,omitempty"` // when the intent was recorded
+}
+
+// check refuses an event this agentd cannot read exactly: another version,
+// an unknown kind or mode, or a payload other than its kind's alone.
+func (e Event) check() error {
+	if e.V != EventVersion {
+		return fmt.Errorf("version %d, not %d", e.V, EventVersion)
+	}
+	payloads := map[string]bool{
+		KindStart: e.Start != nil, KindStop: e.Stop != nil, KindObserve: e.Observe != nil, KindTransition: e.Transition != nil,
+		KindSkip: e.Skip != nil, KindCrash: e.Crash != nil, KindClear: e.Clear != nil, KindError: e.Error != nil, KindWarning: e.Warning != nil,
+		"act": e.Act != nil,
+	}
+	want := e.Kind
+	switch e.Kind {
+	case KindIntent, KindAction, KindWould:
+		want = "act"
+	}
+	if _, ok := payloads[want]; !ok {
+		return fmt.Errorf("unknown kind %q", e.Kind)
+	}
+	for kind, set := range payloads {
+		if set != (kind == want) {
+			return fmt.Errorf("a %s event must carry its own payload and no other", e.Kind)
+		}
+	}
+	switch e.Mode {
+	case ModeLive, ModeShadow, ModeOwner:
+	case "":
+		if e.Kind != KindWarning {
+			return fmt.Errorf("a %s event must carry its mode", e.Kind)
+		}
+	default:
+		return fmt.Errorf("unknown mode %q", e.Mode)
+	}
+	return nil
+}
 
 // Log appends events to a JSONL file. It is safe for concurrent use, and
 // across processes: each append holds an exclusive flock on the file, so
@@ -104,6 +314,9 @@ func (l *Log) lock() (func(), error) {
 // torn final line, so the event never lands glued to a fragment that the
 // next run would cut off with it.
 func (l *Log) Append(e Event) error {
+	if err := e.check(); err != nil {
+		return fmt.Errorf("refusing to log an event agentd could not read back: %w", err)
+	}
 	b, err := json.Marshal(e)
 	if err != nil {
 		return err
@@ -203,16 +416,15 @@ func (l *Log) repairTail() (int, error) {
 	if _, err := l.f.ReadAt(tail, start); err != nil {
 		return 0, err
 	}
-	var e Event
-	if err := json.Unmarshal(tail, &e); err == nil && e.Kind != "" {
+	if _, err := parseEvent(tail); err == nil {
 		return 0, l.write([]byte{'\n'})
 	}
 	if err := l.f.Truncate(start); err != nil {
 		return 0, err
 	}
 	torn := int(size - start)
-	w, err := json.Marshal(Event{Time: time.Now(), Kind: KindWarning, Details: map[string]any{
-		"warning": "dropped a torn final line of the event log", "bytes": torn}})
+	w, err := json.Marshal(Event{V: EventVersion, Time: time.Now(), Kind: KindWarning, Warning: &WarningPayload{
+		Warning: "dropped a torn final line of the event log", Bytes: torn}})
 	if err != nil {
 		return 0, err
 	}
@@ -308,12 +520,12 @@ func ReadEvents(r io.Reader) ([]Event, int, error) {
 		}
 		final := err == io.EOF // the line has no newline
 		if len(bytes.TrimSpace(line)) > 0 {
-			var e Event
-			if jerr := json.Unmarshal(line, &e); jerr != nil || e.Kind == "" {
+			e, perr := parseEvent(line)
+			if perr != nil {
 				if final {
 					return events, len(line), nil
 				}
-				return nil, 0, fmt.Errorf("event log line %d is malformed; fix or remove it before starting", n)
+				return nil, 0, fmt.Errorf("event log line %d is malformed (%v); fix or remove it, or start a fresh log, before starting", n, perr)
 			}
 			events = append(events, e)
 		}
@@ -323,22 +535,14 @@ func ReadEvents(r io.Reader) ([]Event, int, error) {
 	}
 }
 
-// detailString reads a string detail, or "".
-func detailString(e Event, key string) string {
-	if v, ok := e.Details[key].(string); ok {
-		return v
+// parseEvent reads one line strictly: a field the format lacks, or an
+// event check refuses, is malformed.
+func parseEvent(line []byte) (Event, error) {
+	var e Event
+	dec := json.NewDecoder(bytes.NewReader(line))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&e); err != nil {
+		return Event{}, err
 	}
-	return ""
-}
-
-// detailInt reads a numeric detail. ok is false when the detail is missing
-// or not a number, which is unknown, not zero. JSON numbers decode as float64.
-func detailInt(e Event, key string) (int, bool) {
-	switch v := e.Details[key].(type) {
-	case float64:
-		return int(v), true
-	case int:
-		return v, true
-	}
-	return 0, false
+	return e, e.check()
 }

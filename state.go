@@ -48,7 +48,32 @@ type Track struct {
 	Delivered map[string]string      // delivery keys: MR reference or the reason none was made
 	Skipped   map[string]bool        // skip reasons already logged
 	Failures  map[string][]time.Time // failed tries of a keyed action; retries follow the restart backoff
-	LastObs   map[string]any         // last observe details, to log only changes
+	LastObs   *ObservePayload        // last observation logged, to log only changes
+
+	// What the views show, folded from the log by apply alone.
+	LastSeen      time.Time
+	Head, Reason  string
+	RestartCount  int               // restarts, taken or would-be, ever
+	NudgeCount    int               // nudges ever
+	Escalations   int               // escalations and updates posted
+	Would         int               // would events (shadow mode)
+	Errors        int               // error events
+	DeliveredRefs []string          // what each delivery opened
+	Blocked       map[string]string // worktree: the last reason its delivery was declined
+	GaveUp        []string          // escalation keys given up on
+	CutShort      []string          // actions a crash of agentd cut short
+	Asked         string            // the Questions text last posted, while they stay open
+	AskedAt       time.Time
+	Filtered      map[string]bool // escalation keys whose text was withheld
+	Deliveries    []DeliveryRecord
+}
+
+// DeliveryRecord is one request a delivery opened, found, or was told of.
+type DeliveryRecord struct {
+	Ref        string
+	Repository string // as configured; "" for an owner's mark-delivered record
+	Delivered  string // the delivery key, session:worktree
+	At         time.Time
 }
 
 // QuestionsEscalation is the one escalation a session's Questions section
@@ -126,7 +151,8 @@ func (t *Track) clear() {
 }
 
 func newTrack() *Track {
-	return &Track{Posted: map[string]bool{}, Delivered: map[string]string{}, Skipped: map[string]bool{}, Failures: map[string][]time.Time{}}
+	return &Track{Posted: map[string]bool{}, Delivered: map[string]string{}, Skipped: map[string]bool{}, Failures: map[string][]time.Time{},
+		Blocked: map[string]string{}, Filtered: map[string]bool{}}
 }
 
 // restartsInWindow counts restarts inside the backoff window.

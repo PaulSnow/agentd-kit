@@ -415,7 +415,7 @@ func (h *harness) events() []Event {
 func (h *harness) count(kind, action, session string) int {
 	n := 0
 	for _, e := range h.events() {
-		if e.Kind == kind && (action == "" || detailString(e, "action") == action) && (session == "" || e.Session == session) {
+		if e.Kind == kind && (action == "" || actionOf(e) == action) && (session == "" || e.Session == session) {
 			n++
 		}
 	}
@@ -424,4 +424,26 @@ func (h *harness) count(kind, action, session string) int {
 
 func (h *harness) state(name string) State {
 	return h.sup.Tracks()[name].State
+}
+
+// actionOf is the action an intent, action, would or failed action's error
+// event names, or a warning about a cut-short intent, or "".
+func actionOf(e Event) string {
+	switch {
+	case e.Act != nil:
+		return e.Act.Action
+	case e.Error != nil && e.Error.Act != nil:
+		return e.Error.Act.Action
+	case e.Warning != nil && e.Warning.Intent != nil:
+		return e.Warning.Intent.Action
+	}
+	return ""
+}
+
+// skipReason is a skip event's reason, or "".
+func skipReason(e Event) string {
+	if e.Skip != nil {
+		return e.Skip.Reason
+	}
+	return ""
 }

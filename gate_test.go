@@ -33,19 +33,19 @@ func TestDeliveryRunsTheGateFirst(t *testing.T) {
 	}
 	var gate *Event
 	for _, e := range h.events() {
-		if e.Kind == KindAction && detailString(e, "action") == ActGate {
+		if e.Kind == KindAction && actionOf(e) == ActGate {
 			e := e
 			gate = &e
 		}
 	}
-	if gate == nil || detailString(*gate, "sha") != "c0ffee" || gate.Details["command"] == nil {
+	if gate == nil || gate.Act.SHA != "c0ffee" || len(gate.Act.Gate) == 0 {
 		t.Fatalf("gate event = %+v", gate)
 	}
-	if n, ok := detailInt(*gate, "exit"); !ok || n != 0 {
-		t.Fatalf("gate event exit = %v", gate.Details["exit"])
+	if gate.Act.Exit == nil || *gate.Act.Exit != 0 {
+		t.Fatalf("gate event exit = %v", gate.Act.Exit)
 	}
-	if _, ok := gate.Details["duration_s"]; !ok {
-		t.Fatalf("gate event lacks its duration: %+v", gate)
+	if gate.Act.DurationS == nil {
+		t.Fatalf("gate event lacks its duration: %+v", gate.Act)
 	}
 }
 

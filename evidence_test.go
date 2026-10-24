@@ -136,7 +136,8 @@ func TestLogRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	at := time.Date(2026, 10, 22, 3, 4, 5, 0, time.UTC)
-	if err := l.Append(Event{Time: at, Session: "s", Kind: KindObserve, Details: map[string]any{"state": "idle", "restarts": 2}}); err != nil {
+	two := 2
+	if err := l.Append(Event{V: EventVersion, Time: at, Session: "s", Kind: KindObserve, Mode: ModeLive, Observe: &ObservePayload{State: "idle", Restarts: &two}}); err != nil {
 		t.Fatal(err)
 	}
 	l.Close()
@@ -148,7 +149,7 @@ func TestLogRoundTrip(t *testing.T) {
 		t.Fatalf("events %d torn %d err %v", len(events), torn, err)
 	}
 	e := events[0]
-	if n, ok := detailInt(e, "restarts"); !e.Time.Equal(at) || e.Session != "s" || detailString(e, "state") != "idle" || !ok || n != 2 {
+	if !e.Time.Equal(at) || e.Session != "s" || e.Observe.State != "idle" || e.Observe.Restarts == nil || *e.Observe.Restarts != 2 {
 		t.Fatalf("event = %+v", e)
 	}
 	if events, _, err := ReadLog(filepath.Join(t.TempDir(), "missing")); err != nil || events != nil {
@@ -317,7 +318,7 @@ func TestStatusTable(t *testing.T) {
 	h.sup.Run(contextWithCancel(t), true)
 	h.ticks(3*12, 5*time.Minute)
 
-	rows, meta := Summarize(h.events())
+	rows, meta := Summarize(h.cfg, h.events(), ModeLive)
 	byName := map[string]SessionStatus{}
 	for _, r := range rows {
 		byName[r.Name] = r
