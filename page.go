@@ -712,6 +712,7 @@ type pageRepo struct {
 	Hidden    bool
 	HideLink  string
 	Cases     []ReportCase
+	Requests  []ReportDelivery
 	Issues    []pageIssue
 	// HiddenIssues counts the issues hidden in this repository, and
 	// ShowIssues shows them again.
@@ -769,7 +770,7 @@ func buildView(data PageData, q viewQuery, now time.Time) pageView {
 			continue
 		}
 		r := get(rr.Repository, rr.Name)
-		r.Cases = rr.Cases
+		r.Cases, r.Requests = rr.Cases, rr.Deliveries
 		needs := map[string]bool{}
 		for _, c := range rr.Cases {
 			if c.State == string(BlockedOnOwner) {
@@ -947,6 +948,7 @@ table { border-collapse: collapse; } td { padding: .1rem .6rem .1rem 0; vertical
 {{range .Repos}}<section>
 <h2 class="repo">{{.Name}} <span class="muted">{{.Key}}</span>{{if .NeedsYou}} <span class="needs">needs you: {{.NeedsYou}}</span>{{end}} <a href="{{.HideLink}}">{{if .Hidden}}show{{else}}hide{{end}}</a></h2>
 {{if .Cases}}<table>{{range .Cases}}<tr><td>{{.Session}}</td><td>{{.State}}</td><td class="muted">since {{when .Since}}</td><td>{{.Head}}</td>{{if .Role}}<td class="muted">{{.Role}}: {{.Wakes}} wakes{{with .WakeTokens}}, {{.}} tokens per wake{{end}}</td>{{end}}</tr>{{end}}</table>{{end}}
+{{if .Requests}}<table>{{range .Requests}}<tr><td>{{.Session}}</td><td>{{.Ref}}</td><td class="muted">delivered {{when .At}}</td><td>{{with .CI}}CI {{.}}{{else}}<span class="muted">CI not watched</span>{{end}}{{with .CIVerdict}} ({{.}}){{end}}{{range .CIJobs}} {{.}}{{end}}</td></tr>{{end}}</table>{{end}}
 {{if .Issues}}<table>{{range .Issues}}<tr><td>#{{.Number}}</td><td>{{.Title}}</td><td class="muted">updated {{when .Updated}}</td><td><a href="{{.HideLink}}">hide</a></td></tr>{{end}}</table>{{end}}
 {{if .HiddenIssues}}<p class="muted">{{.HiddenIssues}} hidden issues. <a href="{{.ShowIssues}}">show them</a></p>{{end}}
 </section>{{else}}<p>Nothing to show.</p>{{end}}

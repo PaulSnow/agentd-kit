@@ -76,6 +76,8 @@ func (f *fakeForgeAPI) GitLab(path string) (APIResponse, error) {
 	return APIResponse{Status: http.StatusOK, Body: []byte("[]")}, nil
 }
 
+func (f *fakeForgeAPI) At(string) ForgeAPI { return f }
+
 func (f *fakeForgeAPI) set(fn func()) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

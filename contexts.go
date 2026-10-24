@@ -527,7 +527,7 @@ func ParseProgress(text string) Progress {
 // restartFacts is what agentd hands a fresh session about where it stands,
 // as one compact JSON document: data, not instructions.
 type restartFacts struct {
-	Why       string   `json:"why"` // rotation, restart, or answered: restarted with the owner's answers
+	Why       string   `json:"why"` // rotation, restart, answered (restarted with the owner's answers) or ci-fix
 	Brief     string   `json:"brief"`
 	Progress  string   `json:"progress"`
 	Item      string   `json:"item,omitempty"`
@@ -535,6 +535,8 @@ type restartFacts struct {
 	LastMerge string   `json:"last_merge,omitempty"`
 	Next      []string `json:"next,omitempty"`
 	Answers   string   `json:"answers,omitempty"` // the owner's answers, when restarted with them
+	// A fix session's: the CI failure it was started for.
+	CI *CIFact `json:"ci,omitempty"`
 	// With the case's server passed at launch: the tools to report
 	// through, the done-when items they name, and the rulings the first
 	// report must acknowledge.
@@ -556,7 +558,12 @@ func (s *Supervisor) restartPrompt(name string, sess Session, t *Track, why stri
 // packFacts is the facts document a fresh session is handed, its context
 // pack, as compact JSON.
 func (s *Supervisor) packFacts(name string, sess Session, t *Track, why string) []byte {
-	f := restartFacts{Why: why, Brief: sess.Workdir + "/BRIEF.md", Progress: sess.Workdir + "/STATUS.md"}
+	return s.packFactsWith(name, sess, t, why, nil)
+}
+
+// packFactsWith is the facts document with a fix session's CI failure.
+func (s *Supervisor) packFactsWith(name string, sess Session, t *Track, why string, ci *CIFact) []byte {
+	f := restartFacts{Why: why, Brief: sess.Workdir + "/BRIEF.md", Progress: sess.Workdir + "/STATUS.md", CI: ci}
 	// Answers the owner gave stay in the file and are named in every
 	// fresh session's facts, since the context that read them is gone.
 	if len(t.answersFor(false)) > 0 {
@@ -585,8 +592,11 @@ func (s *Supervisor) packFacts(name string, sess Session, t *Track, why string) 
 // promptWith is the prompt that hands a fresh session facts.
 func (s *Supervisor) promptWith(facts []byte, why string) string {
 	prompt := DefaultRestartPrompt + " "
-	if why == "answered" {
+	switch why {
+	case "answered":
 		prompt += s.cfg.Policies.Answers.Pointer + " "
+	case "ci-fix":
+		prompt += s.cfg.Policies.CI.Pointer + " "
 	}
 	return prompt + string(facts)
 }
@@ -606,7 +616,13 @@ func (s *Supervisor) passesMCP() bool {
 // document of its case's server, substituted, and the facts the prompt
 // hands it: its case's context pack.
 func (s *Supervisor) launchCommand(name string, sess Session, t *Track, id, why string) ([]string, []byte) {
-	facts := s.packFacts(name, sess, t, why)
+	return s.launchCommandWith(name, sess, t, id, why, nil)
+}
+
+// launchCommandWith is the launch command of a fix session, its CI
+// failure in its facts.
+func (s *Supervisor) launchCommandWith(name string, sess Session, t *Track, id, why string, ci *CIFact) ([]string, []byte) {
+	facts := s.packFactsWith(name, sess, t, why, ci)
 	if sess.Role == RoleCoordinator && !s.shadow {
 		// A pack that cannot be written leaves the last one; the
 		// launch goes on.

@@ -119,6 +119,11 @@ type ReportDelivery struct {
 	Ref       string    `json:"ref"`
 	At        time.Time `json:"at"`
 	OwnerOnly bool      `json:"owner_only"`
+	// CI is the request's pipeline as the watcher last saw it, its
+	// verdict on a failure and the failing jobs; "" when not watched.
+	CI        string   `json:"ci,omitempty"`
+	CIVerdict string   `json:"ci_verdict,omitempty"`
+	CIJobs    []string `json:"ci_jobs,omitempty"`
 }
 
 // ReportQuestion is a session's open Questions, the STATUS.md text last
@@ -302,7 +307,21 @@ func ReportFrom(cfg *Config, st *LogState, host string, now time.Time) Report {
 			if dr == nil || secret(d.Ref) {
 				continue
 			}
-			dr.Deliveries = append(dr.Deliveries, ReportDelivery{Session: n, Ref: d.Ref, At: d.At, OwnerOnly: dr.OwnerOnly})
+			rd := ReportDelivery{Session: n, Ref: d.Ref, At: d.At, OwnerOnly: dr.OwnerOnly}
+			if c, ok := st.CI[ciKey(repo, d.Ref)]; ok {
+				rd.CI, rd.CIVerdict, rd.CIJobs = c.State, c.Verdict, c.Jobs
+			}
+			// A CI fix pushed to the request is the same delivery again.
+			again := false
+			for i, o := range dr.Deliveries {
+				if o.Session == n && o.Ref == d.Ref {
+					rd.At, dr.Deliveries[i], again = o.At, rd, true
+				}
+			}
+			if again {
+				continue
+			}
+			dr.Deliveries = append(dr.Deliveries, rd)
 			count("", 1, 0, 0, dr.OwnerOnly)
 		}
 		if rr != nil && rs.Questions.Open && rs.Asked != "" && !secret(rs.Asked) {

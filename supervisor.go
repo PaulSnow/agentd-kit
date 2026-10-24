@@ -380,6 +380,7 @@ func (s *Supervisor) Pass() error {
 	}
 	if s.halt == nil {
 		s.pollForges(s.clock.Now())
+		s.watchCI(s.clock.Now())
 		s.triageItems(s.clock.Now())
 	}
 	return s.halt
@@ -657,6 +658,9 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 	}
 	if !typed && sess.Role == RoleCoordinator {
 		typed = s.wake(name, sess, t, ev, state, now)
+	}
+	if !typed && sess.Role != RoleCoordinator && s.fixCI(name, sess, t, ev, state, now) {
+		return Starting
 	}
 	switch state {
 	case Done:
@@ -1065,6 +1069,13 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 		return
 	}
 	wt := &SkipPayload{Worktree: d.Worktree}
+	// A CI fix session's commit goes to its request once the session has
+	// finished, not while it works.
+	fix, fixing := t.pendingCIFix(key)
+	if fixing && !s.ciFixFinished(t, fix, ev, now) {
+		s.skipOnce(name, "deliver:"+key+":ci-fix:"+fix.Transcript, fmt.Sprintf("the CI fix session for %s has not finished; delivery waits", fix.Ref), t, wt)
+		return
+	}
 	if sess.Hold != "" {
 		s.skipOnce(name, "hold:"+key, "delivery held: "+sess.Hold, t, wt)
 		return
@@ -1186,8 +1197,15 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 	// the branch counts. A merged one counts when it carried HEAD, or when the
 	// target contains its head and HEAD has nothing the target lacks, as after
 	// the forge rebased it before merging. A reused branch name with new
-	// commits is delivered again.
+	// commits is delivered again. The open request a CI fix session was
+	// started for takes the fix's new commits: they are pushed to it.
+	var refresh *MergeResult
 	for _, r := range reqs {
+		if fixing && r.Ref == fix.Ref && !r.Merged && head != fix.Head {
+			r := r
+			refresh = &r
+			continue
+		}
 		delivers := !r.Merged || r.Head == head
 		if !delivers && ahead == 0 && r.Head != "" {
 			in, err := s.git.Contains(d.Worktree, r.Head, d.Target)
@@ -1254,6 +1272,11 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 		return s.forge.PushAllowed(d.Repository, d.Worktree, head, branch)
 	}); err != nil {
 		fail("push", err)
+		return
+	}
+	if refresh != nil {
+		s.skipOnce(name, fkey+":ci-fix:"+head, fmt.Sprintf("pushed the CI fix %s to %s", shortHash(head), refresh.Ref), t,
+			&SkipPayload{Delivered: key, Outcome: refresh.Ref, URL: refresh.URL, Branch: branch, Head: head, Repository: d.Repository, Worktree: d.Worktree, Target: d.Target})
 		return
 	}
 	mr := MergeRequest{Project: repo.Project, Source: branch, Target: d.Target, Title: title, Description: string(body), Assignee: repo.Assignee}

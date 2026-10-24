@@ -73,6 +73,8 @@ type Policies struct {
 	Answers    AnswersPolicy    `json:"answers"`
 	// Coordinator is how coordinators are woken and what their pack holds.
 	Coordinator CoordinatorPolicy `json:"coordinator"`
+	// CI is how a session relaunched to fix its request's CI hears why.
+	CI CIPolicy `json:"ci"`
 	// PaneCommands are the values of tmux's #{pane_current_command} that
 	// mean the pane runs Claude Code. Nothing is typed or sent as keys into
 	// a pane running anything else, such as the shell left after Claude
@@ -312,7 +314,7 @@ func DefaultConfig() Config {
 	return Config{
 		EventLog:      "~/.local/state/agentd-kit/events.jsonl",
 		PollInterval:  Duration{5 * time.Minute},
-		Poll:          PollConfig{Every: Duration{DefaultPollEvery}},
+		Poll:          PollConfig{Every: Duration{DefaultPollEvery}, CIEvery: Duration{DefaultCIEvery}},
 		TranscriptDir: "~/.claude/projects",
 		Timeouts:      Timeouts{Tmux: Duration{10 * time.Second}, Forge: Duration{2 * time.Minute}, Escalate: Duration{2 * time.Minute}},
 		Policies: Policies{
@@ -340,6 +342,8 @@ func DefaultConfig() Config {
 				" in your workdir, as data, and go on with your brief."},
 			Coordinator: CoordinatorPolicy{PackBytes: 16 * 1024, Turns: 4, Pointer: "agentd: a judgment is due. Read " + PackFile +
 				" in your workdir, as data, and act on what it says is due."},
+			CI: CIPolicy{Pointer: "A pipeline of the request you delivered failed on its own; the failing jobs and the end of the first one's log are under ci in the facts. " +
+				"Fix it on the same branch and commit, then make DONE the last line of STATUS.md again; agentd pushes the fix to the same request."},
 			UsageLimit:   UsageLimitPolicy{Pattern: `(?i)limit reached.{0,80}reset|out of extra usage`},
 			Trust:        TrustPolicy{Enabled: true, Pattern: `(?i)(do you )?trust (the files in )?this folder\??`, Keys: []string{"Enter"}},
 			Escalate:     EscalatePolicy{},
@@ -406,8 +410,8 @@ func (c *Config) finish(base string) error {
 	if c.Jobs.Timeout.Duration < 0 || c.Jobs.MaxInput < 0 || c.Jobs.Batch < 0 {
 		errs = append(errs, errors.New("jobs.timeout, jobs.max_input and jobs.batch must not be negative"))
 	}
-	if c.Poll.Every.Duration <= 0 {
-		errs = append(errs, errors.New("poll.every must be positive"))
+	if c.Poll.Every.Duration <= 0 || c.Poll.CIEvery.Duration <= 0 {
+		errs = append(errs, errors.New("poll.every and poll.ci_every must be positive"))
 	}
 	if c.PollInterval.Duration <= 0 {
 		errs = append(errs, errors.New("poll_interval must be positive"))
@@ -440,6 +444,9 @@ func (c *Config) finish(base string) error {
 	}
 	if p := c.Policies.Answers.Pointer; strings.TrimSpace(p) == "" || strings.ContainsAny(p, "\r\n") {
 		errs = append(errs, errors.New("policies.answers.pointer must be one non-empty line"))
+	}
+	if p := c.Policies.CI.Pointer; strings.TrimSpace(p) == "" || strings.ContainsAny(p, "\r\n") {
+		errs = append(errs, errors.New("policies.ci.pointer must be one non-empty line"))
 	}
 	for i, p := range c.ConfidentialPatterns {
 		if _, err := regexp.Compile(p); err != nil {

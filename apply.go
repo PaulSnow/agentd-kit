@@ -27,6 +27,8 @@ type LogState struct {
 	// Coordinators are the claims on each repository's coordinator: the
 	// session that holds it, by repository.
 	Coordinators map[string]string
+	// CI is each watched request's latest CI, by repository and request.
+	CI map[string]CIRecord
 
 	cfg *Config // its policies, read as each event is applied
 }
@@ -35,7 +37,7 @@ type LogState struct {
 func NewLogState(cfg *Config, mode string) *LogState {
 	return &LogState{Mode: mode, Tracks: map[string]*Track{}, Pending: map[string]Event{}, Items: map[string]*Item{},
 		Cursors: map[string]time.Time{}, Polls: map[string]PollRecord{}, Cases: map[string]*Case{},
-		Coordinators: map[string]string{}, cfg: cfg}
+		Coordinators: map[string]string{}, CI: map[string]CIRecord{}, cfg: cfg}
 }
 
 // setItem changes a copy of the item and puts the copy in its place: a
@@ -96,6 +98,10 @@ func (st *LogState) apply(e Event) {
 	st.Events++
 	if e.Kind == KindCase {
 		st.applyCase(e)
+		return
+	}
+	if e.Kind == KindCI {
+		st.applyCI(e)
 		return
 	}
 	if e.Kind == KindCoordinator {
@@ -352,6 +358,28 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 		}
 	case ActWake:
 		t.applyWake(a, taken, counted, at)
+	case ActCIFix:
+		// Not a restart or a crash: its count is the fix's own. A would-be
+		// fix is recorded too, so shadow mode would start it once.
+		if counted {
+			t.CIFixes = append(t.CIFixes, CIFixRecord{Ref: a.Ref, Repository: a.Repository, Delivered: a.Delivered, Head: a.Head, Cause: a.Cause,
+				Decision: a.Decision, Transcript: a.Transcript, Taken: taken, At: at})
+		}
+		if taken {
+			// The delivery waits for the fix, and is recorded again after it.
+			delete(t.Delivered, a.Delivered)
+			t.Hash, t.HashSince, t.Observed, t.Live = "", at, true, true
+			t.Nudges, t.LastNudge, t.Limited = 0, time.Time{}, false
+			t.launched(a.Transcript, at)
+		}
+	case ActRaise:
+		if counted && a.Raised != nil {
+			if t.CIRaised == nil {
+				t.CIRaised = map[string]string{}
+			}
+			t.CIRaised[ciKey(a.Repository, a.Ref)+" "+a.Cause] = a.Raised.ID
+			t.raise(*a.Raised)
+		}
 	case ActStop:
 		t.Stopped = a.Reason
 		if taken { // its session is gone by the owner's policy, not a crash

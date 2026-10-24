@@ -385,6 +385,9 @@ type CaseView struct {
 	Rank       int             `json:"rank"`
 	Pinned     bool            `json:"pinned,omitempty"`
 	Priority   int             `json:"priority,omitempty"` // the repository's this week, 0 unlisted
+	// CI is the pipeline of each request its sessions delivered, as the
+	// watcher last saw it.
+	CI []CIRecord `json:"ci,omitempty"`
 }
 
 // CasesFrom is every case the state knows, sorted by id: the cases of the
@@ -447,6 +450,14 @@ func CasesFrom(cfg *Config, st *LogState) []CaseView {
 			}
 		}
 		v.State = caseState(c, ts)
+		for _, s := range v.Sessions {
+			for _, r := range st.CI {
+				if r.Session == s {
+					v.CI = append(v.CI, r)
+				}
+			}
+		}
+		sort.Slice(v.CI, func(i, j int) bool { return v.CI[i].Ref < v.CI[j].Ref })
 		if v.State == CaseNeedsYou {
 			// Waiting on the owner since the first of its sessions to wait.
 			var since time.Time

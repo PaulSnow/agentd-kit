@@ -70,6 +70,9 @@ func SummarizeState(cfg *Config, st *LogState) ([]SessionStatus, map[string]any)
 		meta["polls"] = polls
 		meta["poll_stale"] = pollHeartbeat + 2*cfg.Poll.Every.Duration
 	}
+	if cfg.Poll.CI && len(st.CI) > 0 {
+		meta["ci"] = st.CI
+	}
 	tracks := copyMap(st.Tracks)
 	for _, n := range cfg.SessionNames() {
 		if tracks[n] == nil {
@@ -138,6 +141,29 @@ func PrintStatus(w io.Writer, rows []SessionStatus, meta map[string]any, now tim
 	// A quiet poll makes no event, but a source still polled has a record
 	// at least every pollHeartbeat: an older one means no one is polling
 	// it, so it is unknown, never "nothing new".
+	// A request's CI as the watcher last saw it; once agentd has stopped,
+	// no one is watching, so it is unknown.
+	if ci, ok := meta["ci"].(map[string]CIRecord); ok {
+		stopped, _ := meta["stopped"].(time.Time)
+		keys := make([]string, 0, len(ci))
+		for k := range ci {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			c := ci[k]
+			line := fmt.Sprintf("ci %s %s (%s): %s", c.Repository, c.Ref, c.Session, c.State)
+			switch {
+			case !stopped.IsZero() && c.State != CIMerged && c.State != CIClosed:
+				line = fmt.Sprintf("ci %s %s (%s): unknown, agentd stopped %s ago; last %s", c.Repository, c.Ref, c.Session, ago(now, stopped), c.State)
+			case c.State == CIUnknown:
+				line += ": " + c.Error
+			case c.State == CIFailed:
+				line += fmt.Sprintf(" (%s: %s)", c.Verdict, strings.Join(c.Jobs, ", "))
+			}
+			fmt.Fprintf(w, "%s, since %s ago\n", line, ago(now, c.At))
+		}
+	}
 	if polls, ok := meta["polls"].(map[string]PollRecord); ok {
 		stale, _ := meta["poll_stale"].(time.Duration)
 		stopped, _ := meta["stopped"].(time.Time)
