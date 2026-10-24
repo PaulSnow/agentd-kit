@@ -156,7 +156,7 @@ func TestMalformedMailNeverEmptiesTheList(t *testing.T) {
 	}
 	before := len(st.Items)
 	laterSnapshot(t, tr)
-	for _, bad := range []string{`{"asOf": `, `{"asOf": "2026-10-24T00:00:00Z", "findings": [{"threadId": "t9"}]}`, `{"asOf": "2026-10-24T00:00:00Z", "findings": null}`, `[]`} {
+	for _, bad := range []string{`{"asOf": `, `{"asOf": "2026-10-25T00:00:00Z", "findings": [{"threadId": "t9"}]}`, `{"asOf": "2026-10-25T00:00:00Z", "findings": null}`, `[]`} {
 		writeFile(t, tr.Mail, bad)
 		_, err := refresh(t, st, tr)
 		if err == nil || !strings.Contains(err.Error(), tr.Mail) {
@@ -206,4 +206,82 @@ func TestItemsCommand(t *testing.T) {
 	if err := itemsCmd([]string{"--config", cfgPath, "--seen", "nosuch#1"}, &out); err == nil {
 		t.Fatal("marked an unknown item seen")
 	}
+	for _, args := range [][]string{{"--new", "--seen", "mail:t2"}, {"extra"}} {
+		if err := itemsCmd(append([]string{"--config", cfgPath}, args...), &out); err == nil {
+			t.Errorf("items %v accepted", args)
+		}
+	}
+}
+
+// An item seen again under a moved cursor is not listed twice: a mail file
+// rewritten with a later asOf and the same thread, and two refreshes made
+// from the same state, as when the command and a running agentd race.
+func TestItemSeenAgainIsNotDuplicated(t *testing.T) {
+	tr, cfg := itemsFixture(t)
+	st := NewLogState(cfg, ModeLive)
+	if _, err := refresh(t, st, tr); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, tr.Mail, strings.Replace(mailFixture, `"asOf": "2026-10-23T20:00:00-05:00"`, `"asOf": "2026-10-23T23:00:00-05:00"`, 1))
+	events, err := refresh(t, st, tr)
+	if err != nil || len(events) != 1 || events[0].Kind != KindCursor {
+		t.Fatalf("the same threads again: %+v, %v", events, err)
+	}
+	laterSnapshot(t, tr)
+	a, errA := RefreshItems(st, tr, time.Now())
+	b, errB := RefreshItems(st, tr, time.Now())
+	if errA != nil || errB != nil || len(a) == 0 || len(a) != len(b) {
+		t.Fatalf("two refreshes: %d and %d events, %v %v", len(a), len(b), errA, errB)
+	}
+	n := len(st.Items)
+	for _, e := range append(a, b...) {
+		st.apply(e)
+	}
+	if got := len(st.Items) - n; got != len(a)-1 { // one of a's events is the cursor
+		t.Fatalf("%d items from two racing refreshes, want %d", got, len(a)-1)
+	}
+	// A cursor never moves back: an older snapshot, restored, adds nothing.
+	writeFile(t, tr.Snapshot, strings.Replace(mustRead(t, tr.Snapshot), `"AsOf": "2026-10-23T22:23:04-05:00"`, `"AsOf": "2026-10-22T22:23:04-05:00"`, 1))
+	if events, err := refresh(t, st, tr); err != nil || len(events) != 0 {
+		t.Fatalf("an older snapshot: %+v, %v", events, err)
+	}
+}
+
+// Mail waits while the tracking files cannot be read: its items would
+// have no repositories, and keep none for good.
+func TestMailWaitsForTheInventory(t *testing.T) {
+	tr, cfg := itemsFixture(t)
+	writeFile(t, tr.Snapshot, `{`)
+	st := NewLogState(cfg, ModeLive)
+	if _, err := refresh(t, st, tr); err == nil || !strings.Contains(err.Error(), tr.Snapshot) {
+		t.Fatalf("error = %v", err)
+	}
+	if len(st.Items) != 0 || !st.Cursors[SourceMail].IsZero() {
+		t.Fatalf("items %v, mail cursor %v", st.Items, st.Cursors)
+	}
+}
+
+// Items and cursors are shared facts and seen marks the owner's; no other
+// mode is accepted for them, and shared for nothing else.
+func TestItemEventModes(t *testing.T) {
+	at := time.Now()
+	for _, e := range []Event{
+		{V: EventVersion, Time: at, Kind: KindItem, Mode: ModeLive, Item: &ItemPayload{ID: "x"}},
+		{V: EventVersion, Time: at, Kind: KindCursor, Mode: ModeOwner, Cursor: &CursorPayload{Source: SourceMail}},
+		{V: EventVersion, Time: at, Kind: KindSeen, Mode: ModeShared, Seen: &SeenPayload{IDs: []string{"x"}}},
+		{V: EventVersion, Time: at, Kind: KindStop, Mode: ModeShared, Stop: &StopPayload{}},
+	} {
+		if err := e.check(); err == nil {
+			t.Errorf("accepted a %s event in mode %s", e.Kind, e.Mode)
+		}
+	}
+}
+
+func mustRead(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }

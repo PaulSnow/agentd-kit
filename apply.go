@@ -19,7 +19,7 @@ type LogState struct {
 	Pending map[string]Event // intents with no outcome yet, by intent id
 	Started time.Time
 	Stopped time.Time
-	Events  int                  // events of this mode, and the owner's, applied
+	Events  int                  // events of this mode, the owner's and the shared ones, applied
 	Items   map[string]*Item     // new items by id, and whether the owner saw them
 	Cursors map[string]time.Time // how far each source of items has been read
 
@@ -62,8 +62,9 @@ func (st *LogState) CutShort() []Event {
 }
 
 // apply folds one event into the state. Events of the other mode are
-// ignored; the owner's records count for both. In shadow mode a would event
-// counts as the action taken, so the shadow keeps its own counters.
+// ignored; the owner's records and the shared facts count for both. In
+// shadow mode a would event counts as the action taken, so the shadow keeps
+// its own counters.
 func (st *LogState) apply(e Event) {
 	if e.Mode != st.Mode && e.Mode != ModeOwner && e.Mode != ModeShared && e.Mode != "" {
 		return

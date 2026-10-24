@@ -266,6 +266,13 @@ func (e Event) check() error {
 			return fmt.Errorf("a %s event must carry its own payload and no other", e.Kind)
 		}
 	}
+	// Items and cursors are facts both modes read; the owner marks items seen.
+	switch {
+	case (e.Kind == KindItem || e.Kind == KindCursor) != (e.Mode == ModeShared):
+		return fmt.Errorf("a %s event must not carry mode %q", e.Kind, e.Mode)
+	case e.Kind == KindSeen && e.Mode != ModeOwner:
+		return fmt.Errorf("a seen event is the owner's, not %q", e.Mode)
+	}
 	switch e.Mode {
 	case ModeLive, ModeShadow, ModeOwner, ModeShared:
 	case "":

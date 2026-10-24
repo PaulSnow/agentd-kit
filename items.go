@@ -79,6 +79,8 @@ type Item struct {
 }
 
 // itemLink is the forge page for an issue (or a request when mr is set).
+// The tracking files name the platform, not the host, so a repository on a
+// self-hosted forge gets a link to the public one: a known gap.
 func itemLink(platform, path string, number int, mr bool) string {
 	switch {
 	case platform == "gitlab" && mr:
@@ -91,17 +93,22 @@ func itemLink(platform, path string, number int, mr bool) string {
 	return fmt.Sprintf("https://github.com/%s/issues/%d", path, number)
 }
 
-// SnapshotItems are the items a snapshot holds that are newer than since,
-// the AsOf of the snapshot read before it: issues and requests created
-// since, and open ones updated since, as discussions. A zero since is the
-// first snapshot, which is only a baseline: it yields nothing.
-func SnapshotItems(snap *Snapshot, since time.Time) []ItemPayload {
+// SnapshotItems are the items an inventory's snapshot holds that are newer
+// than since, the AsOf of the snapshot read before it: issues and requests
+// created since, and open ones updated since, as discussions, for the
+// repositories in the manifest only. A zero since is the first snapshot,
+// which is only a baseline: it yields nothing. A discussion names no
+// author: the snapshot knows who opened the issue, not who changed it.
+func SnapshotItems(inv *Inventory, since time.Time) []ItemPayload {
 	if since.IsZero() {
 		return nil
 	}
 	var out []ItemPayload
-	for _, r := range snap.Repos {
+	for _, r := range inv.snapshot.Repos {
 		key := repoKey(r.Info.Platform, r.Info.FullPath)
+		if inv.byKey[key] == nil {
+			continue // the manifest is the list
+		}
 		add := func(kind, sigil string, number int, title, author string, created, updated time.Time, open, mr bool) {
 			switch {
 			case created.After(since):
@@ -109,7 +116,7 @@ func SnapshotItems(snap *Snapshot, since time.Time) []ItemPayload {
 					Link: itemLink(r.Info.Platform, r.Info.FullPath, number, mr), SourceTime: created, Author: author})
 			case open && updated.After(since):
 				out = append(out, ItemPayload{ID: fmt.Sprintf("%s%s%d@%s", key, sigil, number, updated.UTC().Format(time.RFC3339)), Kind: ItemDiscussion,
-					Repository: key, Title: title, Link: itemLink(r.Info.Platform, r.Info.FullPath, number, mr), SourceTime: updated, Author: author})
+					Repository: key, Title: title, Link: itemLink(r.Info.Platform, r.Info.FullPath, number, mr), SourceTime: updated})
 			}
 		}
 		for _, is := range r.Issues {
@@ -125,7 +132,9 @@ func SnapshotItems(snap *Snapshot, since time.Time) []ItemPayload {
 
 // MailItems are the mail findings as items, every one for the owner only.
 // A finding whose summary or subject asks something is a question; any
-// other is a report.
+// other is a report. Its repository is the manifest repository of the
+// finding's name, or none when no one repository has that name. An item
+// keeps the kind and title it was first seen with.
 func MailItems(m *MailFindings, inv *Inventory) ([]ItemPayload, error) {
 	var out []ItemPayload
 	for i, f := range m.Findings {
@@ -140,13 +149,14 @@ func MailItems(m *MailFindings, inv *Inventory) ([]ItemPayload, error) {
 		if strings.Contains(f.Summary, "?") || strings.Contains(f.Subject, "?") {
 			kind = ItemMailQuestion
 		}
-		repo := ""
-		if inv != nil {
-			for _, r := range inv.Repos {
-				if strings.EqualFold(r.Name, f.Repo) {
-					repo = r.Key
-				}
+		repo, matches := "", 0
+		for _, r := range inv.Repos {
+			if strings.EqualFold(r.Name, f.Repo) {
+				repo, matches = r.Key, matches+1
 			}
+		}
+		if matches != 1 {
+			repo = ""
 		}
 		out = append(out, ItemPayload{ID: "mail:" + f.ThreadID, Kind: kind, Repository: repo, Title: f.Subject, SourceTime: at, Author: f.From, OwnerOnly: true})
 	}
@@ -161,18 +171,21 @@ const (
 
 // RefreshItems reads the tracking files tr names and returns the events
 // that bring st up to date: an item event for each item st does not hold
-// yet, and a cursor for each source read. The first snapshot read sets the
-// cursor only. A file that cannot be read is an error and yields no events
-// from it, so a bad file never empties or rewrites the list; the other
-// source is still read.
+// yet, and a cursor for each source read that moved forward. The first
+// snapshot read sets the cursor only. A file that cannot be read is an
+// error and yields no events from it, so a bad file never empties or
+// rewrites the list. The mail findings need the inventory, for their
+// repositories, so they wait while the tracking files cannot be read.
 func RefreshItems(st *LogState, tr Tracking, now time.Time) ([]Event, error) {
 	var events []Event
 	var errs []error
+	queued := map[string]bool{}
 	add := func(items []ItemPayload) {
 		for _, it := range items {
-			if _, ok := st.Items[it.ID]; ok {
+			if _, ok := st.Items[it.ID]; ok || queued[it.ID] {
 				continue
 			}
+			queued[it.ID] = true
 			it := it
 			events = append(events, Event{V: EventVersion, Time: now, Kind: KindItem, Mode: ModeShared, Item: &it})
 		}
@@ -180,17 +193,17 @@ func RefreshItems(st *LogState, tr Tracking, now time.Time) ([]Event, error) {
 	inv, err := LoadInventory(tr)
 	if err != nil {
 		errs = append(errs, err)
-	} else if since := st.Cursors[SourceSnapshot]; !inv.AsOf.Equal(since) {
-		add(SnapshotItems(inv.snapshot, since))
+	} else if since := st.Cursors[SourceSnapshot]; inv.AsOf.After(since) {
+		add(SnapshotItems(inv, since))
 		events = append(events, Event{V: EventVersion, Time: now, Kind: KindCursor, Mode: ModeShared, Cursor: &CursorPayload{Source: SourceSnapshot, AsOf: inv.AsOf}})
 	}
-	if tr.Mail != "" {
+	if tr.Mail != "" && inv != nil {
 		var m MailFindings
 		if err := readStrict(tr.Mail, &m); err != nil {
 			errs = append(errs, fmt.Errorf("tracking mail findings %w", err))
 		} else if m.AsOf.IsZero() || m.Findings == nil {
 			errs = append(errs, fmt.Errorf("tracking mail findings %s: unknown shape: asOf and findings must be present", tr.Mail))
-		} else if !m.AsOf.Equal(st.Cursors[SourceMail]) {
+		} else if m.AsOf.After(st.Cursors[SourceMail]) {
 			items, err := MailItems(&m, inv)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("tracking mail findings %s: unknown shape: %w", tr.Mail, err))
@@ -240,6 +253,9 @@ func itemsCmd(args []string, w io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if fs.NArg() > 0 || *seen != "" && *unseen {
+		return errors.New("usage: agentd items [--new] | agentd items --seen ID,...")
+	}
 	log, events, err := openLoaded(cfg.EventLog)
 	if err != nil {
 		return err
@@ -282,7 +298,12 @@ func PrintItems(w io.Writer, items []*Item) {
 		if it.OwnerOnly {
 			title += " (owner only)"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", it.SourceTime.Local().Format("2006-01-02 15:04"), it.Kind, repo, title, it.Author, seen, it.ID)
+		// Mail findings carry a day, not a time.
+		when := it.SourceTime.Local().Format("2006-01-02 15:04")
+		if it.Kind == ItemMailQuestion || it.Kind == ItemMailReport {
+			when = it.SourceTime.UTC().Format("2006-01-02")
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", when, it.Kind, repo, title, it.Author, seen, it.ID)
 	}
 	tw.Flush()
 }
