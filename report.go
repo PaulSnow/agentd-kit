@@ -29,7 +29,10 @@ type Report struct {
 	Host         string       `json:"host"`
 	Mode         string       `json:"mode"`
 	Repositories []ReportRepo `json:"repositories"`
-	Digest       string       `json:"digest"`
+	// Digest summarizes the entries anyone may see; OwnerDigest, for the
+	// owner only, summarizes them all.
+	Digest      string `json:"digest"`
+	OwnerDigest string `json:"owner_digest"`
 }
 
 // ReportRepo is one repository's part of the report. Repository is its
@@ -63,8 +66,8 @@ type ReportDelivery struct {
 	OwnerOnly bool      `json:"owner_only"`
 }
 
-// ReportQuestion is a session's open Questions, as last posted to the
-// owner. Questions are always for the owner only.
+// ReportQuestion is a session's open Questions, the STATUS.md text last
+// posted to the owner. Questions are always for the owner only.
 type ReportQuestion struct {
 	Session   string    `json:"session"`
 	Since     time.Time `json:"since"`
@@ -80,12 +83,37 @@ type reportSession struct {
 	asks       bool
 	question   string
 	askedAt    time.Time
-	deliveries []ReportDelivery
+	filtered   map[string]bool // escalation keys whose text was withheld when posted
+	deliveries []reportDelivery
+}
+
+// reportDelivery is a delivery and the repository it went to.
+type reportDelivery struct {
+	ReportDelivery
+	repository string
+}
+
+// Questions escalations and updates start with one of these, after the
+// session's name, ahead of the text from STATUS.md.
+var questionPrefixes = []string{" is blocked on you. Questions from STATUS.md:\n", " changed its open Questions in STATUS.md; they now read:\n"}
+
+// questionText is the STATUS.md text a Questions escalation carried.
+func questionText(session, message string) string {
+	for _, p := range questionPrefixes {
+		if strings.HasPrefix(message, session+p) {
+			return message[len(session+p):]
+		}
+	}
+	return message
 }
 
 // BuildReport folds events into the report for mode: the events of that
 // mode and the owner's, as a run of that mode replays them, so a live
-// report never shows what a shadow run only would have done.
+// report never shows what a shadow run only would have done. Only
+// configured sessions and repositories are reported. Every text is
+// screened against the confidential patterns as configured now: a matching
+// first line is left out, and any other entry with matching text, its
+// session's name or its repository's, is left out whole.
 func BuildReport(cfg *Config, events []Event, mode, host string, now time.Time) Report {
 	var confidential []*regexp.Regexp
 	for _, p := range cfg.ConfidentialPatterns {
@@ -101,6 +129,16 @@ func BuildReport(cfg *Config, events []Event, mode, host string, now time.Time) 
 		}
 		return false
 	}
+	// deliveredTo is the repository of the deliver spec a delivered key,
+	// session:worktree, names.
+	deliveredTo := func(session, key string) string {
+		for _, d := range cfg.Sessions[session].Deliver {
+			if session+":"+d.Worktree == key {
+				return d.Repository
+			}
+		}
+		return ""
+	}
 	sessions := map[string]*reportSession{}
 	started := ""
 	for _, e := range events {
@@ -110,13 +148,23 @@ func BuildReport(cfg *Config, events []Event, mode, host string, now time.Time) 
 			}
 			continue
 		}
+		if _, ok := cfg.Sessions[e.Session]; !ok {
+			continue // a session no longer configured is not reported
+		}
 		if m := eventMode(e, started); m != mode && m != ModeOwner {
 			continue
 		}
 		rs := sessions[e.Session]
 		if rs == nil {
-			rs = &reportSession{}
+			rs = &reportSession{filtered: map[string]bool{}}
 			sessions[e.Session] = rs
+		}
+		deliver := func(ref string) {
+			repo := detailString(e, "repository")
+			if repo == "" {
+				repo = deliveredTo(e.Session, detailString(e, "delivered"))
+			}
+			rs.deliveries = append(rs.deliveries, reportDelivery{ReportDelivery{Session: e.Session, Ref: ref, At: e.Time}, repo})
 		}
 		switch e.Kind {
 		case KindObserve:
@@ -137,38 +185,48 @@ func BuildReport(cfg *Config, events []Event, mode, host string, now time.Time) 
 			}
 			switch detailString(e, "action") {
 			case ActOpen:
-				if ref := detailString(e, "ref"); ref != "" {
-					rs.deliveries = append(rs.deliveries, ReportDelivery{Session: e.Session, Ref: ref, At: e.Time})
+				ref := detailString(e, "ref")
+				if ref == "" && e.Kind == KindWould {
+					ref = "would-open"
+				}
+				if ref != "" {
+					deliver(ref)
 				}
 			case ActEscalate, ActUpdate:
-				if strings.HasPrefix(detailString(e, "key"), "questions:") {
-					rs.question, rs.askedAt = detailString(e, "message"), e.Time
+				if key := detailString(e, "key"); strings.HasPrefix(key, "questions:") {
+					rs.question, rs.askedAt = questionText(e.Session, detailString(e, "message")), e.Time
+					if rs.filtered[key] {
+						rs.question = "" // the generic message, not the questions
+					}
 				}
 			}
 		case KindSkip:
+			if k := detailString(e, "filtered"); k != "" {
+				rs.filtered[k] = true
+			}
 			if detailString(e, "delivered") != "" {
 				// The outcome is the request found already open or
 				// merged, or failed or nothing, which deliver nothing.
 				if ref := detailString(e, "outcome"); ref != "" && ref != "failed" && ref != "nothing" {
-					rs.deliveries = append(rs.deliveries, ReportDelivery{Session: e.Session, Ref: ref, At: e.Time})
+					deliver(ref)
 				}
 			}
 		}
 	}
 
 	repos := map[string]*ReportRepo{}
-	names := make([]string, 0, len(sessions))
-	for n := range sessions {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	counts := map[State]int{}
-	var delivered, asked int
-	for _, n := range names {
-		rs := sessions[n]
-		key, name, ownerOnly := "", "", true
-		if r, ok := cfg.Repositories[cfg.Sessions[n].Repository]; ok {
-			key, name, ownerOnly = repoKey(r.Forge, r.Project), cfg.Sessions[n].Repository, r.OwnerOnly
+	// group is the report's entry for the configured repository name, nil
+	// when its name or identity matches a confidential pattern.
+	group := func(name string) *ReportRepo {
+		key, ownerOnly := "", true
+		r, ok := cfg.Repositories[name]
+		if ok {
+			key, ownerOnly = repoKey(r.Forge, r.Project), r.OwnerOnly
+		} else {
+			name = ""
+		}
+		if secret(name, key) {
+			return nil
 		}
 		rr := repos[key]
 		if rr == nil {
@@ -176,53 +234,94 @@ func BuildReport(cfg *Config, events []Event, mode, host string, now time.Time) 
 				Cases: []ReportCase{}, Deliveries: []ReportDelivery{}, Questions: []ReportQuestion{}}
 			repos[key] = rr
 		}
-		if rs.state != "" {
-			c := ReportCase{Session: n, State: string(rs.state), Since: rs.since, Head: rs.head, OwnerOnly: ownerOnly}
+		return rr
+	}
+	names := make([]string, 0, len(sessions))
+	for n := range sessions {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var public, all digestCounts
+	for _, n := range names {
+		rs := sessions[n]
+		if secret(n) {
+			continue
+		}
+		rr := group(cfg.Sessions[n].Repository)
+		if rr != nil && rs.state != "" {
+			c := ReportCase{Session: n, State: string(rs.state), Since: rs.since, Head: rs.head, OwnerOnly: rr.OwnerOnly}
 			if secret(c.Head) {
 				c.Head = ""
 			}
 			rr.Cases = append(rr.Cases, c)
-			counts[rs.state]++
+			all.add(c.State, 0, 0, &public, c.OwnerOnly)
 		}
 		for _, d := range rs.deliveries {
-			if !secret(d.Ref) {
-				d.OwnerOnly = ownerOnly
-				rr.Deliveries = append(rr.Deliveries, d)
-				delivered++
+			dr := group(d.repository)
+			if dr == nil || secret(d.Ref) {
+				continue
 			}
+			d.OwnerOnly = dr.OwnerOnly
+			dr.Deliveries = append(dr.Deliveries, d.ReportDelivery)
+			all.add("", 1, 0, &public, d.OwnerOnly)
 		}
-		if rs.asks && rs.question != "" && !secret(rs.question) {
+		if rr != nil && rs.asks && rs.question != "" && !secret(rs.question) {
 			rr.Questions = append(rr.Questions, ReportQuestion{Session: n, Since: rs.askedAt, Text: rs.question, OwnerOnly: true})
-			asked++
+			all.add("", 0, 1, &public, true)
 		}
 	}
-	report := Report{Schema: ReportSchema, WrittenAt: now, Host: host, Mode: mode, Repositories: []ReportRepo{}}
+	report := Report{Schema: ReportSchema, WrittenAt: now, Host: host, Mode: mode, Repositories: []ReportRepo{},
+		Digest: public.digest(), OwnerDigest: all.digest()}
 	for _, rr := range repos {
-		report.Repositories = append(report.Repositories, *rr)
+		if len(rr.Cases)+len(rr.Deliveries)+len(rr.Questions) > 0 {
+			report.Repositories = append(report.Repositories, *rr)
+		}
 	}
 	sort.Slice(report.Repositories, func(i, j int) bool {
 		return report.Repositories[i].Repository < report.Repositories[j].Repository
 	})
-	report.Digest = reportDigest(counts, delivered, asked)
 	return report
 }
 
-// reportDigest is the report's one plain summary: sessions by state, the
-// deliveries, and the questions waiting on the owner.
-func reportDigest(counts map[State]int, delivered, asked int) string {
+// digestCounts is what a digest summarizes.
+type digestCounts struct {
+	states    map[State]int
+	delivered int
+	asked     int
+}
+
+// add counts a case in state (when not ""), deliveries and questions, and
+// counts them in public too unless they are for the owner only.
+func (d *digestCounts) add(state string, delivered, asked int, public *digestCounts, ownerOnly bool) {
+	if d.states == nil {
+		d.states = map[State]int{}
+	}
+	if state != "" {
+		d.states[State(state)]++
+	}
+	d.delivered += delivered
+	d.asked += asked
+	if !ownerOnly && public != nil {
+		public.add(state, delivered, asked, nil, true)
+	}
+}
+
+// digest is one plain summary: sessions by state, the deliveries, and the
+// questions waiting on the owner.
+func (d digestCounts) digest() string {
 	total := 0
 	var parts []string
 	for _, st := range []State{Working, Starting, Idle, BlockedOnOwner, UsageLimited, Done, Failed, CrashLooping} {
-		if counts[st] > 0 {
-			total += counts[st]
-			parts = append(parts, fmt.Sprintf("%d %s", counts[st], st))
+		if d.states[st] > 0 {
+			total += d.states[st]
+			parts = append(parts, fmt.Sprintf("%d %s", d.states[st], st))
 		}
 	}
 	line := fmt.Sprintf("%d sessions", total)
 	if len(parts) > 0 {
 		line += ": " + strings.Join(parts, ", ")
 	}
-	return fmt.Sprintf("%s; %s delivered; %s waiting on the owner.", line, plural(delivered, "request"), plural(asked, "question"))
+	return fmt.Sprintf("%s; %s delivered; %s waiting on the owner.", line, plural(d.delivered, "request"), plural(d.asked, "question"))
 }
 
 // plural is n with noun, made plural unless n is one.
