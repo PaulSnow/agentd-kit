@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -32,7 +33,20 @@ const (
 	SourceGitLab = "gitlab"
 )
 
-const githubNotifications = "/notifications"
+// githubNotifications asks for read notifications too, since the owner
+// may read one on the site before agentd polls, and for a full page.
+const githubNotifications = "/notifications?all=true&per_page=100"
+
+// pollHeartbeat is the longest a source goes without a poll record while
+// it is polled: quiet polls are tallied into the next record, so status
+// can tell a source still polled from one no longer polled, and the calls
+// of every poll are counted.
+const pollHeartbeat = 6 * time.Hour
+
+// pollOverlap is how far before the poll began the GitLab cursor is set,
+// so a clock behind GitLab's misses nothing; what the overlap finds again
+// has the same id.
+const pollOverlap = 2 * time.Minute
 
 // PollConfig turns on agentd's own poll of the forges, per forge: each
 // needs that forge's CLI logged in. Every is how often.
@@ -42,14 +56,16 @@ type PollConfig struct {
 	GitLab bool     `json:"gitlab"`
 }
 
-// PollPayload is one poll of a source that changed something: it found
+// PollPayload is a poll of a source that changed something: it found
 // items or moved its cursor, or it failed, or it worked again after
-// failing. A poll that found nothing new makes no event. Calls is how many
-// API calls it made.
+// failing; or the heartbeat after pollHeartbeat of quiet polls. A quiet
+// poll makes no event of its own: Polls counts it into the next record,
+// and Calls is the API calls of those polls.
 type PollPayload struct {
 	Source string `json:"source"`
 	OK     bool   `json:"ok"`
 	Error  string `json:"error,omitempty"`
+	Polls  int    `json:"polls"`
 	Calls  int    `json:"calls"`
 	Items  int    `json:"items"`
 }
@@ -83,27 +99,41 @@ func (a ExecForgeAPI) GitHub(path string, header map[string]string) (APIResponse
 		args = append(args, "-H", k+": "+v)
 	}
 	out, err := runTimed(a.Timeout, "", nil, false, "gh", args...)
-	// gh exits non-zero on a 304; the reply it printed still says so.
-	resp, perr := parseIncluded(out)
-	if perr == nil && (err == nil || resp.Status == http.StatusNotModified) {
-		return resp, nil
-	}
-	if err == nil {
-		err = perr
-	}
-	return resp, fmt.Errorf("gh api %s: %w", path, err)
+	return included("gh api "+path, out, err)
 }
 
 func (a ExecForgeAPI) GitLab(path string) (APIResponse, error) {
 	out, err := runTimed(a.Timeout, "", nil, false, "glab", "api", "--include", path)
+	return included("glab api "+path, out, err)
+}
+
+// included is the reply a CLI printed. The CLIs exit non-zero on a 304 or
+// an error status, and the reply they printed still says which, so the
+// caller reports its status; with no reply, the error carries what the CLI
+// said on stderr.
+func included(what string, out []byte, err error) (APIResponse, error) {
 	resp, perr := parseIncluded(out)
+	if perr == nil {
+		return resp, nil
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && len(bytes.TrimSpace(ee.Stderr)) > 0 {
+		err = fmt.Errorf("%w: %s", err, bytes.TrimSpace(ee.Stderr))
+	}
 	if err == nil {
 		err = perr
 	}
-	if err != nil {
-		return resp, fmt.Errorf("glab api %s: %w", path, err)
+	return resp, fmt.Errorf("%s: %w", what, err)
+}
+
+// statusError is a reply that is neither 200 nor 304: its status and the
+// start of what the forge said.
+func statusError(what string, resp APIResponse) error {
+	msg := strings.Join(strings.Fields(string(resp.Body)), " ")
+	if len(msg) > 120 {
+		msg = msg[:120] + "..."
 	}
-	return resp, nil
+	return fmt.Errorf("%s: status %d %s", what, resp.Status, msg)
 }
 
 // parseIncluded reads a reply printed with --include: the status line,
@@ -177,9 +207,14 @@ func (s *Supervisor) pollSource(src string, now time.Time) pollResult {
 	return pollGitLab(s.api, s.st, inv, now)
 }
 
-// recordPoll logs what a poll begun at start found: its items, its cursor,
-// and a poll record when it changed something or its health changed; and
-// when the source is next due.
+// recordPoll logs what a poll begun at start found: its items and its
+// cursor, and a poll record when it changed something, its health changed
+// or the heartbeat is due, tallying the quiet polls since the last; and
+// when the source is next due. A poll that failed writes no items, even
+// those it found before the failure: its cursor stays, so the next poll
+// finds them again. The GitHub cursor is Last-Modified and moves whenever
+// GitHub sends a new one; the GitLab cursor moves only with a record, so
+// quiet polls write nothing.
 func (s *Supervisor) recordPoll(src string, r pollResult, start time.Time) {
 	wait := s.cfg.Poll.Every.Duration
 	if r.wait > wait {
@@ -187,26 +222,34 @@ func (s *Supervisor) recordPoll(src string, r pollResult, start time.Time) {
 	}
 	s.work.mu.Lock()
 	s.work.nextPoll[src] = start.Add(wait)
+	p := s.work.pollTally[src]
+	p.Polls++
+	p.Calls += r.calls
+	s.work.pollTally[src] = p
 	s.work.mu.Unlock()
-	p := PollPayload{Source: src, OK: r.err == nil, Calls: r.calls}
+	p.Source, p.OK = src, r.err == nil
 	if r.err != nil {
 		p.Error = r.err.Error()
 	}
 	for _, it := range r.items {
-		if _, ok := s.st.Items[it.ID]; ok {
+		if _, ok := s.st.Items[it.ID]; ok || r.err != nil {
 			continue
 		}
 		it := it
 		s.emit("", Event{Kind: KindItem, Mode: ModeShared, Item: &it})
 		p.Items++
 	}
-	moved := r.err == nil && r.cursor.After(s.st.Cursors[src])
+	prev, seen := s.st.Polls[src]
+	record := p.Items > 0 || !seen || prev.OK != p.OK || prev.Error != p.Error || start.Sub(prev.At) >= pollHeartbeat
+	moved := r.err == nil && r.cursor.After(s.st.Cursors[src]) && (src == SourceGitHub || record || s.st.Cursors[src].IsZero())
 	if moved {
 		s.emit("", Event{Kind: KindCursor, Mode: ModeShared, Cursor: &CursorPayload{Source: src, AsOf: r.cursor}})
 	}
-	prev, seen := s.st.Polls[src]
-	if p.Items > 0 || moved || !seen || prev.OK != p.OK || prev.Error != p.Error {
+	if record || moved {
 		s.emit("", Event{Kind: KindPoll, Poll: &p})
+		s.work.mu.Lock()
+		delete(s.work.pollTally, src)
+		s.work.mu.Unlock()
 	}
 }
 
@@ -246,7 +289,7 @@ func pollGitHub(api ForgeAPI, st *LogState, inv *Inventory) pollResult {
 		return r
 	case http.StatusOK:
 	default:
-		r.err = fmt.Errorf("GitHub notifications: status %d", resp.Status)
+		r.err = statusError("GitHub notifications", resp)
 		return r
 	}
 	cursor, err := http.ParseTime(resp.Header.Get("Last-Modified"))
@@ -290,11 +333,15 @@ func pollGitHub(api ForgeAPI, st *LogState, inv *Inventory) pollResult {
 		id := fmt.Sprintf("%s%s%d", key, sigil, num)
 		it := ItemPayload{ID: id, Kind: kind, Repository: key, Title: n.Subject.Title, Link: itemLink("github", n.Repository.FullName, num, mr)}
 		var sub githubSubject
-		if _, held := st.Items[id]; !held {
+		if held, ok := st.Items[id]; ok {
+			if held.SourceTime.After(since) {
+				continue // opened since the cursor: already its new item
+			}
+		} else {
 			r.calls++
 			resp, err := api.GitHub(strings.TrimPrefix(n.Subject.URL, "https://api.github.com"), nil)
 			if err == nil && resp.Status != http.StatusOK {
-				err = fmt.Errorf("status %d", resp.Status)
+				err = statusError("status", resp)
 			}
 			if err == nil {
 				err = json.Unmarshal(resp.Body, &sub)
@@ -344,22 +391,24 @@ func gitlabItem(key, path string, w gitlabWork, mr bool, since time.Time) ItemPa
 // pollGitLab asks each active GitLab repository of the manifest for the
 // issues and merge requests updated since the cursor, and the owner's
 // pending to-do list for to-dos made since, on any manifest repository.
-// The new cursor is when the poll began, so what changes while it runs is
-// asked for again next time, and found again under the same id. Any call
+// The new cursor is pollOverlap before the poll began, so what changes
+// while it runs, or in a skew between the clocks, is asked for again next
+// time, and found again under the same id. Any call
 // that fails makes the whole poll unknown and leaves the cursor, so a
 // failure never leaves a gap. The first poll is the baseline: it sets the
 // cursor only.
 func pollGitLab(api ForgeAPI, st *LogState, inv *Inventory, now time.Time) pollResult {
 	since := st.Cursors[SourceGitLab]
+	cursor := now.Add(-pollOverlap)
 	if since.IsZero() {
-		return pollResult{cursor: now}
+		return pollResult{cursor: cursor}
 	}
 	var r pollResult
 	get := func(path string, into any) bool {
 		r.calls++
 		resp, err := api.GitLab(path)
 		if err == nil && resp.Status != http.StatusOK {
-			err = fmt.Errorf("GitLab %s: status %d", path, resp.Status)
+			err = statusError("GitLab "+path, resp)
 		}
 		if err == nil {
 			if err = json.Unmarshal(resp.Body, into); err != nil {
@@ -380,6 +429,9 @@ func pollGitLab(api ForgeAPI, st *LogState, inv *Inventory, now time.Time) pollR
 				return pollResult{calls: r.calls, err: r.err}
 			}
 			for _, w := range list {
+				if !w.UpdatedAt.After(since) {
+					continue // the overlap again: nothing since
+				}
 				r.items = append(r.items, gitlabItem(repo.Key, repo.Path, w, kind == "merge_requests", since))
 			}
 		}
@@ -410,6 +462,6 @@ func pollGitLab(api ForgeAPI, st *LogState, inv *Inventory, now time.Time) pollR
 		}
 		r.items = append(r.items, it)
 	}
-	r.cursor = now
+	r.cursor = cursor
 	return r
 }

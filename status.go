@@ -47,6 +47,7 @@ func Summarize(cfg *Config, events []Event, mode string) ([]SessionStatus, map[s
 	}
 	if len(st.Polls) > 0 {
 		meta["polls"] = st.Polls
+		meta["poll_stale"] = pollHeartbeat + 2*cfg.Poll.Every.Duration
 	}
 	for _, n := range cfg.SessionNames() {
 		st.track(n)
@@ -101,9 +102,11 @@ func PrintStatus(w io.Writer, rows []SessionStatus, meta map[string]any, now tim
 		}
 		fmt.Fprintf(w, "%s; %d events\n", line, meta["events"])
 	}
-	// A poll that found nothing new makes no event, so its record is the
-	// last change: an unchanged GitHub poll costs one call.
+	// A quiet poll makes no event, but a source still polled has a record
+	// at least every pollHeartbeat: an older one means no one is polling
+	// it, so it is unknown, never "nothing new".
 	if polls, ok := meta["polls"].(map[string]PollRecord); ok {
+		stale, _ := meta["poll_stale"].(time.Duration)
 		srcs := make([]string, 0, len(polls))
 		for src := range polls {
 			srcs = append(srcs, src)
@@ -111,10 +114,13 @@ func PrintStatus(w io.Writer, rows []SessionStatus, meta map[string]any, now tim
 		sort.Strings(srcs)
 		for _, src := range srcs {
 			p := polls[src]
-			if p.OK {
-				fmt.Fprintf(w, "poll %s: ok, last change %s ago (%d calls, %d new items)\n", src, ago(now, p.At), p.Calls, p.Items)
-			} else {
-				fmt.Fprintf(w, "poll %s: unknown since %s ago (%d calls): %s\n", src, ago(now, p.At), p.Calls, p.Error)
+			switch {
+			case !p.OK:
+				fmt.Fprintf(w, "poll %s: unknown since %s ago (%d calls in %d polls): %s\n", src, ago(now, p.At), p.Calls, p.Polls, p.Error)
+			case stale > 0 && now.Sub(p.At) > stale:
+				fmt.Fprintf(w, "poll %s: unknown, no poll recorded for %s\n", src, ago(now, p.At))
+			default:
+				fmt.Fprintf(w, "poll %s: ok, last record %s ago (%d calls in %d polls, %d new items)\n", src, ago(now, p.At), p.Calls, p.Polls, p.Items)
 			}
 		}
 	}

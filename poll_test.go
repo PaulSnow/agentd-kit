@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -202,6 +203,16 @@ func TestGitHubNotificationsBecomeItems(t *testing.T) {
 func TestPollCursorSurvivesRestart(t *testing.T) {
 	h, api := pollHarness(t, true, true)
 	h.ticks(1, 15*time.Minute)
+	created := h.clock.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+	api.set(func() {
+		api.gitlab = map[string]string{"/projects/example-org%2Fwidgets/issues": `[{"iid": 7, "title": "Widgets wobble", "created_at": "` + created +
+			`", "updated_at": "` + created + `"}]`}
+	})
+	h.ticks(1, 15*time.Minute)
+	id := "gitlab/example-org/widgets#7"
+	if n := h.itemEvents(id); n != 1 {
+		t.Fatalf("item events before the restart = %d", n)
+	}
 	gitlabCursor := h.sup.st.Cursors[SourceGitLab]
 	h.restart(false)
 	h.sup.api = api
@@ -219,6 +230,9 @@ func TestPollCursorSurvivesRestart(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("GitLab asked without its cursor %s after a restart: %q", want, calls)
+	}
+	if n := h.itemEvents(id); n != 1 {
+		t.Fatalf("item events after the restart = %d, want 1", n)
 	}
 	for _, c := range calls {
 		if strings.HasPrefix(c, "github") && strings.HasSuffix(c, " ") {
@@ -280,22 +294,127 @@ func TestFailingSourceIsUnknown(t *testing.T) {
 
 func TestPollCallsAreCounted(t *testing.T) {
 	h, api := pollHarness(t, false, true)
-	h.ticks(2, 15*time.Minute)
+	h.ticks(1, 15*time.Minute) // the baseline's record
+	before := len(h.events())
+	// Quiet polls write nothing until the heartbeat, which tallies them.
+	h.ticks(int(pollHeartbeat/(15*time.Minute))-1, 15*time.Minute)
+	if after := len(h.events()); after != before {
+		t.Fatalf("quiet polls made %d events", after-before)
+	}
+	h.ticks(1, 15*time.Minute)
 	var p *PollPayload
 	for _, e := range h.events() {
 		if e.Kind == KindPoll {
 			p = e.Poll
 		}
 	}
-	// One active GitLab repository: issues, merge requests, and the to-do list.
-	if p == nil || p.Calls != 3 || len(api.callList()) != 3 {
-		t.Fatalf("poll = %+v, calls %q", p, api.callList())
+	// One active GitLab repository: issues, merge requests, and the to-do
+	// list, in each of the 24 polls since the baseline.
+	polls := int(pollHeartbeat / (15 * time.Minute))
+	if p == nil || p.Polls != polls || p.Calls != 3*polls || len(api.callList()) != 3*polls {
+		t.Fatalf("poll = %+v, %d calls", p, len(api.callList()))
 	}
 	_, meta := Summarize(h.cfg, h.events(), ModeLive)
 	var b strings.Builder
 	PrintStatus(&b, nil, meta, h.clock.Now())
-	if !strings.Contains(b.String(), "gitlab: ok") || !strings.Contains(b.String(), "3 calls") {
+	if !strings.Contains(b.String(), "gitlab: ok") || !strings.Contains(b.String(), fmt.Sprintf("%d calls in %d polls", 3*polls, polls)) {
 		t.Fatalf("status:\n%s", b.String())
+	}
+	// A source no one polls any more is unknown once its heartbeat is late.
+	PrintStatus(&b, nil, meta, h.clock.Now().Add(pollHeartbeat+time.Hour))
+	if !strings.Contains(b.String(), "gitlab: unknown, no poll recorded") {
+		t.Fatalf("stale status:\n%s", b.String())
+	}
+}
+
+// The snapshot found #5 first, as a new issue: the notification of its
+// opening is not a second item, and needs no call.
+func TestGitHubSnapshotAndPollGiveOneItem(t *testing.T) {
+	h, api := pollHarness(t, true, false)
+	h.ticks(1, 15*time.Minute)
+	upd := h.clock.Now().UTC()
+	id := "github/example-org/gadgets#5"
+	h.sup.emit("", Event{Kind: KindItem, Mode: ModeShared, Item: &ItemPayload{ID: id, Kind: ItemIssue, Repository: "github/example-org/gadgets", SourceTime: upd}})
+	api.set(func() {
+		api.lastModified = "Thu, 22 Oct 2026 00:20:00 GMT"
+		api.notes = `[{"id": "1", "updated_at": "` + upd.Format(time.RFC3339) + `", "subject": {"title": "New gadget bug", "type": "Issue", "url": "https://api.github.com/repos/example-org/gadgets/issues/5"}, "repository": {"full_name": "example-org/gadgets"}}]`
+	})
+	h.ticks(1, 15*time.Minute)
+	if n := h.count(KindItem, "", ""); n != 1 {
+		t.Fatalf("items = %d, want the snapshot's one: %v", n, h.sup.st.Items)
+	}
+	for _, c := range api.callList() {
+		if strings.Contains(c, "/issues/5") {
+			t.Fatalf("asked for a held issue: %s", c)
+		}
+	}
+}
+
+// A poll that fails part way writes none of what it found, and keeps its
+// cursor; the next finds the new issue once.
+func TestGitHubPartialFailureWritesNoItems(t *testing.T) {
+	h, api := pollHarness(t, true, false)
+	h.ticks(1, 15*time.Minute)
+	upd := h.clock.Now().UTC().Format(time.RFC3339)
+	note := func(n int) string {
+		return fmt.Sprintf(`{"id": "%d", "updated_at": %q, "subject": {"title": "Bug %d", "type": "Issue", "url": "https://api.github.com/repos/example-org/gadgets/issues/%d"}, "repository": {"full_name": "example-org/gadgets"}}`, n, upd, n, n)
+	}
+	api.set(func() {
+		api.lastModified = "Thu, 22 Oct 2026 00:20:00 GMT"
+		api.notes = "[" + note(5) + "," + note(6) + "]"
+		api.github = map[string]string{"/repos/example-org/gadgets/issues/5": `{"created_at": "` + upd + `", "user": {"login": "user-c"}}`}
+	})
+	h.ticks(1, 15*time.Minute)
+	if n := h.count(KindItem, "", ""); n != 0 || h.sup.st.Polls[SourceGitHub].OK || !strings.Contains(h.sup.st.Polls[SourceGitHub].Error, "status 404") {
+		t.Fatalf("after a failed call: %d items, poll %+v", n, h.sup.st.Polls[SourceGitHub])
+	}
+	api.set(func() {
+		api.github["/repos/example-org/gadgets/issues/6"] = `{"created_at": "` + upd + `", "user": {"login": "user-c"}}`
+	})
+	h.ticks(2, 15*time.Minute)
+	if h.itemEvents("github/example-org/gadgets#5") != 1 || h.itemEvents("github/example-org/gadgets#6") != 1 || h.count(KindItem, "", "") != 2 {
+		t.Fatalf("items after recovery: %v", h.sup.st.Items)
+	}
+}
+
+// A GitHub source that fails is unknown, and asks from its old cursor.
+func TestGitHubFailingIsUnknown(t *testing.T) {
+	h, api := pollHarness(t, true, false)
+	h.ticks(1, 15*time.Minute)
+	api.set(func() { api.githubErr = errors.New("gh: not logged in") })
+	h.ticks(2, 15*time.Minute)
+	if p := h.sup.st.Polls[SourceGitHub]; p.OK || !strings.Contains(p.Error, "not logged in") {
+		t.Fatalf("github poll = %+v", p)
+	}
+	_, meta := Summarize(h.cfg, h.events(), ModeLive)
+	var b strings.Builder
+	PrintStatus(&b, nil, meta, h.clock.Now())
+	if !strings.Contains(b.String(), "github: unknown since") {
+		t.Fatalf("status:\n%s", b.String())
+	}
+	calls := api.callList()
+	if last := calls[len(calls)-1]; !strings.HasSuffix(last, api.lastModified) {
+		t.Fatalf("asked without the old cursor: %q", last)
+	}
+	// A reply with no Last-Modified is a failure too, not "nothing new".
+	api.set(func() { api.githubErr, api.lastModified = nil, "" })
+	h.ticks(1, 15*time.Minute)
+	if p := h.sup.st.Polls[SourceGitHub]; p.OK || !strings.Contains(p.Error, "Last-Modified") {
+		t.Fatalf("github poll without Last-Modified = %+v", p)
+	}
+}
+
+// A CLI that printed a reply hands it on, error status and all; one that
+// printed none says what it said on stderr.
+func TestIncludedReply(t *testing.T) {
+	r, err := included("gh api /x", []byte("HTTP/2.0 401 Unauthorized\r\n\r\n{\"message\": \"Bad credentials\"}"), errors.New("exit status 1"))
+	if err != nil || r.Status != 401 || !strings.Contains(statusError("GitHub", r).Error(), "401 {\"message\": \"Bad credentials\"}") {
+		t.Fatalf("401 = %+v, %v", r, err)
+	}
+	cmd := exec.Command("sh", "-c", "echo 'not logged in' >&2; exit 1")
+	_, runErr := cmd.Output()
+	if _, err := included("gh api /x", nil, runErr); err == nil || !strings.Contains(err.Error(), "not logged in") {
+		t.Fatalf("no reply = %v", err)
 	}
 }
 
