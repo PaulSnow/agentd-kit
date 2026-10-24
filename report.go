@@ -242,6 +242,12 @@ func BuildReport(cfg *Config, events []Event, mode, host string, now time.Time) 
 	}
 	sort.Strings(names)
 	var public, all digestCounts
+	count := func(state string, delivered, asked int, ownerOnly bool) {
+		all.add(state, delivered, asked)
+		if !ownerOnly {
+			public.add(state, delivered, asked)
+		}
+	}
 	for _, n := range names {
 		rs := sessions[n]
 		if secret(n) {
@@ -254,7 +260,7 @@ func BuildReport(cfg *Config, events []Event, mode, host string, now time.Time) 
 				c.Head = ""
 			}
 			rr.Cases = append(rr.Cases, c)
-			all.add(c.State, 0, 0, &public, c.OwnerOnly)
+			count(c.State, 0, 0, c.OwnerOnly)
 		}
 		for _, d := range rs.deliveries {
 			dr := group(d.repository)
@@ -263,11 +269,11 @@ func BuildReport(cfg *Config, events []Event, mode, host string, now time.Time) 
 			}
 			d.OwnerOnly = dr.OwnerOnly
 			dr.Deliveries = append(dr.Deliveries, d.ReportDelivery)
-			all.add("", 1, 0, &public, d.OwnerOnly)
+			count("", 1, 0, d.OwnerOnly)
 		}
 		if rr != nil && rs.asks && rs.question != "" && !secret(rs.question) {
 			rr.Questions = append(rr.Questions, ReportQuestion{Session: n, Since: rs.askedAt, Text: rs.question, OwnerOnly: true})
-			all.add("", 0, 1, &public, true)
+			count("", 0, 1, true)
 		}
 	}
 	report := Report{Schema: ReportSchema, WrittenAt: now, Host: host, Mode: mode, Repositories: []ReportRepo{},
@@ -290,9 +296,8 @@ type digestCounts struct {
 	asked     int
 }
 
-// add counts a case in state (when not ""), deliveries and questions, and
-// counts them in public too unless they are for the owner only.
-func (d *digestCounts) add(state string, delivered, asked int, public *digestCounts, ownerOnly bool) {
+// add counts a case in state (when not ""), deliveries and questions.
+func (d *digestCounts) add(state string, delivered, asked int) {
 	if d.states == nil {
 		d.states = map[State]int{}
 	}
@@ -301,9 +306,6 @@ func (d *digestCounts) add(state string, delivered, asked int, public *digestCou
 	}
 	d.delivered += delivered
 	d.asked += asked
-	if !ownerOnly && public != nil {
-		public.add(state, delivered, asked, nil, true)
-	}
 }
 
 // digest is one plain summary: sessions by state, the deliveries, and the
