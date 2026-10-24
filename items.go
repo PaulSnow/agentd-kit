@@ -178,7 +178,7 @@ const (
 
 // RefreshItems reads the tracking files tr names and returns the events
 // that bring st up to date: an item event for each item st does not hold
-// yet, and a cursor for each source read that moved forward. The first
+// yet or holds with other text, and a cursor for each source read that moved forward. The first
 // snapshot read sets the cursor only. A file that cannot be read is an
 // error and yields no events from it, so a bad file never empties or
 // rewrites the list. The mail findings need the inventory, for their
@@ -189,7 +189,7 @@ func RefreshItems(st *LogState, tr Tracking, now time.Time) ([]Event, error) {
 	queued := map[string]bool{}
 	add := func(items []ItemPayload) {
 		for _, it := range items {
-			if _, ok := st.Items[it.ID]; ok || queued[it.ID] {
+			if !st.itemChanged(it) || queued[it.ID] {
 				continue
 			}
 			queued[it.ID] = true

@@ -244,7 +244,7 @@ func (s *Supervisor) recordPoll(src string, r pollResult, start time.Time) {
 		p.Error = r.err.Error()
 	}
 	for _, it := range r.items {
-		if _, ok := s.st.Items[it.ID]; ok || r.err != nil {
+		if !s.st.itemChanged(it) || r.err != nil {
 			continue
 		}
 		it := it

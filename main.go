@@ -100,7 +100,7 @@ items lists what is new since the owner last looked: issues, requests and
 discussions from the tracking snapshots, and mail findings; --seen marks
 items seen. page serves the owner's page on page.address, to the owner only;
 its one write marks items seen. triage tries the triage job on the items in
-FILE with one call, and prints its checked answer and cost; it logs nothing.`)
+FILE with one call (retried once on failure) and prints its checked answer and cost; it logs nothing.`)
 }
 
 func loadConfigFlag(fs *flag.FlagSet, args []string) (*Config, *string, error) {

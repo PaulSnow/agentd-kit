@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Agent jobs (#3, section 5): small, checked calls Go makes for judgment.
@@ -36,7 +37,8 @@ var (
 	TriageSuggested  = []string{"reply", "file_issue", "answer_in_thread", "none"}
 )
 
-// TriageSummaryMax is the longest summary Go accepts, in bytes.
+// TriageSummaryMax is the longest summary Go accepts, in characters, as
+// the schema's maxLength counts them.
 const TriageSummaryMax = 160
 
 // Job defaults, when the config leaves them unset.
@@ -151,10 +153,12 @@ type jobResult struct {
 // Run makes the call: system is the job's instructions, schema the JSON
 // schema of its answer, and input the one JSON document of data, sent on
 // standard input. It returns the answer as the CLI held it to the schema,
-// and what the call cost. Input over MaxInput is refused before any call.
+// and what the call cost. Input over MaxInput is refused before any call,
+// and output over JobOutputMax ends it. When ctx ends, as when agentd
+// stops, the call's process group is killed.
 // A token file is read by the shell, as for a session, so agentd never
 // holds the token.
-func (j Job) Run(system string, schema, input []byte) (json.RawMessage, JobUsage, error) {
+func (j Job) Run(ctx context.Context, system string, schema, input []byte) (json.RawMessage, JobUsage, error) {
 	if len(input) > j.MaxInput {
 		return nil, JobUsage{}, fmt.Errorf("job input is %d bytes, over the %d allowed", len(input), j.MaxInput)
 	}
@@ -167,7 +171,7 @@ func (j Job) Run(system string, schema, input []byte) (json.RawMessage, JobUsage
 		}
 		script = `t=$(cat "$AGENTD_TOKEN_FILE") && case $t in *[![:space:]]*) true ;; *) false ;; esac || { echo "token file is empty" >&2; exit 1; }; CLAUDE_CODE_OAUTH_TOKEN=$t exec "$@"`
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), j.Timeout)
+	ctx, cancel := context.WithTimeout(ctx, j.Timeout)
 	defer cancel()
 	cmd := groupCommand(ctx, "", "sh", append([]string{"-c", script, "sh", j.Command}, args...)...)
 	cmd.Env = jobEnv(os.Environ(), j.Account)
@@ -175,10 +179,18 @@ func (j Job) Run(system string, schema, input []byte) (json.RawMessage, JobUsage
 	var stderr tailBuffer
 	stderr.max = 2048
 	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+	stdout := &capBuffer{max: JobOutputMax}
+	cmd.Stdout = stdout
+	err := cmd.Run()
+	out := stdout.b
 	if err != nil {
-		if ctx.Err() != nil {
+		switch {
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
 			return nil, JobUsage{}, fmt.Errorf("%s timed out after %s and was killed", j.Command, j.Timeout)
+		case ctx.Err() != nil:
+			return nil, JobUsage{}, fmt.Errorf("%s was stopped: %v", j.Command, ctx.Err())
+		case stdout.over:
+			return nil, JobUsage{}, fmt.Errorf("%s wrote more than %d bytes and was stopped", j.Command, JobOutputMax)
 		}
 		return nil, JobUsage{}, fmt.Errorf("%s: %v: %s", j.Command, err, strings.TrimSpace(string(stderr.b)))
 	}
@@ -194,6 +206,26 @@ func (j Job) Run(system string, schema, input []byte) (json.RawMessage, JobUsage
 		return nil, r.Usage, fmt.Errorf("%s: no structured output", j.Command)
 	}
 	return r.StructuredOutput, r.Usage, nil
+}
+
+// JobOutputMax is the most a job may write to standard output.
+const JobOutputMax = 1 << 20
+
+// capBuffer holds what is written to it up to max bytes; past that it
+// fails the write, which ends the command.
+type capBuffer struct {
+	max  int
+	b    []byte
+	over bool
+}
+
+func (c *capBuffer) Write(p []byte) (int, error) {
+	if len(c.b)+len(p) > c.max {
+		c.over = true
+		return 0, errors.New("output over its limit")
+	}
+	c.b = append(c.b, p...)
+	return len(p), nil
 }
 
 // jobEnv is env without what a job must not inherit, with the account's
@@ -371,7 +403,7 @@ func checkTriage(raw json.RawMessage, sent []ItemPayload) ([]TriageResult, error
 			return nil, fmt.Errorf("triage of %q: unknown urgency %q", r.ID, r.Urgency)
 		case !in(r.Suggested, TriageSuggested):
 			return nil, fmt.Errorf("triage of %q: unknown suggestion %q", r.ID, r.Suggested)
-		case strings.TrimSpace(r.Summary) == "" || len(r.Summary) > TriageSummaryMax || strings.ContainsAny(r.Summary, "\r\n"):
+		case strings.TrimSpace(r.Summary) == "" || utf8.RuneCountInString(r.Summary) > TriageSummaryMax || strings.ContainsAny(r.Summary, "\r\n"):
 			return nil, fmt.Errorf("triage of %q: the summary is empty, too long or not one line", r.ID)
 		}
 		got[r.ID] = true
@@ -392,14 +424,14 @@ func checkTriage(raw json.RawMessage, sent []ItemPayload) ([]TriageResult, error
 
 // Triage triages items in one call, retried once when the call or its
 // answer fails. It returns the checked results and what the calls cost.
-func (j Job) Triage(items []ItemPayload) ([]TriageResult, []ItemPayload, JobUsage, error) {
+func (j Job) Triage(ctx context.Context, items []ItemPayload) ([]TriageResult, []ItemPayload, JobUsage, error) {
 	input, sent, err := triageInputFor(items, j.MaxInput)
 	if err != nil {
 		return nil, nil, JobUsage{}, err
 	}
 	var total JobUsage
 	for attempt := 0; ; attempt++ {
-		raw, u, err := j.Run(triageSystem, triageSchema(), input)
+		raw, u, err := j.Run(ctx, triageSystem, triageSchema(), input)
 		total.add(u)
 		if err == nil {
 			var res []TriageResult
@@ -407,7 +439,7 @@ func (j Job) Triage(items []ItemPayload) ([]TriageResult, []ItemPayload, JobUsag
 				return res, sent, total, nil
 			}
 		}
-		if attempt == 1 {
+		if attempt == 1 || ctx.Err() != nil {
 			return nil, sent, total, err
 		}
 	}
@@ -463,7 +495,10 @@ func (s *Supervisor) triageItems(now time.Time) {
 	}
 	job := jobFromConfig(s.cfg)
 	s.spawnShared("triage", func(w *Supervisor) {
-		res, sent, usage, err := job.Triage(items)
+		res, sent, usage, err := job.Triage(w.runCtx, items)
+		if w.runCtx.Err() != nil {
+			return // agentd is stopping: the items are tried again on the next run
+		}
 		p := &TriagePayload{Results: res, Model: job.Model, Usage: &usage}
 		if err != nil {
 			p.Results = nil
@@ -481,7 +516,7 @@ func (s *Supervisor) triageItems(now time.Time) {
 }
 
 // triageCmd triages the items in a JSON file, a list of #18's items, with
-// one call under the config's jobs settings, and prints the checked answer
+// one call, retried once, under the config's jobs settings, and prints the checked answer
 // and what it cost. It writes nothing to the event log: it is for trying
 // the job on a few items.
 func triageCmd(args []string, w io.Writer) error {
@@ -506,7 +541,7 @@ func triageCmd(args []string, w io.Writer) error {
 		return fmt.Errorf("%s holds no items", *file)
 	}
 	job := jobFromConfig(cfg)
-	res, sent, usage, err := job.Triage(items)
+	res, sent, usage, err := job.Triage(context.Background(), items)
 	out := map[string]any{"model": job.Model, "usage": usage, "results": res, "sent": len(sent)}
 	if err != nil {
 		out["error"] = err.Error()

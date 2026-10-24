@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,12 +15,14 @@ import (
 
 // fakeClaude puts a fake claude CLI first on PATH. Each call n saves its
 // arguments, standard input and environment as args.n, in.n and env.n in
-// the returned directory, and prints out.n, or out when there is none.
+// the returned directory, and prints out.n, or out when there is none,
+// after FAKE_CLAUDE_DELAY seconds when that is set.
 func fakeClaude(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("FAKE_CLAUDE", dir)
 	shim(t, "claude", `d=$FAKE_CLAUDE
+[ -z "$FAKE_CLAUDE_DELAY" ] || sleep "$FAKE_CLAUDE_DELAY"
 n=$(cat "$d/n" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$d/n"
 printf '%s\n' "$@" > "$d/args.$n"
 cat > "$d/in.$n"
@@ -96,7 +99,7 @@ func TestJobRunIsStripped(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
 	t.Setenv("CLAUDECODE", "1")
 	input := []byte(`{"items":[{"id":"x","title":"say hello"}]}`)
-	raw, usage, err := testJob().Run("the job's instructions", []byte(`{"type":"object"}`), input)
+	raw, usage, err := testJob().Run(context.Background(), "the job's instructions", []byte(`{"type":"object"}`), input)
 	if err != nil || string(raw) != `{"ok":true}` {
 		t.Fatalf("run = %s, %v", raw, err)
 	}
@@ -130,14 +133,14 @@ func TestJobRunsUnderItsAccount(t *testing.T) {
 	}
 	j := testJob()
 	j.Account = Account{ConfigDir: "/accounts/b", TokenFile: tok}
-	if _, _, err := j.Run("s", []byte(`{}`), []byte(`{}`)); err != nil {
+	if _, _, err := j.Run(context.Background(), "s", []byte(`{}`), []byte(`{}`)); err != nil {
 		t.Fatal(err)
 	}
 	env := readFake(t, dir, "env.1")
 	if !strings.Contains(env, "CLAUDE_CONFIG_DIR=/accounts/b\n") || strings.Contains(env, "/agentd/own") || !strings.Contains(env, "CLAUDE_CODE_OAUTH_TOKEN=tok-123\n") {
 		t.Fatalf("account env:\n%s", env)
 	}
-	if _, _, err := testJob().Run("s", []byte(`{}`), []byte(`{}`)); err != nil {
+	if _, _, err := testJob().Run(context.Background(), "s", []byte(`{}`), []byte(`{}`)); err != nil {
 		t.Fatal(err)
 	}
 	if env := readFake(t, dir, "env.2"); !strings.Contains(env, "CLAUDE_CONFIG_DIR=/agentd/own\n") {
@@ -152,15 +155,63 @@ func TestJobLimits(t *testing.T) {
 	dir := fakeClaude(t)
 	j := testJob()
 	j.MaxInput = 10
-	if _, _, err := j.Run("s", []byte(`{}`), []byte(`{"items":["too long"]}`)); err == nil || claudeCalls(t, dir) != 0 {
+	if _, _, err := j.Run(context.Background(), "s", []byte(`{}`), []byte(`{"items":["too long"]}`)); err == nil || claudeCalls(t, dir) != 0 {
 		t.Fatalf("over-limit input: %v after %d calls", err, claudeCalls(t, dir))
 	}
 	shim(t, "claude", "exec sleep 30")
 	j = testJob()
 	j.Timeout = 100 * time.Millisecond
-	err := quick(t, "job", func() error { _, _, err := j.Run("s", []byte(`{}`), []byte(`{}`)); return err })
+	err := quick(t, "job", func() error { _, _, err := j.Run(context.Background(), "s", []byte(`{}`), []byte(`{}`)); return err })
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("hung job: %v", err)
+	}
+}
+
+// A summary is counted in characters, as the schema counts it, so one
+// outside ASCII within the limit is accepted.
+func TestTriageSummaryCountsCharacters(t *testing.T) {
+	s := strings.Repeat("é", TriageSummaryMax)
+	ans := `{"results":[{"id":"gitlab:example-org/widgets#4","kind":"question","needs_owner":"today","urgency":"today","summary":"x","suggested":"reply"},` +
+		`{"id":"mail:t1","kind":"report","needs_owner":"none","urgency":"later","summary":"` + s + `","suggested":"none"}]}`
+	if _, err := checkTriage([]byte(ans), triageItemsFixture()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A job is killed with its whole process group when agentd stops, a
+// job that writes without end is stopped, and an empty token file is
+// refused before any call.
+func TestJobStopsAndCaps(t *testing.T) {
+	dir := fakeClaude(t)
+	shim(t, "claude", `(sleep 1; touch "$FAKE_CLAUDE/late") & wait`)
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(100*time.Millisecond, cancel)
+	err := quick(t, "job", func() error { _, _, err := testJob().Run(ctx, "s", []byte(`{}`), []byte(`{}`)); return err })
+	if err == nil || !strings.Contains(err.Error(), "stopped") {
+		t.Fatalf("stopped job: %v", err)
+	}
+	time.Sleep(1500 * time.Millisecond)
+	if _, err := os.Stat(filepath.Join(dir, "late")); !os.IsNotExist(err) {
+		t.Fatal("the job's child outlived the stop")
+	}
+	shim(t, "claude", "exec yes")
+	err = quick(t, "job", func() error {
+		_, _, err := testJob().Run(context.Background(), "s", []byte(`{}`), []byte(`{}`))
+		return err
+	})
+	if err == nil || !strings.Contains(err.Error(), "more than") {
+		t.Fatalf("endless output: %v", err)
+	}
+	fd := fakeClaude(t)
+	tok := filepath.Join(t.TempDir(), "token")
+	writeFile(t, tok, " \n")
+	if err := os.Chmod(tok, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	j := testJob()
+	j.Account = Account{TokenFile: tok}
+	if _, _, err := j.Run(context.Background(), "s", []byte(`{}`), []byte(`{}`)); err == nil || claudeCalls(t, fd) != 0 {
+		t.Fatalf("empty token: %v after %d calls", err, claudeCalls(t, fd))
 	}
 }
 
@@ -172,7 +223,7 @@ func TestJobErrors(t *testing.T) {
 	claudeAnswers(t, dir, 2, claudeResult(`null`))
 	claudeAnswers(t, dir, 3, `not json`)
 	for i := 1; i <= 3; i++ {
-		if _, _, err := testJob().Run("s", []byte(`{}`), []byte(`{}`)); err == nil {
+		if _, _, err := testJob().Run(context.Background(), "s", []byte(`{}`), []byte(`{}`)); err == nil {
 			t.Fatalf("call %d: no error", i)
 		}
 	}
@@ -218,17 +269,18 @@ func TestCheckTriageRefuses(t *testing.T) {
 	a := one("gitlab:example-org/widgets#4", "question", "today", "today", "Asks.", "reply")
 	b := one("mail:t1", "report", "none", "later", "Reports.", "none")
 	bad := map[string]string{
-		"unknown id":    `{"results":[` + a + `,` + b + `,` + one("other", "report", "none", "later", "x", "none") + `]}`,
-		"twice":         `{"results":[` + a + `,` + a + `,` + b + `]}`,
-		"left out":      `{"results":[` + a + `]}`,
-		"kind":          `{"results":[` + a + `,` + one("mail:t1", "issue", "none", "later", "x", "none") + `]}`,
-		"needs_owner":   `{"results":[` + a + `,` + one("mail:t1", "report", "yes", "later", "x", "none") + `]}`,
-		"urgency":       `{"results":[` + a + `,` + one("mail:t1", "report", "none", "soon", "x", "none") + `]}`,
-		"suggested":     `{"results":[` + a + `,` + one("mail:t1", "report", "none", "later", "x", "merge") + `]}`,
-		"empty summary": `{"results":[` + a + `,` + one("mail:t1", "report", "none", "later", " ", "none") + `]}`,
-		"long summary":  `{"results":[` + a + `,` + one("mail:t1", "report", "none", "later", strings.Repeat("x", TriageSummaryMax+1), "none") + `]}`,
-		"two lines":     `{"results":[` + a + `,` + one("mail:t1", "report", "none", "later", "one\ntwo", "none") + `]}`,
-		"extra field":   `{"results":[` + a + `,` + b + `],"note":"x"}`,
+		"unknown id":                 `{"results":[` + a + `,` + b + `,` + one("other", "report", "none", "later", "x", "none") + `]}`,
+		"twice":                      `{"results":[` + a + `,` + a + `,` + b + `]}`,
+		"left out":                   `{"results":[` + a + `]}`,
+		"kind":                       `{"results":[` + a + `,` + one("mail:t1", "issue", "none", "later", "x", "none") + `]}`,
+		"needs_owner":                `{"results":[` + a + `,` + one("mail:t1", "report", "yes", "later", "x", "none") + `]}`,
+		"urgency":                    `{"results":[` + a + `,` + one("mail:t1", "report", "none", "soon", "x", "none") + `]}`,
+		"suggested":                  `{"results":[` + a + `,` + one("mail:t1", "report", "none", "later", "x", "merge") + `]}`,
+		"empty summary":              `{"results":[` + a + `,` + one("mail:t1", "report", "none", "later", " ", "none") + `]}`,
+		"long summary in characters": `{"results":[` + a + `,` + one("mail:t1", "report", "none", "later", strings.Repeat("é", TriageSummaryMax+1), "none") + `]}`,
+		"long summary":               `{"results":[` + a + `,` + one("mail:t1", "report", "none", "later", strings.Repeat("x", TriageSummaryMax+1), "none") + `]}`,
+		"two lines":                  `{"results":[` + a + `,` + one("mail:t1", "report", "none", "later", "one\ntwo", "none") + `]}`,
+		"extra field":                `{"results":[` + a + `,` + b + `],"note":"x"}`,
 	}
 	for name, ans := range bad {
 		if _, err := checkTriage([]byte(ans), sent); err == nil {
@@ -265,13 +317,13 @@ func TestTriageRetriesOnce(t *testing.T) {
 	dir := fakeClaude(t)
 	claudeAnswers(t, dir, 1, claudeResult(`{"results":[]}`))
 	claudeAnswers(t, dir, 2, claudeResult(goodTriage))
-	res, _, usage, err := testJob().Triage(triageItemsFixture())
+	res, _, usage, err := testJob().Triage(context.Background(), triageItemsFixture())
 	if err != nil || len(res) != 2 || claudeCalls(t, dir) != 2 || usage.InputTokens != 1800 {
 		t.Fatalf("triage = %d results, %v, %d calls, %+v", len(res), err, claudeCalls(t, dir), usage)
 	}
 	claudeAnswers(t, dir, 3, claudeResult(`{"results":[]}`))
 	claudeAnswers(t, dir, 4, `{"is_error":true,"subtype":"error"}`)
-	if _, _, _, err := testJob().Triage(triageItemsFixture()); err == nil || claudeCalls(t, dir) != 4 {
+	if _, _, _, err := testJob().Triage(context.Background(), triageItemsFixture()); err == nil || claudeCalls(t, dir) != 4 {
 		t.Fatalf("two failures: %v after %d calls", err, claudeCalls(t, dir))
 	}
 }
@@ -319,13 +371,42 @@ func TestTriageInTheLoop(t *testing.T) {
 	if n := claudeCalls(t, dir); n != 1 {
 		t.Fatalf("triaged again: %d calls", n)
 	}
-	// An item whose text changed is triaged again.
+	// An item whose text changed, as another process logged it, is
+	// triaged again; its first sighting stands.
 	if len(h.sup.st.untriaged(h.clock.Now())) != 0 {
 		t.Fatal("untriaged after triage")
 	}
-	h.sup.st.Items["mail:t1"].Title = "A new title"
-	if u := h.sup.st.untriaged(h.clock.Now()); len(u) != 1 || u[0].ID != "mail:t1" {
-		t.Fatalf("edited item: %+v", u)
+	first := h.sup.st.Items["mail:t1"].FirstSeen
+	edited := triageItemsFixture()[1]
+	edited.Title = "A new title"
+	if err := h.sup.log.Append(Event{V: EventVersion, Time: h.clock.Now(), Kind: KindItem, Mode: ModeShared, Item: &edited}); err != nil {
+		t.Fatal(err)
+	}
+	claudeAnswers(t, dir, 0, claudeResult(`{"results":[{"id":"mail:t1","kind":"discussion","needs_owner":"none","urgency":"later","summary":"Retitled.","suggested":"none"}]}`))
+	h.ticks(1, time.Minute)
+	it = h.sup.st.Items["mail:t1"]
+	if n := claudeCalls(t, dir); n != 2 || it.Title != "A new title" || !it.FirstSeen.Equal(first) || it.Triaged() == nil || it.Triage.Summary != "Retitled." {
+		t.Fatalf("edited item after %d calls: %+v", n, it)
+	}
+	if !strings.Contains(readFake(t, dir, "in.2"), "A new title") || strings.Contains(readFake(t, dir, "in.2"), "Blue or green?") {
+		t.Fatalf("second call sent %s", readFake(t, dir, "in.2"))
+	}
+}
+
+// A batch smaller than the untriaged items leaves the rest for the next
+// pass, oldest first.
+func TestTriageBatches(t *testing.T) {
+	h, dir := triageHarness(t)
+	h.cfg.Jobs.Batch = 1
+	claudeAnswers(t, dir, 1, claudeResult(`{"results":[{"id":"gitlab:example-org/widgets#4","kind":"question","needs_owner":"today","urgency":"today","summary":"Asks.","suggested":"reply"}]}`))
+	claudeAnswers(t, dir, 2, claudeResult(`{"results":[{"id":"mail:t1","kind":"discussion","needs_owner":"none","urgency":"later","summary":"Mail.","suggested":"none"}]}`))
+	h.ticks(1, time.Minute)
+	if n := claudeCalls(t, dir); n != 1 || len(h.sup.st.untriaged(h.clock.Now())) != 1 {
+		t.Fatalf("after one pass: %d calls", n)
+	}
+	h.ticks(1, time.Minute)
+	if n := claudeCalls(t, dir); n != 2 || len(h.sup.st.untriaged(h.clock.Now())) != 0 {
+		t.Fatalf("after two passes: %d calls, untriaged %+v", n, h.sup.st.untriaged(h.clock.Now()))
 	}
 }
 
@@ -365,20 +446,53 @@ func TestTriageFailureIsNotApplied(t *testing.T) {
 		t.Fatalf("after the hour: %d calls", n)
 	}
 	h.cfg.Jobs.Triage = false
-	h.sup.st.Items["mail:t1"].Title = "changed"
+	edited := triageItemsFixture()[1]
+	edited.Title = "changed"
+	h.sup.emit("", Event{Kind: KindItem, Mode: ModeShared, Item: &edited})
 	h.ticks(1, time.Minute)
 	if n := claudeCalls(t, dir); n != 3 {
 		t.Fatalf("triage off made a call: %d", n)
 	}
 }
 
-// The items a seen mark covers are not triaged.
+// The items a seen mark covers are not triaged, though the mark was
+// logged by another process (the page, agentd items --seen) while agentd
+// ran.
 func TestTriageSkipsSeen(t *testing.T) {
 	h, dir := triageHarness(t)
-	h.sup.st.apply(Event{V: EventVersion, Kind: KindSeen, Mode: ModeOwner, Seen: &SeenPayload{IDs: []string{"mail:t1", "gitlab:example-org/widgets#4"}}})
+	h.sup.Pass() // reads the log so far
+	h.sup.Wait()
+	if err := h.sup.log.Append(Event{V: EventVersion, Time: h.clock.Now(), Kind: KindSeen, Mode: ModeOwner,
+		Seen: &SeenPayload{IDs: []string{"mail:t1", "gitlab:example-org/widgets#4"}}}); err != nil {
+		t.Fatal(err)
+	}
+	calls := claudeCalls(t, dir)
 	h.ticks(1, time.Minute)
-	if n := claudeCalls(t, dir); n != 0 {
-		t.Fatalf("%d calls for seen items", n)
+	if n := claudeCalls(t, dir); n != calls || !h.sup.st.Items["mail:t1"].Seen {
+		t.Fatalf("%d calls for seen items", n-calls)
+	}
+}
+
+// A seen mark the loop applies while a triage worker is running changes
+// a copy of the item, never the one the worker shares.
+func TestTriageSeenWhileWorking(t *testing.T) {
+	h, dir := triageHarness(t)
+	claudeAnswers(t, dir, 0, claudeResult(goodTriage))
+	t.Setenv("FAKE_CLAUDE_DELAY", "0.3")
+	h.sup.Pass() // starts the triage
+	shared := h.sup.st.Items["mail:t1"]
+	if err := h.sup.log.Append(Event{V: EventVersion, Time: h.clock.Now(), Kind: KindSeen, Mode: ModeOwner,
+		Seen: &SeenPayload{IDs: []string{"mail:t1"}}}); err != nil {
+		t.Fatal(err)
+	}
+	h.sup.Pass() // applies the mark while the worker runs
+	if shared.Seen || !h.sup.st.Items["mail:t1"].Seen {
+		t.Fatal("the mark changed the item the worker shares")
+	}
+	h.sup.Wait()
+	it := h.sup.st.Items["mail:t1"]
+	if !it.Seen || it.Triage == nil {
+		t.Fatalf("item = %+v", it)
 	}
 }
 

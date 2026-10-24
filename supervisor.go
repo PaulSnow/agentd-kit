@@ -57,6 +57,8 @@ type Supervisor struct {
 	// is done until the next pass: an action whose record could be lost
 	// could be repeated after a replay.
 	halt error
+	// runCtx ends when the run is told to stop; agent jobs end with it.
+	runCtx context.Context
 	// tailOff is how far into the event log this run has read, so each
 	// pass picks up what the owner wrote meanwhile: agentd clear.
 	tailOff int64
@@ -92,6 +94,7 @@ func NewSupervisor(cfg *Config, log *Log, clock Clock, tmux Tmux, git Git, forge
 		usage:  newUsageReader(),
 
 		checkpointRe: regexp.MustCompile(cfg.Policies.Context.Checkpoint),
+		runCtx:       context.Background(),
 		tailOff:      log.Size(),
 		limitRe:      regexp.MustCompile(cfg.Policies.UsageLimit.Pattern),
 		trustRe:      regexp.MustCompile(`^(?:` + cfg.Policies.Trust.Pattern + `)$`),
@@ -274,6 +277,7 @@ func (s *Supervisor) surfaceCutShort() {
 // before it stops: a --once run for all of them, one told to stop for up
 // to StopWait.
 func (s *Supervisor) Run(ctx context.Context, once bool) error {
+	s.runCtx = ctx
 	s.emit("", Event{Kind: KindStart, Start: &StartPayload{Sessions: s.cfg.SessionNames()}})
 	s.surfaceCutShort()
 	if !once {
@@ -353,7 +357,8 @@ func (s *Supervisor) Pass() error {
 
 // ownerRecords applies what the owner wrote to the event log since the last
 // pass: a clear lifts a session's park, and a mark-delivered record settles
-// a delivery, while agentd runs.
+// a delivery, a seen mark takes items off the triage list, and an item
+// another process logged (agentd items) is added, while agentd runs.
 func (s *Supervisor) ownerRecords() {
 	events, off, err := s.log.Tail(s.tailOff)
 	if err != nil {
@@ -362,6 +367,10 @@ func (s *Supervisor) ownerRecords() {
 	}
 	s.tailOff = off
 	for _, e := range events {
+		if e.Session == "" && (e.Kind == KindSeen || e.Kind == KindItem && s.st.itemChanged(*e.Item)) {
+			s.st.apply(e)
+			continue
+		}
 		if _, ok := s.cfg.Sessions[e.Session]; ok && e.Mode == ModeOwner {
 			s.st.apply(e)
 			if e.Kind == KindClear {
