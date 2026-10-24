@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"io"
 	"io/fs"
 	"maps"
 	"net/url"
@@ -252,10 +253,11 @@ const GateOutputMax = 64 * 1024
 var gitEnv = []string{"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "SSH_ASKPASS=", "GCM_INTERACTIVE=never", "GIT_NO_REPLACE_OBJECTS=1"}
 
 // gitSafe go before every git command agentd runs: the worktree's config,
-// which the session can write, may not start a file-system monitor in
-// agentd's environment or answer for files from a cache, and paths are
-// literal.
-var gitSafe = []string{"-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "--literal-pathspecs"}
+// which the session can write, may not start a file-system monitor or a
+// hook in agentd's environment, or answer for files from a cache, and
+// paths are literal. Filters, an ssh command and a credential helper the
+// config names still run.
+var gitSafe = []string{"-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-c", "core.hooksPath=/dev/null", "--literal-pathspecs"}
 
 // git runs git in dir with gitEnv and gitSafe.
 func git(timeout time.Duration, dir string, args ...string) ([]byte, error) {
@@ -290,16 +292,25 @@ func (g ExecGit) Fetch(dir string) error {
 func (g ExecGit) GateFiles(dir, url, target, head string, paths []string) ([]string, int, error) {
 	// The target's commit is asked of the configured URL: origin/target is
 	// a ref the session can point anywhere, or keep a fetch from moving.
+	if err := remoteNamed(g.Timeout, dir, url); err != nil {
+		return nil, 0, err
+	}
 	ref := "refs/heads/" + target
 	out, err := gitOut(g.Timeout, dir, "ls-remote", "--", url, ref)
 	if err != nil {
 		return nil, 0, err
 	}
-	fields := strings.Fields(out)
-	if len(fields) < 2 || fields[1] != ref {
+	// ls-remote matches the ref's tail, so refs/heads/x/refs/heads/main
+	// answers too; only the exact ref counts.
+	want := ""
+	for _, line := range strings.Split(out, "\n") {
+		if f := strings.Fields(line); len(f) == 2 && f[1] == ref {
+			want = f[0]
+		}
+	}
+	if want == "" {
 		return nil, 0, fmt.Errorf("the target branch %s is not at %s", target, url)
 	}
-	want := fields[0]
 	if _, err := gitOut(g.Timeout, dir, "cat-file", "-e", want+"^{commit}"); err != nil {
 		return nil, 0, fmt.Errorf("the target branch %s's commit %s has not been fetched into %s", target, shortHash(want), dir)
 	}
@@ -371,6 +382,7 @@ func diskFiles(dir, p, format string) (map[string]string, error) {
 			return files, nil
 		}
 	}
+	count := 0
 	err := filepath.WalkDir(filepath.Join(dir, p), func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -392,16 +404,19 @@ func diskFiles(dir, p, format string) (map[string]string, error) {
 			}
 			data, mode = []byte(link), "120000"
 		case t.IsRegular():
-			fi, err := d.Info()
+			if count++; count > gateFilesMax {
+				files[rel] = "too many files"
+				return filepath.SkipAll
+			}
+			sum, exec, err := hashFile(path, format)
 			if err != nil {
 				return err
 			}
-			if fi.Mode()&0o111 != 0 {
+			if exec {
 				mode = "100755"
 			}
-			if data, err = os.ReadFile(path); err != nil {
-				return err
-			}
+			files[rel] = mode + " " + sum
+			return nil
 		default:
 			files[rel] = "not a file: " + t.String()
 			return nil
@@ -413,6 +428,62 @@ func diskFiles(dir, p, format string) (map[string]string, error) {
 		return files, nil
 	}
 	return files, err
+}
+
+// gateFilesMax and gateFileMax bound what diskFiles reads under one gate
+// path: a gate is a few small scripts, and anything larger is a change.
+const (
+	gateFilesMax = 1000
+	gateFileMax  = 16 << 20
+)
+
+// hashFile is the blob name of the regular file at path, and whether git
+// would record it executable. It opens without blocking and checks what it
+// opened, so a file swapped for a pipe cannot hang it; a file over
+// gateFileMax gets a name no blob has.
+func hashFile(path, format string) (string, bool, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return "", false, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return "", false, err
+	}
+	if !fi.Mode().IsRegular() {
+		return "not a file: " + fi.Mode().Type().String(), false, nil
+	}
+	if fi.Size() > gateFileMax {
+		return "too large", false, nil
+	}
+	data := make([]byte, fi.Size())
+	if _, err := io.ReadFull(f, data); err != nil {
+		return "", false, err
+	}
+	return blobHash(format, data), fi.Mode()&0o100 != 0, nil
+}
+
+// remoteNamed refuses a worktree whose git config has a remote named url:
+// git would take url as that remote's name and use its url or pushurl,
+// which the session can point anywhere.
+func remoteNamed(timeout time.Duration, dir, url string) error {
+	out, err := git(timeout, dir, "config", "--get-regexp", `^remote\..*\.(url|pushurl)$`)
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("git config in %s: %s", dir, exitMessage(err))
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		key, _, _ := strings.Cut(line, " ")
+		name := strings.TrimPrefix(key, "remote.")
+		if i := strings.LastIndex(name, "."); i >= 0 && name[:i] == url {
+			return fmt.Errorf("git config in %s names a remote %s, which git would use in place of that URL", dir, url)
+		}
+	}
+	return nil
 }
 
 // blobHash is the object name git gives a blob holding data.
@@ -542,6 +613,9 @@ type ExecForge struct{ Timeout time.Duration }
 // whatever HEAD has become since, to url, never to a remote the worktree
 // names. Hooks are off: a pre-push hook is the branch's own code.
 func (f ExecForge) Push(dir, url, sha, branch string) error {
+	if err := remoteNamed(f.Timeout, dir, url); err != nil {
+		return err
+	}
 	_, err := gitOut(f.Timeout, dir, "-c", "core.hooksPath=/dev/null", "push", "--no-verify", "-q", url, sha+":refs/heads/"+branch)
 	return err
 }

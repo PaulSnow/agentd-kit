@@ -1278,8 +1278,9 @@ func (s *Supervisor) gate(name, key, fkey string, d Deliver, repo Repository, he
 		if clean, err = s.git.Clean(d.Worktree); err == nil && clean {
 			var after string
 			if after, err = s.git.ConfigHash(d.Worktree); err == nil && after == config {
-				// The gate files again: changed while it ran, and put
-				// back, is still changed.
+				// The gate files again: one still changed when the gate
+				// ends is refused. One changed and put back while it ran
+				// is not seen.
 				return s.gatePinned(name, key, fkey, d, repo, head, t, fail)
 			}
 		}
@@ -1415,9 +1416,9 @@ func (s *Supervisor) gatePinned(name, key, fkey string, d Deliver, repo Reposito
 	}
 	if len(changed) > 0 {
 		ck := "deliver:" + key + ":gate-changed:" + head
-		s.skipOnce(name, ck, fmt.Sprintf("the session changed its gate (%s) from the target branch's %s; not running it or delivering %s",
+		s.skipOnce(name, ck, fmt.Sprintf("the gate (%s) differs from the target branch's %s; not running it or delivering %s",
 			strings.Join(changed, ", "), d.Target, shortHash(head)), t, &SkipPayload{Worktree: d.Worktree, SHA: head})
-		s.escalate(name, ck, fmt.Sprintf("%s is DONE but changed its gate (%s) from what the target branch %s has; nothing is delivered. "+
+		s.escalate(name, ck, fmt.Sprintf("%s is DONE but its gate (%s) differs from what the target branch %s has; nothing is delivered. "+
 			"Restore the gate in the branch, or change it on %s through review.", name, strings.Join(changed, ", "), d.Target, d.Target), t, s.clock.Now())
 		return false
 	}
@@ -1450,16 +1451,10 @@ var credentialPaths = []string{".aws", ".claude", ".claude.json", ".config/agent
 
 // reachableCredentials lists the credential paths a process running as
 // agentd's user can still find, however its HOME is set: the common ones
-// under the real home as ~/ paths, each configured account's files, and
-// the ssh agent's socket. Existence is enough, and nothing is opened.
+// under the real home as ~/ paths, each configured account's files by
+// account and field, never by path, and the ssh agent's socket. Existence is enough, and nothing is opened.
 func (s *Supervisor) reachableCredentials() []string {
 	home, _ := os.UserHomeDir()
-	show := func(p string) string {
-		if rel, err := filepath.Rel(home, p); home != "" && err == nil && rel != ".." && !strings.HasPrefix(rel, "../") {
-			return "~/" + filepath.ToSlash(rel)
-		}
-		return p
-	}
 	var out []string
 	seen := map[string]bool{}
 	add := func(label, p string) {
@@ -1480,9 +1475,9 @@ func (s *Supervisor) reachableCredentials() []string {
 	sort.Strings(names)
 	for _, name := range names {
 		a := s.cfg.Accounts[name]
-		for _, p := range []string{a.TokenFile, a.ConfigDir} {
-			if p != "" {
-				add(show(p), p)
+		for _, f := range [][2]string{{"token_file", a.TokenFile}, {"config_dir", a.ConfigDir}} {
+			if f[1] != "" {
+				add("account "+name+" "+f[0], f[1])
 			}
 		}
 	}

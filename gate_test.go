@@ -309,8 +309,8 @@ func TestUnpinnedGateIsRefused(t *testing.T) {
 	}
 }
 
-// A gate file changed while the gate ran, and put back, is still refused:
-// the gate files are checked again after it.
+// A gate file changed while the gate ran, and still changed when it ends,
+// is refused: the gate files are checked again after it.
 func TestGateChangedDuringItsRunIsNotPushed(t *testing.T) {
 	h := newHarness(t, false, "d")
 	doneWithDelivery(t, h, "d")
@@ -360,7 +360,7 @@ func TestGateHomeIsRemovedAndAccountsAreReachable(t *testing.T) {
 	}
 	for _, e := range h.events() {
 		if e.Kind == KindAction && actionOf(e) == ActGate {
-			if !reflect.DeepEqual(e.Act.Reachable, []string{"~/tokens/a", "$SSH_AUTH_SOCK"}) {
+			if !reflect.DeepEqual(e.Act.Reachable, []string{"account a token_file", "$SSH_AUTH_SOCK"}) {
 				t.Fatalf("reachable %v", e.Act.Reachable)
 			}
 			return
@@ -496,13 +496,27 @@ func TestExecGateFiles(t *testing.T) {
 	run("commit", "-q", "-am", "evil base")
 	run("update-ref", "refs/remotes/origin/main", "HEAD")
 	check("bin/check")
-	// A file-system monitor named in the worktree's config never runs.
+	// A remote named after the configured URL would answer for it.
+	run("config", "remote."+remote+".url", dir)
+	if _, _, err := g.GateFiles(dir, remote, "main", run("rev-parse", "HEAD"), paths); err == nil || !strings.Contains(err.Error(), "names a remote") {
+		t.Fatalf("a remote named after the URL gave %v", err)
+	}
+	if err := (ExecForge{Timeout: 10 * time.Second}).Push(dir, remote, run("rev-parse", "HEAD"), "x"); err == nil || !strings.Contains(err.Error(), "names a remote") {
+		t.Fatalf("push through a remote named after the URL gave %v", err)
+	}
+	run("config", "--remove-section", "remote."+remote)
+	// A file-system monitor, or a hook, named in the worktree's config
+	// never runs.
 	marker := filepath.Join(root, "monitor-ran")
 	writeFile(t, filepath.Join(root, "monitor.sh"), "#!/bin/sh\ntouch "+marker+"\n")
 	if err := os.Chmod(filepath.Join(root, "monitor.sh"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	run("config", "core.fsmonitor", filepath.Join(root, "monitor.sh"))
+	run("config", "core.hooksPath", root)
+	if err := os.Symlink(filepath.Join(root, "monitor.sh"), filepath.Join(root, "post-index-change")); err != nil {
+		t.Fatal(err)
+	}
 	check("bin/check")
 	if _, err := g.Clean(dir); err != nil {
 		t.Fatal(err)
