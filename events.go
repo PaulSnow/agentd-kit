@@ -46,6 +46,7 @@ type Event struct {
 	Usage      *UsagePayload      `json:"usage,omitempty"`
 	Checkpoint *CheckpointPayload `json:"checkpoint,omitempty"`
 	Poll       *PollPayload       `json:"poll,omitempty"`
+	Triage     *TriagePayload     `json:"triage,omitempty"`
 }
 
 // Event kinds.
@@ -68,6 +69,7 @@ const (
 	KindUsage      = "usage"      // what a session's transcript has cost so far
 	KindCheckpoint = "checkpoint" // a merge newly at the head of a session's worktree
 	KindPoll       = "poll"       // a poll of a forge that found something, failed, or recovered
+	KindTriage     = "triage"     // the checked answer of a triage job: each item's kind, needs and summary
 )
 
 // Modes, in the mode every event carries. A run reads only the events of
@@ -252,6 +254,9 @@ type ErrorPayload struct {
 	Key   string      `json:"key,omitempty"`
 	Error string      `json:"error"`
 	Act   *ActPayload `json:"act,omitempty"`
+	// Triage is a failed triage: the items it failed for, and what its
+	// calls cost.
+	Triage *TriagePayload `json:"triage,omitempty"`
 }
 
 // WarningPayload is something agentd noticed about itself: a torn last
@@ -274,7 +279,7 @@ func (e Event) check() error {
 		KindStart: e.Start != nil, KindStop: e.Stop != nil, KindObserve: e.Observe != nil, KindTransition: e.Transition != nil,
 		KindSkip: e.Skip != nil, KindCrash: e.Crash != nil, KindClear: e.Clear != nil, KindError: e.Error != nil, KindWarning: e.Warning != nil,
 		KindItem: e.Item != nil, KindSeen: e.Seen != nil, KindCursor: e.Cursor != nil, KindUsage: e.Usage != nil,
-		KindCheckpoint: e.Checkpoint != nil, KindPoll: e.Poll != nil, "act": e.Act != nil,
+		KindCheckpoint: e.Checkpoint != nil, KindPoll: e.Poll != nil, KindTriage: e.Triage != nil, "act": e.Act != nil,
 	}
 	want := e.Kind
 	switch e.Kind {
@@ -289,9 +294,11 @@ func (e Event) check() error {
 			return fmt.Errorf("a %s event must carry its own payload and no other", e.Kind)
 		}
 	}
-	// Items and cursors are facts both modes read; the owner marks items seen.
+	// Items, cursors and triage are facts both modes read, a failed triage
+	// too; the owner marks items seen.
+	failedTriage := e.Kind == KindError && e.Error.Triage != nil
 	switch {
-	case (e.Kind == KindItem || e.Kind == KindCursor) != (e.Mode == ModeShared):
+	case (e.Kind == KindItem || e.Kind == KindCursor || e.Kind == KindTriage || failedTriage) != (e.Mode == ModeShared):
 		return fmt.Errorf("a %s event must not carry mode %q", e.Kind, e.Mode)
 	case e.Kind == KindSeen && e.Mode != ModeOwner:
 		return fmt.Errorf("a seen event is the owner's, not %q", e.Mode)

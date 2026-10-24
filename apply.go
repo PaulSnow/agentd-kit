@@ -33,6 +33,17 @@ func NewLogState(cfg *Config, mode string) *LogState {
 		Cursors: map[string]time.Time{}, Polls: map[string]PollRecord{}, cfg: cfg}
 }
 
+// setItem changes a copy of the item and puts the copy in its place: a
+// worker's state shares the loop's items, so an item is never changed in
+// place by triage.
+func (st *LogState) setItem(id string, change func(*Item)) {
+	if it := st.Items[id]; it != nil {
+		c := *it
+		change(&c)
+		st.Items[id] = &c
+	}
+}
+
 // track returns the session's Track, creating it.
 func (st *LogState) track(name string) *Track {
 	t, ok := st.Tracks[name]
@@ -93,6 +104,17 @@ func (st *LogState) apply(e Event) {
 			st.Cursors[e.Cursor.Source] = e.Cursor.AsOf
 		case KindPoll:
 			st.Polls[e.Poll.Source] = PollRecord{PollPayload: *e.Poll, At: e.Time}
+		case KindTriage:
+			for _, r := range e.Triage.Results {
+				r := r
+				st.setItem(r.ID, func(it *Item) { it.Triage = &r })
+			}
+		case KindError:
+			if e.Error.Triage != nil {
+				for _, id := range e.Error.Triage.Failed {
+					st.setItem(id, func(it *Item) { it.TriageFailed = e.Time })
+				}
+			}
 		}
 		return
 	}

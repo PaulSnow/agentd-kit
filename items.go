@@ -78,6 +78,11 @@ type Item struct {
 	ItemPayload
 	FirstSeen time.Time
 	Seen      bool
+	// Triage is the item's latest triage; it holds for the item's text
+	// while its Hash is the item's. TriageFailed is when a triage of it
+	// last failed.
+	Triage       *TriageResult
+	TriageFailed time.Time
 }
 
 // itemLink is the forge page for an issue (or a request when mr is set).
@@ -245,6 +250,35 @@ func (st *LogState) SortedItems(unseen bool) []*Item {
 	return out
 }
 
+// Triaged is the item's triage, while it is for the item's text.
+func (it *Item) Triaged() *TriageResult {
+	if it.Triage != nil && it.Triage.Hash == ItemHash(it.ItemPayload) {
+		return it.Triage
+	}
+	return nil
+}
+
+// urgencyRank orders items by their triage's urgency. An untriaged item
+// ranks with today's, neither buried nor put first.
+func urgencyRank(it *Item) int {
+	tr := it.Triaged()
+	switch {
+	case tr == nil:
+		return 1
+	case tr.Urgency == "now":
+		return 0
+	case tr.Urgency == "today":
+		return 1
+	}
+	return 2
+}
+
+// SortByUrgency orders items by urgency, then as they were: #7's order
+// for what is new.
+func SortByUrgency(items []*Item) {
+	sort.SliceStable(items, func(i, j int) bool { return urgencyRank(items[i]) < urgencyRank(items[j]) })
+}
+
 // itemsCmd brings the items up to date from the tracking files, then
 // lists them, or marks the ones --seen names.
 func itemsCmd(args []string, w io.Writer) error {
@@ -280,14 +314,16 @@ func itemsCmd(args []string, w io.Writer) error {
 		}
 		st.apply(e)
 	}
-	PrintItems(w, st.SortedItems(*unseen))
+	items := st.SortedItems(*unseen)
+	SortByUrgency(items)
+	PrintItems(w, items)
 	return rerr
 }
 
 // PrintItems writes the items table.
 func PrintItems(w io.Writer, items []*Item) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "WHEN\tKIND\tREPOSITORY\tTITLE\tFROM\tSEEN\tID")
+	fmt.Fprintln(tw, "WHEN\tKIND\tREPOSITORY\tTITLE\tFROM\tSEEN\tNEEDS\tID\tSUMMARY")
 	for _, it := range items {
 		repo, seen := it.Repository, ""
 		if repo == "" {
@@ -305,7 +341,11 @@ func PrintItems(w io.Writer, items []*Item) {
 		if it.Kind == ItemMailQuestion || it.Kind == ItemMailReport {
 			when = it.SourceTime.UTC().Format("2006-01-02")
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", when, it.Kind, repo, title, it.Author, seen, it.ID)
+		needs, summary := "-", ""
+		if tr := it.Triaged(); tr != nil {
+			needs, summary = tr.NeedsOwner+"/"+tr.Urgency, tr.Summary
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", when, it.Kind, repo, title, it.Author, seen, needs, it.ID, summary)
 	}
 	tw.Flush()
 }

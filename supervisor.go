@@ -346,6 +346,7 @@ func (s *Supervisor) Pass() error {
 	}
 	if s.halt == nil {
 		s.pollForges(s.clock.Now())
+		s.triageItems(s.clock.Now())
 	}
 	return s.halt
 }
