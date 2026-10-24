@@ -138,9 +138,6 @@ func PrintStatus(w io.Writer, rows []SessionStatus, meta map[string]any, now tim
 		}
 		fmt.Fprintf(w, "%s; %d events\n", line, meta["events"])
 	}
-	// A quiet poll makes no event, but a source still polled has a record
-	// at least every pollHeartbeat: an older one means no one is polling
-	// it, so it is unknown, never "nothing new".
 	// A request's CI as the watcher last saw it; once agentd has stopped,
 	// no one is watching, so it is unknown.
 	if ci, ok := meta["ci"].(map[string]CIRecord); ok {
@@ -164,6 +161,9 @@ func PrintStatus(w io.Writer, rows []SessionStatus, meta map[string]any, now tim
 			fmt.Fprintf(w, "%s, since %s ago\n", line, ago(now, c.At))
 		}
 	}
+	// A quiet poll makes no event, but a source still polled has a record
+	// at least every pollHeartbeat: an older one means no one is polling
+	// it, so it is unknown, never "nothing new".
 	if polls, ok := meta["polls"].(map[string]PollRecord); ok {
 		stale, _ := meta["poll_stale"].(time.Duration)
 		stopped, _ := meta["stopped"].(time.Time)

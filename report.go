@@ -310,6 +310,11 @@ func ReportFrom(cfg *Config, st *LogState, host string, now time.Time) Report {
 			rd := ReportDelivery{Session: n, Ref: d.Ref, At: d.At, OwnerOnly: dr.OwnerOnly}
 			if c, ok := st.CI[ciKey(repo, d.Ref)]; ok {
 				rd.CI, rd.CIVerdict, rd.CIJobs = c.State, c.Verdict, c.Jobs
+				// No one watching, or a record of a head before the one
+				// delivered since: unknown, never an old green.
+				if c.State != CIMerged && c.State != CIClosed && (!cfg.Poll.CI || !st.Stopped.IsZero() || rs.ciStale(c)) {
+					rd.CI, rd.CIVerdict, rd.CIJobs = CIUnknown, "", nil
+				}
 			}
 			// A CI fix pushed to the request is the same delivery again.
 			again := false

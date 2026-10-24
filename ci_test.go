@@ -173,6 +173,16 @@ func TestCISameFailureTwiceIsADecision(t *testing.T) {
 	if len(h.forge.opens) != 1 {
 		t.Fatalf("opens = %d: the fix went to a new request", len(h.forge.opens))
 	}
+	// The forge still shows the old head's failure, then the new head
+	// pending: neither is the same failure again.
+	if n := h.count(KindAction, ActRaise, "d"); n != 0 {
+		t.Fatalf("raised %d decisions on the old head's record", n)
+	}
+	api.pipelines("c0ffee2", "running", nil, "success", []string{"test:success"})
+	h.ticks(3, 5*time.Minute)
+	if n := h.count(KindAction, ActRaise, "d"); n != 0 {
+		t.Fatalf("raised %d decisions on a pending head", n)
+	}
 	// The new head fails the same way.
 	api.pipelines("c0ffee2", "failed", []string{"test:failed"}, "success", []string{"test:success"})
 	h.ticks(6, 5*time.Minute)
@@ -201,6 +211,17 @@ func TestCISameFailureTwiceIsADecision(t *testing.T) {
 	if n := h.count(KindAction, ActCIFix, "d"); n != 2 {
 		t.Fatalf("ci-fix actions after retry = %d, want 2", n)
 	}
+	// The retry changes nothing and meets the same failure: the owner is
+	// asked again, not left with nothing open.
+	h.ticks(8, 5*time.Minute)
+	if n := h.count(KindAction, ActCIFix, "d"); n != 2 {
+		t.Fatalf("ci-fix actions after the retry failed = %d, want 2", n)
+	}
+	tr = h.sup.Tracks()["d"]
+	if !tr.hasRaised("C2") || tr.RaisedCount != 0 {
+		t.Fatalf("raised = %+v, count %d", tr.Raised, tr.RaisedCount)
+	}
+	sameAfterReplay(t, h, "after the retry")
 }
 
 // A forge that cannot be reached is unknown, never green, and starts
@@ -327,5 +348,78 @@ func TestCIDecisionIDsAreReserved(t *testing.T) {
 	err := checkDecisions([]Decision{{ID: "C1", Type: DecisionText, Question: "Which colour?"}})
 	if err == nil || !strings.Contains(err.Error(), "C, D or R") {
 		t.Fatalf("C1 = %v", err)
+	}
+}
+
+// The same failure in two GitLab runs, with their own section clocks,
+// commit and durations, has one cause.
+func TestCICauseIgnoresRunNoise(t *testing.T) {
+	run := func(epoch, sha, took string) string {
+		return "\x1b[0Ksection_start:" + epoch + ":step_script\r\x1b[0KRunning\nChecking out " + sha + " as detached HEAD\n" +
+			"--- FAIL: TestWidgets (" + took + "s)\nFAIL\nsection_end:" + epoch + ":step_script\r\x1b[0K\n"
+	}
+	a, b := ciExcerpt(run("1761091200", "c0ffee12", "0.01")), ciExcerpt(run("1761094800", "deadbeef", "0.40"))
+	if strings.Contains(a, "section_") || ciCause([]string{"test"}, a) != ciCause([]string{"test"}, b) {
+		t.Fatalf("causes differ:\n%q\n%q", a, b)
+	}
+	if ciCause([]string{"test"}, a) == ciCause([]string{"test"}, strings.Replace(a, "TestWidgets", "TestGadgets", 1)) {
+		t.Fatal("another failing test has the same cause")
+	}
+}
+
+// A target whose latest pipeline has not settled is waited for.
+func TestCITargetPendingWaits(t *testing.T) {
+	c := ciCheck{state: CIFailed, failed: []string{"test"}}
+	if v := ciVerdict(c, ciCheck{state: CIPending}); v != CITargetPending {
+		t.Fatalf("verdict = %s", v)
+	}
+}
+
+// A failing job whose log cannot be read leaves the failure known.
+func TestCIUnreadableLogStaysFailed(t *testing.T) {
+	h, api := ciHarness(t)
+	api.pipelines("c0ffee", "failed", []string{"test:failed"}, "success", []string{"test:success"})
+	api.set(func() { api.gitlab[ciProject+"/jobs/501/trace"] = fakeNotFound })
+	h.ticks(3, 5*time.Minute)
+	evs := h.ciEvents()
+	if last := evs[len(evs)-1]; last.State != CIFailed || last.Cause == "" {
+		t.Fatalf("ci = %+v", last)
+	}
+}
+
+// A request merged is recorded once and no longer asked about.
+func TestCIMergedStopsWatching(t *testing.T) {
+	h, api := ciHarness(t)
+	api.pipelines("c0ffee", "success", nil, "success", nil)
+	h.ticks(2, 5*time.Minute)
+	api.set(func() {
+		api.gitlab[ciProject+"/merge_requests/1"] = `{"iid":1,"state":"merged","sha":"c0ffee","target_branch":"main"}`
+	})
+	h.ticks(2, 5*time.Minute)
+	calls := len(api.callList())
+	h.ticks(3, 5*time.Minute)
+	evs := h.ciEvents()
+	if last := evs[len(evs)-1]; last.State != CIMerged || len(api.callList()) != calls {
+		t.Fatalf("ci = %+v, calls %d then %d", last, calls, len(api.callList()))
+	}
+}
+
+// Fix sessions per request are bounded by the restart policy's count:
+// past it, a new failure is a decision too.
+func TestCIFixesAreBoundedByTheRestartPolicy(t *testing.T) {
+	h, api := ciHarness(t)
+	h.cfg.Policies.Restart.MaxRestarts, h.cfg.Policies.Restart.Window = 1, Duration{6 * time.Hour}
+	api.pipelines("c0ffee", "failed", []string{"test:failed"}, "success", []string{"test:success"})
+	h.ticks(4, 5*time.Minute)
+	h.git.head = "c0ffee2"
+	h.alive("d", "fixed\n")
+	h.ticks(8, 5*time.Minute)
+	api.pipelines("c0ffee2", "failed", []string{"lint:failed"}, "success", []string{"lint:success"})
+	h.ticks(4, 5*time.Minute)
+	if n := h.count(KindAction, ActCIFix, "d"); n != 1 {
+		t.Fatalf("ci-fix actions = %d, want 1", n)
+	}
+	if tr := h.sup.Tracks()["d"]; !tr.hasRaised("C1") || !strings.Contains(tr.Raised[0].Question, "fix sessions") {
+		t.Fatalf("raised = %+v", tr.Raised)
 	}
 }

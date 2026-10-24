@@ -41,8 +41,9 @@ const (
 	CIMerged  = "merged"
 	CIClosed  = "closed"
 
-	CIOwn       = "own"        // the branch's own failure
-	CITargetRed = "target-red" // the target is red with the same jobs: wait for it
+	CIOwn           = "own"            // the branch's own failure
+	CITargetRed     = "target-red"     // the target is red with the same jobs: wait for it
+	CITargetPending = "target-pending" // the target's latest pipeline has not settled: wait for it
 )
 
 // CI decision answers.
@@ -107,6 +108,9 @@ type CIFixRecord struct {
 	Transcript string
 	Taken      bool
 	At         time.Time
+	// Pushed is the head the delivery after the fix recorded: the fix's
+	// commit, or the failing head again when the fix changed nothing.
+	Pushed string
 }
 
 // CIFact is what a fix session's pack says of the failure.
@@ -254,13 +258,17 @@ func (s *Supervisor) askCI(r ciWatched, prev CIRecord) CIPayload {
 		p.Cause, p.Excerpt, p.Withheld = prev.Cause, prev.Excerpt, prev.Withheld
 		return p
 	}
-	log, err := c.jobLog(c.failedIDs[0])
-	if err != nil {
-		p.State, p.Error = CIUnknown, s.withheld(err.Error())
-		return p
+	// A job whose log cannot be read (another CI app's check, on
+	// GitHub) leaves the failure known, its excerpt empty.
+	log := ""
+	for _, id := range c.failedIDs {
+		if l, err := c.jobLog(id); err == nil {
+			log = l
+			break
+		}
 	}
 	excerpt := ciExcerpt(log)
-	p.Cause = shortHash(StillHash(strings.Join(p.Jobs, "\n") + "\n" + excerpt))
+	p.Cause = ciCause(p.Jobs, excerpt)
 	if i := s.confidentialMatch(excerpt); i > 0 {
 		p.Withheld = i
 	} else {
@@ -276,6 +284,9 @@ func (s *Supervisor) askCI(r ciWatched, prev CIRecord) CIPayload {
 // a request that passes what the target fails, or says it fixes it, is
 // the target's fix, and is never left waiting for itself.
 func ciVerdict(c, tgt ciCheck) string {
+	if tgt.state == CIPending {
+		return CITargetPending
+	}
 	if tgt.state != CIFailed {
 		return CIOwn
 	}
@@ -360,6 +371,7 @@ func gitlabCI(api ForgeAPI, project, ref string) (ciCheck, error) {
 			ID     int    `json:"id"`
 			Status string `json:"status"`
 			SHA    string `json:"sha"`
+			Ref    string `json:"ref"`
 		} `json:"head_pipeline"`
 	}
 	if err := get(base+"/merge_requests/"+ref[1:], &mr); err != nil {
@@ -397,7 +409,10 @@ func gitlabCI(api ForgeAPI, project, ref string) (ciCheck, error) {
 		return nil
 	}
 	p := mr.HeadPipeline
-	if p == nil || p.SHA != "" && p.SHA != mr.SHA {
+	// A merged-results or merge-train pipeline runs on GitLab's merge of
+	// the head, under the request's own ref.
+	merged := p != nil && strings.HasPrefix(p.Ref, "refs/merge-requests/")
+	if p == nil || p.SHA != "" && p.SHA != mr.SHA && !merged {
 		// No pipeline has run on the head commit yet.
 		c.state = CIPending
 		if p == nil {
@@ -421,7 +436,9 @@ func gitlabCI(api ForgeAPI, project, ref string) (ciCheck, error) {
 			SHA    string `json:"sha"`
 			WebURL string `json:"web_url"`
 		}
-		if err := get(fmt.Sprintf("%s/pipelines?ref=%s&per_page=1", base, url.QueryEscape(mr.TargetBranch)), &ps); err != nil {
+		// The latest finished pipeline: one still running says nothing yet
+		// of the red one before it.
+		if err := get(fmt.Sprintf("%s/pipelines?ref=%s&scope=finished&per_page=1", base, url.QueryEscape(mr.TargetBranch)), &ps); err != nil {
 			return ciCheck{}, err
 		}
 		if len(ps) == 0 {
@@ -564,12 +581,22 @@ func sortedJobs(names, ids []string) ([]string, []string) {
 	return n, d
 }
 
-// logStamp is the time a CI log line starts with, and ansiEscape a
-// terminal colour code.
+// logStamp is the time a CI log line starts with, ansiEscape a terminal
+// colour code, and logSection GitLab's section marker, with its clock.
+// causeNoise is what differs between two runs of the same failure: commit
+// hashes, clocks and other long numbers.
 var (
 	logStamp   = regexp.MustCompile(`^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z ?`)
 	ansiEscape = regexp.MustCompile("\x1b\\[[0-9;]*[A-Za-z]")
+	logSection = regexp.MustCompile(`section_(?:start|end):\d+:[A-Za-z0-9_.-]*(?:\[[^\]]*\])?\r?`)
+	causeNoise = regexp.MustCompile(`(?i)\b[0-9a-f]{7,40}\b|\d{4,}|\d+(?:\.\d+)?\s*(?:ms|s|m|h)\b`)
 )
+
+// ciCause is a failure's cause: its failing jobs and its excerpt, without
+// what differs from one run of the same failure to the next.
+func ciCause(jobs []string, excerpt string) string {
+	return shortHash(StillHash(strings.Join(jobs, "\n") + "\n" + causeNoise.ReplaceAllString(excerpt, "#")))
+}
 
 // ciExcerpt is the end of a job's log: its last lines, without their
 // timestamps or colour codes, within ciExcerptBytes.
@@ -579,7 +606,7 @@ func ciExcerpt(log string) string {
 		lines = lines[len(lines)-ciExcerptLines:]
 	}
 	for i, l := range lines {
-		lines[i] = logStamp.ReplaceAllString(ansiEscape.ReplaceAllString(l, ""), "")
+		lines[i] = logStamp.ReplaceAllString(logSection.ReplaceAllString(ansiEscape.ReplaceAllString(l, ""), ""), "")
 	}
 	out := strings.Join(lines, "\n")
 	for len(out) > ciExcerptBytes {
@@ -602,6 +629,42 @@ func (t *Track) ciFixes(repo, ref string) []CIFixRecord {
 		}
 	}
 	return out
+}
+
+// notePushed records the head the delivery after a fix recorded.
+func (t *Track) notePushed(key, head string) {
+	for i := len(t.CIFixes) - 1; i >= 0; i-- {
+		if f := &t.CIFixes[i]; f.Delivered == key && f.Taken {
+			if f.Pushed == "" {
+				// Copied, so a worker's track never shares the record.
+				fixes := append([]CIFixRecord(nil), t.CIFixes...)
+				fixes[i].Pushed = head
+				t.CIFixes = fixes
+			}
+			return
+		}
+	}
+}
+
+// ciStale says whether a request's record is of a head before the one a
+// fix's delivery recorded since.
+func (t *Track) ciStale(r CIRecord) bool {
+	fixes := t.ciFixes(r.Repository, r.Ref)
+	if len(fixes) == 0 {
+		return false
+	}
+	f := fixes[len(fixes)-1]
+	return f.Taken && (f.Pushed == "" || f.Pushed != r.Head)
+}
+
+// hasRaised says whether an open raised decision has the id.
+func (t *Track) hasRaised(id string) bool {
+	for _, o := range t.Raised {
+		if o.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // pendingCIFix is the fix session a delivery waits for: the latest one
@@ -658,10 +721,18 @@ func (s *Supervisor) fixCI(name string, sess Session, t *Track, ev Evidence, sta
 		}
 		fixes := t.ciFixes(r.Repository, r.Ref)
 		var last *CIFixRecord
+		since := ""
 		if len(fixes) > 0 {
 			last = &fixes[len(fixes)-1]
-			if last.Head == r.Head && last.Cause == r.Cause && t.CIRaised[k+" "+r.Cause] == "" && !last.Taken {
+			since = last.Transcript
+			switch {
+			case !last.Taken && last.Head == r.Head && last.Cause == r.Cause:
 				continue // shadow mode would have fixed this one
+			case t.ciStale(r):
+				// The record is of a head before the fix's delivery: the
+				// watcher has not seen the head delivered since. A delivery
+				// that named no head, the owner's, leaves it to the owner.
+				continue
 			}
 		}
 		n := 0
@@ -679,9 +750,12 @@ func (s *Supervisor) fixCI(name string, sess Session, t *Track, ev Evidence, sta
 		}
 		retry := ""
 		if why != "" {
-			id := t.CIRaised[k+" "+r.Cause]
+			// One decision per failure after each fix: a retry that meets
+			// the same failure asks again.
+			rkey := "ci-raise:" + k + ":" + r.Cause + ":" + since
+			id := t.CIRaised[rkey]
 			if id == "" {
-				s.raiseCI(name, t, r, why)
+				s.raiseCI(name, t, r, rkey, why)
 				continue
 			}
 			a, ok := t.Answers[id]
@@ -732,7 +806,7 @@ func (s *Supervisor) startCIFix(name string, sess Session, t *Track, ev Evidence
 // raiseCI raises the decision a repeated failure becomes, on the session
 // that delivered the request: retry with one more fix session, or leave
 // the request to the owner.
-func (s *Supervisor) raiseCI(name string, t *Track, r CIRecord, why string) {
+func (s *Supervisor) raiseCI(name string, t *Track, r CIRecord, key, why string) {
 	id := fmt.Sprintf("C%d", len(t.CIRaised)+1)
 	jobs := strings.Join(r.Jobs, ", ")
 	d := Decision{
@@ -748,5 +822,5 @@ func (s *Supervisor) raiseCI(name string, t *Track, r CIRecord, why string) {
 			{Key: ciLeave, Label: "Leave it", Consequence: "agentd starts no fix session for this failure; the owner looks at the request."},
 		},
 	}
-	s.act(name, ActRaise, &ActPayload{Key: "ci-raise:" + ciKey(r.Repository, r.Ref) + ":" + r.Cause, Repository: r.Repository, Ref: r.Ref, Cause: r.Cause, Raised: &d}, func() error { return nil })
+	s.act(name, ActRaise, &ActPayload{Key: key, Repository: r.Repository, Ref: r.Ref, Cause: r.Cause, Raised: &d}, func() error { return nil })
 }

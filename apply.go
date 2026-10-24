@@ -239,6 +239,7 @@ func (st *LogState) apply(e Event) {
 	case KindSkip:
 		k := e.Skip
 		if k.Delivered != "" {
+			t.notePushed(k.Delivered, k.Head)
 			t.Delivered[k.Delivered] = k.Outcome
 			t.DeliveredRefs = append(t.DeliveredRefs, k.Outcome)
 			// Found already open or merged; failed and nothing deliver nothing.
@@ -377,8 +378,11 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 			if t.CIRaised == nil {
 				t.CIRaised = map[string]string{}
 			}
-			t.CIRaised[ciKey(a.Repository, a.Ref)+" "+a.Cause] = a.Raised.ID
-			t.raise(*a.Raised)
+			t.CIRaised[a.Key] = a.Raised.ID
+			// Not the session's own: its D numbering is left alone.
+			if !t.hasRaised(a.Raised.ID) {
+				t.Raised = append(t.Raised[:len(t.Raised):len(t.Raised)], *a.Raised)
+			}
 		}
 	case ActStop:
 		t.Stopped = a.Reason
@@ -416,6 +420,9 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 		t.settleQuestions(a.QuestionsHash, a.Update, a.Episode, at)
 		t.settleDialog(a.Dialog, a.Episode, at)
 	case ActOpen:
+		if taken {
+			t.notePushed(a.Delivered, a.Head)
+		}
 		ref := a.Ref
 		if ref == "" {
 			ref = "would-open"
