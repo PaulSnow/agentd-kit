@@ -145,8 +145,9 @@ func (st *LogState) apply(e Event) {
 		}
 		t.noteCrash(c, st.cfg.Policies.Restart.MaxCrashes)
 	case KindClear:
-		if sp, ok := t.spend(st.Mode == ModeLive); ok {
-			t.SpendBase += sp
+		if b := e.Clear.Base; b != nil {
+			t.SpendBase = *b
+			break
 		}
 		t.clear()
 	case KindSkip:

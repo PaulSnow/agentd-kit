@@ -299,7 +299,9 @@ func (s *Supervisor) measure(name string, sess Session, t *Track) {
 		}
 		if id != "" {
 			if u, ok, err := s.usage.measure(dir, id); err == nil && ok {
-				u.Guessed = guessed
+				// A guess that lands on a transcript agentd launched is
+				// that transcript, measured exactly.
+				u.Guessed = guessed && (t.Usage[id].Transcript == "" || t.Usage[id].Guessed)
 				if prev, seen := t.Usage[id]; !seen || prev != u || t.Measured != id {
 					s.emit(name, Event{Kind: KindUsage, Usage: &u})
 				}
@@ -308,8 +310,11 @@ func (s *Supervisor) measure(name string, sess Session, t *Track) {
 	}
 	// Only a newer merge is a checkpoint: a checkout of an older branch
 	// goes back to an earlier merge, which is not one reached now.
+	// A merge the session makes mid-step, of its base into its branch or
+	// by a pull, is none either: only a subject the policy's pattern
+	// matches is a checkpoint.
 	sha, subject, at, err := s.git.LastMerge(sess.Cwd)
-	if err == nil && sha != "" && sha != t.Checkpoint.SHA && !at.Before(t.Checkpoint.Committed) {
+	if err == nil && sha != "" && sha != t.Checkpoint.SHA && !at.Before(t.Checkpoint.Committed) && s.checkpointRe.MatchString(subject) {
 		s.emit(name, Event{Kind: KindCheckpoint, Checkpoint: &CheckpointPayload{SHA: sha, Subject: subject, Committed: at,
 			Baseline: t.Checkpoint.SHA == ""}})
 	}
@@ -326,6 +331,13 @@ func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, no
 	pol := s.cfg.Policies.Context
 	if !pol.Enabled || !ev.Alive {
 		return false
+	}
+	if t.Transcript != "" && t.guessed() {
+		// The launch's transcript never appeared: the restart command
+		// does not pass {session_id} on, and live mode acts on no guess.
+		key := "transcript:" + name + ":" + t.Transcript
+		s.skipOnce(name, key, "launched transcript "+t.Transcript+" never appeared; not rotating or counting a guess", t, nil)
+		s.escalate(name, key, fmt.Sprintf("%s: the transcript agentd launched it under never appeared, so its context and spend are guesses and it is not rotated or held to its budget. Make the restart command pass --session-id {session_id}.", name), t, now)
 	}
 	u, ok := t.current()
 	if !ok || u.Context <= pol.Threshold || u.Guessed && !s.shadow {

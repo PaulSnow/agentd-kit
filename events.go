@@ -236,6 +236,11 @@ type CrashPayload struct {
 // ClearPayload is the owner's clearing of a parked session.
 type ClearPayload struct {
 	By string `json:"by"`
+	// Base is set on the record a run writes after applying the owner's
+	// clear: the session's spend then, which its cap counts from. It is
+	// computed once, in the order the run applied events, so a replay
+	// reads the same base rather than recomputing it.
+	Base *int64 `json:"base,omitempty"`
 }
 
 // ErrorPayload is a failed step or action. Key, when set, is the keyed

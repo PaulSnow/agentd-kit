@@ -294,7 +294,7 @@ func TestShadowGuessesTranscriptAndWouldRotate(t *testing.T) {
 	h := newHarness(t, true, "s")
 	h.cfg.TranscriptDir = filepath.Join(h.dir, "projects")
 	h.alive("s", "working")
-	h.git.merge = "m0"
+	h.git.merge, h.git.mergeSubject = "m0", "Merge #20: poll"
 	h.transcript("outside", usageLine("m1", 10, 150000, 0, 5, false))
 	h.ticks(2, time.Minute)
 	u, ok := h.sup.Tracks()["s"].current()
@@ -387,10 +387,18 @@ func TestClearAfterStop(t *testing.T) {
 	if h.count(KindAction, ActStop, "s") != 1 {
 		t.Fatal("not stopped")
 	}
-	h.sup.st.apply(Event{V: EventVersion, Time: h.clock.Now(), Session: "s", Kind: KindClear, Mode: ModeOwner, Clear: &ClearPayload{By: "clear"}})
+	if err := ClearSession(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "s"); err != nil {
+		t.Fatal(err)
+	}
 	h.ticks(4, time.Minute)
 	if h.count(KindCrash, "", "s") != 0 || h.count(KindAction, ActStop, "s") != 1 || !h.tmux.alive["s"] {
 		t.Fatalf("after clear: crashes %d, stops %d, alive %v", h.count(KindCrash, "", "s"), h.count(KindAction, ActStop, "s"), h.tmux.alive["s"])
+	}
+	// The base the run recorded survives a replay.
+	base := h.sup.Tracks()["s"].SpendBase
+	h.restart(false)
+	if b := h.sup.Tracks()["s"].SpendBase; base == 0 || b != base {
+		t.Fatalf("base %d, after replay %d", base, b)
 	}
 }
 
@@ -446,5 +454,29 @@ func TestFailedRotationEscalates(t *testing.T) {
 	}
 	if tries != h.cfg.Policies.Restart.MaxRestarts || escalations != 1 {
 		t.Fatalf("tries %d, escalations %d", tries, escalations)
+	}
+}
+
+// A merge of the base into the session's branch, or a pull, is no
+// checkpoint: its subject is not an issue's merge.
+func TestBaseMergeIsNoCheckpoint(t *testing.T) {
+	h, id := contextHarness(t, false)
+	h.transcript(id, usageLine("m1", 10, 150000, 0, 5, false))
+	h.git.merge, h.git.mergeSubject = "m1", "Merge branch 'main' into feature"
+	h.ticks(10, time.Minute)
+	if n := h.count(KindAction, ActRotate, "s"); n != 0 {
+		t.Fatalf("rotated at a base merge: %d", n)
+	}
+}
+
+// A guess that lands on a transcript agentd launched counts it exactly.
+func TestGuessOfLaunchedTranscriptStaysExact(t *testing.T) {
+	h, id := contextHarness(t, false)
+	h.transcript(id, usageLine("m1", 50000, 0, 0, 0, false))
+	h.ticks(2, time.Minute)
+	h.sup.st.track("s").launched("never-written", h.clock.Now())
+	h.ticks(15, time.Minute)
+	if sp, ok := h.sup.Tracks()["s"].spend(true); !ok || sp != 50000 {
+		t.Fatalf("live spend = %d, %v", sp, ok)
 	}
 }

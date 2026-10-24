@@ -103,10 +103,14 @@ type RestartPolicy struct {
 // with a fresh context, under the restart command, once Grace has passed
 // since a merge it reached. A rotation is not a crash and does not count
 // toward the restart limits.
+// Checkpoint, a regular expression, is what a merge's subject must match
+// to be a checkpoint; by default the subject of a merge of an issue's
+// branch, "Merge #12: ...", and not a merge of the base into a branch.
 type ContextPolicy struct {
-	Enabled   bool     `json:"enabled"`
-	Threshold int64    `json:"threshold"`
-	Grace     Duration `json:"grace"`
+	Enabled    bool     `json:"enabled"`
+	Threshold  int64    `json:"threshold"`
+	Grace      Duration `json:"grace"`
+	Checkpoint string   `json:"checkpoint"`
 }
 
 // BudgetPolicy stops a session whose spend (input-equivalent tokens, over
@@ -279,7 +283,7 @@ func DefaultConfig() Config {
 			Escalate:     EscalatePolicy{},
 			Dialog:       DialogPolicy{Patterns: []string{`Do you want to`, `❯\s*1\.`, `(?i)enter to confirm`}},
 			PaneCommands: []string{"claude"},
-			Context:      ContextPolicy{Enabled: true, Threshold: 120000, Grace: Duration{5 * time.Minute}},
+			Context:      ContextPolicy{Enabled: true, Threshold: 120000, Grace: Duration{5 * time.Minute}, Checkpoint: `^Merge [#!][0-9]+\b`},
 		},
 	}
 }
@@ -350,6 +354,9 @@ func (c *Config) finish(base string) error {
 	}
 	if x := c.Policies.Context; x.Enabled && (x.Threshold <= 0 || x.Grace.Duration < 0) {
 		errs = append(errs, errors.New("policies.context: threshold must be positive and grace non-negative"))
+	}
+	if _, err := regexp.Compile(c.Policies.Context.Checkpoint); err != nil {
+		errs = append(errs, fmt.Errorf("policies.context.checkpoint: %w", err))
 	}
 	if b := c.Policies.Budget; b.SessionTokens < 0 || b.RunTokens < 0 {
 		errs = append(errs, errors.New("policies.budget: session_tokens and run_tokens must not be negative"))

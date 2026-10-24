@@ -50,6 +50,8 @@ type Supervisor struct {
 	work   *workState // shared by the loop and its workers
 	usage  *usageReader
 
+	checkpointRe *regexp.Regexp
+
 	// halt is the first failed append of the pass. Once set, nothing more
 	// is done until the next pass: an action whose record could be lost
 	// could be repeated after a replay.
@@ -76,21 +78,23 @@ func NewSupervisor(cfg *Config, log *Log, clock Clock, tmux Tmux, git Git, forge
 		dialogs = append(dialogs, regexp.MustCompile(p))
 	}
 	return &Supervisor{
-		cfg:     cfg,
-		log:     log,
-		clock:   clock,
-		tmux:    tmux,
-		git:     git,
-		forge:   AllowedForge{Repos: cfg.Repositories, Forge: forge},
-		runner:  runner,
-		shadow:  shadow,
-		st:      NewLogState(cfg, mode(shadow)),
-		work:    newWorkState(),
-		usage:   newUsageReader(),
-		tailOff: log.Size(),
-		limitRe: regexp.MustCompile(cfg.Policies.UsageLimit.Pattern),
-		trustRe: regexp.MustCompile(`^(?:` + cfg.Policies.Trust.Pattern + `)$`),
-		dialogs: dialogs,
+		cfg:    cfg,
+		log:    log,
+		clock:  clock,
+		tmux:   tmux,
+		git:    git,
+		forge:  AllowedForge{Repos: cfg.Repositories, Forge: forge},
+		runner: runner,
+		shadow: shadow,
+		st:     NewLogState(cfg, mode(shadow)),
+		work:   newWorkState(),
+		usage:  newUsageReader(),
+
+		checkpointRe: regexp.MustCompile(cfg.Policies.Context.Checkpoint),
+		tailOff:      log.Size(),
+		limitRe:      regexp.MustCompile(cfg.Policies.UsageLimit.Pattern),
+		trustRe:      regexp.MustCompile(`^(?:` + cfg.Policies.Trust.Pattern + `)$`),
+		dialogs:      dialogs,
 
 		confidential: confidential,
 	}
@@ -346,6 +350,12 @@ func (s *Supervisor) ownerRecords() {
 	for _, e := range events {
 		if _, ok := s.cfg.Sessions[e.Session]; ok && e.Mode == ModeOwner {
 			s.st.apply(e)
+			if e.Kind == KindClear {
+				t := s.track(e.Session)
+				sp, _ := t.spend(!s.shadow)
+				base := sp + t.SpendBase
+				s.emit(e.Session, Event{Kind: KindClear, Clear: &ClearPayload{By: "agentd", Base: &base}})
+			}
 		}
 	}
 }
@@ -428,7 +438,9 @@ func (s *Supervisor) step(name string, sess Session) {
 		s.emit(name, Event{Kind: KindError, Error: &ErrorPayload{Step: "observe", Error: err.Error()}})
 		return
 	}
-	if !ev.Alive && t.Live && !ev.Status.Done && t.Stopped == "" {
+	// A session stopped for its budget, or due to be, is gone by policy;
+	// so is one whose stop a crash of agentd cut short.
+	if !ev.Alive && t.Live && !ev.Status.Done && t.Stopped == "" && s.overBudget(t, now) == "" {
 		screen := ev.DeadScreen
 		if !ev.PaneDead {
 			screen = shortHash(t.Hash) // gone outright: the last screen seen
