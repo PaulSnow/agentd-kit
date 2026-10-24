@@ -45,7 +45,7 @@ func TestConfidentialCommitsAreNotPushed(t *testing.T) {
 func TestExecGitMessages(t *testing.T) {
 	shim(t, "git", `echo "$*"`)
 	got, err := ExecGit{Timeout: 10 * time.Second}.Messages(t.TempDir(), "main")
-	if err != nil || strings.TrimSpace(got) != "log --format=%B origin/main..HEAD" {
+	if err != nil || strings.TrimSpace(got) != strings.Join(gitSafe, " ")+" log --format=%B origin/main..HEAD" {
 		t.Fatalf("messages ran %q, %v", got, err)
 	}
 }

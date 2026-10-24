@@ -199,7 +199,10 @@ type ActPayload struct {
 	URL        string `json:"url,omitempty"`
 
 	// A gate run.
-	Gate      []string `json:"gate,omitempty"`
+	Gate []string `json:"gate,omitempty"`
+	// Reachable are the credential paths under the real HOME a gate could
+	// still open by path.
+	Reachable []string `json:"reachable,omitempty"`
 	SHA       string   `json:"sha,omitempty"`
 	Exit      *int     `json:"exit,omitempty"`
 	DurationS *float64 `json:"duration_s,omitempty"`

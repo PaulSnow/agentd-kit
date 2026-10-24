@@ -91,7 +91,8 @@
       "project": "example-org/gadgets",
       "allow": ["push", "open"],
       "console": "gadgets",
-      "gate": ["make", "test"]
+      "gate": ["make", "test"],
+      "gate_paths": ["Makefile"]
     }
   },
   "accounts": {
