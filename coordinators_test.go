@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -391,5 +392,128 @@ func TestStatusShowsWakes(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "coordinator: 2 wakes, 100 tokens per wake") {
 		t.Fatalf("page:\n%s", out.String())
+	}
+}
+
+// A wake an agentd crash cut short is not outstanding, and a typed wake
+// the coordinator's transcript never moved after counts as handled once
+// the nudge stall has passed, so neither silences the coordinator.
+func TestCutShortOrUntakenWakeDoesNotStall(t *testing.T) {
+	h := coordHarness(t)
+	h.ticks(2, time.Minute)
+	intent := Event{V: EventVersion, Time: h.clock.Now(), Session: "c", Kind: KindIntent, Mode: ModeLive,
+		Act: &ActPayload{Action: ActWake, Intent: "cut", Key: "wake:widgets:1", Reason: "finished: a"}}
+	if err := NewLogWriter(h.buf).Append(intent); err != nil {
+		t.Fatal(err)
+	}
+	h.restart(false)
+	h.sup.surfaceCutShort()
+	h.clock.advance(time.Minute)
+	h.status("b", "# b\n\nDONE\n")
+	h.ticks(3, time.Minute)
+	if w := h.wakes(); len(w) != 1 || w[0].Reason != "finished: b" {
+		t.Fatalf("after a cut-short wake: %+v", w)
+	}
+	// The pointer was typed, but the transcript never moved after it.
+	it := ItemPayload{ID: "gitlab:example-org/widgets#4", Kind: "issue", Repository: "gitlab/example-org/widgets", Title: "Widget squeaks"}
+	h.sup.emit("", Event{Kind: KindItem, Mode: ModeShared, Item: &it})
+	h.ticks(3, time.Minute)
+	if n := len(h.wakes()); n != 1 {
+		t.Fatalf("woke within the stall: %d", n)
+	}
+	h.ticks(2, h.cfg.Policies.Nudge.Stall.Duration)
+	if w := h.wakes(); len(w) != 2 || w[1].Reason != "item: "+it.ID {
+		t.Fatalf("after the stall: %+v", w)
+	}
+}
+
+// The reasons a wake is due for count against the byte limit too: a busy
+// repository's first pack keeps a few and counts the rest.
+func TestPackCountsDueOverLimit(t *testing.T) {
+	h := coordHarness(t)
+	var due []string
+	for i := 0; i < 600; i++ {
+		due = append(due, fmt.Sprintf("item: gitlab:example-org/widgets#%d", i))
+	}
+	p, b := h.sup.buildPack("widgets", due, h.clock.Now())
+	if len(b) > h.cfg.Policies.Coordinator.PackBytes || p.Summarized.Due == 0 || len(p.Due)+p.Summarized.Due != 600 {
+		t.Fatalf("pack %d bytes, due %d shown, %d summarized", len(b), len(p.Due), p.Summarized.Due)
+	}
+}
+
+// A shadow run claims no coordinator: the claim is a shared fact that
+// would hold against the live run.
+func TestShadowClaimsNoCoordinator(t *testing.T) {
+	h := coordHarness(t)
+	h.restart(true)
+	h.status("a", "# a\n\nDONE\n")
+	h.ticks(3, time.Minute)
+	if n := h.count(KindCoordinator, "", ""); n != 0 {
+		t.Fatalf("a shadow run logged %d claims", n)
+	}
+	if n := h.count(KindWould, ActWake, "c"); n != 1 {
+		t.Fatalf("would-be wakes = %d", n)
+	}
+	h.restart(false)
+	h.ticks(2, time.Minute)
+	if n := h.count(KindCoordinator, "", "c"); n != 1 {
+		t.Fatalf("live claims = %d", n)
+	}
+}
+
+// Two runs that claim one repository in the same pass settle it by the
+// log's order: the claim written first holds, in memory as on replay.
+func TestRaceForClaimSettledByLogOrder(t *testing.T) {
+	h := coordHarness(t)
+	rival := NewLogWriter(h.buf)
+	once := false
+	h.tmux.onPane = func(name string) {
+		if name == "c" && !once {
+			once = true
+			rival.Append(Event{V: EventVersion, Time: h.clock.Now(), Session: "elsewhere", Kind: KindCoordinator, Mode: ModeShared,
+				Coordinator: &CoordinatorPayload{Repository: "widgets"}})
+		}
+	}
+	h.status("a", "# a\n\nDONE\n")
+	h.ticks(3, time.Minute)
+	if got := h.sup.st.Coordinators["widgets"]; got != "elsewhere" {
+		t.Fatalf("holder in memory = %q", got)
+	}
+	if got := NewLogState(h.cfg, ModeLive).Fold(h.events()).Coordinators["widgets"]; got != "elsewhere" {
+		t.Fatalf("holder on replay = %q", got)
+	}
+	if n := len(h.wakes()); n != 0 {
+		t.Fatalf("the losing coordinator woke: %d", n)
+	}
+}
+
+// A confidential term across the cut is still found: turns are screened
+// whole, then cut.
+func TestTurnScreenedBeforeCut(t *testing.T) {
+	h := coordHarness(t)
+	h.cfg.ConfidentialPatterns = []string{`hunter2`}
+	h.restart(false)
+	h.transcriptOf("a", "t1", promptLine("u1", strings.Repeat("x", turnText-3)+"hunter2 more", h.clock.Now()))
+	h.ticks(2, time.Minute)
+	for _, e := range h.events() {
+		if e.Kind == KindTurn && (e.Turn.Withheld != 1 || e.Turn.Text != "") {
+			t.Fatalf("turn = %+v", e.Turn)
+		}
+	}
+	if h.count(KindTurn, "", "a") != 1 {
+		t.Fatal("no turn logged")
+	}
+}
+
+// A coordinator's errors name the field the owner wrote.
+func TestCoordinatorErrorsNameTheirField(t *testing.T) {
+	h := coordHarness(t)
+	w := h.cfg.Repositories["widgets"]
+	w.Coordinator = &Coordinator{Session: "c2", Workdir: filepath.Join(h.dir, "missing"), Account: "nosuch"}
+	h.cfg.Repositories["widgets"] = w
+	err := h.cfg.finish(h.dir)
+	if err == nil || !strings.Contains(err.Error(), "repositories.widgets.coordinator.account") ||
+		!strings.Contains(err.Error(), "repositories.widgets.coordinator.workdir") || strings.Contains(err.Error(), "sessions.c2") {
+		t.Fatalf("errors: %v", err)
 	}
 }

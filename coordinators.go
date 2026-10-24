@@ -23,11 +23,12 @@ import (
 const PackFile = "pack.json"
 
 const (
-	turnText    = 300 // bytes of a prompt or summary kept
-	turnsKept   = 16  // a session's latest turns its Track keeps
-	turnsRead   = 256 // turns a transcript reader holds until they are logged
-	wakesKept   = 20  // a coordinator's latest wakes its Track keeps
-	wakeReasons = 500 // bytes of a wake's reasons kept
+	turnText    = 300          // bytes of a prompt or summary logged, cut after it is screened whole
+	turnRead    = 4 * turnText // bytes of a prompt or summary read, so a term across the cut is screened
+	turnsKept   = 16           // a session's latest turns its Track keeps
+	turnsRead   = 256          // turns a transcript reader holds until they are logged
+	wakesKept   = 20           // a coordinator's latest wakes its Track keeps
+	wakeReasons = 500          // bytes of a wake's reasons kept
 )
 
 // Turn roles.
@@ -124,7 +125,7 @@ func turnOf(line []byte, n int) (TurnPayload, bool) {
 		return TurnPayload{}, false
 	}
 	at, _ := time.Parse(time.RFC3339Nano, l.Timestamp)
-	return TurnPayload{Line: n, Role: role, Text: cutUTF8(text, turnText), At: at}, true
+	return TurnPayload{Line: n, Role: role, Text: cutUTF8(text, turnRead), At: at}, true
 }
 
 // noteTurn keeps a turn read from the transcript until it is logged; the
@@ -181,7 +182,9 @@ func (t *Track) applyWake(a *ActPayload, taken, counted bool, at time.Time) {
 		sp := *a.Spend
 		t.WakeBase = &sp
 	}
-	w := WakeRecord{At: at, Reason: a.Reason, Taken: taken || !counted, Spend: a.Spend}
+	// A wake cut short may never have typed its pointer, so it is not
+	// outstanding; a second pointer is harmless.
+	w := WakeRecord{At: at, Reason: a.Reason, Taken: taken, Spend: a.Spend}
 	if len(t.Wakes) == wakesKept {
 		t.Wakes = t.Wakes[1:len(t.Wakes):len(t.Wakes)]
 	}
@@ -208,17 +211,24 @@ func (t *Track) wakeTokens(exact bool) (int64, bool) {
 
 // handled says whether the coordinator has finished its latest wake, so
 // another may be typed or it may be rotated: it has had none, or none was
-// typed, or its transcript ended a turn after it. Without transcripts, a
-// screen still for the nudge policy's stall since the wake stands in.
+// typed, or its transcript ended a turn after it. A transcript that has
+// not moved since the wake for the nudge policy's stall never took the
+// line, and the wake counts as handled. Without transcripts, a screen
+// still for the stall stands in.
 func (s *Supervisor) handled(t *Track, ev Evidence, now time.Time) bool {
 	w, ok := t.lastWake()
 	if !ok || !w.Taken {
 		return true
 	}
-	if ev.Transcript.Found {
-		return ev.Transcript.Role == "assistant" && ev.Transcript.StopReason == "end_turn" && ev.Transcript.At.After(w.At)
+	stall := s.cfg.Policies.Nudge.Stall.Duration
+	if s.cfg.TranscriptDir == "" {
+		return now.Sub(t.HashSince) >= stall && now.Sub(w.At) >= stall
 	}
-	return s.cfg.TranscriptDir == "" && t.HashSince.After(w.At) && now.Sub(t.HashSince) >= s.cfg.Policies.Nudge.Stall.Duration
+	tr := ev.Transcript
+	if tr.Found && tr.At.After(w.At) {
+		return tr.Role == "assistant" && tr.StopReason == "end_turn"
+	}
+	return now.Sub(w.At) >= stall
 }
 
 // claimed says whether name holds its repository's coordinator, claiming
@@ -229,8 +239,37 @@ func (s *Supervisor) claimed(name string, sess Session, t *Track) bool {
 	case name:
 		return true
 	case "":
-		s.emit(name, Event{Kind: KindCoordinator, Mode: ModeShared, Coordinator: &CoordinatorPayload{Repository: sess.Repository}})
-		return s.halt == nil
+		// A shadow run holds it in its own memory: a claim in the log
+		// would hold against the live run.
+		if s.shadow {
+			s.st.Coordinators[sess.Repository] = name
+			return true
+		}
+		if s.emit(name, Event{Kind: KindCoordinator, Mode: ModeShared, Coordinator: &CoordinatorPayload{Repository: sess.Repository}}); s.halt != nil {
+			return false
+		}
+		// Another run may have claimed it since this pass read the log:
+		// the claim the log holds first stands, as a replay reads it.
+		events, _, err := s.log.Tail(s.tailOff)
+		if err != nil {
+			return false
+		}
+		holder := ""
+		for _, e := range events {
+			if e.Kind != KindCoordinator || e.Coordinator.Repository != sess.Repository {
+				continue
+			}
+			switch {
+			case e.Mode == ModeOwner:
+				holder = ""
+			case e.Mode == ModeShared && holder == "":
+				holder = e.Session
+			}
+		}
+		if holder != "" {
+			s.st.Coordinators[sess.Repository] = holder
+		}
+		return s.st.Coordinators[sess.Repository] == name
 	default:
 		s.skipOnce(name, "coordinator:"+sess.Repository+":"+holder, fmt.Sprintf("%s already coordinates %s; %s is not launched or woken until the owner runs agentd coordinator release %s",
 			holder, sess.Repository, name, sess.Repository), t, nil)
@@ -362,6 +401,7 @@ type PackCounts struct {
 	Turns     int `json:"turns"`
 	Decisions int `json:"decisions"`
 	Items     int `json:"items"`
+	Due       int `json:"due"`
 }
 
 // packItems are repo's unseen items, oldest first, never the owner's own.
@@ -396,10 +436,11 @@ func (s *Supervisor) packItems(repo string) []PackItem {
 
 // buildPack is repo's pack, and its compact JSON, which stays under the
 // policy's byte limit: the oldest turns go first, then the oldest items,
-// then the latest decisions, each counted in Summarized.
+// then the latest decisions, then the last reasons due, each counted in
+// Summarized.
 func (s *Supervisor) buildPack(repo string, due []string, now time.Time) (Pack, []byte) {
 	pol := s.cfg.Policies.Coordinator
-	p := Pack{Repository: repo, At: now, Due: due, Sessions: []PackSession{}}
+	p := Pack{Repository: repo, At: now, Due: append([]string(nil), due...), Sessions: []PackSession{}}
 	if co := s.cfg.Repositories[repo].Coordinator; co != nil {
 		if w, ok := s.track(co.Session).lastWake(); ok {
 			at := w.At
@@ -441,6 +482,9 @@ func (s *Supervisor) buildPack(repo string, due []string, now time.Time) (Pack, 
 		case len(p.Decisions) > 0:
 			p.Decisions = p.Decisions[:len(p.Decisions)-1]
 			p.Summarized.Decisions++
+		case len(p.Due) > 1:
+			p.Due = p.Due[:len(p.Due)-1] // the first reasons are kept
+			p.Summarized.Due++
 		default:
 			return p, b // only the sessions' states are left
 		}

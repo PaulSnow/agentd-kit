@@ -604,6 +604,19 @@ func (c *Config) addCoordinators(path func(field, p string) string, errs *[]erro
 		}
 		of[co.Session] = repo
 		workdir := path(field+".workdir", co.Workdir)
+		bad := false
+		if _, ok := c.Accounts[co.Account]; co.Account != "" && !ok {
+			*errs, bad = append(*errs, fmt.Errorf("%s.account %q is not in accounts", field, co.Account)), true
+		}
+		if info, err := os.Stat(workdir); err != nil || !info.IsDir() {
+			*errs, bad = append(*errs, fmt.Errorf("%s.workdir: directory %s does not exist", field, workdir)), true
+		}
+		if !sessionName.MatchString(co.Session) {
+			*errs, bad = append(*errs, fmt.Errorf("%s.session: %q is not a plain tmux session name", field, co.Session)), true
+		}
+		if bad {
+			continue
+		}
 		want := Session{Workdir: workdir, Cwd: workdir, Account: co.Account, Repository: repo, Role: RoleCoordinator}
 		if s, ok := c.Sessions[co.Session]; ok && !reflect.DeepEqual(s, want) {
 			*errs = append(*errs, fmt.Errorf("sessions.%s is %s's coordinator; configure it there alone", co.Session, repo))

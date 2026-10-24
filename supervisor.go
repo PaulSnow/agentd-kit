@@ -159,6 +159,7 @@ func (s *Supervisor) screen(e *Event) {
 		if i := s.confidentialMatch(e.Turn.Text); i > 0 {
 			e.Turn.Text, e.Turn.Withheld = "", i
 		}
+		e.Turn.Text = cutUTF8(e.Turn.Text, turnText)
 	}
 }
 
