@@ -154,6 +154,7 @@ func (st *LogState) apply(e Event) {
 			t.Dialog.Episode++
 		}
 		t.Dialog.Showing = o.Dialog
+		t.StatusQuestions = o.StatusQuestions
 		t.Questions.observeQuestions(o.Questions, o.Done)
 		if !o.Questions || o.Done {
 			t.Asked = ""
@@ -178,6 +179,14 @@ func (st *LogState) apply(e Event) {
 			c.Exit = *e.Crash.Exit
 		}
 		t.noteCrash(c, st.cfg.Policies.Restart.MaxCrashes)
+	case KindDecision:
+		t.DecisionsHash = e.Decision.Hash
+		if e.Decision.Refused == "" {
+			t.Decisions = e.Decision.Decisions
+		}
+	case KindAnswer:
+		// The latest answer to a decision stands, to be delivered anew.
+		t.Answers[e.Answer.ID] = AnswerRecord{AnswerPayload: *e.Answer, At: e.Time}
 	case KindClear:
 		if b := e.Clear.Base; b != nil {
 			t.SpendBase = *b
@@ -250,7 +259,7 @@ func (st *LogState) apply(e Event) {
 				at = *e.Warning.IntentAt
 			}
 			switch a.Action {
-			case ActEscalate, ActUpdate, ActNudge, ActResume, ActTrust, ActRotate:
+			case ActEscalate, ActUpdate, ActNudge, ActResume, ActTrust, ActRotate, ActAnswer:
 				t.applyAction(a, false, false, at)
 			}
 			// A rotation cut short may have started its session: measure
@@ -271,6 +280,14 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 	n := 0
 	if counted {
 		n = 1
+	}
+	// The answers an answer or a restart handed over are delivered, a
+	// would-be one's too, so shadow mode records each once.
+	for _, id := range a.Answers {
+		if r, ok := t.Answers[id]; ok {
+			r.Delivered = true
+			t.Answers[id] = r
+		}
 	}
 	switch a.Action {
 	case ActRestart:

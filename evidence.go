@@ -26,7 +26,11 @@ type Evidence struct {
 	TrustPrompt bool
 	Dialog      string // the dialog pattern the visible screen matches, or ""
 	Status      StatusEvidence
-	Transcript  TranscriptEvidence
+	// StatusQuestions is the hash of STATUS.md's own Questions section;
+	// Status.Questions is what still waits on the owner once the answers
+	// are counted, questions.json's blocking decisions included.
+	StatusQuestions string
+	Transcript      TranscriptEvidence
 }
 
 // StatusEvidence is what the session's STATUS.md says.

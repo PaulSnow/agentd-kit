@@ -479,6 +479,9 @@ func (s *Supervisor) step(name string, sess Session) {
 			return
 		}
 	}
+	if s.readDecisions(name, sess, t, &ev); s.halt != nil {
+		return
+	}
 	state, reason := Classify(t, ev, s.cfg.Policies, now)
 	// The observe event, applied, ends a dialog episode and opens or
 	// closes the Questions escalation: each is a field it compares.
@@ -527,11 +530,13 @@ func (s *Supervisor) logObserve(name string, t *Track, ev Evidence, state State,
 		Alive:     ev.Alive,
 		Done:      ev.Status.Done,
 		Questions: ev.Status.Questions != "",
-		Limited:   ev.Limited,
-		Trust:     ev.TrustPrompt,
-		Dialog:    ev.Dialog != "",
-		Command:   ev.Command,
-		Head:      ev.Status.Head,
+
+		StatusQuestions: ev.StatusQuestions,
+		Limited:         ev.Limited,
+		Trust:           ev.TrustPrompt,
+		Dialog:          ev.Dialog != "",
+		Command:         ev.Command,
+		Head:            ev.Status.Head,
 	}
 	if s.confidentialMatch(ev.Status.Head) > 0 {
 		o.Head = "(withheld: matches a confidential pattern)"
@@ -588,6 +593,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			return s.tmux.Type(name, pol.Nudge.ResumeMessage)
 		})
 	}
+	s.deliverAnswers(name, sess, t, ev, state)
 	switch state {
 	case Done:
 		// Each delivery runs in a worker: its gate and forge calls take
@@ -614,8 +620,18 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 				return state
 			}
 		}
+		// A session gone with answers waiting is restarted with them: the
+		// file is written first, and the prompt names it.
+		why, fresh := "restart", t.answersFor(true)
+		var ids []string
+		for _, a := range fresh {
+			ids = append(ids, a.ID)
+		}
+		if len(ids) > 0 {
+			why = "answered"
+		}
 		id := newSessionID()
-		line, err := s.launchLine(sess, s.launchCommand(sess, t, id, "restart"))
+		line, err := s.launchLine(sess, s.launchCommand(sess, t, id, why))
 		if err != nil {
 			// Not final, and not a crash: the owner may fix the account.
 			// There is no fallback to another account.
@@ -623,7 +639,13 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			s.escalate(name, "account:"+name, fmt.Sprintf("%s is gone and cannot be restarted under its account: %v. Fix the account; agentd will not use another.", name, err), t, now)
 			return state
 		}
-		err = s.act(name, ActRestart, &ActPayload{Attempt: n + 1, Cwd: sess.Cwd, Respawn: ev.PaneDead, Account: sess.Account, Command: line, Transcript: id}, func() error {
+		answers := t.answersFor(false)
+		err = s.act(name, ActRestart, &ActPayload{Attempt: n + 1, Cwd: sess.Cwd, Respawn: ev.PaneDead, Account: sess.Account, Command: line, Transcript: id, Answers: ids}, func() error {
+			if len(ids) > 0 {
+				if err := writeAnswers(sess.Workdir, answers); err != nil {
+					return err
+				}
+			}
 			if ev.PaneDead {
 				return s.tmux.Respawn(name, sess.Cwd, line)
 			}
