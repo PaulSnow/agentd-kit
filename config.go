@@ -29,6 +29,8 @@ type Config struct {
 	Repositories         map[string]Repository `json:"repositories"`
 	Accounts             map[string]Account    `json:"accounts"`
 	Sessions             map[string]Session    `json:"sessions"`
+	// Tracking names the tracking system's files agentd reads.
+	Tracking Tracking `json:"tracking"`
 }
 
 // Account is a Claude login a session runs under: its config directory,
@@ -296,6 +298,8 @@ func (c *Config) finish(base string) error {
 	}
 	c.EventLog = path("event_log", c.EventLog)
 	c.TranscriptDir = path("transcript_dir", c.TranscriptDir)
+	c.Tracking.Manifest = path("tracking.manifest", c.Tracking.Manifest)
+	c.Tracking.Snapshot = path("tracking.snapshot", c.Tracking.Snapshot)
 	if c.PollInterval.Duration <= 0 {
 		errs = append(errs, errors.New("poll_interval must be positive"))
 	}

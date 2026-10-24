@@ -1,0 +1,52 @@
+{
+  "AsOf": "2026-10-23T21:23:04.123456789-05:00",
+  "Host": "host-a",
+  "Repos": [
+    {
+      "Info": {"Name": "widgets", "Platform": "gitlab", "FullPath": "example-org/widgets", "Audience": "team-a"},
+      "Issues": [
+        {"Number": 17, "Title": "Widgets wobble", "Description": "They wobble.", "State": "open", "Author": "user-a", "Labels": ["bug"], "CreatedAt": "2026-10-01T10:00:00Z", "UpdatedAt": "2026-10-20T10:00:00Z", "ClosedAt": null},
+        {"Number": 18, "Title": "Paint widgets blue", "Description": "", "State": "open", "Author": "user-b", "Labels": [], "CreatedAt": "2026-10-02T10:00:00Z", "UpdatedAt": "2026-10-21T10:00:00Z", "ClosedAt": null},
+        {"Number": 12, "Title": "Old widget", "Description": "", "State": "closed", "Author": "user-a", "Labels": [], "CreatedAt": "2026-09-01T10:00:00Z", "UpdatedAt": "2026-09-05T10:00:00Z", "ClosedAt": "2026-09-05T10:00:00Z"}
+      ],
+      "MRs": [
+        {"Number": 40, "Title": "Fix the wobble", "Description": "Closes #17", "State": "opened", "Author": "user-a", "SourceBranch": "fix-17", "TargetBranch": "main", "RelatedIssueIDs": [17], "CreatedAt": "2026-10-19T10:00:00Z", "UpdatedAt": "2026-10-22T10:00:00Z", "MergedAt": null},
+        {"Number": 39, "Title": "Older work", "Description": "", "State": "merged", "Author": "user-b", "SourceBranch": "old", "TargetBranch": "main", "RelatedIssueIDs": null, "CreatedAt": "2026-09-19T10:00:00Z", "UpdatedAt": "2026-09-22T10:00:00Z", "MergedAt": "2026-09-22T10:00:00Z"}
+      ],
+      "Commits": [
+        {"SHA": "1111111111111111111111111111111111111111", "Message": "Steady the widgets", "AuthorName": "user-a", "AuthorEmail": "user-a@example.com", "CommittedAt": "2026-10-22T09:00:00Z"}
+      ]
+    },
+    {
+      "Info": {"Name": "gadgets", "Platform": "github", "FullPath": "example-org/gadgets", "Audience": "personal"},
+      "Issues": [
+        {"Number": 3, "Title": "Gadget docs", "Description": "", "State": "open", "Author": "user-b", "Labels": ["docs"], "CreatedAt": "2026-10-10T10:00:00Z", "UpdatedAt": "2026-10-10T10:00:00Z", "ClosedAt": null}
+      ],
+      "MRs": null,
+      "Commits": null
+    }
+  ],
+  "Errors": null,
+  "LocalWork": [
+    {"Host": "host-a", "Path": "/srv/repos/gitlab.example.com/example-org/widgets", "Branch": "fix-17", "Dirty": 2, "Unpushed": 1, "UnpushedOn": ["fix-17"], "NoRemote": false, "Stashes": 0, "Worktrees": ["/srv/repos/gitlab.example.com/example-org/widgets-wt/17"], "LastCommit": "2026-10-22"}
+  ],
+  "Clones": [
+    {"Host": "host-a", "Path": "/srv/repos/gitlab.example.com/example-org/widgets", "Platform": "gitlab", "FullPath": "example-org/widgets", "Branch": "main"},
+    {"Host": "host-b", "Path": "/srv/b/repos/gitlab.example.com/example-org/widgets", "Platform": "gitlab", "FullPath": "example-org/widgets", "FetchError": "host unreachable"},
+    {"Host": "host-a", "Path": "/srv/repos/github.com/example-org/gadgets", "Platform": "github", "FullPath": "example-org/gadgets"}
+  ],
+  "Platform": [
+    {"Platform": "gitlab", "FullPath": "example-org/widgets", "PushedAt": "2026-10-22T09:00:00Z"},
+    {"Platform": "github", "FullPath": "example-org/gadgets", "PushedAt": "2026-10-10T10:00:00Z"}
+  ],
+  "Manifest": {
+    "gitlab/example-org/widgets": true,
+    "github/example-org/gadgets": true,
+    "gitlab/example-org/tools/sprockets": false,
+    "github/example-user/doohickey": true
+  },
+  "Scans": [
+    {"Host": "host-a", "AsOf": "2026-10-23T21:20:00-05:00"},
+    {"Host": "host-b", "AsOf": "2026-10-22T08:00:00-05:00"}
+  ]
+}

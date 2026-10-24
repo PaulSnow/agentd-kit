@@ -1,0 +1,6 @@
+[
+  {"name": "widgets", "platform": "gitlab", "path": "example-org/widgets", "active": true, "audience": "team-a"},
+  {"name": "gadgets", "platform": "github", "path": "example-org/gadgets", "active": true, "audience": "personal"},
+  {"name": "sprockets", "platform": "gitlab", "path": "example-org/tools/sprockets", "active": false, "audience": "team-a", "note": "kept for reference"},
+  {"name": "doohickey", "platform": "github", "path": "example-user/doohickey", "active": true, "audience": "personal"}
+]
