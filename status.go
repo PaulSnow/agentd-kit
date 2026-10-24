@@ -45,6 +45,9 @@ func Summarize(cfg *Config, events []Event, mode string) ([]SessionStatus, map[s
 	if !st.Stopped.IsZero() {
 		meta["stopped"] = st.Stopped
 	}
+	if len(st.Polls) > 0 {
+		meta["polls"] = st.Polls
+	}
 	for _, n := range cfg.SessionNames() {
 		st.track(n)
 	}
@@ -97,6 +100,23 @@ func PrintStatus(w io.Writer, rows []SessionStatus, meta map[string]any, now tim
 			line += ", stopped " + st.Local().Format("2006-01-02 15:04")
 		}
 		fmt.Fprintf(w, "%s; %d events\n", line, meta["events"])
+	}
+	// A poll that found nothing new makes no event, so its record is the
+	// last change: an unchanged GitHub poll costs one call.
+	if polls, ok := meta["polls"].(map[string]PollRecord); ok {
+		srcs := make([]string, 0, len(polls))
+		for src := range polls {
+			srcs = append(srcs, src)
+		}
+		sort.Strings(srcs)
+		for _, src := range srcs {
+			p := polls[src]
+			if p.OK {
+				fmt.Fprintf(w, "poll %s: ok, last change %s ago (%d calls, %d new items)\n", src, ago(now, p.At), p.Calls, p.Items)
+			} else {
+				fmt.Fprintf(w, "poll %s: unknown since %s ago (%d calls): %s\n", src, ago(now, p.At), p.Calls, p.Error)
+			}
+		}
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "SESSION\tSTATE\tFOR\tSEEN\tCONTEXT\tSPEND\tRESTARTS\tROTATED\tNUDGES\tESCALATED\tDELIVERED\tWHY")

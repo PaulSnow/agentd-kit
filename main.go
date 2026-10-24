@@ -135,6 +135,9 @@ func runCmd(args []string) error {
 	to := cfg.Timeouts
 	sup := NewSupervisor(cfg, log, RealClock{}, ExecTmux{Timeout: to.Tmux.Duration}, ExecGit{Timeout: to.Forge.Duration},
 		ExecForge{Timeout: to.Forge.Duration}, ExecRunner{Timeout: to.Escalate.Duration}, *shadow)
+	if cfg.Poll.GitHub || cfg.Poll.GitLab {
+		sup.api = ExecForgeAPI{Timeout: to.Forge.Duration}
+	}
 	sup.Replay(events)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

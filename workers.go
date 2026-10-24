@@ -28,8 +28,9 @@ type workState struct {
 	queue    []workerMsg
 	inFlight map[string]bool // job keys running now; the loop's alone
 	jobs     sync.WaitGroup
-	err      error         // the first event a worker could not append
-	wake     chan struct{} // signalled when the owner wrote to the log
+	err      error                // the first event a worker could not append
+	wake     chan struct{}        // signalled when the owner wrote to the log
+	nextPoll map[string]time.Time // when each forge source is next due
 }
 
 // workerMsg is an event a worker appended, or the end of its job.
@@ -39,7 +40,7 @@ type workerMsg struct {
 }
 
 func newWorkState() *workState {
-	return &workState{inFlight: map[string]bool{}, wake: make(chan struct{}, 1)}
+	return &workState{inFlight: map[string]bool{}, wake: make(chan struct{}, 1), nextPoll: map[string]time.Time{}}
 }
 
 // signal wakes the loop, if it is not already due to wake.
@@ -53,6 +54,21 @@ func (w *workState) signal() {
 // spawn runs job in a worker on a copy of the session's Track, unless a
 // job with the same key is still running, and says whether it started it.
 func (s *Supervisor) spawn(name, key string, job func(w *Supervisor, t *Track)) bool {
+	st := &LogState{Mode: s.st.Mode, Tracks: map[string]*Track{name: s.track(name).clone()}, Pending: map[string]Event{}, cfg: s.cfg}
+	return s.start(key, st, func(w *Supervisor) { job(w, w.st.track(name)) })
+}
+
+// spawnShared runs a job about no one session, a poll of the forges, in a
+// worker whose state holds copies of the items, cursors and poll records,
+// unless the same job is still running.
+func (s *Supervisor) spawnShared(key string, job func(w *Supervisor)) bool {
+	st := &LogState{Mode: s.st.Mode, Tracks: map[string]*Track{}, Pending: map[string]Event{}, cfg: s.cfg,
+		Items: copyMap(s.st.Items), Cursors: copyMap(s.st.Cursors), Polls: copyMap(s.st.Polls)}
+	return s.start(key, st, job)
+}
+
+// start runs job in a worker over st.
+func (s *Supervisor) start(key string, st *LogState, job func(w *Supervisor)) bool {
 	if s.work.inFlight[key] {
 		return false
 	}
@@ -60,7 +76,7 @@ func (s *Supervisor) spawn(name, key string, job func(w *Supervisor, t *Track)) 
 	w := *s
 	w.worker = true
 	w.halt = nil
-	w.st = &LogState{Mode: s.st.Mode, Tracks: map[string]*Track{name: s.track(name).clone()}, Pending: map[string]Event{}, cfg: s.cfg}
+	w.st = st
 	s.work.jobs.Add(1)
 	go func() {
 		defer s.work.jobs.Done()
@@ -69,7 +85,7 @@ func (s *Supervisor) spawn(name, key string, job func(w *Supervisor, t *Track)) 
 			s.work.queue = append(s.work.queue, workerMsg{done: key})
 			s.work.mu.Unlock()
 		}()
-		job(&w, w.st.track(name))
+		job(&w)
 	}()
 	return true
 }
