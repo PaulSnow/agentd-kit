@@ -31,6 +31,8 @@ type Config struct {
 	Sessions             map[string]Session    `json:"sessions"`
 	// Tracking names the tracking system's files agentd reads.
 	Tracking Tracking `json:"tracking"`
+	// Page is the owner's page that agentd page serves.
+	Page PageConfig `json:"page"`
 }
 
 // Account is a Claude login a session runs under: its config directory,
