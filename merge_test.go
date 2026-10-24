@@ -289,6 +289,15 @@ func TestMergeGitHubView(t *testing.T) {
 	if why, _ := v.fastForward(tip, v.head); !strings.Contains(why, "not a fast-forward") {
 		t.Fatalf("diverged = %q", why)
 	}
+	for _, held := range []string{`"draft":true`, `"mergeable_state":"blocked"`} {
+		api.github["/repos/example-org/gadgets/pulls/4"] = `{"state":"open",` + held + `,"head":{"sha":"abc1234def"},"base":{"ref":"main"}}`
+		if v, err := githubMergeView(api, "example-org/gadgets", "#4"); err != nil || v.held == "" {
+			t.Fatalf("%s: held = %q, %v", held, v.held, err)
+		}
+	}
+	if v, err := githubMergeView(api, "example-org/gadgets", "#4"); err != nil || v.held == "" {
+		t.Fatalf("held = %+v, %v", v, err)
+	}
 	api.github["/repos/example-org/gadgets/pulls/4"] = `{"state":"closed","merged":true}`
 	if v, err := githubMergeView(api, "example-org/gadgets", "#4"); err != nil || v.open {
 		t.Fatalf("merged = %+v, %v", v, err)
@@ -310,10 +319,10 @@ func TestExecForgeMergeIsFastForward(t *testing.T) {
 		t.Fatalf("glab = %q, want %q", b, want)
 	}
 	shim(t, "gh", `echo "$GH_PROMPT_DISABLED $*" > `+out)
-	if err := f.Merge(Repository{Forge: "github", Project: "example-org/gadgets"}, "#4", "abc1234", "main"); err != nil {
+	if err := f.Merge(Repository{Forge: "github", Project: "example-org/gadgets"}, "#4", "abc1234", "release/v1#2"); err != nil {
 		t.Fatal(err)
 	}
-	want = "1 api --method PATCH repos/example-org/gadgets/git/refs/heads/main -f sha=abc1234 -F force=false\n"
+	want = "1 api --method PATCH repos/example-org/gadgets/git/refs/heads/release/v1%232 -f sha=abc1234 -F force=false\n"
 	if b, _ := readFile(out); string(b) != want {
 		t.Fatalf("gh = %q, want %q", b, want)
 	}
@@ -335,4 +344,77 @@ func TestMergeConfig(t *testing.T) {
 	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "allows merge but has no gate") {
 		t.Fatalf("merge without a gate: %v", err)
 	}
+}
+
+// CI that is none, a pipeline not yet created or one cancelled, is not
+// green.
+func TestMergeNoPipelineIsNotGreen(t *testing.T) {
+	h, api := mergeHarness(t)
+	api.set(func() {
+		api.gitlab[ciProject+"/merge_requests/1"] = `{"iid":1,"state":"opened","sha":"c0ffee","target_branch":"main","head_pipeline":null}`
+	})
+	h.ticks(6, 5*time.Minute)
+	if len(h.forge.merges) != 0 {
+		t.Fatalf("merged without a pipeline: %+v", h.forge.merges)
+	}
+	if s := h.mergeSkips(); len(s) != 1 || !strings.Contains(s[0], "is none, not green") {
+		t.Fatalf("skips = %q", s)
+	}
+}
+
+// A GitLab project that squashes every merge, or a draft, never merges.
+func TestMergeGitLabSquashAlwaysAndDraft(t *testing.T) {
+	h, api := mergeHarness(t)
+	api.set(func() { api.gitlab["="+ciProject] = `{"id":7,"merge_method":"ff","squash_option":"always"}` })
+	h.ticks(6, 5*time.Minute)
+	if s := h.mergeSkips(); len(h.forge.merges) != 0 || len(s) != 1 || !strings.Contains(s[0], "squashes every merge") {
+		t.Fatalf("merges = %+v, skips %q", h.forge.merges, s)
+	}
+	h, api = mergeHarness(t)
+	api.set(func() {
+		api.gitlab[ciProject+"/merge_requests/1"] = strings.Replace(api.gitlab[ciProject+"/merge_requests/1"], `"iid":1,`, `"iid":1,"draft":true,`, 1)
+	})
+	h.ticks(6, 5*time.Minute)
+	if s := h.mergeSkips(); len(h.forge.merges) != 0 || len(s) != 1 || !strings.Contains(s[0], "it is a draft") {
+		t.Fatalf("merges = %+v, skips %q", h.forge.merges, s)
+	}
+}
+
+// A request retargeted during the check does not merge.
+func TestMergeRequestRetargetedDuringCheck(t *testing.T) {
+	h, api := mergeHarness(t)
+	key := ciProject + "/merge_requests/1"
+	api.set(func() {
+		first := api.gitlab[key]
+		api.gitlabSeq = map[string][]string{key: {first, first}} // the CI watcher's look, then the check's
+		api.gitlab[key] = strings.Replace(first, `"target_branch":"main"`, `"target_branch":"release"`, 1)
+	})
+	h.ticks(2, 5*time.Minute) // delivered, then the CI record of c0ffee
+	h.sup.mergeRequest("d", h.sup.track("d"), ciWatched{Session: "d", Repository: "widgets", Ref: "!1", Delivered: "d:" + h.dir + "/d/wt"}, h.sup.st.CI[ciKey("widgets", "!1")])
+	if len(h.forge.merges) != 0 {
+		t.Fatalf("merges = %+v", h.forge.merges)
+	}
+	if s := h.mergeSkips(); len(s) == 0 || !strings.Contains(s[len(s)-1], "changed during the check") {
+		t.Fatalf("skips = %q", s)
+	}
+}
+
+// A merge cut short by a crash of agentd may have merged: it is never
+// tried again, after the restart or a replay.
+func TestMergeCutShortIsNotRetried(t *testing.T) {
+	h, api := mergeHarness(t)
+	h.ticks(2, 5*time.Minute)
+	h.sup.emit("d", Event{Kind: KindIntent, Act: &ActPayload{Action: ActMerge, Intent: "i-merge", Key: mergeKey("widgets", "!1") + ":c0ffee",
+		Repository: "widgets", Ref: "!1", Head: "c0ffee", Target: "main", SHA: mergeTip}})
+	h.restart(false)
+	h.sup.api = api
+	h.sup.surfaceCutShort()
+	h.ticks(6, 5*time.Minute)
+	if len(h.forge.merges) != 0 {
+		t.Fatalf("merged again after a cut-short merge: %+v", h.forge.merges)
+	}
+	if got := h.sup.Tracks()["d"].Merges[ciKey("widgets", "!1")]; got != "c0ffee" {
+		t.Fatalf("merges = %v", h.sup.Tracks()["d"].Merges)
+	}
+	sameAfterReplay(t, h, "after the cut-short merge")
 }

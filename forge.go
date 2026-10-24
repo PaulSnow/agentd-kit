@@ -684,7 +684,7 @@ func mergeGitLab(timeout time.Duration, repo Repository, ref, head string) error
 // does only for a fast-forward; GitHub has no fast-forward merge method,
 // and marks the request merged once the target contains its head.
 func mergeGitHub(timeout time.Duration, repo Repository, head, target string) error {
-	args := []string{"api", "--method", "PATCH", "repos/" + repo.Project + "/git/refs/heads/" + target,
+	args := []string{"api", "--method", "PATCH", "repos/" + repo.Project + "/git/refs/heads/" + escapeRef(target),
 		"-f", "sha=" + head, "-F", "force=false"}
 	if repo.Host != "" {
 		args = append(args, "--hostname", repo.Host)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -14,8 +15,8 @@ import (
 // target branch, read at the target's tip, says merge: fast-forward, so a
 // session cannot grant itself a merge from its branch. Each watched
 // request is checked as the CI watcher records it; it merges when its
-// head is the commit agentd's gate passed and CI is green on (or runs no
-// pipeline for), no blocking decision of its session is open, the head
+// head is the commit agentd's gate passed and CI succeeded on, no
+// blocking decision of its session is open, the head
 // is a fast-forward of the target, and the target has not moved since
 // that check. Otherwise why is recorded, once per head and reason, and
 // nothing is done. A request is merged once; there is no squash, rebase
@@ -84,7 +85,7 @@ func (s *Supervisor) mergeBlocked(t *Track, w ciWatched, r CIRecord, ok bool, no
 		return "no-ci", "" // the CI watcher has not recorded it yet
 	case r.Session != w.Session || r.Delivered != w.Delivered || t.ciStale(r):
 		return "stale", "its CI record is from before its latest delivery"
-	case r.State != CISuccess && r.State != CINone:
+	case r.State != CISuccess:
 		return "ci-" + r.State, fmt.Sprintf("CI on %s is %s, not green", shortHash(r.Head), r.State)
 	case !contains(t.Gated, r.Head):
 		return "ungated", fmt.Sprintf("its head %s did not pass agentd's gate", shortHash(r.Head))
@@ -127,6 +128,7 @@ func (s *Supervisor) mergeSkip(name string, t *Track, w ciWatched, head, code, w
 type mergeView struct {
 	head, target, url string
 	open              bool
+	held              string // why the forge itself holds it, a draft, or ""
 	// tip is the target branch's commit, policy the merge policy file at
 	// a commit (nil when there is none), and fastForward why head is not
 	// a fast-forward of tip, or "".
@@ -140,13 +142,13 @@ type mergeView struct {
 func (s *Supervisor) mergeRequest(name string, t *Track, w ciWatched, r CIRecord) {
 	repo := s.cfg.Repositories[w.Repository]
 	api := s.api.At(repo.Host)
-	var v mergeView
-	var err error
-	if repo.Forge == "github" {
-		v, err = githubMergeView(api, repo.Project, w.Ref)
-	} else {
-		v, err = gitlabMergeView(api, repo.Project, w.Ref)
+	view := func() (mergeView, error) {
+		if repo.Forge == "github" {
+			return githubMergeView(api, repo.Project, w.Ref)
+		}
+		return gitlabMergeView(api, repo.Project, w.Ref)
 	}
+	v, err := view()
 	skip := func(code, why string) { s.mergeSkip(name, t, w, r.Head, code, why) }
 	unknown := func(err error) { skip("unknown", "the forge could not be asked: "+s.withheld(err.Error())) }
 	if err != nil {
@@ -158,6 +160,10 @@ func (s *Supervisor) mergeRequest(name string, t *Track, w ciWatched, r CIRecord
 	}
 	if v.head != r.Head {
 		skip("head-moved:"+v.head, fmt.Sprintf("its head is now %s, not %s, which was gated and green", shortHash(v.head), shortHash(r.Head)))
+		return
+	}
+	if v.held != "" {
+		skip("held", v.held)
 		return
 	}
 	tip, err := v.tip(v.target)
@@ -172,7 +178,7 @@ func (s *Supervisor) mergeRequest(name string, t *Track, w ciWatched, r CIRecord
 	}
 	var pol mergePolicy
 	if b == nil || json.Unmarshal(b, &pol) != nil || pol.Merge != MergeFastForward {
-		skip("no-grant:"+tip, fmt.Sprintf("%s on %s at %s does not grant merge: %s", MergePolicyFile, v.target, shortHash(tip), MergeFastForward))
+		skip("no-grant", fmt.Sprintf("%s on %s at %s does not grant merge: %s", MergePolicyFile, v.target, shortHash(tip), MergeFastForward))
 		return
 	}
 	why, err := v.fastForward(tip, v.head)
@@ -181,18 +187,28 @@ func (s *Supervisor) mergeRequest(name string, t *Track, w ciWatched, r CIRecord
 		return
 	}
 	if why != "" {
-		skip("not-ff:"+tip, why)
+		skip("not-ff", why)
 		return
 	}
-	// The target is asked again just before the merge: one that moved
-	// since the check is checked again at the next round.
+	// The request and its target are asked again just before the merge:
+	// a request retargeted or moved on, or a target that moved since the
+	// check, is checked again at the next round.
+	again, err := view()
+	if err != nil {
+		unknown(err)
+		return
+	}
+	if !again.open || again.head != v.head || again.target != v.target || again.held != "" {
+		skip("request-changed", "the request changed during the check")
+		return
+	}
 	now, err := v.tip(v.target)
 	if err != nil {
 		unknown(err)
 		return
 	}
 	if now != tip {
-		skip("target-moved:"+now, fmt.Sprintf("%s moved from %s to %s since the check", v.target, shortHash(tip), shortHash(now)))
+		skip("target-moved", fmt.Sprintf("%s moved from %s to %s since the check", v.target, shortHash(tip), shortHash(now)))
 		return
 	}
 	fkey := mergeKey(w.Repository, w.Ref) + ":" + r.Head
@@ -203,7 +219,9 @@ func (s *Supervisor) mergeRequest(name string, t *Track, w ciWatched, r CIRecord
 
 // gitlabMergeView asks GitLab about merge request !n. GitLab's merge call
 // fast-forwards only under the project's ff merge method; under any other
-// it would make a merge commit, so a project without it never merges.
+// it would make a merge commit, and where the project squashes every
+// merge it would write a commit nobody gated, so such a project never
+// merges. A draft is held.
 func gitlabMergeView(api ForgeAPI, project, ref string) (mergeView, error) {
 	base := "/projects/" + url.PathEscape(project)
 	get := func(path string, v any) error {
@@ -214,11 +232,15 @@ func gitlabMergeView(api ForgeAPI, project, ref string) (mergeView, error) {
 		WebURL       string `json:"web_url"`
 		SHA          string `json:"sha"`
 		TargetBranch string `json:"target_branch"`
+		Draft        bool   `json:"draft"`
 	}
 	if err := get(base+"/merge_requests/"+ref[1:], &mr); err != nil {
 		return mergeView{}, err
 	}
 	v := mergeView{head: mr.SHA, target: mr.TargetBranch, url: mr.WebURL, open: mr.State == "opened"}
+	if mr.Draft {
+		v.held = "it is a draft"
+	}
 	v.tip = func(target string) (string, error) {
 		var b struct {
 			Commit struct {
@@ -240,13 +262,18 @@ func gitlabMergeView(api ForgeAPI, project, ref string) (mergeView, error) {
 	}
 	v.fastForward = func(tip, head string) (string, error) {
 		var p struct {
-			MergeMethod string `json:"merge_method"`
+			MergeMethod  string `json:"merge_method"`
+			SquashOption string `json:"squash_option"`
 		}
 		if err := get(base, &p); err != nil {
 			return "", err
 		}
 		if p.MergeMethod != "ff" {
 			return fmt.Sprintf("the project's merge method is %q, not ff: GitLab would not fast-forward", p.MergeMethod), nil
+		}
+		// Under always, GitLab squashes whatever the merge call says.
+		if p.SquashOption == "always" {
+			return "the project squashes every merge: GitLab would not fast-forward the gated commits", nil
 		}
 		var mb struct {
 			ID string `json:"id"`
@@ -270,10 +297,12 @@ func githubMergeView(api ForgeAPI, project, ref string) (mergeView, error) {
 		return ciGet(func() (APIResponse, error) { return api.GitHub(path, nil) }, "gh api "+path, v)
 	}
 	var pr struct {
-		State   string `json:"state"`
-		Merged  bool   `json:"merged"`
-		HTMLURL string `json:"html_url"`
-		Head    struct {
+		State          string `json:"state"`
+		Merged         bool   `json:"merged"`
+		Draft          bool   `json:"draft"`
+		MergeableState string `json:"mergeable_state"`
+		HTMLURL        string `json:"html_url"`
+		Head           struct {
 			SHA string `json:"sha"`
 		} `json:"head"`
 		Base struct {
@@ -284,13 +313,22 @@ func githubMergeView(api ForgeAPI, project, ref string) (mergeView, error) {
 		return mergeView{}, err
 	}
 	v := mergeView{head: pr.Head.SHA, target: pr.Base.Ref, url: pr.HTMLURL, open: pr.State == "open" && !pr.Merged}
+	// Moving the branch skips what GitHub's own merge would ask: a draft,
+	// or a request its branch protection blocks (a review it lacks), is
+	// held. A mergeable_state GitHub has not computed yet is not.
+	switch {
+	case pr.Draft:
+		v.held = "it is a draft"
+	case pr.MergeableState == "blocked" || pr.MergeableState == "dirty" || pr.MergeableState == "draft":
+		v.held = fmt.Sprintf("GitHub says it is %s", pr.MergeableState)
+	}
 	v.tip = func(target string) (string, error) {
 		var r struct {
 			Object struct {
 				SHA string `json:"sha"`
 			} `json:"object"`
 		}
-		if err := get(base+"/git/ref/heads/"+target, &r); err != nil {
+		if err := get(base+"/git/ref/heads/"+escapeRef(target), &r); err != nil {
 			return "", err
 		}
 		if r.Object.SHA == "" {
@@ -317,6 +355,16 @@ func githubMergeView(api ForgeAPI, project, ref string) (mergeView, error) {
 		return "", nil
 	}
 	return v, nil
+}
+
+// escapeRef escapes each segment of a branch name for a GitHub path, so a
+// # or % in it names the branch, not a fragment or another ref.
+func escapeRef(ref string) string {
+	parts := strings.Split(ref, "/")
+	for i, p := range parts {
+		parts[i] = url.PathEscape(p)
+	}
+	return strings.Join(parts, "/")
 }
 
 // policyFile reads the merge policy file: nil when the target has none.
