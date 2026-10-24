@@ -410,3 +410,43 @@ func TestPageAnswerTypesAndDeadline(t *testing.T) {
 		t.Fatalf("deadlines %v", set)
 	}
 }
+
+// Review round 1: a default logged after an owner's answer to the same
+// question does not replace it; ordinary numbered sentences are not taken
+// for options; a refusal logs none of the session's values; a decision
+// already settled cannot be superseded.
+func TestDecisionReview1(t *testing.T) {
+	d := Decision{ID: "D1", Type: DecisionYesNo, Question: "q", Default: "yes"}
+	no, yes := false, true
+	cfg := DefaultConfig()
+	st := NewLogState(&cfg, ModeLive)
+	st.Fold([]Event{
+		{V: EventVersion, Time: pageAt, Kind: KindAnswer, Mode: ModeOwner, Session: "s1", Answer: &AnswerPayload{ID: "D1", Answer: &no, Asked: decisionHash(d)}},
+		{V: EventVersion, Time: pageAt.Add(time.Second), Kind: KindAnswer, Mode: ModeLive, Session: "s1", Answer: &AnswerPayload{ID: "D1", Answer: &yes, Asked: decisionHash(d), ByDefault: true, Note: defaultNote}},
+	})
+	if a := st.Tracks["s1"].Answers["D1"]; a.ByDefault || *a.Answer {
+		t.Fatalf("the default replaced the owner's answer: %+v", a)
+	}
+
+	for _, q := range []string{"The retry count is 3. The timeout is 5. What should the log line say?", "Phase 1. shipped, phase 2. is pending; what is phase 3 called?",
+		"See section 4) and appendix b); what title fits?"} {
+		if err := checkDecision(Decision{ID: "D1", Type: DecisionText, Question: q, Context: "c", Why: "w", IfWrong: "i", Recommendation: "r"}); err != nil {
+			t.Errorf("%q: %v", q, err)
+		}
+	}
+
+	h, _ := mcpHarness(t)
+	if _, refused := raise(t, h, decisionArgs("secret-type-value", "Ship it?", nil)); !refused {
+		t.Fatal("unknown type accepted")
+	}
+	if strings.Contains(h.buf.String(), "secret-type-value") {
+		t.Fatal("the refusal logged the session's value")
+	}
+	id := mustRaise(t, h, decisionArgs(DecisionChooseOne, "Which colour?", map[string]any{"options": options("Blue", "Green")}))
+	if err := answerAs(h, "s1", AnswerPayload{ID: id, Choice: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, refused := raise(t, h, decisionArgs(DecisionYesNo, "Ship it?", map[string]any{"supersedes": id})); !refused {
+		t.Fatal("a settled decision was superseded")
+	}
+}

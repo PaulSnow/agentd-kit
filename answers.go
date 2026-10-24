@@ -209,10 +209,15 @@ func checkDecisions(ds []Decision) error {
 	return nil
 }
 
-// optionMarker is an option a question names in its own words: (a), b),
-// 1. and the like.
-var optionMarker = regexp.MustCompile(`(?i)(?:^|[\s(])\(?([a-e1-5])[).]\s`)
-var yesOrNo = regexp.MustCompile(`(?i)\byes\s*(?:or|/)\s*no\b`)
+// optionMarker is an option a question names in its own words, (a) or
+// a), and yesOrNo a question that asks for yes or no. Only the question is
+// read, not its context, and a list counts only when it starts at its
+// first marker, (a) and (b) or (1) and (2), so a sentence such as "the
+// retry count is 3." is not taken for one.
+var (
+	optionMarker = regexp.MustCompile(`(?i)(?:^|\s)(?:\(([a-e1-5])\)|([a-e])\))(?:\s|$)`)
+	yesOrNo      = regexp.MustCompile(`(?i)\byes\s*(?:or|/)\s*no\s*\??\s*$`)
+)
 
 // checkDecision checks one decision's type against what it asks: options
 // only for the types that list them, limits only for those that take
@@ -243,15 +248,14 @@ func checkDecision(d Decision) error {
 		return fmt.Errorf("decision %s: type %q is not yes_no, choose_one, choose_many, number, date or text", d.ID, cutUTF8(d.Type, 40))
 	}
 	if d.Type == DecisionText {
-		words := d.Question + " " + d.Context
-		if yesOrNo.MatchString(words) {
+		if yesOrNo.MatchString(d.Question) {
 			return fmt.Errorf("decision %s: a text question answered yes or no is a yes_no; use yes_no", d.ID)
 		}
 		marks := map[string]bool{}
-		for _, m := range optionMarker.FindAllStringSubmatch(words, -1) {
-			marks[strings.ToLower(m[1])] = true
+		for _, m := range optionMarker.FindAllStringSubmatch(d.Question, -1) {
+			marks[strings.ToLower(m[1]+m[2])] = true
 		}
-		if len(marks) >= 2 {
+		if marks["a"] && marks["b"] || marks["1"] && marks["2"] {
 			return fmt.Errorf("decision %s: a text question that names its own options is a choice; use choose_one or choose_many", d.ID)
 		}
 		if d.Default != "" {

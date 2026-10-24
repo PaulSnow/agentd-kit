@@ -176,7 +176,7 @@ func (srv *MCPServer) checkRaise(args json.RawMessage, t *Track) (*Decision, boo
 	d := Decision{ID: fmt.Sprintf("D%d", t.RaisedCount+1), Type: a.Type, Question: a.Question, Context: a.Context, Why: a.Why, IfWrong: a.IfWrong,
 		Recommendation: a.Recommendation, Options: a.Options, Limits: a.Limits, Default: a.Default, Deadline: a.Deadline, Blocking: a.Blocking, Supersedes: a.Supersedes}
 	if err := checkDecision(d); err != nil {
-		return nil, false, []problem{srv.refusal(err)}
+		return nil, false, []problem{srv.refusal(err, d)}
 	}
 	open := 0
 	for _, o := range t.Raised {
@@ -191,10 +191,10 @@ func (srv *MCPServer) checkRaise(args json.RawMessage, t *Track) (*Decision, boo
 	if d.Supersedes != "" {
 		found := false
 		for _, o := range t.Raised {
-			found = found || o.ID == d.Supersedes
+			found = found || o.ID == d.Supersedes && t.waits(o)
 		}
 		if !found {
-			return nil, false, []problem{{format: "supersedes %q: not an open decision this session raised", args: []any{cutUTF8(d.Supersedes, 40)}}}
+			return nil, false, []problem{{format: "supersedes %q: not a decision this session raised that still waits on the owner", args: []any{cutUTF8(d.Supersedes, 40)}}}
 		}
 	}
 	if open >= maxDecisions {
@@ -210,9 +210,16 @@ func (srv *MCPServer) checkRaise(args json.RawMessage, t *Track) (*Decision, boo
 }
 
 // refusal is a check's error as a problem: the session is told it whole,
-// and the log keeps it screened.
-func (srv *MCPServer) refusal(err error) problem {
-	return problem{format: "%s", args: []any{err.Error()}, log: srv.withheld(cutUTF8(err.Error(), 300))}
+// and the log keeps its wording, each value the session gave that the
+// error quotes left out, as for every refusal.
+func (srv *MCPServer) refusal(err error, d Decision) problem {
+	logged := err.Error()
+	for _, v := range []string{d.Type, d.Default, d.Supersedes} {
+		if v != "" {
+			logged = strings.ReplaceAll(logged, fmt.Sprintf("%q", cutUTF8(v, 40)), "…")
+		}
+	}
+	return problem{format: "%s", args: []any{err.Error()}, log: srv.withheld(cutUTF8(logged, 300))}
 }
 
 // withholdDecision is d with its words left out: its id, type, option

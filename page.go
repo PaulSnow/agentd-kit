@@ -934,7 +934,7 @@ table { border-collapse: collapse; } td { padding: .1rem .6rem .1rem 0; vertical
 {{if ne .Type "text"}}<div><textarea name="other" rows="1" cols="60" maxlength="2000" placeholder="or in your own words, which does not settle it"></textarea></div>{{end}}
 <div><input name="note" size="60" maxlength="500" placeholder="a note"> <button type="submit">Answer</button></div></form>
 {{if and .Default (not .Answered)}}<form method="post" action="/deadline"><input type="hidden" name="token" value="{{$.Token}}"><input type="hidden" name="view" value="{{$.ViewQ}}"><input type="hidden" name="session" value="{{.Session}}"><input type="hidden" name="id" value="{{.ID}}">
-{{with .OwnerDeadline}}<span class="muted">Your deadline: {{when .At}}.</span> {{end}}<input type="datetime-local" name="deadline"> <button type="submit">Apply the default after</button></form>{{end}}{{end}}
+{{with .OwnerDeadline}}<span class="muted">Your deadline: {{when .At}}.</span> {{end}}<input type="datetime-local" name="deadline"> <span class="muted">(the page's time zone)</span> <button type="submit">Apply the default after</button></form>{{end}}{{end}}
 {{end}}</section>{{end}}
 <section id="new"><h2>New since last visit</h2>
 {{if .New}}<form method="post" action="/seen"><input type="hidden" name="token" value="{{.Token}}"><input type="hidden" name="view" value="{{.ViewQ}}">
