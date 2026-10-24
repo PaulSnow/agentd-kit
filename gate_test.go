@@ -411,7 +411,7 @@ func TestExecGateFiles(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := gitOut(10*time.Second, root, "init", "-q", "--bare", remote); err != nil {
+	if _, err := gitOut(10*time.Second, root, "init", "-q", "--bare", "--initial-branch=main", remote); err != nil {
 		t.Fatal(err)
 	}
 	run("init", "-q")
