@@ -43,6 +43,8 @@ type Event struct {
 	Item       *ItemPayload       `json:"item,omitempty"`
 	Seen       *SeenPayload       `json:"seen,omitempty"`
 	Cursor     *CursorPayload     `json:"cursor,omitempty"`
+	Usage      *UsagePayload      `json:"usage,omitempty"`
+	Checkpoint *CheckpointPayload `json:"checkpoint,omitempty"`
 }
 
 // Event kinds.
@@ -62,6 +64,8 @@ const (
 	KindItem       = "item"       // something new the owner may want to know: an issue, a request, a discussion, mail
 	KindSeen       = "seen"       // the owner marked items seen
 	KindCursor     = "cursor"     // how far a source of items has been read
+	KindUsage      = "usage"      // what a session's transcript has cost so far
+	KindCheckpoint = "checkpoint" // a merge newly at the head of a session's worktree
 )
 
 // Modes, in the mode every event carries. A run reads only the events of
@@ -85,6 +89,8 @@ const (
 	ActGate     = "gate"
 	ActEscalate = "escalate"
 	ActUpdate   = "update" // the open Questions escalation's text changed
+	ActRotate   = "rotate" // a fresh context at a checkpoint: not a crash, not a restart
+	ActStop     = "stop"   // the budget or the stop time was reached
 )
 
 // StartPayload is a run's start: the sessions it supervises.
@@ -141,6 +147,13 @@ type ActPayload struct {
 	Respawn bool   `json:"respawn,omitempty"`
 	Account string `json:"account,omitempty"`
 	Command string `json:"command,omitempty"`
+	// A restart or rotation: the Claude Code session id it launched, and
+	// for a rotation the context it left and the merge it rotated at.
+	Transcript string `json:"transcript,omitempty"`
+	Context    int64  `json:"context,omitempty"`
+	Checkpoint string `json:"checkpoint,omitempty"`
+	// A stop: why.
+	Reason string `json:"reason,omitempty"`
 
 	// Typing: a nudge, a resume, the trust keys.
 	Message  string   `json:"message,omitempty"`
@@ -223,6 +236,11 @@ type CrashPayload struct {
 // ClearPayload is the owner's clearing of a parked session.
 type ClearPayload struct {
 	By string `json:"by"`
+	// Base is set on the record a run writes after applying the owner's
+	// clear: the session's spend then, which its cap counts from. It is
+	// computed once, in the order the run applied events, so a replay
+	// reads the same base rather than recomputing it.
+	Base *int64 `json:"base,omitempty"`
 }
 
 // ErrorPayload is a failed step or action. Key, when set, is the keyed
@@ -253,7 +271,8 @@ func (e Event) check() error {
 	payloads := map[string]bool{
 		KindStart: e.Start != nil, KindStop: e.Stop != nil, KindObserve: e.Observe != nil, KindTransition: e.Transition != nil,
 		KindSkip: e.Skip != nil, KindCrash: e.Crash != nil, KindClear: e.Clear != nil, KindError: e.Error != nil, KindWarning: e.Warning != nil,
-		KindItem: e.Item != nil, KindSeen: e.Seen != nil, KindCursor: e.Cursor != nil, "act": e.Act != nil,
+		KindItem: e.Item != nil, KindSeen: e.Seen != nil, KindCursor: e.Cursor != nil, KindUsage: e.Usage != nil,
+		KindCheckpoint: e.Checkpoint != nil, "act": e.Act != nil,
 	}
 	want := e.Kind
 	switch e.Kind {

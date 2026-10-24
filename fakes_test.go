@@ -91,6 +91,7 @@ type fakeTmux struct {
 	onPane     func(name string) // runs when Pane is asked, to change the screen under a caller
 	commands   map[string]string
 	newErr     map[string]error // NewSession fails with this
+	replaceErr error            // Replace fails with this
 	calls      []call
 	mutations  int
 }
@@ -188,6 +189,34 @@ func (f *fakeTmux) NewSession(name, cwd, command string, width, height int) erro
 	return nil
 }
 
+// Replace kills the pane's command and starts a fresh one in it.
+func (f *fakeTmux) Replace(name, cwd, command string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, call{op: "replace", name: name, args: []string{cwd, command}})
+	f.mutations++
+	if f.replaceErr != nil {
+		return f.replaceErr
+	}
+	if !f.alive[name] {
+		return fmt.Errorf("no session %s", name)
+	}
+	f.start(name)
+	return nil
+}
+
+func (f *fakeTmux) Stop(name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, call{op: "stop", name: name})
+	f.mutations++
+	if !f.alive[name] {
+		return fmt.Errorf("no session %s", name)
+	}
+	f.alive[name], f.dead[name] = false, false
+	return nil
+}
+
 func (f *fakeTmux) Type(name, text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -245,22 +274,25 @@ func (f *fakeTmux) count(op, name string) int {
 }
 
 type fakeGit struct {
-	mu         sync.Mutex
-	clean      bool
-	branch     string
-	branches   map[string]string // branch per worktree, over branch
-	ahead      int
-	aheads     map[string]int // ahead per worktree, over ahead
-	subject    string
-	messages   string // the commit messages ahead of the target
-	head       string
-	inTarget   map[string]bool // commits the target contains
-	remote     string
-	remotes    map[string]string // origin URL per worktree, over remote
-	pushRemote string            // origin's separate push URL, if any
-	rewrites   []string          // url.*.insteadOf and pushInsteadOf prefixes in git config
-	config     string            // git config as listed; a change is a rewritten config
-	fetches    int
+	mu           sync.Mutex
+	clean        bool
+	branch       string
+	branches     map[string]string // branch per worktree, over branch
+	ahead        int
+	aheads       map[string]int // ahead per worktree, over ahead
+	subject      string
+	messages     string // the commit messages ahead of the target
+	head         string
+	inTarget     map[string]bool // commits the target contains
+	remote       string
+	remotes      map[string]string // origin URL per worktree, over remote
+	pushRemote   string            // origin's separate push URL, if any
+	rewrites     []string          // url.*.insteadOf and pushInsteadOf prefixes in git config
+	config       string            // git config as listed; a change is a rewritten config
+	fetches      int
+	merge        string // the newest merge at HEAD, and its subject
+	mergeSubject string
+	mergeAt      map[string]time.Time // each merge's commit time, zero by default
 }
 
 func (g *fakeGit) Fetch(string) error {
@@ -327,6 +359,12 @@ func (g *fakeGit) FirstSubject(string, string) (string, error) {
 	defer g.mu.Unlock()
 	return g.subject, nil
 }
+func (g *fakeGit) LastMerge(string) (string, string, time.Time, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.merge, g.mergeSubject, g.mergeAt[g.merge], nil
+}
+
 func (g *fakeGit) Messages(string, string) (string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()

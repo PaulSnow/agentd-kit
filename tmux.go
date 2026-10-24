@@ -11,7 +11,9 @@ import (
 )
 
 // Tmux is the slice of tmux the supervisor uses. Every method takes one
-// exact session name; there is no listing, no pattern, and no kill.
+// exact session name; there is no listing and no pattern. The only kills
+// are Replace, of the one pane of a session being rotated, and Stop, of a
+// session that reached its budget.
 type Tmux interface {
 	HasSession(name string) (bool, error)
 	// CapturePane returns the visible screen and, when lines is more than
@@ -23,6 +25,11 @@ type Tmux interface {
 	// Respawn starts command again in the session's dead pane. tmux refuses
 	// it for a pane that is still running, so it cannot replace a live one.
 	Respawn(name, cwd, command string) error
+	// Replace kills what the session's pane runs and starts command in it:
+	// a rotation, which keeps the session.
+	Replace(name, cwd, command string) error
+	// Stop ends the session.
+	Stop(name string) error
 	// Type enters a line of text and submits it.
 	Type(name, text string) error
 	// Keys sends named keys such as Down and Enter, one at a time.
@@ -140,6 +147,30 @@ func (t ExecTmux) Respawn(name, cwd, command string) error {
 	}
 	if out, err := t.run("respawn-pane", "-t", tg, "-c", cwd, command); err != nil {
 		return fmt.Errorf("respawn-pane %s: %w: %s", name, err, strings.TrimSpace(out))
+	}
+	return nil
+}
+
+// Replace runs respawn-pane -k: the pane's command is killed and command
+// started in its place, in the same session and pane.
+func (t ExecTmux) Replace(name, cwd, command string) error {
+	tg, err := target(name)
+	if err != nil {
+		return err
+	}
+	if out, err := t.run("respawn-pane", "-k", "-t", tg, "-c", cwd, command); err != nil {
+		return fmt.Errorf("respawn-pane -k %s: %w: %s", name, err, strings.TrimSpace(out))
+	}
+	return nil
+}
+
+// Stop runs kill-session on the one session of that exact name.
+func (t ExecTmux) Stop(name string) error {
+	if _, err := target(name); err != nil {
+		return err
+	}
+	if out, err := t.run("kill-session", "-t", "="+name); err != nil {
+		return fmt.Errorf("kill-session %s: %w: %s", name, err, strings.TrimSpace(out))
 	}
 	return nil
 }

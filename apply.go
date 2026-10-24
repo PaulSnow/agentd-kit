@@ -127,6 +127,14 @@ func (st *LogState) apply(e Event) {
 		if o.State != "" && t.State == "" {
 			t.State, t.Since = State(o.State), e.Time
 		}
+	case KindUsage:
+		u := *e.Usage
+		t.Usage[u.Transcript] = u
+		if t.Transcript == "" || u.Transcript == t.Transcript || u.Guessed {
+			t.Measured = u.Transcript
+		}
+	case KindCheckpoint:
+		t.Checkpoint = Checkpoint{CheckpointPayload: *e.Checkpoint, At: e.Time}
 	case KindTransition:
 		t.State, t.Since = State(e.Transition.To), e.Time
 		t.Reason = e.Transition.Reason
@@ -137,6 +145,10 @@ func (st *LogState) apply(e Event) {
 		}
 		t.noteCrash(c, st.cfg.Policies.Restart.MaxCrashes)
 	case KindClear:
+		if b := e.Clear.Base; b != nil {
+			t.SpendBase = *b
+			break
+		}
 		t.clear()
 	case KindSkip:
 		k := e.Skip
@@ -204,8 +216,14 @@ func (st *LogState) apply(e Event) {
 				at = *e.Warning.IntentAt
 			}
 			switch a.Action {
-			case ActEscalate, ActUpdate, ActNudge, ActResume, ActTrust:
+			case ActEscalate, ActUpdate, ActNudge, ActResume, ActTrust, ActRotate:
 				t.applyAction(a, false, false, at)
+			}
+			// A rotation cut short may have started its session: measure
+			// the transcript it named, which a guess replaces if it never
+			// appears. A stop cut short is simply tried again.
+			if a.Action == ActRotate {
+				t.launched(a.Transcript, at)
 			}
 		}
 	}
@@ -227,6 +245,22 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 		if taken { // a would-be restart started nothing
 			t.Hash, t.HashSince, t.Observed, t.Live = "", at, true, true
 			t.Nudges, t.LastNudge, t.Limited = 0, time.Time{}, false
+			t.launched(a.Transcript, at)
+		}
+	case ActRotate:
+		// Not a restart: the backoff, the restart count and the crash
+		// record are untouched, and the session stays live.
+		t.Rotations += n
+		t.RotatedFor = a.Checkpoint
+		if taken {
+			t.Hash, t.HashSince, t.Observed = "", at, true
+			t.Nudges, t.LastNudge, t.Limited = 0, time.Time{}, false
+			t.launched(a.Transcript, at)
+		}
+	case ActStop:
+		t.Stopped = a.Reason
+		if taken { // its session is gone by the owner's policy, not a crash
+			t.Live = false
 		}
 	case ActNudge:
 		t.Nudges++
@@ -281,5 +315,14 @@ func (t *Track) settleDialog(n, episode int, at time.Time) {
 	}
 	if episode > t.Dialog.Escalated {
 		t.Dialog.Escalated = episode
+	}
+}
+
+// launched records the transcript a restart or rotation started: the
+// session is measured under it from now on, unknown until its first call.
+func (t *Track) launched(transcript string, at time.Time) {
+	t.Launched = at
+	if transcript != "" {
+		t.Transcript, t.Measured = transcript, ""
 	}
 }

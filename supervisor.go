@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -49,6 +48,9 @@ type Supervisor struct {
 	shadow bool
 	worker bool       // this copy runs one job off the loop
 	work   *workState // shared by the loop and its workers
+	usage  *usageReader
+
+	checkpointRe *regexp.Regexp
 
 	// halt is the first failed append of the pass. Once set, nothing more
 	// is done until the next pass: an action whose record could be lost
@@ -76,20 +78,23 @@ func NewSupervisor(cfg *Config, log *Log, clock Clock, tmux Tmux, git Git, forge
 		dialogs = append(dialogs, regexp.MustCompile(p))
 	}
 	return &Supervisor{
-		cfg:     cfg,
-		log:     log,
-		clock:   clock,
-		tmux:    tmux,
-		git:     git,
-		forge:   AllowedForge{Repos: cfg.Repositories, Forge: forge},
-		runner:  runner,
-		shadow:  shadow,
-		st:      NewLogState(cfg, mode(shadow)),
-		work:    newWorkState(),
-		tailOff: log.Size(),
-		limitRe: regexp.MustCompile(cfg.Policies.UsageLimit.Pattern),
-		trustRe: regexp.MustCompile(`^(?:` + cfg.Policies.Trust.Pattern + `)$`),
-		dialogs: dialogs,
+		cfg:    cfg,
+		log:    log,
+		clock:  clock,
+		tmux:   tmux,
+		git:    git,
+		forge:  AllowedForge{Repos: cfg.Repositories, Forge: forge},
+		runner: runner,
+		shadow: shadow,
+		st:     NewLogState(cfg, mode(shadow)),
+		work:   newWorkState(),
+		usage:  newUsageReader(),
+
+		checkpointRe: regexp.MustCompile(cfg.Policies.Context.Checkpoint),
+		tailOff:      log.Size(),
+		limitRe:      regexp.MustCompile(cfg.Policies.UsageLimit.Pattern),
+		trustRe:      regexp.MustCompile(`^(?:` + cfg.Policies.Trust.Pattern + `)$`),
+		dialogs:      dialogs,
 
 		confidential: confidential,
 	}
@@ -345,6 +350,12 @@ func (s *Supervisor) ownerRecords() {
 	for _, e := range events {
 		if _, ok := s.cfg.Sessions[e.Session]; ok && e.Mode == ModeOwner {
 			s.st.apply(e)
+			if e.Kind == KindClear {
+				t := s.track(e.Session)
+				sp, _ := t.spend(!s.shadow)
+				base := sp + t.SpendBase
+				s.emit(e.Session, Event{Kind: KindClear, Clear: &ClearPayload{By: "agentd", Base: &base}})
+			}
 		}
 	}
 }
@@ -413,11 +424,7 @@ func (s *Supervisor) observe(name string, sess Session) (Evidence, error) {
 			}
 		}
 	}
-	if root := s.cfg.TranscriptDir; root != "" {
-		// An account with its own config directory keeps its transcripts there.
-		if a := s.cfg.Accounts[sess.Account]; sess.Account != "" && a.ConfigDir != "" {
-			root = filepath.Join(a.ConfigDir, "projects")
-		}
+	if root := s.transcriptRoot(sess); root != "" {
 		ev.Transcript = ReadTranscript(TranscriptDir(root, sess.Cwd))
 	}
 	return ev, nil
@@ -431,7 +438,9 @@ func (s *Supervisor) step(name string, sess Session) {
 		s.emit(name, Event{Kind: KindError, Error: &ErrorPayload{Step: "observe", Error: err.Error()}})
 		return
 	}
-	if !ev.Alive && t.Live && !ev.Status.Done {
+	// A session stopped for its budget, or due to be, is gone by policy;
+	// so is one whose stop a crash of agentd cut short.
+	if !ev.Alive && t.Live && !ev.Status.Done && t.Stopped == "" && s.overBudget(t, now) == "" {
 		screen := ev.DeadScreen
 		if !ev.PaneDead {
 			screen = shortHash(t.Hash) // gone outright: the last screen seen
@@ -446,12 +455,25 @@ func (s *Supervisor) step(name string, sess Session) {
 	if s.logObserve(name, t, ev, state, reason, now); s.halt != nil {
 		return
 	}
+	// After the observation, whose applying marks a live session live: the
+	// stop, applied, marks it not, so its going is no crash.
+	if s.stopForBudget(name, t, ev, now); s.halt != nil {
+		return
+	}
+	if t.Stopped != "" && state != Done && state != Stopped {
+		state, reason = Stopped, "stopped: "+t.Stopped
+	}
 	state = s.actOn(name, sess, t, ev, state, now)
 	if ev.Alive && state != Done && state != CrashLooping {
 		s.watchCommand(name, ev.Command, t, now)
 	}
 	if state != t.State {
 		s.emit(name, Event{Kind: KindTransition, Transition: &TransitionPayload{From: string(t.State), To: string(state), Reason: reason}})
+	}
+	// The transcript and the worktree are read in a worker, from what the
+	// transcript gained since the last read; the next pass acts on them.
+	if s.halt == nil {
+		s.spawn(name, "measure:"+name, func(w *Supervisor, wt *Track) { w.measure(name, sess, wt) })
 	}
 }
 
@@ -526,6 +548,9 @@ func sameObservation(a, b ObservePayload) bool {
 
 func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, state State, now time.Time) State {
 	pol := s.cfg.Policies
+	if (state == Working || state == Idle) && !t.Limited && s.rotate(name, sess, t, ev, now) {
+		return Starting
+	}
 	// The limit has cleared. Only a session that can take a line is told to
 	// go on: never one that is DONE, waits on the owner, or shows a dialog.
 	if t.Limited && ev.Alive && (state == Working || state == Idle) {
@@ -559,12 +584,8 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 				return state
 			}
 		}
-		brief, status := sess.Workdir+"/BRIEF.md", sess.Workdir+"/STATUS.md"
-		cmd := make([]string, len(pol.Restart.Command))
-		for i, part := range pol.Restart.Command {
-			cmd[i] = strings.NewReplacer("{brief}", brief, "{status}", status).Replace(part)
-		}
-		line, err := s.launchLine(sess, cmd)
+		id := newSessionID()
+		line, err := s.launchLine(sess, s.launchCommand(sess, t, id, "restart"))
 		if err != nil {
 			// Not final, and not a crash: the owner may fix the account.
 			// There is no fallback to another account.
@@ -572,7 +593,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			s.escalate(name, "account:"+name, fmt.Sprintf("%s is gone and cannot be restarted under its account: %v. Fix the account; agentd will not use another.", name, err), t, now)
 			return state
 		}
-		err = s.act(name, ActRestart, &ActPayload{Attempt: n + 1, Cwd: sess.Cwd, Respawn: ev.PaneDead, Account: sess.Account, Command: line}, func() error {
+		err = s.act(name, ActRestart, &ActPayload{Attempt: n + 1, Cwd: sess.Cwd, Respawn: ev.PaneDead, Account: sess.Account, Command: line, Transcript: id}, func() error {
 			if ev.PaneDead {
 				return s.tmux.Respawn(name, sess.Cwd, line)
 			}

@@ -21,7 +21,7 @@
       "window": "1h",
       "backoff_initial": "1m",
       "backoff_max": "30m",
-      "command": ["bash", "-lic", "exec claude \"$1\"", "agentd", "You were restarted by the supervisor with a fresh context. Read your brief, {brief}, and your progress, {status}, then continue from where {status} says you are."],
+      "command": ["bash", "-lic", "exec claude --session-id \"$1\" \"$2\"", "agentd", "{session_id}", "{prompt}"],
       "width": 220,
       "height": 50
     },
@@ -40,6 +40,15 @@
       "patterns": ["Do you want to", "❯\\s*1\\.", "(?i)enter to confirm"]
     },
     "pane_commands": ["claude"],
+    "context": {
+      "enabled": true,
+      "threshold": 120000,
+      "grace": "5m"
+    },
+    "budget": {
+      "session_tokens": 0,
+      "run_tokens": 0
+    },
     "escalate": {
       "command": ["~/bin/post-to-console", "{console}", "--kind", "decision", "{message}"],
       "default_console": "infra"
