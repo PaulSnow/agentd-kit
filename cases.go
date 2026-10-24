@@ -73,7 +73,7 @@ func (p *CasePayload) check() error {
 			n++
 		}
 	}
-	if _, _, ok := splitCase(p.Case); !ok || n != 1 {
+	if _, _, ok := splitCase(p.Case); !ok || n != 1 || p.Case != strings.ToLower(p.Case) {
 		return errors.New("a case event names its case and carries exactly one of a pack, a report or a ruling")
 	}
 	if r := p.Ruling; r != nil {
@@ -83,6 +83,9 @@ func (p *CasePayload) check() error {
 				return fmt.Errorf("a %s ruling needs its id", r.Kind)
 			}
 		case RulingClose, RulingReopen:
+			if r.ID != "" || r.Text != "" {
+				return fmt.Errorf("a %s ruling takes no id or text", r.Kind)
+			}
 		default:
 			return fmt.Errorf("unknown ruling %q", r.Kind)
 		}
@@ -241,6 +244,7 @@ func (s *Supervisor) noteReport(name string, sess Session, ev Evidence) {
 // id is read from st, folded before the append without a lock held across
 // both, so two rulings recorded at the same moment could share an id.
 func RecordRuling(log *Log, cfg *Config, st *LogState, now time.Time, id, kind, text, by string) error {
+	id = strings.ToLower(id)
 	known := st.Cases[id] != nil
 	for _, sess := range cfg.Sessions {
 		known = known || cfg.caseOf(sess) == id
@@ -299,7 +303,7 @@ func caseState(c *Case, ts []*Track) string {
 	var stopped, delivered, working bool
 	for _, t := range ts {
 		switch {
-		case t.State == BlockedOnOwner || t.State == CrashLooping || t.Questions.Open:
+		case t.State == BlockedOnOwner || t.State == CrashLooping || t.Parked || t.Questions.Open:
 			return CaseNeedsYou
 		case t.Stopped != "":
 			stopped = true
@@ -390,8 +394,10 @@ func CasesFrom(cfg *Config, st *LogState) []CaseView {
 				v.Urgency = it.Triage.Urgency
 			}
 		}
+		// The state is the sessions' that work the case now: a session
+		// moved to another issue stays listed, and no longer speaks for it.
 		var ts []*Track
-		for _, s := range v.Sessions {
+		for _, s := range sessions[id] {
 			if t := st.Tracks[s]; t != nil {
 				ts = append(ts, t)
 			}
@@ -401,8 +407,15 @@ func CasesFrom(cfg *Config, st *LogState) []CaseView {
 			// Waiting on the owner since the first of its sessions to wait.
 			var since time.Time
 			for _, t := range ts {
-				if !t.Since.IsZero() && (t.State == BlockedOnOwner || t.State == CrashLooping) && (since.IsZero() || t.Since.Before(since)) {
-					since = t.Since
+				at := time.Time{}
+				switch {
+				case t.State == BlockedOnOwner || t.State == CrashLooping || t.Parked:
+					at = t.Since
+				case t.Questions.Open:
+					at = t.AskedAt
+				}
+				if !at.IsZero() && (since.IsZero() || at.Before(since)) {
+					since = at
 				}
 			}
 			if !since.IsZero() {

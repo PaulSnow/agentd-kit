@@ -330,7 +330,9 @@ func (e Event) check() error {
 		if err := e.Case.check(); err != nil {
 			return err
 		}
-		if (e.Case.Ruling != nil) != (e.Mode == ModeOwner && e.Session == "") {
+		owner := e.Mode == ModeOwner && e.Session == ""
+		run := (e.Mode == ModeLive || e.Mode == ModeShadow) && e.Session != ""
+		if e.Case.Ruling != nil && !owner || e.Case.Ruling == nil && !run {
 			return errors.New("a ruling is the owner's, for no one session; a pack or report is a run's, for one")
 		}
 	}

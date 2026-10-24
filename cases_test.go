@@ -237,8 +237,8 @@ func TestCaseFromIssueItem(t *testing.T) {
 	w := NewLogWriter(h.buf)
 	issue := ItemPayload{ID: "gitlab/example-org/widgets#9", Kind: ItemIssue, Repository: "gitlab/example-org/widgets", Title: "Widgets wobble"}
 	w.Append(Event{V: EventVersion, Time: at, Kind: KindItem, Mode: ModeShared, Item: &issue})
-	w.Append(Event{V: EventVersion, Time: at, Kind: KindItem, Mode: ModeShared, Item: &ItemPayload{ID: "mail:t1",
-		Kind: ItemIssue, Title: "Not a case", OwnerOnly: true}})
+	w.Append(Event{V: EventVersion, Time: at, Kind: KindItem, Mode: ModeShared, Item: &ItemPayload{ID: "gitlab/example-org/widgets#10",
+		Kind: ItemIssue, Repository: "gitlab/example-org/widgets", Title: "Not a case: the owner's", OwnerOnly: true}})
 	w.Append(Event{V: EventVersion, Time: at, Kind: KindTriage, Mode: ModeShared, Triage: &TriagePayload{Results: []TriageResult{
 		{ID: "gitlab/example-org/widgets#9", Hash: ItemHash(issue), Kind: "bug", NeedsOwner: "no", Urgency: "today", Summary: "It wobbles."}}}})
 	cs := casesOf(h, ModeLive)
@@ -273,6 +273,7 @@ func rankFixture() []CaseView {
 		{ID: "github/example-org/gadgets#4", Repository: "github/example-org/gadgets", State: CaseNotStarted, Urgency: "now", Since: at.Add(3 * time.Hour)},
 		{ID: "github/example-org/gadgets#5", Repository: "github/example-org/gadgets", State: CaseClosed, Since: at},
 		{ID: "github/example-org/sprockets#6", Repository: "github/example-org/sprockets", State: CaseWorking, Since: at},
+		{ID: "github/example-org/sprockets#7", Repository: "github/example-org/sprockets", State: CaseWorking, Since: at.Add(-time.Hour)},
 	}
 }
 
@@ -281,8 +282,8 @@ func rankFixture() []CaseView {
 func TestRankCasesWithoutPriorities(t *testing.T) {
 	cs := rankFixture()
 	RankCases(cs, nil)
-	want := []string{"gitlab/example-org/widgets#3", "github/example-org/gadgets#4", "github/example-org/gadgets#1",
-		"github/example-org/sprockets#6", "gitlab/example-org/widgets#2", "github/example-org/gadgets#5"}
+	want := []string{"gitlab/example-org/widgets#3", "github/example-org/gadgets#4", "github/example-org/sprockets#7",
+		"github/example-org/gadgets#1", "github/example-org/sprockets#6", "gitlab/example-org/widgets#2", "github/example-org/gadgets#5"}
 	if got := rankIDs(cs); !reflect.DeepEqual(got, want) {
 		t.Fatalf("got  %v\nwant %v", got, want)
 	}
@@ -302,12 +303,14 @@ func TestRankCasesWithPriorities(t *testing.T) {
 		{Repository: "gitlab/example-org/widgets", Priority: 1}, {Repository: "github/example-org/gadgets", Priority: 2}},
 		Pins: []string{"github/example-org/sprockets#6"}}
 	RankCases(cs, pr)
+	// sprockets is unlisted: its unpinned #7, though the oldest, comes
+	// after every listed repository's case.
 	want := []string{"github/example-org/sprockets#6", "gitlab/example-org/widgets#3", "gitlab/example-org/widgets#2",
-		"github/example-org/gadgets#4", "github/example-org/gadgets#1", "github/example-org/gadgets#5"}
+		"github/example-org/gadgets#4", "github/example-org/gadgets#1", "github/example-org/sprockets#7", "github/example-org/gadgets#5"}
 	if got := rankIDs(cs); !reflect.DeepEqual(got, want) {
 		t.Fatalf("got  %v\nwant %v", got, want)
 	}
-	if !cs[0].Pinned || cs[2].Priority != 1 || cs[5].Priority != 2 || cs[0].Priority != 0 {
+	if !cs[0].Pinned || cs[2].Priority != 1 || cs[6].Priority != 2 || cs[0].Priority != 0 || cs[5].Priority != 0 {
 		t.Fatalf("cases %+v", cs)
 	}
 }
@@ -468,6 +471,10 @@ func TestCaseEventCheck(t *testing.T) {
 		owner(CasePayload{Case: widgetsCase, Ruling: &CaseRuling{Kind: RulingWaiver, Text: "no id"}}),
 		run(CasePayload{Case: widgetsCase, Ruling: ruling}),
 		owner(CasePayload{Case: widgetsCase, Pack: pack}),
+		{V: EventVersion, Time: at, Kind: KindCase, Mode: ModeLive, Case: &CasePayload{Case: widgetsCase, Pack: pack}},
+		{V: EventVersion, Time: at, Kind: KindCase, Mode: ModeOwner, Session: "s1", Case: &CasePayload{Case: widgetsCase, Report: report}},
+		owner(CasePayload{Case: widgetsCase, Ruling: &CaseRuling{Kind: RulingClose, ID: "R9", Text: "x"}}),
+		run(CasePayload{Case: "GitLab/example-org/widgets#7", Pack: pack}),
 	} {
 		if err := bad.check(); err == nil {
 			t.Errorf("%+v (mode %s) accepted", bad.Case, bad.Mode)
@@ -484,10 +491,19 @@ func TestRulingOnAnItemCase(t *testing.T) {
 	if err := RecordRuling(NewLogWriter(h.buf), h.cfg, st, h.clock.Now(), "gitlab/example-org/widgets#9", RulingClose, "", "owner"); err != nil {
 		t.Fatal(err)
 	}
+	found := false
 	for _, c := range casesOf(h, ModeLive) {
-		if c.ID == "gitlab/example-org/widgets#9" && c.State != CaseClosed {
-			t.Fatalf("case %+v", c)
+		if c.ID == "gitlab/example-org/widgets#9" {
+			found = c.State == CaseClosed
 		}
+	}
+	if !found {
+		t.Fatalf("cases %+v", casesOf(h, ModeLive))
+	}
+	// A ruling names its case in any letter case, as a pin does.
+	st = NewLogState(h.cfg, ModeLive).Fold(h.events())
+	if err := RecordRuling(NewLogWriter(h.buf), h.cfg, st, h.clock.Now(), "GitLab/Example-Org/widgets#9", RulingReopen, "", "owner"); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -503,5 +519,29 @@ func TestRankPinsAndUndated(t *testing.T) {
 	RankCases(cs, &Priorities{Pins: []string{"gitlab/Example-Org/widgets#3"}})
 	if got := rankIDs(cs); !reflect.DeepEqual(got, []string{"gitlab/example-org/widgets#3", "gitlab/example-org/widgets#2", "gitlab/example-org/widgets#1"}) {
 		t.Fatalf("got %v", got)
+	}
+}
+
+// A session moved to another issue no longer speaks for its old case.
+func TestMovedSessionLeavesItsCase(t *testing.T) {
+	h := caseHarness(t)
+	h.alive("s1", "working")
+	h.status("s1", progressText("second", "in progress"))
+	h.ticks(1, 5*time.Minute)
+	s := h.cfg.Sessions["s1"]
+	s.Issue = 8
+	h.cfg.Sessions["s1"] = s
+	h.ticks(1, 5*time.Minute)
+	for _, c := range casesOf(h, ModeLive) {
+		switch c.ID {
+		case widgetsCase:
+			if c.State != CaseNotStarted || !reflect.DeepEqual(c.Sessions, []string{"s1"}) {
+				t.Fatalf("old case %+v", c)
+			}
+		case "gitlab/example-org/widgets#8":
+			if c.State != CaseWorking {
+				t.Fatalf("new case %+v", c)
+			}
+		}
 	}
 }
