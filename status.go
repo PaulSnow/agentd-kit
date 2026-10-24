@@ -71,7 +71,15 @@ func SummarizeState(cfg *Config, st *LogState) ([]SessionStatus, map[string]any)
 		meta["poll_stale"] = pollHeartbeat + 2*cfg.Poll.Every.Duration
 	}
 	if cfg.Poll.CI && len(st.CI) > 0 {
-		meta["ci"] = st.CI
+		// A record of a head before the one a fix delivered is unknown.
+		ci := make(map[string]CIRecord, len(st.CI))
+		for k, c := range st.CI {
+			if t := st.Tracks[c.Session]; t != nil && c.State != CIMerged && c.State != CIClosed && t.ciStale(c) {
+				c.State, c.Error = CIUnknown, "waiting for the head a fix delivered"
+			}
+			ci[k] = c
+		}
+		meta["ci"] = ci
 	}
 	tracks := copyMap(st.Tracks)
 	for _, n := range cfg.SessionNames() {

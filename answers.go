@@ -620,7 +620,9 @@ func (t *Track) answersFor(undelivered bool) []AnswerPayload {
 	var out []AnswerPayload
 	for id := range t.Answers {
 		a, ok := t.answer(id)
-		if !ok || undelivered && a.Delivered {
+		// agentd's own CI decisions are agentd's to act on, not the
+		// session's to read.
+		if !ok || undelivered && a.Delivered || ciRaisedID.MatchString(id) {
 			continue
 		}
 		p := a.AnswerPayload

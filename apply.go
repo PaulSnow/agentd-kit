@@ -240,6 +240,7 @@ func (st *LogState) apply(e Event) {
 		k := e.Skip
 		if k.Delivered != "" {
 			t.notePushed(k.Delivered, k.Head)
+			st.ciSeen(t)
 			t.Delivered[k.Delivered] = k.Outcome
 			t.DeliveredRefs = append(t.DeliveredRefs, k.Outcome)
 			// Found already open or merged; failed and nothing deliver nothing.
@@ -284,6 +285,7 @@ func (st *LogState) apply(e Event) {
 			t.Would++
 		}
 		t.applyAction(e.Act, e.Kind == KindAction, true, e.Time)
+		st.ciSeen(t)
 		if a := e.Act; e.Kind == KindAction && a.Action == ActGate && a.Exit != nil && *a.Exit == 0 && a.SHA != "" && !contains(t.Gated, a.SHA) {
 			t.Gated = append(t.Gated[:len(t.Gated):len(t.Gated)], a.SHA)
 		}

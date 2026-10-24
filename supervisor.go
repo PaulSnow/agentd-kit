@@ -1199,7 +1199,13 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 	// the forge rebased it before merging. A reused branch name with new
 	// commits is delivered again. The open request a CI fix session was
 	// started for takes the fix's new commits: they are pushed to it.
+	// Each fix's delivery is recorded anew, so one that changed nothing
+	// settles its own wait.
 	var refresh *MergeResult
+	again := ""
+	if fixing {
+		again = ":" + fix.Transcript
+	}
 	for _, r := range reqs {
 		if fixing && r.Ref == fix.Ref && !r.Merged && head != fix.Head {
 			r := r
@@ -1216,13 +1222,13 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 			delivers = in
 		}
 		if delivers {
-			s.skipOnce(name, "deliver:"+key+":exists", fmt.Sprintf("%s already has merge request %s; not delivering again", branch, r.Ref), t,
+			s.skipOnce(name, "deliver:"+key+":exists"+again, fmt.Sprintf("%s already has merge request %s; not delivering again", branch, r.Ref), t,
 				&SkipPayload{Delivered: key, Outcome: r.Ref, URL: r.URL, Branch: branch, Head: head, Repository: d.Repository, Worktree: d.Worktree, Target: d.Target})
 			return
 		}
 	}
 	if ahead == 0 {
-		s.skipOnce(name, "deliver:"+key+":nothing", fmt.Sprintf("%s has nothing ahead of %s; not delivering", branch, d.Target), t,
+		s.skipOnce(name, "deliver:"+key+":nothing"+again, fmt.Sprintf("%s has nothing ahead of %s; not delivering", branch, d.Target), t,
 			&SkipPayload{Delivered: key, Outcome: "nothing", Branch: branch, Head: head, Repository: d.Repository, Worktree: d.Worktree, Target: d.Target})
 		return
 	}

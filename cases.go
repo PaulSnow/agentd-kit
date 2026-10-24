@@ -453,6 +453,9 @@ func CasesFrom(cfg *Config, st *LogState) []CaseView {
 		for _, s := range v.Sessions {
 			for _, r := range st.CI {
 				if r.Session == s {
+					if t := st.Tracks[s]; t != nil && r.State != CIMerged && r.State != CIClosed && t.ciStale(r) {
+						r.State, r.Verdict, r.Jobs, r.Cause, r.Excerpt = CIUnknown, "", nil, "", ""
+					}
 					v.CI = append(v.CI, r)
 				}
 			}

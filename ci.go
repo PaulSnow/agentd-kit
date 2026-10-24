@@ -109,8 +109,13 @@ type CIFixRecord struct {
 	Taken      bool
 	At         time.Time
 	// Pushed is the head the delivery after the fix recorded: the fix's
-	// commit, or the failing head again when the fix changed nothing.
-	Pushed string
+	// commit, or the failing head again when the fix changed nothing; ""
+	// for the owner's mark-delivered. Redelivered says that delivery was
+	// recorded, and Seen that the watcher has since recorded the head it
+	// delivered, or any change for the owner's.
+	Pushed      string
+	Redelivered bool
+	Seen        bool
 }
 
 // CIFact is what a fix session's pack says of the failure.
@@ -137,6 +142,37 @@ func (st *LogState) applyCI(e Event) {
 		st.CI = map[string]CIRecord{}
 	}
 	st.CI[ciKey(e.CI.Repository, e.CI.Ref)] = CIRecord{CIPayload: *e.CI, Session: e.Session, At: e.Time}
+	if t := st.Tracks[e.Session]; t != nil {
+		st.ciSeenBy(t, e.CI.Repository, e.CI.Ref, true)
+	}
+}
+
+// ciSeen ends the wait of the session's latest fix when the record of its
+// request already shows the head its delivery recorded.
+func (st *LogState) ciSeen(t *Track) {
+	if n := len(t.CIFixes); n > 0 {
+		st.ciSeenBy(t, t.CIFixes[n-1].Repository, t.CIFixes[n-1].Ref, false)
+	}
+}
+
+// ciSeenBy ends the wait for the head a request's latest fix delivered:
+// at the first record of that head, or for the owner's mark-delivered,
+// which names no head, at the next record (changed says one was just
+// made). Any head after it is followed as it comes.
+func (st *LogState) ciSeenBy(t *Track, repo, ref string, changed bool) {
+	for i := len(t.CIFixes) - 1; i >= 0; i-- {
+		f := t.CIFixes[i]
+		if f.Repository != repo || f.Ref != ref || !f.Taken {
+			continue
+		}
+		r, ok := st.CI[ciKey(repo, ref)]
+		if f.Redelivered && !f.Seen && ok && (f.Pushed == "" && changed || f.Pushed != "" && f.Pushed == r.Head) {
+			fixes := append([]CIFixRecord(nil), t.CIFixes...)
+			fixes[i].Seen = true
+			t.CIFixes = fixes
+		}
+		return
+	}
 }
 
 // ciWatched is a request to ask about: whose delivery named it.
@@ -504,7 +540,9 @@ func githubCI(api ForgeAPI, project, ref string) (ciCheck, error) {
 		c.state = CIClosed
 		return c, nil
 	}
-	checks := func(c *ciCheck, commit string) error {
+	// settled judges completed runs only, as the target is: a run still
+	// going says nothing yet of the red one before it.
+	checks := func(c *ciCheck, commit string, settled bool) error {
 		var cr struct {
 			CheckRuns []struct {
 				ID         int64  `json:"id"`
@@ -525,7 +563,7 @@ func githubCI(api ForgeAPI, project, ref string) (ciCheck, error) {
 			}
 			switch {
 			case r.Status != "completed":
-				running = true
+				running = !settled
 			case r.Conclusion == "failure" || r.Conclusion == "timed_out" || r.Conclusion == "startup_failure":
 				c.failed = append(c.failed, r.Name)
 				c.failedIDs = append(c.failedIDs, strconv.FormatInt(r.ID, 10))
@@ -549,12 +587,12 @@ func githubCI(api ForgeAPI, project, ref string) (ciCheck, error) {
 		}
 		return nil
 	}
-	if err := checks(&c, pr.Head.SHA); err != nil {
+	if err := checks(&c, pr.Head.SHA, false); err != nil {
 		return ciCheck{}, err
 	}
 	c.targetCI = func() (ciCheck, error) {
 		var t ciCheck
-		if err := checks(&t, pr.Base.Ref); err != nil {
+		if err := checks(&t, pr.Base.Ref, true); err != nil {
 			return ciCheck{}, err
 		}
 		return t, nil
@@ -635,10 +673,10 @@ func (t *Track) ciFixes(repo, ref string) []CIFixRecord {
 func (t *Track) notePushed(key, head string) {
 	for i := len(t.CIFixes) - 1; i >= 0; i-- {
 		if f := &t.CIFixes[i]; f.Delivered == key && f.Taken {
-			if f.Pushed == "" {
+			if !f.Redelivered {
 				// Copied, so a worker's track never shares the record.
 				fixes := append([]CIFixRecord(nil), t.CIFixes...)
-				fixes[i].Pushed = head
+				fixes[i].Pushed, fixes[i].Redelivered = head, true
 				t.CIFixes = fixes
 			}
 			return
@@ -647,14 +685,14 @@ func (t *Track) notePushed(key, head string) {
 }
 
 // ciStale says whether a request's record is of a head before the one a
-// fix's delivery recorded since.
+// fix's delivery recorded since: until the watcher has recorded that head.
 func (t *Track) ciStale(r CIRecord) bool {
 	fixes := t.ciFixes(r.Repository, r.Ref)
 	if len(fixes) == 0 {
 		return false
 	}
 	f := fixes[len(fixes)-1]
-	return f.Taken && (f.Pushed == "" || f.Pushed != r.Head)
+	return f.Taken && !f.Seen
 }
 
 // hasRaised says whether an open raised decision has the id.
@@ -730,8 +768,7 @@ func (s *Supervisor) fixCI(name string, sess Session, t *Track, ev Evidence, sta
 				continue // shadow mode would have fixed this one
 			case t.ciStale(r):
 				// The record is of a head before the fix's delivery: the
-				// watcher has not seen the head delivered since. A delivery
-				// that named no head, the owner's, leaves it to the owner.
+				// watcher has not seen the head delivered since.
 				continue
 			}
 		}

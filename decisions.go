@@ -192,7 +192,7 @@ func (srv *MCPServer) checkRaise(args json.RawMessage, t *Track) (*Decision, boo
 	if d.Supersedes != "" {
 		found := false
 		for _, o := range t.Raised {
-			found = found || o.ID == d.Supersedes && t.waits(o)
+			found = found || o.ID == d.Supersedes && t.waits(o) && !ciRaisedID.MatchString(o.ID)
 		}
 		if !found {
 			return nil, false, []problem{{format: "supersedes %q: not a decision this session raised that still waits on the owner", args: []any{cutUTF8(d.Supersedes, 40)}}}

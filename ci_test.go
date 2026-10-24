@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -221,6 +222,14 @@ func TestCISameFailureTwiceIsADecision(t *testing.T) {
 	if !tr.hasRaised("C2") || tr.RaisedCount != 0 {
 		t.Fatalf("raised = %+v, count %d", tr.Raised, tr.RaisedCount)
 	}
+	if tr.Delivered["d:"+h.dir+"/d/wt"] != "!1" {
+		t.Fatalf("delivery after the second fix = %v", tr.Delivered)
+	}
+	// The owner's answers to agentd's own decisions are not typed into
+	// the session.
+	if n := h.count(KindAction, ActAnswer, "d"); n != 0 {
+		t.Fatalf("answer actions = %d, want 0", n)
+	}
 	sameAfterReplay(t, h, "after the retry")
 }
 
@@ -421,5 +430,61 @@ func TestCIFixesAreBoundedByTheRestartPolicy(t *testing.T) {
 	}
 	if tr := h.sup.Tracks()["d"]; !tr.hasRaised("C1") || !strings.Contains(tr.Raised[0].Question, "fix sessions") {
 		t.Fatalf("raised = %+v", tr.Raised)
+	}
+}
+
+// After a fix's head has been seen, any later head (the owner's push, a
+// rebase on the forge) is followed: its own failure starts a fix.
+func TestCIHeadAfterTheFixIsFollowed(t *testing.T) {
+	h, api := ciHarness(t)
+	h.cfg.Policies.Restart.Window = Duration{6 * time.Hour}
+	api.pipelines("c0ffee", "failed", []string{"test:failed"}, "success", []string{"test:success"})
+	h.ticks(4, 5*time.Minute)
+	h.git.head = "c0ffee2"
+	h.alive("d", "fixed\n")
+	h.ticks(8, 5*time.Minute)
+	api.pipelines("c0ffee2", "success", nil, "success", nil)
+	h.ticks(2, 5*time.Minute)
+	api.pipelines("c0ffee3", "failed", []string{"lint:failed"}, "success", []string{"lint:success"})
+	h.ticks(4, 5*time.Minute)
+	if n := h.count(KindAction, ActCIFix, "d"); n != 2 {
+		t.Fatalf("ci-fix actions = %d, want 2", n)
+	}
+	rep := ReportFrom(h.cfg, h.sup.st, "host-a", h.clock.now)
+	for _, rr := range rep.Repositories {
+		for _, d := range rr.Deliveries {
+			if d.CI != CIUnknown {
+				t.Fatalf("report CI while the second fix is pending = %s, want unknown", d.CI)
+			}
+		}
+	}
+}
+
+// GitHub's target is judged on its completed runs: a rerun still going
+// leaves the red run before it.
+func TestCIGitHubTargetJudgedOnCompletedRuns(t *testing.T) {
+	api := &fakeForgeAPI{github: map[string]string{
+		"/repos/example-org/gadgets/pulls/4":                                    `{"state":"open","head":{"sha":"abc1234def"},"base":{"ref":"main"}}`,
+		"/repos/example-org/gadgets/commits/abc1234def/check-runs?per_page=100": `{"check_runs":[{"id":9,"name":"test","status":"completed","conclusion":"failure"}]}`,
+		"/repos/example-org/gadgets/commits/main/check-runs?per_page=100":       `{"check_runs":[{"id":7,"name":"test","status":"completed","conclusion":"failure"},{"id":8,"name":"test","status":"in_progress"}]}`,
+	}}
+	c, err := githubCI(api, "example-org/gadgets", "#4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tgt, err := c.targetCI()
+	if err != nil || tgt.state != CIFailed || ciVerdict(c, tgt) != CITargetRed {
+		t.Fatalf("target = %+v, %v", tgt, err)
+	}
+}
+
+// A session may not supersede agentd's own CI decision.
+func TestCIDecisionCannotBeSuperseded(t *testing.T) {
+	tr := newTrack()
+	tr.Raised = []Decision{{ID: "C1", Type: DecisionChooseOne, Question: "Start one more fix session?"}}
+	srv := &MCPServer{}
+	_, ok, problems := srv.checkRaise([]byte(`{"type":"text","question":"Which fix?","context":"c","why":"w","if_wrong":"i","recommendation":"r","supersedes":"C1"}`), tr)
+	if ok || len(problems) == 0 || !strings.Contains(fmt.Sprint(problems), "supersedes") {
+		t.Fatalf("superseding C1 was accepted: %v", problems)
 	}
 }
