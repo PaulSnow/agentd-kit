@@ -90,6 +90,18 @@ type Track struct {
 	Filtered   map[string]bool // escalation keys whose text was withheld
 	Deliveries []DeliveryRecord
 	Gated      []string // the commits a gate agentd ran passed on
+
+	// Turns: the latest prompts and summaries read from the transcripts,
+	// oldest first, how many were logged in all, and the last line logged
+	// of each transcript, so none is logged twice.
+	Turns     []TurnRecord
+	TurnCount int
+	TurnLines map[string]int
+	// A coordinator's wakes: the latest, oldest first, how many in all,
+	// and its spend at the first whose spend was known.
+	Wakes     []WakeRecord
+	WakeCount int
+	WakeBase  *int64
 }
 
 // DeliveryRecord is one request a delivery opened, found, or was told of.

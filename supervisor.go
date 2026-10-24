@@ -155,6 +155,11 @@ func (s *Supervisor) screen(e *Event) {
 	if e.Skip != nil {
 		e.Skip.Reason = s.withheld(e.Skip.Reason)
 	}
+	if e.Turn != nil {
+		if i := s.confidentialMatch(e.Turn.Text); i > 0 {
+			e.Turn.Text, e.Turn.Withheld = "", i
+		}
+	}
 }
 
 // withheld is text, or what the log says instead when it matches a
@@ -399,8 +404,13 @@ func (s *Supervisor) ownerRecords() {
 	s.tailOff = off
 	for _, e := range events {
 		shared := e.Kind == KindSeen || e.Kind == KindTriage || e.Kind == KindError && e.Error.Triage != nil ||
-			e.Kind == KindItem && s.st.itemChanged(*e.Item) || e.Kind == KindCase && e.Mode == ModeOwner
+			e.Kind == KindItem && s.st.itemChanged(*e.Item) || e.Kind == KindCase && e.Mode == ModeOwner || e.Kind == KindCoordinator
 		if e.Session == "" && shared {
+			s.st.apply(e)
+			continue
+		}
+		// Another run's claim on a coordinator holds here too.
+		if e.Kind == KindCoordinator && e.Mode == ModeShared {
 			s.st.apply(e)
 			continue
 		}
@@ -622,6 +632,11 @@ func sameObservation(a, b ObservePayload) bool {
 
 func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, state State, now time.Time) State {
 	pol := s.cfg.Policies
+	// A coordinator whose repository another session coordinates is left
+	// alone: not launched, woken or rotated.
+	if sess.Role == RoleCoordinator && !s.claimed(name, sess, t) {
+		return state
+	}
 	if (state == Working || state == Idle) && !t.Limited && s.rotate(name, sess, t, ev, now) {
 		return Starting
 	}
@@ -638,6 +653,9 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 	}
 	if !typed {
 		typed = s.deliverAnswers(name, sess, t, ev, state)
+	}
+	if !typed && sess.Role == RoleCoordinator {
+		typed = s.wake(name, sess, t, ev, state, now)
 	}
 	switch state {
 	case Done:
@@ -746,7 +764,8 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 				fmt.Sprintf("%s has shown the same screen since %s with a tool call as its last turn; it is probably waiting at a permission prompt. Attach and answer it.", name, t.HashSince.Format(time.RFC3339)), t, now)
 		}
 	case Idle:
-		if !pol.Nudge.Enabled || typed {
+		// A coordinator waits, quiet, for its next wake.
+		if !pol.Nudge.Enabled || typed || sess.Role == RoleCoordinator {
 			return state
 		}
 		if t.Nudges >= pol.Nudge.Max {

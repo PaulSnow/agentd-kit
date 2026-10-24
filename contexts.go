@@ -132,6 +132,8 @@ type transcriptFile struct {
 	sum     callUsage
 	context int64
 	known   bool // a main-chain call has been read, so context is known
+	lines   int  // complete lines read
+	turns   []TurnPayload
 }
 
 // usageReader reads transcripts in the workers, each file from where the
@@ -179,7 +181,9 @@ func (r *usageReader) read(path string) (*transcriptFile, error) {
 	}
 	f.partial = append([]byte(nil), data[end+1:]...)
 	for _, line := range bytes.Split(data[:end], []byte("\n")) {
+		f.lines++
 		f.note(line)
+		f.noteTurn(line)
 	}
 	return f, nil
 }
@@ -306,6 +310,14 @@ func (s *Supervisor) measure(name string, sess Session, t *Track) {
 					s.emit(name, Event{Kind: KindUsage, Usage: &u})
 				}
 			}
+			// Each prompt and summary is logged once, by its line: a
+			// transcript read again from its start logs none twice.
+			for _, tn := range s.usage.turns(dir, id, t.TurnLines[id]) {
+				tn := tn
+				if s.emit(name, Event{Kind: KindTurn, Turn: &tn}); s.halt != nil {
+					return
+				}
+			}
 		}
 	}
 	// Only a newer merge is a checkpoint: a checkout of an older branch
@@ -343,14 +355,14 @@ func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, no
 	if !ok || u.Context <= pol.Threshold || u.Guessed && !s.shadow {
 		return false
 	}
-	cp := t.Checkpoint
-	if cp.SHA == "" || cp.Baseline || !cp.At.After(t.Launched) || t.RotatedFor == cp.SHA || now.Sub(cp.At) < pol.Grace.Duration {
+	mark, ok := s.rotationPoint(sess, t, ev, now)
+	if !ok {
 		return false
 	}
-	key := "rotate:" + name + ":" + cp.SHA
+	key := "rotate:" + name + ":" + mark
 	if s.failed(t, key) {
 		s.escalate(name, key, fmt.Sprintf("%s could not be rotated at %s after %d tries; its context stays at %d tokens. See agentd status.",
-			name, shortHash(cp.SHA), len(t.Failures[key]), u.Context), t, now)
+			name, shortHash(mark), len(t.Failures[key]), u.Context), t, now)
 		return false
 	}
 	if !s.retryDue(t, key, now) {
@@ -364,13 +376,30 @@ func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, no
 		return false
 	}
 	err = s.act(name, ActRotate, &ActPayload{Key: key, Cwd: sess.Cwd, Account: sess.Account, Command: line, Transcript: id,
-		Context: u.Context, Checkpoint: cp.SHA}, func() error {
+		Context: u.Context, Checkpoint: mark}, func() error {
 		return s.tmux.Replace(name, sess.Cwd, line)
 	})
 	if err == nil && s.halt == nil && !s.shadow {
 		s.notePack(name, sess, facts)
 	}
 	return err == nil && s.halt == nil && !s.shadow
+}
+
+// rotationPoint is the checkpoint a session may be rotated at, if it has
+// reached one it has not been rotated at: a merge it reached after it was
+// launched, once Grace has passed, or for a coordinator a wake it was given
+// after it was launched and has handled.
+func (s *Supervisor) rotationPoint(sess Session, t *Track, ev Evidence, now time.Time) (string, bool) {
+	if sess.Role == RoleCoordinator {
+		w, ok := t.lastWake()
+		mark := fmt.Sprintf("wake:%d", t.WakeCount)
+		return mark, ok && w.Taken && w.At.After(t.Launched) && t.RotatedFor != mark && s.handled(t, ev, now)
+	}
+	cp := t.Checkpoint
+	if cp.SHA == "" || cp.Baseline || !cp.At.After(t.Launched) || t.RotatedFor == cp.SHA || now.Sub(cp.At) < s.cfg.Policies.Context.Grace.Duration {
+		return "", false
+	}
+	return cp.SHA, true
 }
 
 // overBudget says why the session must stop, or "": the stop time has come,
@@ -512,6 +541,10 @@ type restartFacts struct {
 	Tools       []string     `json:"tools,omitempty"`
 	Items       []GoalItem   `json:"items,omitempty"`
 	Acknowledge []FactRuling `json:"acknowledge,omitempty"`
+	// A coordinator: its repository, and the pack it starts from, written
+	// as it is launched.
+	Repository string `json:"repository,omitempty"`
+	Pack       string `json:"pack,omitempty"`
 }
 
 // restartPrompt is the fresh session's prompt: the fixed instruction, then
@@ -535,6 +568,9 @@ func (s *Supervisor) packFacts(name string, sess Session, t *Track, why string) 
 	}
 	if cp := t.Checkpoint; cp.SHA != "" {
 		f.LastMerge = cutUTF8(shortHash(cp.SHA)+" "+cp.Subject, progressCell)
+	}
+	if sess.Role == RoleCoordinator {
+		f.Repository, f.Pack = sess.Repository, sess.Workdir+"/"+PackFile
 	}
 	if id := s.cfg.caseOf(sess); id != "" && s.passesMCP() {
 		f.Tools, f.Items, f.Acknowledge = mcpFacts(s.st, id)
@@ -571,6 +607,14 @@ func (s *Supervisor) passesMCP() bool {
 // hands it: its case's context pack.
 func (s *Supervisor) launchCommand(name string, sess Session, t *Track, id, why string) ([]string, []byte) {
 	facts := s.packFacts(name, sess, t, why)
+	if sess.Role == RoleCoordinator && !s.shadow {
+		// A pack that cannot be written leaves the last one; the
+		// launch goes on.
+		_, pack := s.buildPack(sess.Repository, nil, s.clock.Now())
+		if err := writeAtomic(sess.Workdir+"/"+PackFile, pack); err != nil {
+			s.emit(name, Event{Kind: KindError, Error: &ErrorPayload{Step: "writing " + PackFile, Error: err.Error()}})
+		}
+	}
 	r := strings.NewReplacer("{brief}", sess.Workdir+"/BRIEF.md", "{status}", sess.Workdir+"/STATUS.md",
 		"{session_id}", id, "{prompt}", s.promptWith(facts, why), "{mcp}", mcpLaunchConfig(s.cfg, name, sess))
 	cmd := make([]string, len(s.cfg.Policies.Restart.Command))

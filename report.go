@@ -105,6 +105,11 @@ type ReportCase struct {
 	Since     time.Time `json:"since"`
 	Head      string    `json:"head,omitempty"`
 	OwnerOnly bool      `json:"owner_only"`
+	// A coordinator: its role, its wakes, and its spend per wake when
+	// known.
+	Role       string `json:"role,omitempty"`
+	Wakes      int    `json:"wakes,omitempty"`
+	WakeTokens *int64 `json:"wake_tokens,omitempty"`
 }
 
 // ReportDelivery is a merge or pull request agentd opened, found, or was
@@ -278,6 +283,12 @@ func ReportFrom(cfg *Config, st *LogState, host string, now time.Time) Report {
 			c := ReportCase{Session: n, State: string(rs.State), Since: rs.Since, Head: rs.Head, OwnerOnly: rr.OwnerOnly}
 			if secret(c.Head) {
 				c.Head = ""
+			}
+			if cfg.Sessions[n].Role == RoleCoordinator {
+				c.Role, c.Wakes = RoleCoordinator, rs.WakeCount
+				if per, ok := rs.wakeTokens(st.Mode == ModeLive); ok {
+					c.WakeTokens = &per
+				}
 			}
 			rr.Cases = append(rr.Cases, c)
 			count(c.State, 0, 0, 0, c.OwnerOnly)

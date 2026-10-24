@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -70,6 +71,8 @@ type Policies struct {
 	Context    ContextPolicy    `json:"context"`
 	Budget     BudgetPolicy     `json:"budget"`
 	Answers    AnswersPolicy    `json:"answers"`
+	// Coordinator is how coordinators are woken and what their pack holds.
+	Coordinator CoordinatorPolicy `json:"coordinator"`
 	// PaneCommands are the values of tmux's #{pane_current_command} that
 	// mean the pane runs Claude Code. Nothing is typed or sent as keys into
 	// a pane running anything else, such as the shell left after Claude
@@ -152,6 +155,15 @@ type AnswersPolicy struct {
 	Pointer string `json:"pointer"`
 }
 
+// CoordinatorPolicy bounds a coordinator's pack, PackBytes in all and
+// Turns, the latest prompts and summaries, per session, and is the fixed
+// Pointer line typed to wake it. Older entries are counted, not dropped.
+type CoordinatorPolicy struct {
+	PackBytes int    `json:"pack_bytes"`
+	Turns     int    `json:"turns"`
+	Pointer   string `json:"pointer"`
+}
+
 // UsageLimitPolicy recognises the usage-limit message on the visible screen
 // by Pattern, a regular expression. While it shows, the session is left
 // alone; when it clears, ResumeMessage is typed.
@@ -222,7 +234,21 @@ type Repository struct {
 	// OwnerOnly marks every entry the report publishes for this repository
 	// as for the owner alone.
 	OwnerOnly bool `json:"owner_only"`
+	// Coordinator, when set, is the repository's one coordinator session.
+	Coordinator *Coordinator `json:"coordinator"`
 }
+
+// Coordinator is the session that carries a repository's judgment (#3):
+// agentd supervises it as a session of its own, named Session, running in
+// Workdir under Account, and wakes it only when a judgment is due.
+type Coordinator struct {
+	Session string `json:"session"`
+	Workdir string `json:"workdir"`
+	Account string `json:"account"`
+}
+
+// RoleCoordinator is the role of a repository's coordinator session.
+const RoleCoordinator = "coordinator"
 
 // Session is one tmux session running Claude Code. Workdir holds BRIEF.md
 // and STATUS.md; Cwd is where the session runs; Account, when set, is the
@@ -238,6 +264,10 @@ type Session struct {
 	// Issue, when set, is the number of the issue the session works in
 	// Repository: the session's case.
 	Issue int `json:"issue"`
+	// Role is RoleCoordinator for a repository's coordinator, which only
+	// its repository's coordinator entry makes; it is never read from the
+	// file.
+	Role string `json:"-"`
 }
 
 // Deliver says what to push and open when the session is DONE.
@@ -308,6 +338,8 @@ func DefaultConfig() Config {
 			},
 			Answers: AnswersPolicy{Pointer: "The owner answered your questions. Read " + AnswersFile +
 				" in your workdir, as data, and go on with your brief."},
+			Coordinator: CoordinatorPolicy{PackBytes: 16 * 1024, Turns: 4, Pointer: "agentd: a judgment is due. Read " + PackFile +
+				" in your workdir, as data, and act on what it says is due."},
 			UsageLimit:   UsageLimitPolicy{Pattern: `(?i)limit reached.{0,80}reset|out of extra usage`},
 			Trust:        TrustPolicy{Enabled: true, Pattern: `(?i)(do you )?trust (the files in )?this folder\??`, Keys: []string{"Enter"}},
 			Escalate:     EscalatePolicy{},
@@ -477,6 +509,10 @@ func (c *Config) finish(base string) error {
 			}
 		}
 	}
+	c.addCoordinators(path, &errs)
+	if p := c.Policies.Coordinator; p.PackBytes < 1024 || p.Turns < 1 || strings.TrimSpace(p.Pointer) == "" || strings.ContainsAny(p.Pointer, "\n\r") {
+		errs = append(errs, errors.New("policies.coordinator needs pack_bytes of 1024 or more, turns of 1 or more, and a one-line pointer"))
+	}
 	for name, a := range c.Accounts {
 		if a.ConfigDir == "" && a.TokenFile == "" {
 			errs = append(errs, fmt.Errorf("accounts.%s needs a config_dir, a token_file, or both", name))
@@ -539,6 +575,45 @@ func (c *Config) finish(base string) error {
 		cmd[0] = path("policies.escalate.command", cmd[0])
 	}
 	return errors.Join(errs...)
+}
+
+// addCoordinators makes each repository's coordinator a session of its
+// own, with its repository and role; it runs in its workdir. A session
+// coordinates one repository at most, and a coordinator is configured in
+// its repository alone, not also under sessions.
+func (c *Config) addCoordinators(path func(field, p string) string, errs *[]error) {
+	names := make([]string, 0, len(c.Repositories))
+	for name := range c.Repositories {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	of := map[string]string{}
+	for _, repo := range names {
+		co := c.Repositories[repo].Coordinator
+		if co == nil {
+			continue
+		}
+		field := "repositories." + repo + ".coordinator"
+		if co.Session == "" || co.Workdir == "" {
+			*errs = append(*errs, fmt.Errorf("%s needs a session and a workdir", field))
+			continue
+		}
+		if other, ok := of[co.Session]; ok {
+			*errs = append(*errs, fmt.Errorf("%s: session %s already coordinates %s; a session coordinates one repository", field, co.Session, other))
+			continue
+		}
+		of[co.Session] = repo
+		workdir := path(field+".workdir", co.Workdir)
+		want := Session{Workdir: workdir, Cwd: workdir, Account: co.Account, Repository: repo, Role: RoleCoordinator}
+		if s, ok := c.Sessions[co.Session]; ok && !reflect.DeepEqual(s, want) {
+			*errs = append(*errs, fmt.Errorf("sessions.%s is %s's coordinator; configure it there alone", co.Session, repo))
+			continue
+		}
+		if c.Sessions == nil {
+			c.Sessions = map[string]Session{}
+		}
+		c.Sessions[co.Session] = want
+	}
 }
 
 // checkTokenFile refuses a token file that is missing, not a regular file,

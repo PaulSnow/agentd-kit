@@ -30,52 +30,56 @@ type Event struct {
 	Kind    string    `json:"kind"`
 	Mode    string    `json:"mode,omitempty"`
 
-	Start      *StartPayload      `json:"start,omitempty"`
-	Stop       *StopPayload       `json:"stop,omitempty"`
-	Observe    *ObservePayload    `json:"observe,omitempty"`
-	Transition *TransitionPayload `json:"transition,omitempty"`
-	Act        *ActPayload        `json:"act,omitempty"` // intent, action and would
-	Skip       *SkipPayload       `json:"skip,omitempty"`
-	Crash      *CrashPayload      `json:"crash,omitempty"`
-	Clear      *ClearPayload      `json:"clear,omitempty"`
-	Error      *ErrorPayload      `json:"error,omitempty"`
-	Warning    *WarningPayload    `json:"warning,omitempty"`
-	Item       *ItemPayload       `json:"item,omitempty"`
-	Seen       *SeenPayload       `json:"seen,omitempty"`
-	Cursor     *CursorPayload     `json:"cursor,omitempty"`
-	Usage      *UsagePayload      `json:"usage,omitempty"`
-	Checkpoint *CheckpointPayload `json:"checkpoint,omitempty"`
-	Poll       *PollPayload       `json:"poll,omitempty"`
-	Triage     *TriagePayload     `json:"triage,omitempty"`
-	Decision   *DecisionPayload   `json:"decision,omitempty"`
-	Answer     *AnswerPayload     `json:"answer,omitempty"`
-	Case       *CasePayload       `json:"case,omitempty"`
+	Start       *StartPayload       `json:"start,omitempty"`
+	Stop        *StopPayload        `json:"stop,omitempty"`
+	Observe     *ObservePayload     `json:"observe,omitempty"`
+	Transition  *TransitionPayload  `json:"transition,omitempty"`
+	Act         *ActPayload         `json:"act,omitempty"` // intent, action and would
+	Skip        *SkipPayload        `json:"skip,omitempty"`
+	Crash       *CrashPayload       `json:"crash,omitempty"`
+	Clear       *ClearPayload       `json:"clear,omitempty"`
+	Error       *ErrorPayload       `json:"error,omitempty"`
+	Warning     *WarningPayload     `json:"warning,omitempty"`
+	Item        *ItemPayload        `json:"item,omitempty"`
+	Seen        *SeenPayload        `json:"seen,omitempty"`
+	Cursor      *CursorPayload      `json:"cursor,omitempty"`
+	Usage       *UsagePayload       `json:"usage,omitempty"`
+	Checkpoint  *CheckpointPayload  `json:"checkpoint,omitempty"`
+	Poll        *PollPayload        `json:"poll,omitempty"`
+	Triage      *TriagePayload      `json:"triage,omitempty"`
+	Decision    *DecisionPayload    `json:"decision,omitempty"`
+	Answer      *AnswerPayload      `json:"answer,omitempty"`
+	Case        *CasePayload        `json:"case,omitempty"`
+	Turn        *TurnPayload        `json:"turn,omitempty"`
+	Coordinator *CoordinatorPayload `json:"coordinator,omitempty"`
 }
 
 // Event kinds.
 const (
-	KindStart      = "start"      // agentd started: mode, config, sessions
-	KindStop       = "stop"       // agentd stopped
-	KindObserve    = "observe"    // evidence for a session changed
-	KindTransition = "transition" // the session's state changed
-	KindIntent     = "intent"     // an action is about to be taken; its outcome follows
-	KindAction     = "action"     // an action was taken
-	KindWould      = "would"      // shadow mode: the action that would have been taken
-	KindSkip       = "skip"       // an action a policy declined, with the reason
-	KindCrash      = "crash"      // a session agentd saw alive, or restarted, is gone: its cause
-	KindClear      = "clear"      // the owner cleared a parked session (agentd clear)
-	KindError      = "error"      // observation or action failed
-	KindWarning    = "warning"    // agentd itself noticed something: a torn log line, an intent cut short
-	KindItem       = "item"       // something new the owner may want to know: an issue, a request, a discussion, mail
-	KindSeen       = "seen"       // the owner marked items seen
-	KindCursor     = "cursor"     // how far a source of items has been read
-	KindUsage      = "usage"      // what a session's transcript has cost so far
-	KindCheckpoint = "checkpoint" // a merge newly at the head of a session's worktree
-	KindPoll       = "poll"       // a poll of a forge that found something, failed, or recovered
-	KindTriage     = "triage"     // the checked answer of a triage job: each item's kind, needs and summary
-	KindDecision   = "decision"   // a session's questions.json changed: the decisions it raises
-	KindAnswer     = "answer"     // the owner answered one of a session's decisions
-	KindCase       = "case"       // a fact about a case: the pack a session was handed, its report, or the owner's ruling
+	KindStart       = "start"       // agentd started: mode, config, sessions
+	KindStop        = "stop"        // agentd stopped
+	KindObserve     = "observe"     // evidence for a session changed
+	KindTransition  = "transition"  // the session's state changed
+	KindIntent      = "intent"      // an action is about to be taken; its outcome follows
+	KindAction      = "action"      // an action was taken
+	KindWould       = "would"       // shadow mode: the action that would have been taken
+	KindSkip        = "skip"        // an action a policy declined, with the reason
+	KindCrash       = "crash"       // a session agentd saw alive, or restarted, is gone: its cause
+	KindClear       = "clear"       // the owner cleared a parked session (agentd clear)
+	KindError       = "error"       // observation or action failed
+	KindWarning     = "warning"     // agentd itself noticed something: a torn log line, an intent cut short
+	KindItem        = "item"        // something new the owner may want to know: an issue, a request, a discussion, mail
+	KindSeen        = "seen"        // the owner marked items seen
+	KindCursor      = "cursor"      // how far a source of items has been read
+	KindUsage       = "usage"       // what a session's transcript has cost so far
+	KindCheckpoint  = "checkpoint"  // a merge newly at the head of a session's worktree
+	KindPoll        = "poll"        // a poll of a forge that found something, failed, or recovered
+	KindTriage      = "triage"      // the checked answer of a triage job: each item's kind, needs and summary
+	KindDecision    = "decision"    // a session's questions.json changed: the decisions it raises
+	KindAnswer      = "answer"      // the owner answered one of a session's decisions
+	KindCase        = "case"        // a fact about a case: the pack a session was handed, its report, or the owner's ruling
+	KindTurn        = "turn"        // a prompt or end-of-turn summary read from a session's transcript
+	KindCoordinator = "coordinator" // a session claimed a repository's coordinator, or the owner released it
 )
 
 // Modes, in the mode every event carries. A run reads only the events of
@@ -103,6 +107,7 @@ const (
 	ActRotate   = "rotate" // a fresh context at a checkpoint: not a crash, not a restart
 	ActStop     = "stop"   // the budget or the stop time was reached
 	ActAnswer   = "answer" // the owner's answers written to answers.json and the pointer typed
+	ActWake     = "wake"   // a coordinator's pack written and its pointer typed: a judgment is due
 )
 
 // StartPayload is a run's start: the sessions it supervises.
@@ -168,8 +173,10 @@ type ActPayload struct {
 	Transcript string `json:"transcript,omitempty"`
 	Context    int64  `json:"context,omitempty"`
 	Checkpoint string `json:"checkpoint,omitempty"`
-	// A stop: why.
+	// A stop: why. A wake: what is due.
 	Reason string `json:"reason,omitempty"`
+	// A wake: the coordinator's spend when it was woken, when known.
+	Spend *int64 `json:"spend,omitempty"`
 	// An answer, or a restart that hands answers over: the decisions whose
 	// answers answers.json holds, newly delivered.
 	Answers []string `json:"answers,omitempty"`
@@ -301,7 +308,7 @@ func (e Event) check() error {
 		KindSkip: e.Skip != nil, KindCrash: e.Crash != nil, KindClear: e.Clear != nil, KindError: e.Error != nil, KindWarning: e.Warning != nil,
 		KindItem: e.Item != nil, KindSeen: e.Seen != nil, KindCursor: e.Cursor != nil, KindUsage: e.Usage != nil,
 		KindCheckpoint: e.Checkpoint != nil, KindPoll: e.Poll != nil, KindTriage: e.Triage != nil, KindDecision: e.Decision != nil,
-		KindAnswer: e.Answer != nil, KindCase: e.Case != nil, "act": e.Act != nil,
+		KindAnswer: e.Answer != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, "act": e.Act != nil,
 	}
 	want := e.Kind
 	switch e.Kind {
@@ -320,7 +327,7 @@ func (e Event) check() error {
 	// too; the owner marks items seen.
 	failedTriage := e.Kind == KindError && e.Error.Triage != nil
 	switch {
-	case e.Kind != KindCase && (e.Kind == KindItem || e.Kind == KindCursor || e.Kind == KindTriage || failedTriage) != (e.Mode == ModeShared):
+	case e.Kind != KindCase && e.Kind != KindCoordinator && (e.Kind == KindItem || e.Kind == KindCursor || e.Kind == KindTriage || failedTriage) != (e.Mode == ModeShared):
 		return fmt.Errorf("a %s event must not carry mode %q", e.Kind, e.Mode)
 	case e.Kind == KindSeen && e.Mode != ModeOwner:
 		return fmt.Errorf("a seen event is the owner's, not %q", e.Mode)
@@ -328,6 +335,10 @@ func (e Event) check() error {
 		return errors.New("an answer event is the owner's, for one session")
 	case e.Kind == KindDecision && (e.Mode == ModeOwner || e.Session == ""):
 		return errors.New("a decision event is a run's, for one session")
+	case e.Kind == KindTurn && (e.Mode == ModeOwner || e.Mode == ModeShared || e.Session == "" || e.Turn.Role != TurnPrompt && e.Turn.Role != TurnSummary):
+		return errors.New("a turn event is a run's, for one session, and a prompt or a summary")
+	case e.Kind == KindCoordinator && (e.Coordinator.Repository == "" || !(e.Mode == ModeShared && e.Session != "" || e.Mode == ModeOwner && e.Session == "")):
+		return errors.New("a coordinator claim is a shared fact of one session; a release is the owner's, for no session")
 	case e.Kind == KindCase:
 		if err := e.Case.check(); err != nil {
 			return err

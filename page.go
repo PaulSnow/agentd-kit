@@ -879,7 +879,7 @@ table { border-collapse: collapse; } td { padding: .1rem .6rem .1rem 0; vertical
 {{if .Hidden}}<p class="muted">{{.Hidden}} hidden repositories.</p>{{end}}
 {{range .Repos}}<section>
 <h2 class="repo">{{.Name}} <span class="muted">{{.Key}}</span>{{if .NeedsYou}} <span class="needs">needs you: {{.NeedsYou}}</span>{{end}} <a href="{{.HideLink}}">{{if .Hidden}}show{{else}}hide{{end}}</a></h2>
-{{if .Cases}}<table>{{range .Cases}}<tr><td>{{.Session}}</td><td>{{.State}}</td><td class="muted">since {{when .Since}}</td><td>{{.Head}}</td></tr>{{end}}</table>{{end}}
+{{if .Cases}}<table>{{range .Cases}}<tr><td>{{.Session}}</td><td>{{.State}}</td><td class="muted">since {{when .Since}}</td><td>{{.Head}}</td>{{if .Role}}<td class="muted">{{.Role}}: {{.Wakes}} wakes{{with .WakeTokens}}, {{.}} tokens per wake{{end}}</td>{{end}}</tr>{{end}}</table>{{end}}
 {{if .Issues}}<table>{{range .Issues}}<tr><td>#{{.Number}}</td><td>{{.Title}}</td><td class="muted">updated {{when .Updated}}</td><td><a href="{{.HideLink}}">hide</a></td></tr>{{end}}</table>{{end}}
 {{if .HiddenIssues}}<p class="muted">{{.HiddenIssues}} hidden issues. <a href="{{.ShowIssues}}">show them</a></p>{{end}}
 </section>{{else}}<p>Nothing to show.</p>{{end}}

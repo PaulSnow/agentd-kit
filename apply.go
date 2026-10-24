@@ -24,6 +24,9 @@ type LogState struct {
 	Cursors map[string]time.Time  // how far each source of items has been read
 	Polls   map[string]PollRecord // each forge source's latest poll record
 	Cases   map[string]*Case      // each case by id
+	// Coordinators are the claims on each repository's coordinator: the
+	// session that holds it, by repository.
+	Coordinators map[string]string
 
 	cfg *Config // its policies, read as each event is applied
 }
@@ -31,7 +34,8 @@ type LogState struct {
 // NewLogState is the empty state of mode under the configuration's policies.
 func NewLogState(cfg *Config, mode string) *LogState {
 	return &LogState{Mode: mode, Tracks: map[string]*Track{}, Pending: map[string]Event{}, Items: map[string]*Item{},
-		Cursors: map[string]time.Time{}, Polls: map[string]PollRecord{}, Cases: map[string]*Case{}, cfg: cfg}
+		Cursors: map[string]time.Time{}, Polls: map[string]PollRecord{}, Cases: map[string]*Case{},
+		Coordinators: map[string]string{}, cfg: cfg}
 }
 
 // setItem changes a copy of the item and puts the copy in its place: a
@@ -92,6 +96,17 @@ func (st *LogState) apply(e Event) {
 	st.Events++
 	if e.Kind == KindCase {
 		st.applyCase(e)
+		return
+	}
+	if e.Kind == KindCoordinator {
+		if st.Coordinators == nil {
+			st.Coordinators = map[string]string{}
+		}
+		if e.Mode == ModeOwner {
+			delete(st.Coordinators, e.Coordinator.Repository)
+		} else if st.Coordinators[e.Coordinator.Repository] == "" {
+			st.Coordinators[e.Coordinator.Repository] = e.Session // the first claim holds
+		}
 		return
 	}
 	if e.Session == "" {
@@ -182,6 +197,8 @@ func (st *LogState) apply(e Event) {
 		}
 	case KindCheckpoint:
 		t.Checkpoint = Checkpoint{CheckpointPayload: *e.Checkpoint, At: e.Time}
+	case KindTurn:
+		t.applyTurn(e.Turn)
 	case KindTransition:
 		t.State, t.Since = State(e.Transition.To), e.Time
 		t.Reason = e.Transition.Reason
@@ -274,7 +291,7 @@ func (st *LogState) apply(e Event) {
 				at = *e.Warning.IntentAt
 			}
 			switch a.Action {
-			case ActEscalate, ActUpdate, ActNudge, ActResume, ActTrust, ActRotate, ActDecline:
+			case ActEscalate, ActUpdate, ActNudge, ActResume, ActTrust, ActRotate, ActDecline, ActWake:
 				t.applyAction(a, false, false, at)
 			}
 			// An answer cut short may not have reached the file: it is
@@ -325,6 +342,8 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 			t.Nudges, t.LastNudge, t.Limited = 0, time.Time{}, false
 			t.launched(a.Transcript, at)
 		}
+	case ActWake:
+		t.applyWake(a, taken, counted, at)
 	case ActStop:
 		t.Stopped = a.Reason
 		if taken { // its session is gone by the owner's policy, not a crash
