@@ -6,15 +6,61 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
 
-type fakeClock struct{ now time.Time }
+// fakeClock is a clock the test moves. After channels fire when advance
+// passes their time.
+type fakeClock struct {
+	mu      sync.Mutex
+	now     time.Time
+	waiters []clockWaiter
+}
 
-func (c *fakeClock) Now() time.Time          { return c.now }
-func (c *fakeClock) Sleep(time.Duration)     {}
-func (c *fakeClock) advance(d time.Duration) { c.now = c.now.Add(d) }
+type clockWaiter struct {
+	at time.Time
+	ch chan time.Time
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeClock) Sleep(time.Duration) {}
+
+func (c *fakeClock) After(d time.Duration) <-chan time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ch := make(chan time.Time, 1)
+	c.waiters = append(c.waiters, clockWaiter{c.now.Add(d), ch})
+	return ch
+}
+
+func (c *fakeClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+	kept := c.waiters[:0]
+	for _, w := range c.waiters {
+		if !w.at.After(c.now) {
+			w.ch <- c.now
+			continue
+		}
+		kept = append(kept, w)
+	}
+	c.waiters = kept
+}
+
+// waiting is how many After channels have not fired yet.
+func (c *fakeClock) waiting() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.waiters)
+}
 
 type call struct {
 	op   string
@@ -31,6 +77,7 @@ type call struct {
 // pane, as tmux's remain-on-exit does, showing deadScreen with exit status
 // exit; one without dies outright.
 type fakeTmux struct {
+	mu         sync.Mutex
 	alive      map[string]bool
 	panes      map[string]string
 	history    map[string]string
@@ -55,11 +102,15 @@ func newFakeTmux() *fakeTmux {
 }
 
 func (f *fakeTmux) HasSession(name string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, call{op: "has-session", name: name})
 	return f.alive[name], nil
 }
 
 func (f *fakeTmux) CapturePane(name string, lines int) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, call{op: "capture-pane", name: name})
 	if !f.alive[name] {
 		return "", fmt.Errorf("no session %s", name)
@@ -71,6 +122,8 @@ func (f *fakeTmux) CapturePane(name string, lines int) (string, error) {
 }
 
 func (f *fakeTmux) Pane(name string) (PaneInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, call{op: "pane", name: name})
 	if f.onPane != nil {
 		f.onPane(name)
@@ -109,6 +162,8 @@ func (f *fakeTmux) start(name string) {
 }
 
 func (f *fakeTmux) Respawn(name, cwd, command string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, call{op: "respawn", name: name, args: []string{cwd, command}})
 	f.mutations++
 	if !f.dead[name] {
@@ -119,6 +174,8 @@ func (f *fakeTmux) Respawn(name, cwd, command string) error {
 }
 
 func (f *fakeTmux) NewSession(name, cwd, command string, width, height int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, call{op: "new-session", name: name, args: []string{cwd, command}})
 	f.mutations++
 	if err := f.newErr[name]; err != nil {
@@ -132,6 +189,8 @@ func (f *fakeTmux) NewSession(name, cwd, command string, width, height int) erro
 }
 
 func (f *fakeTmux) Type(name, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, call{op: "type", name: name, args: []string{text}})
 	f.mutations++
 	f.panes[name] += "\n> " + text
@@ -143,6 +202,8 @@ func (f *fakeTmux) Type(name, text string) error {
 // folder; choosing 2 ("No, exit") ends the session. A sticky prompt
 // ignores the keys.
 func (f *fakeTmux) Keys(name string, keys ...string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, call{op: "keys", name: name, args: keys})
 	f.mutations++
 	if f.sticky[name] {
@@ -172,6 +233,8 @@ func (f *fakeTmux) Keys(name string, keys ...string) error {
 }
 
 func (f *fakeTmux) count(op, name string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	n := 0
 	for _, c := range f.calls {
 		if c.op == op && (name == "" || c.name == name) {
@@ -182,6 +245,7 @@ func (f *fakeTmux) count(op, name string) int {
 }
 
 type fakeGit struct {
+	mu         sync.Mutex
 	clean      bool
 	branch     string
 	branches   map[string]string // branch per worktree, over branch
@@ -199,16 +263,33 @@ type fakeGit struct {
 	fetches    int
 }
 
-func (g *fakeGit) Fetch(string) error         { g.fetches++; return nil }
-func (g *fakeGit) Clean(string) (bool, error) { return g.clean, nil }
+func (g *fakeGit) Fetch(string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.fetches++
+	return nil
+}
+func (g *fakeGit) Clean(string) (bool, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.clean, nil
+}
 func (g *fakeGit) Branch(dir string) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	if b, ok := g.branches[dir]; ok {
 		return b, nil
 	}
 	return g.branch, nil
 }
-func (g *fakeGit) Head(string) (string, error) { return g.head, nil }
+func (g *fakeGit) Head(string) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.head, nil
+}
 func (g *fakeGit) RemoteURLs(dir string) ([]string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	u := g.remote
 	if r, ok := g.remotes[dir]; ok {
 		u = r
@@ -218,23 +299,46 @@ func (g *fakeGit) RemoteURLs(dir string) ([]string, error) {
 	}
 	return []string{u}, nil
 }
-func (g *fakeGit) Rewrites(string) ([]string, error) { return g.rewrites, nil }
-func (g *fakeGit) ConfigHash(string) (string, error) { return HashPane(g.config), nil }
+func (g *fakeGit) Rewrites(string) ([]string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.rewrites, nil
+}
+func (g *fakeGit) ConfigHash(string) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return HashPane(g.config), nil
+}
 func (g *fakeGit) Ahead(dir, target string) (int, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	if n, ok := g.aheads[dir]; ok {
 		return n, nil
 	}
 	return g.ahead, nil
 }
-func (g *fakeGit) Contains(dir, sha, target string) (bool, error) { return g.inTarget[sha], nil }
-func (g *fakeGit) FirstSubject(string, string) (string, error)    { return g.subject, nil }
-func (g *fakeGit) Messages(string, string) (string, error)        { return g.messages, nil }
+func (g *fakeGit) Contains(dir, sha, target string) (bool, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.inTarget[sha], nil
+}
+func (g *fakeGit) FirstSubject(string, string) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.subject, nil
+}
+func (g *fakeGit) Messages(string, string) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.messages, nil
+}
 
 // fakeForge records pushes and opened requests, which stay open. merged are
 // requests merged before the test, with the head commit each carried. fail
 // makes Open fail without opening; recordThenFail opens the request and then
 // fails, as a forge whose reply could not be read would.
 type fakeForge struct {
+	mu             sync.Mutex
 	pushes         []string
 	pushedSHAs     []string
 	pushURLs       []string
@@ -249,6 +353,8 @@ type mergedRequest struct {
 }
 
 func (f *fakeForge) Push(dir, url, sha, branch string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.pushes = append(f.pushes, branch)
 	f.pushURLs = append(f.pushURLs, url)
 	f.pushedSHAs = append(f.pushedSHAs, sha)
@@ -256,6 +362,8 @@ func (f *fakeForge) Push(dir, url, sha, branch string) error {
 }
 
 func (f *fakeForge) Open(repo Repository, mr MergeRequest, dir string) (MergeResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.fail != nil {
 		return MergeResult{}, f.fail
 	}
@@ -271,6 +379,8 @@ func (f *fakeForge) result(n int) MergeResult {
 }
 
 func (f *fakeForge) Find(repo Repository, source, target string) ([]MergeResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	var found []MergeResult
 	for _, m := range f.merged {
 		if m.source == source && m.target == target {
@@ -288,6 +398,7 @@ func (f *fakeForge) Find(repo Repository, source, target string) ([]MergeResult,
 // fakeRunner runs escalations and gates. A gate exits gateExit, or fails to
 // run with gateErr; onGate runs during it, to change the tree under it.
 type fakeRunner struct {
+	mu       sync.Mutex
 	calls    [][]string
 	attempts int
 	failing  int // fail this many calls first
@@ -305,15 +416,29 @@ type gateRun struct {
 }
 
 func (r *fakeRunner) Gate(dir string, argv, env []string, timeout time.Duration) (int, string, error) {
+	r.mu.Lock()
 	r.gates = append(r.gates, gateRun{dir, argv, timeout})
 	r.gateEnv = env
-	if r.onGate != nil {
-		r.onGate()
+	onGate := r.onGate
+	r.mu.Unlock()
+	if onGate != nil { // unlocked: it may wait, as a slow gate does
+		onGate()
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	return r.gateExit, "gate output", r.gateErr
 }
 
+// gateCount is how many gates have started.
+func (r *fakeRunner) gateCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.gates)
+}
+
 func (r *fakeRunner) Run(argv []string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.attempts++
 	if r.failing > 0 {
 		r.failing--
@@ -395,10 +520,12 @@ func (h *harness) deliver(name string, d Deliver) {
 	h.cfg.Sessions[name] = s
 }
 
-// ticks runs n passes, every d apart.
+// ticks runs n passes, every d apart, each with the jobs it started run to
+// their end, so a test sees a pass whole.
 func (h *harness) ticks(n int, d time.Duration) {
 	for i := 0; i < n; i++ {
 		h.sup.Pass()
+		h.sup.Wait()
 		h.clock.advance(d)
 	}
 }
