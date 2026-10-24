@@ -9,6 +9,7 @@
 //	agentd clear [--config PATH] [--log PATH] SESSION
 //	agentd inventory [--config PATH]
 //	agentd report [--config PATH] [--log PATH] [--shadow] [--host NAME] --out PATH
+//	agentd items [--config PATH] [--log PATH] [--new] [--seen ID,...]
 package main
 
 import (
@@ -50,6 +51,8 @@ func main() {
 		err = inventoryCmd(os.Args[2:], os.Stdout)
 	case "report":
 		err = reportCmd(os.Args[2:])
+	case "items":
+		err = itemsCmd(os.Args[2:], os.Stdout)
 	case "version", "--version":
 		fmt.Println("agentd", version)
 		return
@@ -75,6 +78,7 @@ func usage() {
   agentd clear [--config PATH] [--log PATH] SESSION
   agentd inventory [--config PATH]
   agentd report [--config PATH] [--log PATH] [--shadow] [--host NAME] --out PATH
+  agentd items [--config PATH] [--log PATH] [--new] [--seen ID,...]
   agentd version
 
 run supervises the configured sessions; --shadow observes and logs what it
@@ -84,7 +88,10 @@ worktree was already delivered as REF by other means, so run never delivers
 it again. clear lifts a crash-looping session's park, so it may be
 restarted again. inventory lists every repository in the tracking system's
 manifest with its open work and clones, from the tracking snapshot. report
-writes report.json for the tracking site from the event log, atomically.`)
+writes report.json for the tracking site from the event log, atomically.
+items lists what is new since the owner last looked: issues, requests and
+discussions from the tracking snapshots, and mail findings; --seen marks
+items seen.`)
 }
 
 func loadConfigFlag(fs *flag.FlagSet, args []string) (*Config, *string, error) {

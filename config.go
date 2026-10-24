@@ -303,6 +303,7 @@ func (c *Config) finish(base string) error {
 	c.TranscriptDir = path("transcript_dir", c.TranscriptDir)
 	c.Tracking.Manifest = path("tracking.manifest", c.Tracking.Manifest)
 	c.Tracking.Snapshot = path("tracking.snapshot", c.Tracking.Snapshot)
+	c.Tracking.Mail = path("tracking.mail", c.Tracking.Mail)
 	if c.PollInterval.Duration <= 0 {
 		errs = append(errs, errors.New("poll_interval must be positive"))
 	}

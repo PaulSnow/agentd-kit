@@ -21,6 +21,7 @@ import (
 type Tracking struct {
 	Manifest string `json:"manifest"`
 	Snapshot string `json:"snapshot"`
+	Mail     string `json:"mail"` // the mail findings file, beside the snapshot
 }
 
 // ManifestRepo is one entry of the tracking system's repository manifest.
@@ -165,6 +166,8 @@ type Inventory struct {
 	Repos []*RepoRecord
 	Scans []SnapScan
 	byKey map[string]*RepoRecord
+
+	snapshot *Snapshot // as read, for the items it holds
 }
 
 // repoKey is a repository's identity: its platform and project path, in
@@ -211,7 +214,7 @@ func LoadInventory(tr Tracking) (*Inventory, error) {
 	if _, ok := keys["Repos"]; !ok || snap.AsOf.IsZero() {
 		return nil, fmt.Errorf("tracking snapshot %s: unknown shape: AsOf and Repos must be present", tr.Snapshot)
 	}
-	inv := &Inventory{AsOf: snap.AsOf, Host: snap.Host, Scans: snap.Scans, byKey: map[string]*RepoRecord{}}
+	inv := &Inventory{AsOf: snap.AsOf, Host: snap.Host, Scans: snap.Scans, byKey: map[string]*RepoRecord{}, snapshot: &snap}
 	var errs []error
 	for i, m := range manifest {
 		switch {

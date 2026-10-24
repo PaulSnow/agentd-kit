@@ -19,14 +19,17 @@ type LogState struct {
 	Pending map[string]Event // intents with no outcome yet, by intent id
 	Started time.Time
 	Stopped time.Time
-	Events  int // events of this mode, and the owner's, applied
+	Events  int                  // events of this mode, and the owner's, applied
+	Items   map[string]*Item     // new items by id, and whether the owner saw them
+	Cursors map[string]time.Time // how far each source of items has been read
 
 	cfg *Config // its policies, read as each event is applied
 }
 
 // NewLogState is the empty state of mode under the configuration's policies.
 func NewLogState(cfg *Config, mode string) *LogState {
-	return &LogState{Mode: mode, Tracks: map[string]*Track{}, Pending: map[string]Event{}, cfg: cfg}
+	return &LogState{Mode: mode, Tracks: map[string]*Track{}, Pending: map[string]Event{}, Items: map[string]*Item{},
+		Cursors: map[string]time.Time{}, cfg: cfg}
 }
 
 // track returns the session's Track, creating it.
@@ -62,7 +65,7 @@ func (st *LogState) CutShort() []Event {
 // ignored; the owner's records count for both. In shadow mode a would event
 // counts as the action taken, so the shadow keeps its own counters.
 func (st *LogState) apply(e Event) {
-	if e.Mode != st.Mode && e.Mode != ModeOwner && e.Mode != "" {
+	if e.Mode != st.Mode && e.Mode != ModeOwner && e.Mode != ModeShared && e.Mode != "" {
 		return
 	}
 	st.Events++
@@ -72,6 +75,20 @@ func (st *LogState) apply(e Event) {
 			st.Started, st.Stopped = e.Time, time.Time{}
 		case KindStop:
 			st.Stopped = e.Time
+		case KindItem:
+			// An item is one however often it is seen: the first sighting
+			// stands, and so does the owner's having seen it.
+			if _, ok := st.Items[e.Item.ID]; !ok {
+				st.Items[e.Item.ID] = &Item{ItemPayload: *e.Item, FirstSeen: e.Time}
+			}
+		case KindSeen:
+			for _, id := range e.Seen.IDs {
+				if it := st.Items[id]; it != nil {
+					it.Seen = true
+				}
+			}
+		case KindCursor:
+			st.Cursors[e.Cursor.Source] = e.Cursor.AsOf
 		}
 		return
 	}
