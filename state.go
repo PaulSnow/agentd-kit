@@ -123,13 +123,14 @@ type QuestionsEscalation struct {
 // whichever comes first: an escalation a worker finishes after the dialog
 // went away settles an episode that is over.
 type DialogEscalation struct {
-	Showing   bool      // a dialog shows, as the last observation logged said
-	Episode   int       // dialog episodes seen so far; the one showing, if any
-	Since     time.Time // when the episode showing was first logged
-	Declined  int       // the latest episode declined, or would have been
-	Escalated int       // the latest episode escalated
-	N         int       // dialog escalations so far, numbering their keys
-	Last      time.Time // when the last was posted
+	Showing    bool      // a dialog shows, as the last observation logged said
+	Episode    int       // dialog episodes seen so far; the one showing, if any
+	Since      time.Time // when the episode showing was first logged
+	Declined   int       // the latest episode declined, or would have been
+	DeclinedAt time.Time // when it was
+	Escalated  int       // the latest episode escalated
+	N          int       // dialog escalations so far, numbering their keys
+	Last       time.Time // when the last was posted
 }
 
 // Open says whether the dialog now showing has been escalated.

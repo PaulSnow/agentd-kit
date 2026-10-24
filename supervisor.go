@@ -478,7 +478,7 @@ func (s *Supervisor) observe(name string, sess Session) (Evidence, error) {
 				break
 			}
 		}
-		if ev.Dialog == "" && dialogShape(screen) {
+		if ev.DialogShape = dialogShape(screen); ev.Dialog == "" && ev.DialogShape {
 			ev.Dialog = "a question line with numbered options"
 		}
 	}
@@ -908,11 +908,25 @@ func (s *Supervisor) escalateDialog(name, pattern string, t *Track, now time.Tim
 // declineDialog sends Escape, once per episode, to a dialog that has shown
 // for the policy's DeclineAfter: a refusal lets the agent adapt where a
 // dialog nobody answers stops it for good. It never approves: Escape is the
-// only key it sends, and only to the screen the pass read.
+// only key it sends, and only to the screen the pass read, which must have
+// a dialog's shape: a pattern alone may match words in a session's output.
+// A dialog still showing at a later pass, the same one or the next the
+// agent's retry raised, is escalated once more: the owner was told it
+// would be declined.
 func (s *Supervisor) declineDialog(name string, t *Track, ev Evidence, now time.Time) {
 	after := s.cfg.Policies.Dialog.DeclineAfter.Duration
 	dq := &t.Dialog
-	if after <= 0 || !dq.Showing || dq.Declined >= dq.Episode || now.Sub(dq.Since) < after {
+	if after <= 0 || !dq.Showing {
+		return
+	}
+	if dq.Declined == dq.Episode {
+		if now.After(dq.DeclinedAt) {
+			s.escalate(name, fmt.Sprintf("dialog-declined:%s:%d", name, dq.Episode),
+				fmt.Sprintf("%s: agentd declined its dialog at %s, but a dialog still shows; it will not decline again. Attach and answer it.", name, dq.DeclinedAt.Format(time.RFC3339)), t, now)
+		}
+		return
+	}
+	if dq.Declined > dq.Episode || !ev.DialogShape || now.Sub(dq.Since) < after {
 		return
 	}
 	keys := []string{"Escape"}

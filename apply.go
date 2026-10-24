@@ -265,7 +265,7 @@ func (st *LogState) apply(e Event) {
 				at = *e.Warning.IntentAt
 			}
 			switch a.Action {
-			case ActEscalate, ActUpdate, ActNudge, ActResume, ActTrust, ActRotate:
+			case ActEscalate, ActUpdate, ActNudge, ActResume, ActTrust, ActRotate, ActDecline:
 				t.applyAction(a, false, false, at)
 			}
 			// An answer cut short may not have reached the file: it is
@@ -336,7 +336,7 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 		// Once per episode, a would-be or cut-short one too: Escape twice
 		// could reach whatever the first left on screen.
 		if a.Episode > t.Dialog.Declined {
-			t.Dialog.Declined = a.Episode
+			t.Dialog.Declined, t.Dialog.DeclinedAt = a.Episode, at
 		}
 	case ActEscalate, ActUpdate:
 		t.Posted[a.Key] = true

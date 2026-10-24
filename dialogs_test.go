@@ -105,9 +105,11 @@ func TestDialogRecognisedByItsShape(t *testing.T) {
 		want bool
 	}{
 		"subagent": {screen(t, "subagent-dialog.txt", 5), true},
-		"bare":     {"Do you want to create notes.md?\n  1. Yes\n  2. No\n", true},
+		"bare":     {"Do you want to create notes.md?\n❯ 1. Yes\n  2. No\n", true},
 		"quoted":   {"> Do you want to proceed?\nthe test prints the prompt text\n", false},
 		"list":     {"Steps:\n1. Build\n2. Test\n", false},
+		"prose":    {"⏺ Which approach do you prefer?\n\n  1. Rewrite\n  2. Patch\n", false},
+		"nocursor": {"Which approach do you prefer?\n  1. Rewrite\n  2. Patch\n", false},
 		"working":  {screen(t, "subagent-working.txt", 5), false},
 	} {
 		if got := dialogShape(c.pane); got != c.want {
@@ -156,6 +158,9 @@ func TestDialogDeclinedAfterPolicy(t *testing.T) {
 	if h.count(KindAction, ActDecline, "s1") != 1 || h.tmux.count("type", "s1") != 0 {
 		t.Fatalf("declines = %d, typed = %d", h.count(KindAction, ActDecline, "s1"), h.tmux.count("type", "s1"))
 	}
+	if len(h.runner.calls) != 2 || !strings.Contains(h.runner.calls[1][4], "still shows") {
+		t.Fatalf("escalations = %v, want a second saying a dialog still shows after the decline", h.runner.calls)
+	}
 	sameAfterReplay(t, h, "after a decline")
 	h.restart(false) // the decline is not repeated across a restart of agentd
 	h.ticks(2, 5*time.Minute)
@@ -194,7 +199,8 @@ func TestDialogDeclineShadow(t *testing.T) {
 	}
 }
 
-// A parked session is never typed into, whatever its screen shows.
+// A parked session is never typed into, whatever its screen shows, nor by
+// any action that asks to type: the safeguard refuses it before the pane.
 func TestParkedSessionNeverTyped(t *testing.T) {
 	h := newHarness(t, false, "s1")
 	h.cfg.Policies.Dialog.DeclineAfter = Duration{5 * time.Minute}
@@ -207,8 +213,48 @@ func TestParkedSessionNeverTyped(t *testing.T) {
 	h.ticks(12, 5*time.Minute)
 	h.tmux.panes["s1"] = screen(t, "subagent-dialog.txt", 0)
 	h.ticks(4, 5*time.Minute)
+	err := h.sup.typeInto("s1", ActNudge, &ActPayload{Message: "go on"}, tr, StillHash(h.tmux.panes["s1"]), func() error {
+		return h.tmux.Type("s1", "go on")
+	})
+	if err != errParked {
+		t.Fatalf("typeInto a parked session = %v, want errParked", err)
+	}
 	if got := typed(h, "s1"); got != 0 {
 		t.Fatalf("typed %d times into a parked session", got)
+	}
+}
+
+// A decline cut short by a crash of agentd may have sent Escape: it counts
+// as sent, so the dialog is not declined twice.
+func TestCutShortDeclineIsNotRepeated(t *testing.T) {
+	cfg := DefaultConfig()
+	st := NewLogState(&cfg, ModeLive)
+	act := &ActPayload{Action: ActDecline, Intent: "i1", Keys: []string{"Escape"}, Episode: 1}
+	for _, e := range []Event{
+		{V: EventVersion, Time: pageAt, Kind: KindObserve, Mode: ModeLive, Session: "s1", Observe: &ObservePayload{State: string(BlockedOnOwner), Alive: true, Dialog: true}},
+		{V: EventVersion, Time: pageAt, Kind: KindWarning, Mode: ModeLive, Session: "s1", Warning: &WarningPayload{Warning: "cut short", Intent: act}},
+	} {
+		st.apply(e)
+	}
+	if d := st.Tracks["s1"].Dialog; d.Declined != 1 || d.Episode != 1 {
+		t.Fatalf("dialog = %+v, want episode 1 declined", d)
+	}
+}
+
+// Words a pattern matches in a session's output block it and escalate, but
+// are never declined: only a dialog's shape is.
+func TestPatternAloneIsNotDeclined(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.cfg.Policies.Dialog.DeclineAfter = Duration{10 * time.Minute}
+	h.restart(false)
+	h.status("s1", working)
+	h.alive("s1", "the test prints: Do you want to proceed")
+	h.ticks(8, 5*time.Minute)
+	if h.state("s1") != BlockedOnOwner {
+		t.Fatalf("state = %s, want blocked-on-owner", h.state("s1"))
+	}
+	if got := keysSent(h, "s1"); len(got) != 0 {
+		t.Fatalf("keys %v for a pattern without a dialog's shape", got)
 	}
 }
 
