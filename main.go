@@ -7,6 +7,7 @@
 //	agentd config [--config PATH]
 //	agentd mark-delivered [--config PATH] [--log PATH] SESSION WORKTREE REF
 //	agentd clear [--config PATH] [--log PATH] SESSION
+//	agentd inventory [--config PATH]
 package main
 
 import (
@@ -44,6 +45,8 @@ func main() {
 		err = markDeliveredCmd(os.Args[2:])
 	case "clear":
 		err = clearCmd(os.Args[2:])
+	case "inventory":
+		err = inventoryCmd(os.Args[2:], os.Stdout)
 	case "version", "--version":
 		fmt.Println("agentd", version)
 		return
@@ -67,6 +70,7 @@ func usage() {
   agentd config [--config PATH]
   agentd mark-delivered [--config PATH] [--log PATH] SESSION WORKTREE REF
   agentd clear [--config PATH] [--log PATH] SESSION
+  agentd inventory [--config PATH]
   agentd version
 
 run supervises the configured sessions; --shadow observes and logs what it
@@ -74,7 +78,8 @@ would do without acting. status prints the state table from the event log.
 config prints the resolved configuration. mark-delivered records that a
 worktree was already delivered as REF by other means, so run never delivers
 it again. clear lifts a crash-looping session's park, so it may be
-restarted again.`)
+restarted again. inventory lists every repository in the tracking system's
+manifest with its open work and clones, from the tracking snapshot.`)
 }
 
 func loadConfigFlag(fs *flag.FlagSet, args []string) (*Config, *string, error) {
