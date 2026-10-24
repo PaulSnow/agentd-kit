@@ -161,6 +161,11 @@ func TestPageHostCaseAndWhois(t *testing.T) {
 	if w := get(p, "GET", "/", "page.example:8770", "192.0.2.20:51000"); w.Code != http.StatusForbidden || whois.calls != 2 {
 		t.Fatalf("whois error for the owner: %d after %d calls", w.Code, whois.calls)
 	}
+	// A failure is not kept: the next request asks again, and gets in.
+	whois.fail = nil
+	if w := get(p, "GET", "/", "page.example:8770", "192.0.2.20:51000"); w.Code != http.StatusOK || whois.calls != 3 {
+		t.Fatalf("after a whois error: %d after %d calls", w.Code, whois.calls)
+	}
 }
 
 // Only GET and HEAD of the page and POST of /seen are served.
@@ -253,7 +258,7 @@ func TestPageSortsAndHides(t *testing.T) {
 	}
 }
 
-// whois output is a login on its first line, or the JSON a tailnet's whois
+// whois output is a login on its first line, or the JSON a private network's whois
 // prints; anything else names no one.
 func TestParseWhois(t *testing.T) {
 	for out, want := range map[string]string{
@@ -426,9 +431,13 @@ func TestNeedsFrom(t *testing.T) {
 		{Key: "questions:w1", Message: "w1 is blocked on you", At: pageAt.Add(-time.Hour)},
 		{Key: "deliver:x", Message: "the embargoed thing", At: pageAt.Add(-time.Hour)},
 	}
+	// Open Questions whose text was withheld are not in the report's
+	// questions, and still wait on the owner.
+	w3 := st.track("w3")
+	w3.Questions.Open, w3.AskedAt = true, pageAt.Add(-10*time.Minute)
 	hidden := st.track("secret-session")
 	hidden.State, hidden.Reason = CrashLooping, "parked"
-	rep := Report{Repositories: []ReportRepo{{Name: "widgets", Cases: []ReportCase{{Session: "w1"}},
+	rep := Report{Repositories: []ReportRepo{{Name: "widgets", Cases: []ReportCase{{Session: "w1"}, {Session: "w3"}},
 		Questions: []ReportQuestion{{Session: "w1", Text: "Blue?", Since: pageAt.Add(-30 * time.Minute)}}}}}
 	// An escalation posted is kept on its Track, the latest few only.
 	for i := 0; i < keptEscalations+2; i++ {
@@ -443,8 +452,15 @@ func TestNeedsFrom(t *testing.T) {
 	for _, n := range needs {
 		got = append(got, n.Kind+":"+n.Session+":"+n.Text)
 	}
-	want := "questions:w1:Blue?,parked:w1:parked after 3 crashes,escalation:w1:w1 waits on a tool"
+	// w1 is parked, so its escalations are not listed again.
+	want := "questions:w3:open Questions; the details were withheld because they matched a confidential pattern. Look at the session directly.," +
+		"questions:w1:Blue?,parked:w1:parked after 3 crashes"
 	if strings.Join(got, ",") != want {
 		t.Fatalf("needs = %s\nwant    %s", strings.Join(got, ","), want)
+	}
+	// What Needs you lists counts toward the repository's needs-you.
+	v := buildView(PageData{Report: rep, Needs: needs}, parseViewQuery(url.Values{"show": {"all"}}), pageAt)
+	if len(v.Repos) != 1 || v.Repos[0].NeedsYou != 2 {
+		t.Fatalf("repositories: %+v, want widgets needing you twice", v.Repos)
 	}
 }

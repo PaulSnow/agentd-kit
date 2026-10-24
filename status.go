@@ -41,7 +41,7 @@ func Summarize(cfg *Config, events []Event, mode string) ([]SessionStatus, map[s
 }
 
 // SummarizeState is Summarize over a state already folded, which it reads
-// and does not change, as the page's does.
+// and does not change.
 func SummarizeState(cfg *Config, st *LogState) ([]SessionStatus, map[string]any) {
 	mode := st.Mode
 	meta := map[string]any{"events": st.Events, "mode": mode}

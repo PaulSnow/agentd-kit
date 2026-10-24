@@ -95,8 +95,8 @@ manifest with its open work and clones, from the tracking snapshot. report
 writes report.json for the tracking site from the event log, atomically.
 items lists what is new since the owner last looked: issues, requests and
 discussions from the tracking snapshots, and mail findings; --seen marks
-items seen. page serves the owner's read-only page on page.address, to
-the owner only.`)
+items seen. page serves the owner's page on page.address, to the owner only;
+its one write marks items seen.`)
 }
 
 func loadConfigFlag(fs *flag.FlagSet, args []string) (*Config, *string, error) {

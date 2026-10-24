@@ -112,12 +112,14 @@ const needsWindow = 24 * time.Hour
 func NeedsFrom(cfg *Config, st *LogState, rep Report, now time.Time) []PageNeed {
 	secret := confidentialMatcher(cfg)
 	repoOf := map[string]string{}
+	asked := map[string]bool{}
 	var needs []PageNeed
 	for _, rr := range rep.Repositories {
 		for _, c := range rr.Cases {
 			repoOf[c.Session] = rr.Name
 		}
 		for _, q := range rr.Questions {
+			asked[q.Session] = true
 			needs = append(needs, PageNeed{Kind: "questions", Session: q.Session, Repository: rr.Name, Since: q.Since, Text: q.Text})
 		}
 	}
@@ -131,14 +133,22 @@ func NeedsFrom(cfg *Config, st *LogState, rep Report, now time.Time) []PageNeed 
 		if t == nil {
 			continue
 		}
-		if why := t.Reason; (t.State == CrashLooping || t.Stopped != "") && !secret(why, t.Stopped) {
+		// Open Questions whose text was withheld still wait on the owner:
+		// the generic message is what was posted.
+		if t.Questions.Open && !asked[n] {
+			needs = append(needs, PageNeed{Kind: "questions", Session: n, Repository: repoOf[n], Since: t.AskedAt,
+				Text: "open Questions; the details were withheld because they matched a confidential pattern. Look at the session directly."})
+		}
+		parked := t.State == CrashLooping || t.Stopped != ""
+		if why := t.Reason; parked && !secret(why, t.Stopped) {
 			if t.Stopped != "" {
 				why = "stopped: " + t.Stopped
 			}
 			needs = append(needs, PageNeed{Kind: "parked", Session: n, Repository: repoOf[n], Since: t.Since, Text: why})
 		}
 		for _, e := range t.Escalated {
-			if now.Sub(e.At) > needsWindow || strings.HasPrefix(e.Key, "questions:") || secret(e.Message) {
+			// A parked session is listed once, as parked.
+			if parked || now.Sub(e.At) > needsWindow || strings.HasPrefix(e.Key, "questions:") || secret(e.Message) {
 				continue
 			}
 			needs = append(needs, PageNeed{Kind: "escalation", Session: n, Repository: repoOf[n], Since: e.At, Text: e.Message})
@@ -225,7 +235,6 @@ const (
 
 type whoisAnswer struct {
 	login string
-	err   error
 	at    time.Time
 }
 
@@ -281,7 +290,7 @@ func (p *Page) login(remote string, ip net.IP) (string, error) {
 	a, ok := p.answers[key]
 	p.mu.Unlock()
 	if ok && p.now().Sub(a.at) < whoisTTL {
-		return a.login, a.err
+		return a.login, nil
 	}
 	select {
 	case p.slots <- struct{}{}:
@@ -297,7 +306,11 @@ func (p *Page) login(remote string, ip net.IP) (string, error) {
 	if len(p.answers) > 1024 {
 		p.answers = map[string]whoisAnswer{}
 	}
-	p.answers[key] = whoisAnswer{login: login, err: err, at: p.now()}
+	// A failure is not kept: one timeout must not lock the owner out for
+	// whoisTTL. The slots bound how often whois runs.
+	if err == nil {
+		p.answers[key] = whoisAnswer{login: login, at: p.now()}
+	}
 	p.mu.Unlock()
 	return login, err
 }
@@ -558,9 +571,15 @@ func buildView(data PageData, q viewQuery, now time.Time) pageView {
 			}
 		}
 		for _, qu := range rr.Questions {
-			needs[qu.Session] = true
 			if qu.Since.After(r.Activity) {
 				r.Activity = qu.Since
+			}
+		}
+		// Whatever Needs you lists for the repository counts: questions,
+		// parked and stopped sessions, escalations.
+		for _, nd := range data.Needs {
+			if nd.Repository == rr.Name {
+				needs[nd.Session] = true
 			}
 		}
 		r.NeedsYou = len(needs)
