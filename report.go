@@ -97,11 +97,17 @@ func questionText(session, message string) string {
 // first line is left out, and any other entry with matching text, its
 // session's name or its repository's, is left out whole.
 func BuildReport(cfg *Config, events []Event, mode, host string, now time.Time) Report {
+	return ReportFrom(cfg, NewLogState(cfg, mode).Fold(events), host, now)
+}
+
+// confidentialMatcher says whether any of the texts matches one of the
+// configuration's confidential patterns as they are now.
+func confidentialMatcher(cfg *Config) func(texts ...string) bool {
 	var confidential []*regexp.Regexp
 	for _, p := range cfg.ConfidentialPatterns {
 		confidential = append(confidential, regexp.MustCompile(p))
 	}
-	secret := func(texts ...string) bool {
+	return func(texts ...string) bool {
 		for _, re := range confidential {
 			for _, t := range texts {
 				if re.MatchString(t) {
@@ -111,6 +117,12 @@ func BuildReport(cfg *Config, events []Event, mode, host string, now time.Time) 
 		}
 		return false
 	}
+}
+
+// ReportFrom is BuildReport over a state already folded, which it reads
+// and does not change, as the page's does.
+func ReportFrom(cfg *Config, st *LogState, host string, now time.Time) Report {
+	secret := confidentialMatcher(cfg)
 	// deliveredTo is the repository of the deliver spec a delivered key,
 	// session:worktree, names.
 	deliveredTo := func(session, key string) string {
@@ -121,7 +133,7 @@ func BuildReport(cfg *Config, events []Event, mode, host string, now time.Time) 
 		}
 		return ""
 	}
-	st := NewLogState(cfg, mode).Fold(events)
+	mode := st.Mode
 	repos := map[string]*ReportRepo{}
 	// group is the report's entry for the configured repository name, nil
 	// when its name or identity matches a confidential pattern.

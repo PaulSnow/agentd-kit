@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -14,6 +17,7 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -77,26 +81,176 @@ func parseWhois(out []byte) (string, error) {
 }
 
 // PageData is everything one view is rendered from: the inventory, when
-// the tracking files are configured, and the report folded from the log.
+// the tracking files are configured, the report and what needs the owner,
+// both from the page's state, and the items the owner has not yet seen.
 type PageData struct {
 	Inventory *Inventory
 	Report    Report
+	Needs     []PageNeed
+	New       []*Item
 }
 
-// Page serves the owner's read-only view. Every request is checked before
-// anything is read: its Host must be one the page answers to, it must not
-// come from the page's own address (a process on this machine would
-// otherwise borrow the machine's identity), and whois must name the owner.
+// PageNeed is one thing waiting on the owner: a session's open Questions,
+// a session parked or blocked for the owner, or an escalation.
+type PageNeed struct {
+	Kind       string // questions, parked, escalation
+	Session    string
+	Repository string
+	Since      time.Time
+	Text       string
+}
+
+// needsWindow is how far back the page lists escalations under Needs you.
+const needsWindow = 24 * time.Hour
+
+// NeedsFrom lists what waits on the owner, from st and the report folded
+// from it: every open Questions section, every session parked until the
+// owner clears it (crash-looping, or stopped by its budget), and the
+// escalations of the last needsWindow other than Questions.
+// Only the report's sessions count, so a session the report leaves out as
+// confidential is left out here too, and every text is screened again.
+func NeedsFrom(cfg *Config, st *LogState, rep Report, now time.Time) []PageNeed {
+	secret := confidentialMatcher(cfg)
+	repoOf := map[string]string{}
+	var needs []PageNeed
+	for _, rr := range rep.Repositories {
+		for _, c := range rr.Cases {
+			repoOf[c.Session] = rr.Name
+		}
+		for _, q := range rr.Questions {
+			needs = append(needs, PageNeed{Kind: "questions", Session: q.Session, Repository: rr.Name, Since: q.Since, Text: q.Text})
+		}
+	}
+	names := make([]string, 0, len(repoOf))
+	for n := range repoOf {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		t := st.Tracks[n]
+		if t == nil {
+			continue
+		}
+		if why := t.Reason; (t.State == CrashLooping || t.Stopped != "") && !secret(why, t.Stopped) {
+			if t.Stopped != "" {
+				why = "stopped: " + t.Stopped
+			}
+			needs = append(needs, PageNeed{Kind: "parked", Session: n, Repository: repoOf[n], Since: t.Since, Text: why})
+		}
+		for _, e := range t.Escalated {
+			if now.Sub(e.At) > needsWindow || strings.HasPrefix(e.Key, "questions:") || secret(e.Message) {
+				continue
+			}
+			needs = append(needs, PageNeed{Kind: "escalation", Session: n, Repository: repoOf[n], Since: e.At, Text: e.Message})
+		}
+	}
+	sort.SliceStable(needs, func(i, j int) bool { return needs[i].Since.After(needs[j].Since) })
+	return needs
+}
+
+// pageState is the page's projection of the log: one LogState, brought up
+// to date through apply with the lines appended since it last looked, so
+// a request reads only what is new.
+type pageState struct {
+	mu   sync.Mutex
+	cfg  *Config
+	log  *Log
+	off  int64
+	st   *LogState
+	host string
+	tr   bool // the tracking files are configured
+}
+
+func newPageState(cfg *Config, log *Log, mode, host string) *pageState {
+	return &pageState{cfg: cfg, log: log, st: NewLogState(cfg, mode), host: host,
+		tr: cfg.Tracking.Manifest != "" || cfg.Tracking.Snapshot != ""}
+}
+
+// load brings the state up to date and reads the page's data from it.
+func (ps *pageState) load() (PageData, error) {
+	var data PageData
+	if ps.tr {
+		inv, err := LoadInventory(ps.cfg.Tracking)
+		if err != nil {
+			return data, err
+		}
+		data.Inventory = inv
+	}
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if err := ps.catchUp(); err != nil {
+		return data, err
+	}
+	now := time.Now()
+	data.Report = ReportFrom(ps.cfg, ps.st, ps.host, now)
+	data.Needs = NeedsFrom(ps.cfg, ps.st, data.Report, now)
+	data.New = ps.st.SortedItems(true)
+	return data, nil
+}
+
+// catchUp applies the events appended since the last look.
+func (ps *pageState) catchUp() error {
+	events, off, err := ps.log.Tail(ps.off)
+	if err != nil {
+		return err
+	}
+	ps.off = off
+	ps.st.Fold(events)
+	return nil
+}
+
+// markSeen records the owner marking items seen from the page. Only items
+// the state holds are marked; an unknown id is an error and marks nothing.
+func (ps *pageState) markSeen(ids []string, from string) error {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if err := ps.catchUp(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if ps.st.Items[id] == nil {
+			return fmt.Errorf("no item %q", id)
+		}
+	}
+	return MarkSeen(ps.log, time.Now(), ids, from)
+}
+
+// whoisTTL is how long the page trusts one whois answer for an address,
+// and whoisSlots how many whois commands may run at once: a burst of
+// requests runs no burst of commands.
+const (
+	whoisTTL   = time.Minute
+	whoisSlots = 4
+)
+
+type whoisAnswer struct {
+	login string
+	err   error
+	at    time.Time
+}
+
+// Page serves the owner's view. Every request is checked before anything
+// is read: its Host must be one the page answers to, it must not come
+// from the page's own address or loopback (a process on this machine
+// would otherwise borrow the machine's identity), and whois must name the
+// owner. A POST must also come from the page itself: its Origin must be
+// the page's, and it must carry the token the page put in its form.
 type Page struct {
 	cfg   PageConfig
 	whois Whois
 	load  func() (PageData, error)
+	mark  func(ids []string, from string) error
 	self  net.IP // the address the page listens on
 	now   func() time.Time
+	token string // the form token, new each time the page starts
+
+	mu      sync.Mutex
+	answers map[string]whoisAnswer // by caller IP
+	slots   chan struct{}
 }
 
 // NewPage builds the page's handler.
-func NewPage(cfg PageConfig, whois Whois, load func() (PageData, error), now func() time.Time) (*Page, error) {
+func NewPage(cfg PageConfig, whois Whois, load func() (PageData, error), mark func(ids []string, from string) error, now func() time.Time) (*Page, error) {
 	host, _, err := net.SplitHostPort(cfg.Address)
 	if err != nil {
 		return nil, fmt.Errorf("page.address: %w", err)
@@ -111,12 +265,46 @@ func NewPage(cfg PageConfig, whois Whois, load func() (PageData, error), now fun
 	if len(cfg.Hosts) == 0 {
 		cfg.Hosts = []string{cfg.Address}
 	}
-	return &Page{cfg: cfg, whois: whois, load: load, self: ip, now: now}, nil
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return nil, err
+	}
+	return &Page{cfg: cfg, whois: whois, load: load, mark: mark, self: ip, now: now, token: hex.EncodeToString(b),
+		answers: map[string]whoisAnswer{}, slots: make(chan struct{}, whoisSlots)}, nil
+}
+
+// login is whois's answer for the caller, from the cache while it is
+// fresh. A failure is logged once per address per whoisTTL.
+func (p *Page) login(remote string, ip net.IP) (string, error) {
+	key := ip.String()
+	p.mu.Lock()
+	a, ok := p.answers[key]
+	p.mu.Unlock()
+	if ok && p.now().Sub(a.at) < whoisTTL {
+		return a.login, a.err
+	}
+	select {
+	case p.slots <- struct{}{}:
+	default:
+		return "", errors.New("too many whois commands running")
+	}
+	login, err := p.whois.Login(remote)
+	<-p.slots
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentd page: refused %s: %v\n", key, err)
+	}
+	p.mu.Lock()
+	if len(p.answers) > 1024 {
+		p.answers = map[string]whoisAnswer{}
+	}
+	p.answers[key] = whoisAnswer{login: login, err: err, at: p.now()}
+	p.mu.Unlock()
+	return login, err
 }
 
 func (p *Page) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h := w.Header()
-	h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+	h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Cache-Control", "no-store")
 	h.Set("Referrer-Policy", "no-referrer")
@@ -125,20 +313,25 @@ func (p *Page) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	remote, _, err := net.SplitHostPort(r.RemoteAddr)
-	if ip := net.ParseIP(remote); err != nil || ip == nil || ip.Equal(p.self) || ip.IsLoopback() {
+	ip := net.ParseIP(remote)
+	if err != nil || ip == nil || ip.Equal(p.self) || ip.IsLoopback() || ip.IsUnspecified() {
 		http.Error(w, "refused: the page does not answer its own machine", http.StatusForbidden)
 		return
 	}
-	login, err := p.whois.Login(r.RemoteAddr)
+	login, err := p.login(r.RemoteAddr, ip)
 	if err != nil || login != p.cfg.Owner {
 		http.Error(w, "refused: only the owner may use this page", http.StatusForbidden)
 		return
 	}
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		http.Error(w, "this page is read-only", http.StatusMethodNotAllowed)
+	switch {
+	case r.URL.Path == "/" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
+	case r.URL.Path == "/seen" && r.Method == http.MethodPost:
+		p.serveSeen(w, r)
 		return
-	}
-	if r.URL.Path != "/" {
+	case r.URL.Path == "/" || r.URL.Path == "/seen":
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	default:
 		http.NotFound(w, r)
 		return
 	}
@@ -149,10 +342,47 @@ func (p *Page) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	view := buildView(data, parseViewQuery(r.URL.Query()), p.now())
+	view.Token = p.token
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	if err := pageTemplate.Execute(w, view); err != nil {
 		fmt.Fprintf(os.Stderr, "agentd page: %v\n", err)
 	}
+}
+
+// maxSeen is the most items one POST may mark seen.
+const maxSeen = 500
+
+// serveSeen marks the items a POST names seen, then sends the owner back
+// to the view they came from. The POST must name the page as its Origin
+// and carry the page's token.
+func (p *Page) serveSeen(w http.ResponseWriter, r *http.Request) {
+	if o := r.Header.Get("Origin"); o == "" || !strings.EqualFold(o, "http://"+r.Host) {
+		http.Error(w, "refused: a POST must come from the page", http.StatusForbidden)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(r.PostForm.Get("token")), []byte(p.token)) != 1 {
+		http.Error(w, "refused: the form's token is not the page's", http.StatusForbidden)
+		return
+	}
+	ids := r.PostForm["id"]
+	if len(ids) == 0 || len(ids) > maxSeen {
+		http.Error(w, fmt.Sprintf("name between 1 and %d items", maxSeen), http.StatusBadRequest)
+		return
+	}
+	if err := p.mark(ids, r.RemoteAddr); err != nil {
+		http.Error(w, "the items could not be marked seen; see agentd's output", http.StatusBadRequest)
+		fmt.Fprintf(os.Stderr, "agentd page: mark seen: %v\n", err)
+		return
+	}
+	// Back to the same view, rebuilt from its parameters, never a target
+	// the form names.
+	back, _ := url.ParseQuery(r.PostForm.Get("view"))
+	http.Redirect(w, r, "/"+parseViewQuery(back).link(nil), http.StatusSeeOther)
 }
 
 // hostAllowed checks the Host header against the configured names, so a
@@ -204,7 +434,7 @@ func parseViewQuery(q url.Values) viewQuery {
 	return v
 }
 
-// encode is the query for v, with change applied to a copy of it.
+// link is the query for v, with change applied to a copy of it.
 func (v viewQuery) link(change func(*viewQuery)) string {
 	c := v
 	c.HideRepos, c.HideIssues = map[string]bool{}, map[string]bool{}
@@ -240,6 +470,10 @@ func (v viewQuery) link(change func(*viewQuery)) string {
 // pageView is what the template renders.
 type pageView struct {
 	Now      time.Time
+	Token    string // the form token
+	Needs    []PageNeed
+	New      []*Item
+	ViewQ    string // the view's query, for the form to come back to
 	AsOf     time.Time
 	Digest   string
 	Query    viewQuery
@@ -262,10 +496,11 @@ type pageRepo struct {
 	Hidden    bool
 	HideLink  string
 	Cases     []ReportCase
-	Questions []ReportQuestion
 	Issues    []pageIssue
-	// HiddenIssues counts the issues hidden in this repository.
+	// HiddenIssues counts the issues hidden in this repository, and
+	// ShowIssues shows them again.
 	HiddenIssues int
+	ShowIssues   string
 }
 
 type pageIssue struct {
@@ -281,7 +516,8 @@ type pageIssue struct {
 // Hiding changes the view only. A hidden repository that needs the owner
 // is shown all the same.
 func buildView(data PageData, q viewQuery, now time.Time) pageView {
-	v := pageView{Now: now, Digest: data.Report.Digest, Query: q, Untraced: data.Inventory == nil}
+	v := pageView{Now: now, Digest: data.Report.Digest, Query: q, Untraced: data.Inventory == nil, Needs: data.Needs, New: data.New,
+		ViewQ: strings.TrimPrefix(q.link(nil), "?")}
 	repos := map[string]*pageRepo{}
 	var order []string
 	get := func(key, name string) *pageRepo {
@@ -311,7 +547,7 @@ func buildView(data PageData, q viewQuery, now time.Time) pageView {
 	}
 	for _, rr := range data.Report.Repositories {
 		r := get(rr.Repository, rr.Name)
-		r.Cases, r.Questions = rr.Cases, rr.Questions
+		r.Cases = rr.Cases
 		needs := map[string]bool{}
 		for _, c := range rr.Cases {
 			if c.State == string(BlockedOnOwner) {
@@ -339,23 +575,32 @@ func buildView(data PageData, q viewQuery, now time.Time) pageView {
 			r.HideLink = q.link(func(c *viewQuery) { c.HideRepos[k] = true })
 		}
 		var issues []pageIssue
+		var hidden []string
 		for _, is := range r.Issues {
 			ik := fmt.Sprintf("%s#%d", key, is.Number)
 			if q.HideIssues[ik] {
 				r.HiddenIssues++
+				hidden = append(hidden, ik)
 				continue
 			}
 			is.HideLink = q.link(func(c *viewQuery) { c.HideIssues[ik] = true })
 			issues = append(issues, is)
+		}
+		if len(hidden) > 0 {
+			r.ShowIssues = q.link(func(c *viewQuery) {
+				for _, ik := range hidden {
+					delete(c.HideIssues, ik)
+				}
+			})
 		}
 		r.Issues = issues
 		sortIssues(r.Issues, q.IssueSort)
 		active := r.OpenWork > 0 || len(r.Cases) > 0 || r.NeedsYou > 0
 		switch {
 		case q.Show == "hidden" && !r.Hidden:
-		case q.Show != "hidden" && r.Hidden && r.NeedsYou == 0:
-			v.Hidden++
 		case q.Show == "open" && !active:
+		case q.Show != "hidden" && r.Hidden && r.NeedsYou == 0:
+			v.Hidden++ // one the filter would show, but for hiding
 		default:
 			v.Repos = append(v.Repos, *r)
 		}
@@ -376,7 +621,8 @@ func buildView(data PageData, q viewQuery, now time.Time) pageView {
 	return v
 }
 
-// sortRepos orders repositories by key, each order falling back to name.
+// sortRepos orders repositories as by says, each order falling back to
+// name, then key.
 func sortRepos(rs []pageRepo, by string) {
 	sort.SliceStable(rs, func(i, j int) bool {
 		a, b := rs[i], rs[j]
@@ -393,6 +639,9 @@ func sortRepos(rs []pageRepo, by string) {
 			if a.OpenWork != b.OpenWork {
 				return a.OpenWork > b.OpenWork
 			}
+		}
+		if a.Name != b.Name {
+			return a.Name < b.Name
 		}
 		return a.Key < b.Key
 	})
@@ -436,14 +685,23 @@ table { border-collapse: collapse; } td { padding: .1rem .6rem .1rem 0; vertical
 </style></head><body>
 <h1>agentd</h1>
 <p class="muted">{{.Digest}}{{if not .AsOf.IsZero}} Tracking snapshot of {{when .AsOf}}.{{end}}{{if .Untraced}} No tracking files are configured; repositories come from the event log only.{{end}}</p>
+<section id="needs"><h2>Needs you</h2>
+{{range .Needs}}<div><span class="needs">{{.Session}}</span> <span class="muted">{{.Repository}}, {{.Kind}}, since {{when .Since}}</span></div><pre>{{.Text}}</pre>
+{{else}}<p class="muted">Nothing waits on you.</p>{{end}}
+</section>
+<section id="new"><h2>New since last visit</h2>
+{{if .New}}<form method="post" action="/seen"><input type="hidden" name="token" value="{{.Token}}"><input type="hidden" name="view" value="{{.ViewQ}}">
+<table>{{range .New}}<tr><td><input type="checkbox" name="id" value="{{.ID}}" checked></td><td class="muted">{{when .SourceTime}}</td><td>{{.Kind}}</td><td>{{.Repository}}</td><td>{{if .Link}}<a href="{{.Link}}">{{.Title}}</a>{{else}}{{.Title}}{{end}}</td><td class="muted">{{.Author}}</td></tr>{{end}}</table>
+<button type="submit">Mark the ticked items seen</button></form>
+{{else}}<p class="muted">Nothing new.</p>{{end}}
+</section>
 <nav>{{range .Links}}<a href="{{.Href}}"{{if .Current}} class="current"{{end}}>{{.Label}}</a>{{end}}</nav>
 {{if .Hidden}}<p class="muted">{{.Hidden}} hidden repositories.</p>{{end}}
 {{range .Repos}}<section>
-<h2>{{.Name}} <span class="muted">{{.Key}}</span>{{if .NeedsYou}} <span class="needs">needs you: {{.NeedsYou}}</span>{{end}} <a href="{{.HideLink}}">{{if .Hidden}}show{{else}}hide{{end}}</a></h2>
-{{range .Questions}}<div class="needs">{{.Session}} asks, since {{when .Since}}:</div><pre>{{.Text}}</pre>{{end}}
+<h2 class="repo">{{.Name}} <span class="muted">{{.Key}}</span>{{if .NeedsYou}} <span class="needs">needs you: {{.NeedsYou}}</span>{{end}} <a href="{{.HideLink}}">{{if .Hidden}}show{{else}}hide{{end}}</a></h2>
 {{if .Cases}}<table>{{range .Cases}}<tr><td>{{.Session}}</td><td>{{.State}}</td><td class="muted">since {{when .Since}}</td><td>{{.Head}}</td></tr>{{end}}</table>{{end}}
 {{if .Issues}}<table>{{range .Issues}}<tr><td>#{{.Number}}</td><td>{{.Title}}</td><td class="muted">updated {{when .Updated}}</td><td><a href="{{.HideLink}}">hide</a></td></tr>{{end}}</table>{{end}}
-{{if .HiddenIssues}}<p class="muted">{{.HiddenIssues}} hidden issues.</p>{{end}}
+{{if .HiddenIssues}}<p class="muted">{{.HiddenIssues}} hidden issues. <a href="{{.ShowIssues}}">show them</a></p>{{end}}
 </section>{{else}}<p>Nothing to show.</p>{{end}}
 </body></html>
 `))
@@ -461,23 +719,16 @@ func pageCmd(args []string) error {
 		mode = ModeShadow
 	}
 	host, _ := os.Hostname()
-	load := func() (PageData, error) {
-		var data PageData
-		if cfg.Tracking.Manifest != "" || cfg.Tracking.Snapshot != "" {
-			inv, err := LoadInventory(cfg.Tracking)
-			if err != nil {
-				return data, err
-			}
-			data.Inventory = inv
-		}
-		events, _, err := ReadLog(cfg.EventLog)
-		if err != nil {
-			return data, err
-		}
-		data.Report = BuildReport(cfg, events, mode, host, time.Now())
-		return data, nil
+	log, err := OpenLog(cfg.EventLog)
+	if err != nil {
+		return err
 	}
-	page, err := NewPage(cfg.Page, ExecWhois{Argv: cfg.Page.Whois, Timeout: cfg.Timeouts.Tmux.Duration}, load, time.Now)
+	defer log.Close()
+	ps := newPageState(cfg, log, mode, host)
+	if _, err := ps.load(); err != nil {
+		return err
+	}
+	page, err := NewPage(cfg.Page, ExecWhois{Argv: cfg.Page.Whois, Timeout: cfg.Timeouts.Tmux.Duration}, ps.load, ps.markSeen, time.Now)
 	if err != nil {
 		return err
 	}

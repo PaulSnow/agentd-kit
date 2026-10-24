@@ -67,16 +67,17 @@ type Track struct {
 	// What the views show, folded from the log by apply alone.
 	LastSeen      time.Time
 	Head, Reason  string
-	RestartCount  int               // restarts, taken or would-be, ever
-	NudgeCount    int               // nudges ever
-	Escalations   int               // escalations and updates posted
-	Would         int               // would events (shadow mode)
-	Errors        int               // error events
-	DeliveredRefs []string          // what each delivery opened
-	Blocked       map[string]string // worktree: the last reason its delivery was declined
-	GaveUp        []string          // escalation keys given up on
-	CutShort      []string          // actions a crash of agentd cut short
-	Asked         string            // the Questions text last posted, while they stay open
+	RestartCount  int                // restarts, taken or would-be, ever
+	NudgeCount    int                // nudges ever
+	Escalations   int                // escalations and updates posted
+	Escalated     []EscalationRecord // the latest escalations, oldest first
+	Would         int                // would events (shadow mode)
+	Errors        int                // error events
+	DeliveredRefs []string           // what each delivery opened
+	Blocked       map[string]string  // worktree: the last reason its delivery was declined
+	GaveUp        []string           // escalation keys given up on
+	CutShort      []string           // actions a crash of agentd cut short
+	Asked         string             // the Questions text last posted, while they stay open
 	AskedAt       time.Time
 	Filtered      map[string]bool // escalation keys whose text was withheld
 	Deliveries    []DeliveryRecord
