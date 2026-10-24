@@ -40,7 +40,7 @@ type Snapshot struct {
 	AsOf      time.Time         `json:"AsOf"`
 	Host      string            `json:"Host"`
 	Repos     []SnapRepo        `json:"Repos"`
-	Errors    []json.RawMessage `json:"Errors"`
+	Errors    []json.RawMessage `json:"Errors"` // null in every snapshot seen; kept as written
 	LocalWork []LocalWork       `json:"LocalWork"`
 	Clones    []SnapClone       `json:"Clones"`
 	Platform  []SnapPushed      `json:"Platform"`
@@ -150,6 +150,7 @@ type RepoRecord struct {
 	Path       string
 	Active     bool
 	Audience   string
+	Note       string
 	Tracked    bool
 	OpenIssues []SnapIssue
 	OpenMRs    []SnapMR
@@ -188,15 +189,27 @@ func LoadInventory(tr Tracking) (*Inventory, error) {
 	if err := readStrict(tr.Manifest, &manifest); err != nil {
 		return nil, fmt.Errorf("tracking manifest %w", err)
 	}
+	if manifest == nil {
+		return nil, fmt.Errorf("tracking manifest %s: unknown shape: not a list", tr.Manifest)
+	}
 	var snap Snapshot
 	if err := readStrict(tr.Snapshot, &snap); err != nil {
 		return nil, fmt.Errorf("tracking snapshot %w", err)
+	}
+	// Repos may be null, as the tracking system writes an empty list, but
+	// it must be there: a file without it is not a snapshot.
+	var keys map[string]json.RawMessage
+	if err := readStrict(tr.Snapshot, &keys); err != nil {
+		return nil, fmt.Errorf("tracking snapshot %w", err)
+	}
+	if _, ok := keys["Repos"]; !ok || snap.AsOf.IsZero() {
+		return nil, fmt.Errorf("tracking snapshot %s: unknown shape: AsOf and Repos must be present", tr.Snapshot)
 	}
 	inv := &Inventory{AsOf: snap.AsOf, Host: snap.Host, Scans: snap.Scans, byKey: map[string]*RepoRecord{}}
 	var errs []error
 	for i, m := range manifest {
 		switch {
-		case m.Platform != "github" && m.Platform != "gitlab":
+		case !forgePlatform(m.Platform):
 			errs = append(errs, fmt.Errorf("entry %d: platform %q is not github or gitlab", i, m.Platform))
 			continue
 		case m.Name == "" || m.Path == "":
@@ -208,39 +221,61 @@ func LoadInventory(tr Tracking) (*Inventory, error) {
 			errs = append(errs, fmt.Errorf("entry %d: %s is listed twice", i, key))
 			continue
 		}
-		r := &RepoRecord{Key: key, Name: m.Name, Platform: m.Platform, Path: m.Path, Active: m.Active, Audience: m.Audience}
+		r := &RepoRecord{Key: key, Name: m.Name, Platform: m.Platform, Path: m.Path, Active: m.Active, Audience: m.Audience, Note: m.Note}
 		inv.byKey[key] = r
 		inv.Repos = append(inv.Repos, r)
 	}
 	if err := errors.Join(errs...); err != nil {
 		return nil, fmt.Errorf("tracking manifest %s: unknown shape: %w", tr.Manifest, err)
 	}
-	if snap.AsOf.IsZero() || snap.Repos == nil {
-		return nil, fmt.Errorf("tracking snapshot %s: unknown shape: AsOf and Repos must be present", tr.Snapshot)
-	}
-	for _, sr := range snap.Repos {
-		r := inv.byKey[repoKey(sr.Info.Platform, sr.Info.FullPath)]
-		if r == nil {
-			continue // the manifest is the list; the snapshot may lag it
+	seen := map[string]bool{}
+	for i, sr := range snap.Repos {
+		key := repoKey(sr.Info.Platform, sr.Info.FullPath)
+		switch {
+		case !forgePlatform(sr.Info.Platform):
+			errs = append(errs, fmt.Errorf("Repos[%d]: platform %q is not github or gitlab", i, sr.Info.Platform))
+			continue
+		case seen[key]:
+			errs = append(errs, fmt.Errorf("Repos[%d]: %s is listed twice", i, key))
+			continue
 		}
-		r.Tracked = true
+		seen[key] = true
+		r := inv.byKey[key]
 		for _, is := range sr.Issues {
-			if is.State == "open" || is.State == "opened" {
+			open, known := workStates[is.State]
+			if !known {
+				errs = append(errs, fmt.Errorf("Repos[%d]: issue %d has state %q", i, is.Number, is.State))
+			}
+			if r != nil && open {
 				r.OpenIssues = append(r.OpenIssues, is)
 			}
 		}
 		for _, mr := range sr.MRs {
-			if mr.State == "open" || mr.State == "opened" {
+			open, known := workStates[mr.State]
+			if !known {
+				errs = append(errs, fmt.Errorf("Repos[%d]: request %d has state %q", i, mr.Number, mr.State))
+			}
+			if r != nil && open {
 				r.OpenMRs = append(r.OpenMRs, mr)
 			}
 		}
+		if r == nil {
+			continue // the manifest is the list; the snapshot may lag it
+		}
+		r.Tracked = true
 		sort.Slice(r.OpenIssues, func(i, j int) bool { return r.OpenIssues[i].Number < r.OpenIssues[j].Number })
 		sort.Slice(r.OpenMRs, func(i, j int) bool { return r.OpenMRs[i].Number < r.OpenMRs[j].Number })
 	}
-	for _, c := range snap.Clones {
+	for i, c := range snap.Clones {
+		if !forgePlatform(c.Platform) {
+			errs = append(errs, fmt.Errorf("Clones[%d]: platform %q is not github or gitlab", i, c.Platform))
+		}
 		if r := inv.byKey[repoKey(c.Platform, c.FullPath)]; r != nil {
 			r.Clones = append(r.Clones, c)
 		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		return nil, fmt.Errorf("tracking snapshot %s: unknown shape: %w", tr.Snapshot, err)
 	}
 	for _, r := range inv.Repos {
 		sort.SliceStable(r.Clones, func(i, j int) bool { return r.Clones[i].Host < r.Clones[j].Host })
@@ -248,6 +283,13 @@ func LoadInventory(tr Tracking) (*Inventory, error) {
 	sort.Slice(inv.Repos, func(i, j int) bool { return inv.Repos[i].Key < inv.Repos[j].Key })
 	return inv, nil
 }
+
+// forgePlatform says whether p is a platform the tracking system fetches.
+func forgePlatform(p string) bool { return p == "github" || p == "gitlab" }
+
+// workStates are the issue and request states the tracking system writes,
+// and whether each is open. Any other state is an unknown shape.
+var workStates = map[string]bool{"open": true, "opened": true, "closed": false, "merged": false, "locked": false}
 
 // readStrict decodes the one JSON value in path into v, refusing fields v
 // does not have and anything after the value. Its errors start with the
@@ -309,9 +351,9 @@ func PrintInventory(w io.Writer, inv *Inventory) {
 		if clones == "" {
 			clones = "-"
 		}
-		note := ""
+		note := r.Note
 		if !r.Tracked {
-			note = "not in snapshot"
+			note = strings.TrimPrefix(note+"; not in snapshot", "; ")
 		}
 		active := "yes"
 		if !r.Active {

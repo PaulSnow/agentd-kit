@@ -59,12 +59,29 @@ func TestInventoryReadsTheTrackingFiles(t *testing.T) {
 	if d == nil || d.Tracked || len(d.OpenIssues) != 0 {
 		t.Fatalf("doohickey = %+v", d)
 	}
-	if s := inv.Find("gitlab", "example-org/tools/sprockets"); s == nil || s.Active {
+	if s := inv.Find("gitlab", "example-org/tools/sprockets"); s == nil || s.Active || s.Note != "kept for reference" {
 		t.Fatalf("sprockets = %+v", s)
 	}
 	// Lookups ignore case, as the snapshot's own manifest keys do.
 	if inv.Find("GitLab", "Example-Org/Widgets") != w {
 		t.Fatal("lookup is case-sensitive")
+	}
+}
+
+// A snapshot with no repositories yet, written with null lists as the
+// tracking system writes them, is read; every manifest repository is
+// listed, untracked.
+func TestInventoryReadsAnEmptySnapshot(t *testing.T) {
+	tr := trackingFixture(t)
+	writeFile(t, tr.Snapshot, `{"AsOf": "2026-10-23T21:23:04Z", "Host": "host-a", "Repos": null, "Errors": null, "LocalWork": null, "Clones": null, "Platform": null, "Manifest": {}, "Scans": null}`)
+	inv, err := LoadInventory(tr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range inv.Repos {
+		if r.Tracked {
+			t.Errorf("%s tracked by an empty snapshot", r.Key)
+		}
 	}
 }
 
@@ -84,13 +101,19 @@ func TestInventoryRefusesBadFiles(t *testing.T) {
 		{name: "malformed snapshot", file: "snapshot", text: `{"AsOf": `, want: "not valid JSON"},
 		{name: "manifest is an object", file: "manifest", text: `{"repositories": []}`, want: "unknown shape"},
 		{name: "manifest unknown field", file: "manifest", text: `[{"name": "w", "platform": "gitlab", "path": "o/w", "active": true, "audience": "a", "owner": "x"}]`, want: `unknown field "owner"`},
-		{name: "manifest unknown platform", file: "manifest", text: `[{"name": "w", "platform": "bitbucket", "path": "o/w", "active": true, "audience": "a"}]`, want: "platform"},
-		{name: "manifest entry without path", file: "manifest", text: `[{"name": "w", "platform": "gitlab", "active": true, "audience": "a"}]`, want: "path"},
+		{name: "manifest unknown platform", file: "manifest", text: `[{"name": "w", "platform": "bitbucket", "path": "o/w", "active": true, "audience": "a"}]`, want: `platform "bitbucket" is not github or gitlab`},
+		{name: "manifest entry without path", file: "manifest", text: `[{"name": "w", "platform": "gitlab", "active": true, "audience": "a"}]`, want: "name and path must be set"},
 		{name: "manifest duplicate", file: "manifest", text: `[{"name": "w", "platform": "gitlab", "path": "o/w", "active": true, "audience": "a"}, {"name": "w2", "platform": "gitlab", "path": "O/W", "active": true, "audience": "a"}]`, want: "twice"},
 		{name: "snapshot unknown field", file: "snapshot", text: `{"AsOf": "2026-10-23T21:23:04Z", "Host": "host-a", "Repos": [], "Version": 2}`, want: `unknown field "Version"`},
-		{name: "snapshot without AsOf", file: "snapshot", text: `{"Host": "host-a", "Repos": []}`, want: "AsOf"},
+		{name: "snapshot without AsOf", file: "snapshot", text: `{"Host": "host-a", "Repos": []}`, want: "AsOf and Repos must be present"},
 		{name: "snapshot repos not a list", file: "snapshot", text: `{"AsOf": "2026-10-23T21:23:04Z", "Host": "host-a", "Repos": {}}`, want: "unknown shape"},
-		{name: "snapshot trailing data", file: "snapshot", text: `{"AsOf": "2026-10-23T21:23:04Z", "Host": "host-a", "Repos": []} {}`, want: "trailing"},
+		{name: "snapshot trailing data", file: "snapshot", text: `{"AsOf": "2026-10-23T21:23:04Z", "Host": "host-a", "Repos": []} {}`, want: "trailing data"},
+		{name: "manifest is null", file: "manifest", text: `null`, want: "not a list"},
+		{name: "snapshot without Repos", file: "snapshot", text: `{"AsOf": "2026-10-23T21:23:04Z", "Host": "host-a"}`, want: "AsOf and Repos must be present"},
+		{name: "snapshot duplicate", file: "snapshot", text: `{"AsOf": "2026-10-23T21:23:04Z", "Host": "host-a", "Repos": [{"Info": {"Name": "w", "Platform": "gitlab", "FullPath": "o/w"}}, {"Info": {"Name": "w", "Platform": "gitlab", "FullPath": "o/W"}}]}`, want: "gitlab/o/w is listed twice"},
+		{name: "snapshot unknown platform", file: "snapshot", text: `{"AsOf": "2026-10-23T21:23:04Z", "Host": "host-a", "Repos": [{"Info": {"Name": "w", "Platform": "bitbucket", "FullPath": "o/w"}}]}`, want: `platform "bitbucket"`},
+		{name: "snapshot clone platform", file: "snapshot", text: `{"AsOf": "2026-10-23T21:23:04Z", "Host": "host-a", "Repos": null, "Clones": [{"Host": "host-a", "Path": "/srv/w", "Platform": "svn", "FullPath": "o/w"}]}`, want: `Clones[0]: platform "svn"`},
+		{name: "snapshot unknown issue state", file: "snapshot", text: `{"AsOf": "2026-10-23T21:23:04Z", "Host": "host-a", "Repos": [{"Info": {"Name": "w", "Platform": "gitlab", "FullPath": "o/w"}, "Issues": [{"Number": 1, "State": "reopened"}]}]}`, want: `issue 1 has state "reopened"`},
 		{name: "not configured", noConfig: true, want: "tracking.manifest"},
 	}
 	for _, c := range cases {
@@ -112,7 +135,8 @@ func TestInventoryRefusesBadFiles(t *testing.T) {
 			if err == nil {
 				t.Fatal("loaded")
 			}
-			if !strings.Contains(err.Error(), c.want) {
+			// The temporary directory holds the test's name; leave it out.
+			if !strings.Contains(strings.ReplaceAll(err.Error(), path, "PATH"), c.want) {
 				t.Fatalf("error %q does not say %q", err, c.want)
 			}
 			if !c.noConfig && !strings.Contains(err.Error(), path) {
