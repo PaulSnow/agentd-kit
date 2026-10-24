@@ -868,6 +868,10 @@ func (s *Supervisor) typeInto(name, action string, a *ActPayload, t *Track, seen
 			if len(a.Answers) > 0 {
 				key = "screen-changed:" + action + ":" + strings.Join(a.Answers, ",") + ":" + fmt.Sprint(a.AnswersAt[len(a.AnswersAt)-1].Unix())
 			}
+			// So is a wake, for a coordinator still busy with its pack.
+			if action == ActWake {
+				key = "screen-changed:" + a.Key
+			}
 			s.skipOnce(name, key, "the screen changed since it was read this pass; not typing", t,
 				&SkipPayload{Action: action})
 			return errScreenChanged

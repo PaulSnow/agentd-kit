@@ -454,6 +454,13 @@ func TestShadowClaimsNoCoordinator(t *testing.T) {
 	if n := h.count(KindWould, ActWake, "c"); n != 1 {
 		t.Fatalf("would-be wakes = %d", n)
 	}
+	// A would-be wake is taken as the coordinator's business until the
+	// stall, as live mode would wait for it.
+	h.status("b", "# b\n\nDONE\n")
+	h.ticks(3, time.Minute)
+	if n := h.count(KindWould, ActWake, "c"); n != 1 {
+		t.Fatalf("would-be wakes during a would-be wake = %d", n)
+	}
 	h.restart(false)
 	h.ticks(2, time.Minute)
 	if n := h.count(KindCoordinator, "", "c"); n != 1 {
@@ -515,5 +522,102 @@ func TestCoordinatorErrorsNameTheirField(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "repositories.widgets.coordinator.account") ||
 		!strings.Contains(err.Error(), "repositories.widgets.coordinator.workdir") || strings.Contains(err.Error(), "sessions.c2") {
 		t.Fatalf("errors: %v", err)
+	}
+}
+
+// What another process logs during the pass a wake is made in, at the
+// wake's own time, is due at the next wake, not lost to it.
+func TestDueLoggedDuringAWakesPassIsNotLost(t *testing.T) {
+	h := coordHarness(t)
+	h.ticks(2, time.Minute)
+	other := NewLogWriter(h.buf)
+	it := ItemPayload{ID: "gitlab:example-org/widgets#4", Kind: "issue", Repository: "gitlab/example-org/widgets", Title: "Widget squeaks"}
+	once := false
+	h.tmux.onPane = func(name string) {
+		if name == "c" && !once {
+			once = true
+			other.Append(Event{V: EventVersion, Time: h.clock.Now(), Kind: KindItem, Mode: ModeShared, Item: &it})
+		}
+	}
+	h.status("a", "# a\n\nDONE\n")
+	h.ticks(2, time.Minute)
+	if w := h.wakes(); len(w) != 1 || w[0].Reason != "finished: a" {
+		t.Fatalf("wakes = %+v", w)
+	}
+	h.transcriptOf("c", "t3", summaryLine("c1", "m1", "Handled.", h.clock.Now(), 100))
+	h.ticks(2, time.Minute)
+	if w := h.wakes(); len(w) != 2 || w[1].Reason != "item: "+it.ID {
+		t.Fatalf("wakes = %+v", w)
+	}
+	h.transcriptOf("c", "t3", summaryLine("c2", "m2", "Handled.", h.clock.Now(), 100))
+	h.restart(false)
+	h.ticks(3, time.Minute)
+	if n := len(h.wakes()); n != 2 {
+		t.Fatalf("woke again after a replay: %d", n)
+	}
+}
+
+// A turn that ends other than with end_turn, an interruption, counts as
+// handled once the screen has been still for the stall.
+func TestInterruptedWakeCountsAsHandled(t *testing.T) {
+	h := coordHarness(t)
+	h.status("a", "# a\n\nDONE\n")
+	h.ticks(2, time.Minute)
+	h.transcriptOf("c", "t3", promptLine("c1", "[Request interrupted by user]", h.clock.Now()))
+	h.status("b", "# b\n\nDONE\n")
+	h.ticks(3, time.Minute)
+	if n := len(h.wakes()); n != 1 {
+		t.Fatalf("woke within the stall: %d", n)
+	}
+	h.ticks(2, h.cfg.Policies.Nudge.Stall.Duration)
+	if w := h.wakes(); len(w) != 2 || w[1].Reason != "finished: b" {
+		t.Fatalf("wakes = %+v", w)
+	}
+}
+
+// A coordinator whose screen moves between the read and the typing is
+// logged once for the wake, not once a pass.
+func TestMovingScreenSkipsAWakeOnce(t *testing.T) {
+	h := coordHarness(t)
+	n := 0
+	h.tmux.onPane = func(name string) {
+		if name == "c" {
+			n++
+			h.tmux.panes["c"] = fmt.Sprintf("thinking %d", n)
+		}
+	}
+	h.status("a", "# a\n\nDONE\n")
+	h.ticks(5, time.Minute)
+	skips := 0
+	for _, e := range h.events() {
+		if e.Kind == KindSkip && e.Session == "c" && strings.HasPrefix(e.Skip.Key, "screen-changed:") {
+			skips++
+		}
+	}
+	if skips != 1 || len(h.wakes()) != 0 {
+		t.Fatalf("skips %d, wakes %d", skips, len(h.wakes()))
+	}
+}
+
+// Trimming drops the oldest turn of the pack, whichever session it is.
+func TestPackDropsTheOldestTurn(t *testing.T) {
+	h := coordHarness(t)
+	old, recent := h.clock.Now(), h.clock.Now().Add(time.Hour)
+	var a, b string
+	h.cfg.Policies.Coordinator.Turns = 5
+	for i := 0; i < 5; i++ {
+		if i < 4 {
+			a += promptLine(fmt.Sprint("a", i), "older work "+strings.Repeat("o", 40), old)
+		}
+		b += promptLine(fmt.Sprint("b", i), "newer work "+strings.Repeat("n", 40), recent)
+	}
+	h.transcriptOf("a", "t1", a)
+	h.transcriptOf("b", "t2", b)
+	h.ticks(2, time.Minute)
+	_, full := h.sup.buildPack("widgets", nil, h.clock.Now())
+	h.cfg.Policies.Coordinator.PackBytes = len(full) - 1
+	p, _ := h.sup.buildPack("widgets", nil, h.clock.Now())
+	if len(p.Sessions[0].Turns) != 3 || len(p.Sessions[1].Turns) != 5 || p.Summarized.Turns != 1 {
+		t.Fatalf("a shows %d, b %d, summarized %d", len(p.Sessions[0].Turns), len(p.Sessions[1].Turns), p.Summarized.Turns)
 	}
 }

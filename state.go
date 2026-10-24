@@ -102,6 +102,7 @@ type Track struct {
 	Wakes     []WakeRecord
 	WakeCount int
 	WakeBase  *int64
+	Woken     map[string]bool // the due keys the wakes within the margin covered
 }
 
 // DeliveryRecord is one request a delivery opened, found, or was told of.

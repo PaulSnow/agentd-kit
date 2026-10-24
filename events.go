@@ -175,8 +175,10 @@ type ActPayload struct {
 	Checkpoint string `json:"checkpoint,omitempty"`
 	// A stop: why. A wake: what is due.
 	Reason string `json:"reason,omitempty"`
-	// A wake: the coordinator's spend when it was woken, when known.
-	Spend *int64 `json:"spend,omitempty"`
+	// A wake: the coordinator's spend when it was woken, when known, and
+	// the keys of what it covered, so none is due again.
+	Spend   *int64   `json:"spend,omitempty"`
+	Covered []string `json:"covered,omitempty"`
 	// An answer, or a restart that hands answers over: the decisions whose
 	// answers answers.json holds, newly delivered.
 	Answers []string `json:"answers,omitempty"`

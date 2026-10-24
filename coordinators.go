@@ -29,6 +29,7 @@ const (
 	turnsRead   = 256          // turns a transcript reader holds until they are logged
 	wakesKept   = 20           // a coordinator's latest wakes its Track keeps
 	wakeReasons = 500          // bytes of a wake's reasons kept
+	wakeMargin  = time.Hour    // how late a fact may be applied after the time it was logged
 )
 
 // Turn roles.
@@ -66,8 +67,8 @@ type CoordinatorPayload struct {
 }
 
 // WakeRecord is one wake of a coordinator: when, why, whether the pointer
-// was typed (a would-be wake typed nothing, so nothing is outstanding),
-// and its spend then.
+// was typed or, in shadow mode, would have been (a wake cut short may have
+// typed nothing, so nothing is outstanding), and its spend then.
 type WakeRecord struct {
 	At     time.Time
 	Reason string
@@ -184,7 +185,20 @@ func (t *Track) applyWake(a *ActPayload, taken, counted bool, at time.Time) {
 	}
 	// A wake cut short may never have typed its pointer, so it is not
 	// outstanding; a second pointer is harmless.
-	w := WakeRecord{At: at, Reason: a.Reason, Taken: taken, Spend: a.Spend}
+	w := WakeRecord{At: at, Reason: a.Reason, Taken: counted, Spend: a.Spend}
+	// What it covered is not due again; what is older than the margin
+	// before it cannot be due anyway.
+	if t.Woken == nil {
+		t.Woken = map[string]bool{}
+	}
+	for _, k := range a.Covered {
+		t.Woken[k] = true
+	}
+	for k := range t.Woken {
+		if when, ok := dueTime(k); !ok || when.Before(at.Add(-wakeMargin)) {
+			delete(t.Woken, k)
+		}
+	}
 	if len(t.Wakes) == wakesKept {
 		t.Wakes = t.Wakes[1:len(t.Wakes):len(t.Wakes)]
 	}
@@ -221,12 +235,15 @@ func (s *Supervisor) handled(t *Track, ev Evidence, now time.Time) bool {
 		return true
 	}
 	stall := s.cfg.Policies.Nudge.Stall.Duration
+	still := now.Sub(t.HashSince) >= stall && now.Sub(w.At) >= stall
 	if s.cfg.TranscriptDir == "" {
-		return now.Sub(t.HashSince) >= stall && now.Sub(w.At) >= stall
+		return still
 	}
 	tr := ev.Transcript
 	if tr.Found && tr.At.After(w.At) {
-		return tr.Role == "assistant" && tr.StopReason == "end_turn"
+		// A turn that ended otherwise, interrupted or failed, has ended
+		// once the screen has been still for the stall.
+		return tr.Role == "assistant" && tr.StopReason == "end_turn" || still
 	}
 	return now.Sub(w.At) >= stall
 }
@@ -277,31 +294,21 @@ func (s *Supervisor) claimed(name string, sess Session, t *Track) bool {
 	}
 }
 
-// due is what the coordinator of repo should judge, newest since its
-// latest wake: a session of the repository that finished or waits on the
-// owner, a new item for it, an owner answer to one of its sessions. Each
-// is due once; the coordinator's own answers reach it by their pointer.
-func (s *Supervisor) due(repo string, t *Track) []string {
+// due is what the coordinator of repo should judge, as reasons and the
+// keys that settle them: a session of the repository that finished or
+// waits on the owner, a new item for it, an owner answer to one of its
+// sessions, each once. A fact counts from the margin before the latest
+// wake, less what that wake and those before it covered, so one another
+// process logged during a wake's pass, at its time, is not lost. The
+// coordinator's own answers reach it by their pointer.
+func (s *Supervisor) due(repo string, t *Track) (reasons, keys []string) {
 	since := time.Time{}
 	if w, ok := t.lastWake(); ok {
-		since = w.At
+		since = w.At.Add(-wakeMargin)
 	}
-	var out []string
-	for _, n := range s.cfg.SessionNames() {
-		sess, o := s.cfg.Sessions[n], s.st.Tracks[n]
-		if sess.Repository != repo || sess.Role == RoleCoordinator || o == nil || !o.Since.After(since) {
-			continue
-		}
-		switch o.State {
-		case Done:
-			out = append(out, "finished: "+n)
-		case BlockedOnOwner:
-			out = append(out, "waiting: "+n)
-		}
-	}
-	for _, it := range s.packItems(repo) {
-		if s.st.Items[it.ID].FirstSeen.After(since) {
-			out = append(out, "item: "+it.ID)
+	add := func(reason string, at time.Time) {
+		if k := reason + "@" + at.UTC().Format(time.RFC3339Nano); at.After(since) && !t.Woken[k] {
+			reasons, keys = append(reasons, reason), append(keys, k)
 		}
 	}
 	for _, n := range s.cfg.SessionNames() {
@@ -309,18 +316,41 @@ func (s *Supervisor) due(repo string, t *Track) []string {
 		if sess.Repository != repo || sess.Role == RoleCoordinator || o == nil {
 			continue
 		}
+		switch o.State {
+		case Done:
+			add("finished: "+n, o.Since)
+		case BlockedOnOwner:
+			add("waiting: "+n, o.Since)
+		}
+	}
+	for _, it := range s.packItems(repo) {
+		add("item: "+it.ID, s.st.Items[it.ID].FirstSeen)
+	}
+	for _, n := range s.cfg.SessionNames() {
+		sess, o := s.cfg.Sessions[n], s.st.Tracks[n]
+		if sess.Repository != repo || sess.Role == RoleCoordinator || o == nil {
+			continue
+		}
 		ids := make([]string, 0, len(o.Answers))
-		for id, a := range o.Answers {
-			if a.At.After(since) {
-				ids = append(ids, id)
-			}
+		for id := range o.Answers {
+			ids = append(ids, id)
 		}
 		sort.Strings(ids)
 		for _, id := range ids {
-			out = append(out, "answer: "+n+"/"+id)
+			add("answer: "+n+"/"+id, o.Answers[id].At)
 		}
 	}
-	return out
+	return reasons, keys
+}
+
+// dueTime is the time a due key names.
+func dueTime(key string) (time.Time, bool) {
+	i := strings.LastIndexByte(key, '@')
+	if i < 0 {
+		return time.Time{}, false
+	}
+	at, err := time.Parse(time.RFC3339Nano, key[i+1:])
+	return at, err == nil
 }
 
 // wake writes the pack and types the fixed pointer into a coordinator that
@@ -328,7 +358,7 @@ func (s *Supervisor) due(repo string, t *Track) []string {
 // In shadow mode it is a would event; nothing is written or typed. It says
 // whether it tried to type.
 func (s *Supervisor) wake(name string, sess Session, t *Track, ev Evidence, state State, now time.Time) bool {
-	due := s.due(sess.Repository, t)
+	due, keys := s.due(sess.Repository, t)
 	if len(due) == 0 || !ev.Alive || t.Limited || ev.Dialog != "" || ev.TrustPrompt || state != Working && state != Idle || !s.handled(t, ev, now) {
 		return false
 	}
@@ -338,7 +368,7 @@ func (s *Supervisor) wake(name string, sess Session, t *Track, ev Evidence, stat
 	}
 	_, pack := s.buildPack(sess.Repository, due, now)
 	pointer := s.cfg.Policies.Coordinator.Pointer
-	a := &ActPayload{Key: key, Reason: cutUTF8(strings.Join(due, "; "), wakeReasons), Message: pointer}
+	a := &ActPayload{Key: key, Reason: cutUTF8(strings.Join(due, "; "), wakeReasons), Message: pointer, Covered: keys}
 	if sp, ok := t.spend(!s.shadow); ok {
 		a.Spend = &sp
 	}
@@ -491,18 +521,18 @@ func (s *Supervisor) buildPack(repo string, due []string, now time.Time) (Pack, 
 	}
 }
 
-// dropOldestTurn drops the oldest turn of the session that shows the most.
+// dropOldestTurn drops the pack's oldest turn, of whichever session.
 func dropOldestTurn(p *Pack) bool {
-	most := -1
+	oldest := -1
 	for i, ps := range p.Sessions {
-		if len(ps.Turns) > 0 && (most < 0 || len(ps.Turns) > len(p.Sessions[most].Turns)) {
-			most = i
+		if len(ps.Turns) > 0 && (oldest < 0 || ps.Turns[0].At.Before(p.Sessions[oldest].Turns[0].At)) {
+			oldest = i
 		}
 	}
-	if most < 0 {
+	if oldest < 0 {
 		return false
 	}
-	p.Sessions[most].Turns = p.Sessions[most].Turns[1:]
+	p.Sessions[oldest].Turns = p.Sessions[oldest].Turns[1:]
 	return true
 }
 
