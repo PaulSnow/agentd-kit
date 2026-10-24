@@ -232,16 +232,16 @@ func TestDialogAnsweredDuringItsEscalation(t *testing.T) {
 	sameAfterReplay(t, h, "after the second dialog")
 }
 
-// clone copies every map and slice of a Track, so a worker never shares
-// one with the loop. A field added to Track must be added to clone, and
+// clone copies every map, slice and pointer of a Track, so a worker never
+// shares one with the loop. A field added to Track must be added to clone, and
 // here.
 func TestCloneCopiesEveryMapAndSlice(t *testing.T) {
 	cloned := map[string]bool{"Restarts": true, "Crashes": true, "Posted": true, "Delivered": true, "Skipped": true, "Failures": true,
-		"DeliveredRefs": true, "Blocked": true, "GaveUp": true, "CutShort": true, "Filtered": true, "Deliveries": true}
+		"DeliveredRefs": true, "Blocked": true, "GaveUp": true, "CutShort": true, "Filtered": true, "Deliveries": true, "LastObs": true}
 	ty := reflect.TypeOf(Track{})
 	for i := 0; i < ty.NumField(); i++ {
 		f := ty.Field(i)
-		if k := f.Type.Kind(); (k == reflect.Map || k == reflect.Slice) && !cloned[f.Name] {
+		if k := f.Type.Kind(); (k == reflect.Map || k == reflect.Slice || k == reflect.Pointer) && !cloned[f.Name] {
 			t.Errorf("Track.%s is a %s that clone does not copy", f.Name, k)
 		}
 	}
