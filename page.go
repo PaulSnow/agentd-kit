@@ -82,12 +82,79 @@ func parseWhois(out []byte) (string, error) {
 
 // PageData is everything one view is rendered from: the inventory, when
 // the tracking files are configured, the report and what needs the owner,
-// both from the page's state, and the items the owner has not yet seen.
+// both from the page's state, the decisions sessions raised, and the
+// items the owner has not yet seen.
 type PageData struct {
 	Inventory *Inventory
 	Report    Report
 	Needs     []PageNeed
+	Decisions []PageDecision
 	New       []*Item
+}
+
+// PageDecision is one open decision a session raised, with the owner's
+// answer to it so far. A withheld decision matched a confidential pattern:
+// only its id and type are shown, and no form.
+type PageDecision struct {
+	Session    string
+	Repository string
+	Decision
+	Answered *AnswerRecord
+	Withheld bool
+}
+
+// DecisionsFrom lists the open decisions of the report's sessions, each
+// session's in the order it raised them: STATUS.md's Questions first, as
+// a text decision whose context is the text the report shows, then those
+// of questions.json. Every text is screened again.
+func DecisionsFrom(cfg *Config, st *LogState, rep Report) []PageDecision {
+	secret := confidentialMatcher(cfg)
+	repoOf := map[string]string{}
+	asked := map[string]string{}
+	for _, rr := range rep.Repositories {
+		for _, c := range rr.Cases {
+			repoOf[c.Session] = rr.Name
+		}
+		for _, q := range rr.Questions {
+			asked[q.Session] = q.Text
+		}
+	}
+	names := make([]string, 0, len(repoOf))
+	for n := range repoOf {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var out []PageDecision
+	for _, n := range names {
+		t := st.Tracks[n]
+		if t == nil {
+			continue
+		}
+		ds := t.Decisions
+		if t.StatusQuestions != "" {
+			d, _ := t.decision(statusDecision + t.StatusQuestions)
+			d.Context = asked[n]
+			ds = append([]Decision{d}, ds...)
+		}
+		for _, d := range ds {
+			pd := PageDecision{Session: n, Repository: repoOf[n], Decision: d}
+			if a, ok := t.answer(d.ID); ok {
+				pd.Answered = &a
+			}
+			texts := []string{d.Question, d.Context, d.Why, d.IfWrong, d.Recommendation}
+			for _, o := range d.Options {
+				texts = append(texts, o.Label, o.Consequence)
+			}
+			// STATUS.md's Questions with no text in the report were
+			// withheld when they were posted, or were never posted.
+			if secret(texts...) || strings.HasPrefix(d.ID, statusDecision) && d.Context == "" {
+				pd.Decision = Decision{ID: d.ID, Type: d.Type, Blocking: d.Blocking}
+				pd.Withheld = true
+			}
+			out = append(out, pd)
+		}
+	}
+	return out
 }
 
 // PageNeed is one thing waiting on the owner: a session's open Questions,
@@ -194,6 +261,7 @@ func (ps *pageState) load() (PageData, error) {
 	now := time.Now()
 	data.Report = ReportFrom(ps.cfg, ps.st, ps.host, now)
 	data.Needs = NeedsFrom(ps.cfg, ps.st, data.Report, now)
+	data.Decisions = DecisionsFrom(ps.cfg, ps.st, data.Report)
 	data.New = ps.st.SortedItems(true)
 	SortByUrgency(data.New)
 	return data, nil
@@ -226,6 +294,17 @@ func (ps *pageState) markSeen(ids []string, from string) error {
 	return MarkSeen(ps.log, time.Now(), ids, from)
 }
 
+// answer records the owner's answer to one of session's open decisions,
+// checked against the decision as the log holds it now.
+func (ps *pageState) answer(session string, a AnswerPayload) error {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if err := ps.catchUp(); err != nil {
+		return err
+	}
+	return RecordAnswer(ps.log, ps.st, time.Now(), session, a)
+}
+
 // whoisTTL is how long the page trusts one whois answer for an address,
 // and whoisSlots how many whois commands may run at once: a burst of
 // requests runs no burst of commands.
@@ -246,13 +325,14 @@ type whoisAnswer struct {
 // owner. A POST must also come from the page itself: its Origin must be
 // the page's, and it must carry the token the page put in its form.
 type Page struct {
-	cfg   PageConfig
-	whois Whois
-	load  func() (PageData, error)
-	mark  func(ids []string, from string) error
-	self  net.IP // the address the page listens on
-	now   func() time.Time
-	token string // the form token, new each time the page starts
+	cfg    PageConfig
+	whois  Whois
+	load   func() (PageData, error)
+	mark   func(ids []string, from string) error
+	answer func(session string, a AnswerPayload) error
+	self   net.IP // the address the page listens on
+	now    func() time.Time
+	token  string // the form token, new each time the page starts
 
 	mu      sync.Mutex
 	answers map[string]whoisAnswer // by caller IP
@@ -260,7 +340,8 @@ type Page struct {
 }
 
 // NewPage builds the page's handler.
-func NewPage(cfg PageConfig, whois Whois, load func() (PageData, error), mark func(ids []string, from string) error, now func() time.Time) (*Page, error) {
+func NewPage(cfg PageConfig, whois Whois, load func() (PageData, error), mark func(ids []string, from string) error,
+	answer func(session string, a AnswerPayload) error, now func() time.Time) (*Page, error) {
 	host, _, err := net.SplitHostPort(cfg.Address)
 	if err != nil {
 		return nil, fmt.Errorf("page.address: %w", err)
@@ -279,7 +360,7 @@ func NewPage(cfg PageConfig, whois Whois, load func() (PageData, error), mark fu
 	if _, err := rand.Read(b); err != nil {
 		return nil, err
 	}
-	return &Page{cfg: cfg, whois: whois, load: load, mark: mark, self: ip, now: now, token: hex.EncodeToString(b),
+	return &Page{cfg: cfg, whois: whois, load: load, mark: mark, answer: answer, self: ip, now: now, token: hex.EncodeToString(b),
 		answers: map[string]whoisAnswer{}, slots: make(chan struct{}, whoisSlots)}, nil
 }
 
@@ -342,7 +423,10 @@ func (p *Page) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/seen" && r.Method == http.MethodPost:
 		p.serveSeen(w, r)
 		return
-	case r.URL.Path == "/" || r.URL.Path == "/seen":
+	case r.URL.Path == "/answer" && r.Method == http.MethodPost:
+		p.serveAnswer(w, r)
+		return
+	case r.URL.Path == "/" || r.URL.Path == "/seen" || r.URL.Path == "/answer":
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	default:
@@ -370,17 +454,7 @@ const maxSeen = 500
 // to the view they came from. The POST must name the page as its Origin
 // and carry the page's token.
 func (p *Page) serveSeen(w http.ResponseWriter, r *http.Request) {
-	if o := r.Header.Get("Origin"); o == "" || !strings.EqualFold(o, "http://"+r.Host) {
-		http.Error(w, "refused: a POST must come from the page", http.StatusForbidden)
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form", http.StatusBadRequest)
-		return
-	}
-	if subtle.ConstantTimeCompare([]byte(r.PostForm.Get("token")), []byte(p.token)) != 1 {
-		http.Error(w, "refused: the form's token is not the page's", http.StatusForbidden)
+	if !p.checkPost(w, r) {
 		return
 	}
 	ids := r.PostForm["id"]
@@ -393,10 +467,66 @@ func (p *Page) serveSeen(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(os.Stderr, "agentd page: mark seen: %v\n", err)
 		return
 	}
-	// Back to the same view, rebuilt from its parameters, never a target
-	// the form names.
+	p.back(w, r)
+}
+
+// checkPost reads a POST's form once it is known to come from the page:
+// its Origin is the page's and it carries the page's token. It answers a
+// POST that does not, and says whether to go on.
+func (p *Page) checkPost(w http.ResponseWriter, r *http.Request) bool {
+	if o := r.Header.Get("Origin"); o == "" || !strings.EqualFold(o, "http://"+r.Host) {
+		http.Error(w, "refused: a POST must come from the page", http.StatusForbidden)
+		return false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return false
+	}
+	if subtle.ConstantTimeCompare([]byte(r.PostForm.Get("token")), []byte(p.token)) != 1 {
+		http.Error(w, "refused: the form's token is not the page's", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+// back sends the owner back to the view the form came from, rebuilt from
+// its parameters, never a target the form names.
+func (p *Page) back(w http.ResponseWriter, r *http.Request) {
 	back, _ := url.ParseQuery(r.PostForm.Get("view"))
 	http.Redirect(w, r, "/"+parseViewQuery(back).link(nil), http.StatusSeeOther)
+}
+
+// serveAnswer records the owner's answer to one decision, then sends the
+// owner back. The form names the session and the decision, and holds
+// answer (yes or no), choice, text or other, and a note; the answer is
+// checked against the decision as the log holds it before it is
+// recorded, with the address it came from.
+func (p *Page) serveAnswer(w http.ResponseWriter, r *http.Request) {
+	if !p.checkPost(w, r) {
+		return
+	}
+	f := func(k string) string { return strings.TrimSpace(r.PostForm.Get(k)) }
+	session := f("session")
+	a := AnswerPayload{ID: f("id"), Choice: f("choice"), Text: f("text"), Other: f("other"), Note: f("note"), From: r.RemoteAddr}
+	switch f("answer") {
+	case "":
+	case "yes", "no":
+		yes := f("answer") == "yes"
+		a.Answer = &yes
+	default:
+		http.Error(w, "answer is yes or no", http.StatusBadRequest)
+		return
+	}
+	if session == "" || a.ID == "" {
+		http.Error(w, "name the session and the decision", http.StatusBadRequest)
+		return
+	}
+	if err := p.answer(session, a); err != nil {
+		http.Error(w, "the answer was not recorded: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	p.back(w, r)
 }
 
 // hostAllowed checks the Host header against the configured names, so a
@@ -483,18 +613,19 @@ func (v viewQuery) link(change func(*viewQuery)) string {
 
 // pageView is what the template renders.
 type pageView struct {
-	Now      time.Time
-	Token    string // the form token
-	Needs    []PageNeed
-	New      []*Item
-	ViewQ    string // the view's query, for the form to come back to
-	AsOf     time.Time
-	Digest   string
-	Query    viewQuery
-	Repos    []pageRepo
-	Hidden   int
-	Links    []pageLink // the sort and show controls
-	Untraced bool       // no tracking files: repositories come from the log only
+	Now       time.Time
+	Token     string // the form token
+	Needs     []PageNeed
+	Decisions []PageDecision
+	New       []*Item
+	ViewQ     string // the view's query, for the form to come back to
+	AsOf      time.Time
+	Digest    string
+	Query     viewQuery
+	Repos     []pageRepo
+	Hidden    int
+	Links     []pageLink // the sort and show controls
+	Untraced  bool       // no tracking files: repositories come from the log only
 }
 
 type pageLink struct {
@@ -530,7 +661,8 @@ type pageIssue struct {
 // Hiding changes the view only. A hidden repository that needs the owner
 // is shown all the same.
 func buildView(data PageData, q viewQuery, now time.Time) pageView {
-	v := pageView{Now: now, Digest: data.Report.Digest, Query: q, Untraced: data.Inventory == nil, Needs: data.Needs, New: data.New,
+	v := pageView{Now: now, Digest: data.Report.Digest, Query: q, Untraced: data.Inventory == nil, Needs: data.Needs,
+		Decisions: data.Decisions, New: data.New,
 		ViewQ: strings.TrimPrefix(q.link(nil), "?")}
 	repos := map[string]*pageRepo{}
 	var order []string
@@ -709,6 +841,19 @@ table { border-collapse: collapse; } td { padding: .1rem .6rem .1rem 0; vertical
 {{range .Needs}}<div><span class="needs">{{.Session}}</span> <span class="muted">{{.Repository}}, {{.Kind}}, since {{when .Since}}</span></div><pre>{{.Text}}</pre>
 {{else}}<p class="muted">Nothing waits on you.</p>{{end}}
 </section>
+{{if .Decisions}}<section id="decisions"><h2>Decisions</h2>
+{{range .Decisions}}<div><span class="needs">{{.Session}}</span> <span class="muted">{{.Repository}}, {{.ID}}, {{.Type}}{{if .Blocking}}, blocking{{end}}</span></div>
+{{if .Withheld}}<p class="muted">The details were withheld because they matched a confidential pattern, or were never posted. Look at the session directly.</p>
+{{else}}<pre>{{.Question}}</pre>{{if .Context}}<pre class="muted">{{.Context}}</pre>{{end}}
+{{if .Why}}<p class="muted">Why: {{.Why}}</p>{{end}}{{if .IfWrong}}<p class="muted">If wrong: {{.IfWrong}}</p>{{end}}{{if .Recommendation}}<p>Recommended: {{.Recommendation}}</p>{{end}}
+{{with .Answered}}<p>Answered {{when .At}}:{{with .Answer}} {{if .}}yes{{else}}no{{end}}{{end}} {{.Choice}} {{.Text}} {{.Other}}{{if .Delivered}} <span class="muted">(delivered)</span>{{end}}</p>{{end}}
+<form method="post" action="/answer"><input type="hidden" name="token" value="{{$.Token}}"><input type="hidden" name="view" value="{{$.ViewQ}}"><input type="hidden" name="session" value="{{.Session}}"><input type="hidden" name="id" value="{{.ID}}">
+{{if eq .Type "yes_no"}}<label><input type="radio" name="answer" value="yes"> yes</label> <label><input type="radio" name="answer" value="no"> no</label>
+{{else if eq .Type "choose_one"}}{{range .Options}}<div><label><input type="radio" name="choice" value="{{.Key}}"> {{.Key}}: {{.Label}}</label> <span class="muted">{{.Consequence}}</span></div>{{end}}
+{{else}}<div><textarea name="text" rows="3" cols="60" maxlength="2000"></textarea></div>{{end}}
+<div><textarea name="other" rows="1" cols="60" maxlength="2000" placeholder="or in your own words, which does not settle it"></textarea></div>
+<div><input name="note" size="60" maxlength="500" placeholder="a note"> <button type="submit">Answer</button></div></form>{{end}}
+{{end}}</section>{{end}}
 <section id="new"><h2>New since last visit</h2>
 {{if .New}}<form method="post" action="/seen"><input type="hidden" name="token" value="{{.Token}}"><input type="hidden" name="view" value="{{.ViewQ}}">
 <table>{{range .New}}<tr><td><input type="checkbox" name="id" value="{{.ID}}" checked></td><td class="muted">{{when .SourceTime}}</td><td>{{.Kind}}</td><td>{{.Repository}}</td><td>{{if .Link}}<a href="{{.Link}}">{{.Title}}</a>{{else}}{{.Title}}{{end}}</td><td class="muted">{{.Author}}</td>{{with .Triaged}}<td>{{.NeedsOwner}}/{{.Urgency}}</td><td>{{.Summary}}</td>{{else}}<td class="muted">untriaged</td><td></td>{{end}}</tr>{{end}}</table>
@@ -748,7 +893,7 @@ func pageCmd(args []string) error {
 	if _, err := ps.load(); err != nil {
 		return err
 	}
-	page, err := NewPage(cfg.Page, ExecWhois{Argv: cfg.Page.Whois, Timeout: cfg.Timeouts.Tmux.Duration}, ps.load, ps.markSeen, time.Now)
+	page, err := NewPage(cfg.Page, ExecWhois{Argv: cfg.Page.Whois, Timeout: cfg.Timeouts.Tmux.Duration}, ps.load, ps.markSeen, ps.answer, time.Now)
 	if err != nil {
 		return err
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -64,13 +65,19 @@ func testPageData() PageData {
 	needs := []PageNeed{{Kind: "questions", Session: "<script>alert(1)</script>", Repository: "widgets", Since: pageAt.Add(-time.Hour), Text: "Blue or </pre><script>x()</script>?"}}
 	items := []*Item{{ItemPayload: ItemPayload{ID: "gitlab/example-org/widgets#19", Kind: ItemIssue, Repository: "gitlab/example-org/widgets",
 		Title: "<iframe src=x>", Link: "https://gitlab.com/example-org/widgets/-/issues/19", SourceTime: pageAt.Add(-10 * time.Minute)}}}
-	return PageData{Inventory: inv, Report: report, Needs: needs, New: items}
+	decisions := []PageDecision{{Session: "w17", Repository: "widgets", Decision: Decision{ID: "D1", Type: DecisionChooseOne,
+		Question: "Which <b>colour</b>?", Context: "</pre><script>y()</script>", Recommendation: "b", Blocking: true,
+		Options: []DecisionOption{{Key: "a", Label: "Blue", Consequence: "old logo"}, {Key: "b", Label: "Green", Consequence: "new guide"}}}}}
+	return PageData{Inventory: inv, Report: report, Needs: needs, New: items, Decisions: decisions}
 }
 
-// fakeMarks records what the page marked seen, and from where.
+// fakeMarks records what the page marked seen and answered, and from where.
 type fakeMarks struct {
-	ids  []string
-	from string
+	ids      []string
+	from     string
+	sessions []string
+	answers  []AnswerPayload
+	fail     error
 }
 
 func testPage(t *testing.T) (*Page, *fakeWhois) {
@@ -88,7 +95,14 @@ func testPageMarks(t *testing.T, cfg PageConfig) (*Page, *fakeWhois, *fakeMarks)
 		return nil
 	}
 	cfg.Address, cfg.Whois, cfg.Owner = pageAddr, []string{"whois", "{addr}"}, "owner-a"
-	p, err := NewPage(cfg, whois, func() (PageData, error) { return testPageData(), nil }, mark, func() time.Time { return pageAt })
+	answer := func(session string, a AnswerPayload) error {
+		if marks.fail != nil {
+			return marks.fail
+		}
+		marks.sessions, marks.answers = append(marks.sessions, session), append(marks.answers, a)
+		return nil
+	}
+	p, err := NewPage(cfg, whois, func() (PageData, error) { return testPageData(), nil }, mark, answer, func() time.Time { return pageAt })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +304,7 @@ func TestPageConfigIsChecked(t *testing.T) {
 		{Address: pageAddr, Owner: "o"},
 		{Address: pageAddr, Whois: []string{"w"}},
 	} {
-		if _, err := NewPage(cfg, &fakeWhois{}, nil, nil, time.Now); err == nil {
+		if _, err := NewPage(cfg, &fakeWhois{}, nil, nil, nil, time.Now); err == nil {
 			t.Errorf("%+v accepted", cfg)
 		}
 	}
@@ -328,8 +342,13 @@ func TestPageSectionsInOrder(t *testing.T) {
 
 // post sends the mark-seen form from remote, with origin and token.
 func post(p *Page, origin, token string, form url.Values, remote string) *httptest.ResponseRecorder {
+	return postTo(p, "/seen", origin, token, form, remote)
+}
+
+// postTo sends a form to path from remote, with origin and token.
+func postTo(p *Page, path, origin, token string, form url.Values, remote string) *httptest.ResponseRecorder {
 	form.Set("token", token)
-	req := httptest.NewRequest("POST", "/seen", strings.NewReader(form.Encode()))
+	req := httptest.NewRequest("POST", path, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	if origin != "" {
 		req.Header.Set("Origin", origin)
@@ -462,5 +481,119 @@ func TestNeedsFrom(t *testing.T) {
 	v := buildView(PageData{Report: rep, Needs: needs}, parseViewQuery(url.Values{"show": {"all"}}), pageAt)
 	if len(v.Repos) != 1 || v.Repos[0].NeedsYou != 2 {
 		t.Fatalf("repositories: %+v, want widgets needing you twice", v.Repos)
+	}
+}
+
+// pageToken is the form token in the page the owner is served.
+func pageToken(t *testing.T, p *Page) (token, body string) {
+	t.Helper()
+	body = get(p, "GET", "/", pageAddr, "192.0.2.20:51000").Body.String()
+	m := regexp.MustCompile(`name="token" value="([0-9a-f]{64})"`).FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("no token in the form:\n%s", body)
+	}
+	return m[1], body
+}
+
+// The page shows each open decision with a form of its type, escaped;
+// answering needs what marking seen needs, and records the answer with
+// the address it came from.
+func TestPageAnswers(t *testing.T) {
+	p, _, marks := testPageMarks(t, PageConfig{})
+	token, body := pageToken(t, p)
+	for _, want := range []string{`action="/answer"`, `name="session" value="w17"`, `name="id" value="D1"`, `name="choice" value="a"`,
+		`name="choice" value="b"`, `name="other"`, "Which &lt;b&gt;colour&lt;/b&gt;?"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("no %s in the page:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "<script>y()") {
+		t.Fatal("the decision's context is not escaped")
+	}
+	origin := "http://" + pageAddr
+	form := func() url.Values {
+		return url.Values{"session": {"w17"}, "id": {"D1"}, "choice": {"b"}, "note": {" soon "}}
+	}
+	for _, c := range []struct {
+		name, origin, token, remote string
+	}{
+		{"no origin", "", token, "192.0.2.20:51000"},
+		{"another token", origin, strings.Repeat("0", 64), "192.0.2.20:51000"},
+		{"a guest", origin, token, "192.0.2.30:51000"},
+	} {
+		if w := postTo(p, "/answer", c.origin, c.token, form(), c.remote); w.Code != http.StatusForbidden {
+			t.Errorf("%s: %d", c.name, w.Code)
+		}
+	}
+	if len(marks.answers) != 0 {
+		t.Fatalf("a refused POST answered %v", marks.answers)
+	}
+	for _, bad := range []url.Values{{"id": {"D1"}, "choice": {"b"}}, {"session": {"w17"}, "choice": {"b"}}, {"session": {"w17"}, "id": {"D1"}, "answer": {"maybe"}}} {
+		if w := postTo(p, "/answer", origin, token, bad, "192.0.2.20:51000"); w.Code != http.StatusBadRequest {
+			t.Errorf("%v: %d", bad, w.Code)
+		}
+	}
+	w := postTo(p, "/answer", origin, token, form(), "192.0.2.20:51000")
+	if w.Code != http.StatusSeeOther || len(marks.answers) != 1 {
+		t.Fatalf("owner's answer: %d, %v", w.Code, marks.answers)
+	}
+	if a := marks.answers[0]; marks.sessions[0] != "w17" || a.ID != "D1" || a.Choice != "b" || a.Note != "soon" || a.Answer != nil || a.From != "192.0.2.20:51000" {
+		t.Fatalf("recorded %q %+v", marks.sessions[0], a)
+	}
+	yes := url.Values{"session": {"w17"}, "id": {"D2"}, "answer": {"yes"}}
+	if w := postTo(p, "/answer", origin, token, yes, "192.0.2.20:51000"); w.Code != http.StatusSeeOther || marks.answers[1].Answer == nil || !*marks.answers[1].Answer {
+		t.Fatalf("yes: %d, %+v", w.Code, marks.answers[1])
+	}
+	marks.fail = errors.New("no open decision")
+	if w := postTo(p, "/answer", origin, token, form(), "192.0.2.20:51000"); w.Code != http.StatusBadRequest {
+		t.Fatalf("a refused answer: %d", w.Code)
+	}
+}
+
+// The page's state lists the report's sessions' decisions, STATUS.md's
+// Questions among them, with their answers, and records an answer only
+// when it fits an open decision.
+func TestPageStateDecisions(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Sessions = map[string]Session{"s1": {Workdir: "/nonexistent/s1", Repository: "gitlab/example-org/widgets"}}
+	cfg.ConfidentialPatterns = []string{"secret-word"}
+	var buf bytes.Buffer
+	log := NewLogWriter(&buf)
+	var doc QuestionsDoc
+	if err := json.Unmarshal([]byte(chooseColour), &doc); err != nil {
+		t.Fatal(err)
+	}
+	hidden := doc.Decisions[0]
+	hidden.ID, hidden.Context = "D2", "about secret-word"
+	for _, e := range []Event{
+		{V: EventVersion, Time: pageAt, Kind: KindObserve, Mode: ModeLive, Session: "s1", Observe: &ObservePayload{State: string(BlockedOnOwner), Alive: true}},
+		{V: EventVersion, Time: pageAt, Kind: KindDecision, Mode: ModeLive, Session: "s1", Decision: &DecisionPayload{Hash: "h1", Decisions: append(doc.Decisions, hidden)}},
+	} {
+		if err := log.Append(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ps := newPageState(&cfg, log, ModeLive, "host-a")
+	data, err := ps.load()
+	if err != nil || len(data.Decisions) != 2 {
+		t.Fatalf("decisions %+v, %v", data.Decisions, err)
+	}
+	if d := data.Decisions[0]; d.ID != "D1" || d.Withheld || d.Answered != nil {
+		t.Fatalf("D1: %+v", d)
+	}
+	if d := data.Decisions[1]; d.ID != "D2" || !d.Withheld || strings.Contains(fmt.Sprint(d), "secret-word") {
+		t.Fatalf("D2 is not withheld: %+v", d)
+	}
+	if err := ps.answer("s1", AnswerPayload{ID: "D1", Choice: "z"}); err == nil {
+		t.Fatal("recorded a choice that is not an option")
+	}
+	if err := ps.answer("s1", AnswerPayload{ID: "D9", Text: "x"}); err == nil {
+		t.Fatal("recorded an answer to no decision")
+	}
+	if err := ps.answer("s1", AnswerPayload{ID: "D1", Choice: "b", From: "192.0.2.20:1"}); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ = ps.load(); data.Decisions[0].Answered == nil || data.Decisions[0].Answered.Choice != "b" {
+		t.Fatalf("after the answer: %+v", data.Decisions[0])
 	}
 }
