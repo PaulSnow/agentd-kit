@@ -20,7 +20,7 @@ type fakeForgeAPI struct {
 	lastModified string            // its Last-Modified
 	pollInterval string            // X-Poll-Interval, if any
 	github       map[string]string // other GitHub paths: body
-	gitlab       map[string]string // GitLab path prefix: body
+	gitlab       map[string]string // parts of a GitLab path: body
 	githubErr    error
 	gitlabErr    error
 	calls        []string
@@ -57,10 +57,20 @@ func (f *fakeForgeAPI) GitLab(path string) (APIResponse, error) {
 	if f.gitlabErr != nil {
 		return APIResponse{}, f.gitlabErr
 	}
-	for prefix, body := range f.gitlab {
-		if strings.HasPrefix(path, prefix) {
-			return APIResponse{Status: http.StatusOK, Body: []byte(body)}, nil
+	// The longest key whose parts, split at "|", the path all contains
+	// answers, so a page can have its own.
+	match := ""
+	for key := range f.gitlab {
+		all := true
+		for _, part := range strings.Split(key, "|") {
+			all = all && strings.Contains(path, part)
 		}
+		if all && len(key) > len(match) {
+			match = key
+		}
+	}
+	if match != "" {
+		return APIResponse{Status: http.StatusOK, Body: []byte(f.gitlab[match])}, nil
 	}
 	return APIResponse{Status: http.StatusOK, Body: []byte("[]")}, nil
 }
@@ -451,5 +461,57 @@ func TestParseIncluded(t *testing.T) {
 	}
 	if _, err := parseIncluded([]byte("gh: not logged in\n")); err == nil {
 		t.Fatal("an error message parsed as a reply")
+	}
+}
+
+// Quiet GitLab polls write nothing but still move the cursor they ask
+// from; a long list is read page by page, and one too long is unknown.
+func TestGitLabQuietCursorAndPages(t *testing.T) {
+	h, api := pollHarness(t, false, true)
+	h.ticks(2, 15*time.Minute)
+	events := len(h.events())
+	h.ticks(1, 15*time.Minute)
+	if n := len(h.events()); n != events {
+		t.Fatalf("a quiet poll made %d events", n-events)
+	}
+	calls := api.callList()
+	want := strings.ReplaceAll(h.clock.Now().Add(-30*time.Minute-pollOverlap).UTC().Format(time.RFC3339), ":", "%3A")
+	if c := calls[len(calls)-3]; !strings.Contains(c, "updated_after="+want) {
+		t.Fatalf("asked from %q, want the last poll's cursor %s", c, want)
+	}
+	upd := h.clock.Now().UTC().Format(time.RFC3339)
+	work := func(from, n int) string {
+		var b []string
+		for i := from; i < from+n; i++ {
+			b = append(b, fmt.Sprintf(`{"iid": %d, "title": "Issue %d", "created_at": %q, "updated_at": %q}`, i, i, upd, upd))
+		}
+		return "[" + strings.Join(b, ",") + "]"
+	}
+	api.set(func() {
+		api.gitlab = map[string]string{"/projects/example-org%2Fwidgets/issues": work(1, 100), "/projects/example-org%2Fwidgets/issues|&page=2": work(101, 3)}
+	})
+	h.ticks(1, 15*time.Minute)
+	if n := h.count(KindItem, "", ""); n != 103 {
+		t.Fatalf("items over two pages = %d, want 103", n)
+	}
+	api.set(func() { api.gitlab = map[string]string{"/projects/example-org%2Fwidgets/issues": work(200, 100)} })
+	h.ticks(1, 15*time.Minute)
+	if p := h.sup.st.Polls[SourceGitLab]; p.OK || !strings.Contains(p.Error, "more than 1000") {
+		t.Fatalf("a list past the pages = %+v", p)
+	}
+}
+
+// A source turned off is not shown; a stopped agentd polls nothing, so its
+// sources are unknown.
+func TestPollStatusOffAndStopped(t *testing.T) {
+	h, _ := pollHarness(t, true, true)
+	h.ticks(1, 15*time.Minute)
+	h.cfg.Poll.GitLab = false
+	h.sup.emit("", Event{Kind: KindStop, Stop: &StopPayload{}})
+	_, meta := Summarize(h.cfg, h.events(), ModeLive)
+	var b strings.Builder
+	PrintStatus(&b, nil, meta, h.clock.Now())
+	if strings.Contains(b.String(), "poll gitlab") || !strings.Contains(b.String(), "github: unknown, agentd stopped") {
+		t.Fatalf("status:\n%s", b.String())
 	}
 }

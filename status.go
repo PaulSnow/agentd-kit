@@ -45,6 +45,12 @@ func Summarize(cfg *Config, events []Event, mode string) ([]SessionStatus, map[s
 	if !st.Stopped.IsZero() {
 		meta["stopped"] = st.Stopped
 	}
+	// A source no longer polled is left out.
+	for src := range st.Polls {
+		if src == SourceGitHub && !cfg.Poll.GitHub || src == SourceGitLab && !cfg.Poll.GitLab {
+			delete(st.Polls, src)
+		}
+	}
 	if len(st.Polls) > 0 {
 		meta["polls"] = st.Polls
 		meta["poll_stale"] = pollHeartbeat + 2*cfg.Poll.Every.Duration
@@ -107,6 +113,7 @@ func PrintStatus(w io.Writer, rows []SessionStatus, meta map[string]any, now tim
 	// it, so it is unknown, never "nothing new".
 	if polls, ok := meta["polls"].(map[string]PollRecord); ok {
 		stale, _ := meta["poll_stale"].(time.Duration)
+		stopped, _ := meta["stopped"].(time.Time)
 		srcs := make([]string, 0, len(polls))
 		for src := range polls {
 			srcs = append(srcs, src)
@@ -117,6 +124,8 @@ func PrintStatus(w io.Writer, rows []SessionStatus, meta map[string]any, now tim
 			switch {
 			case !p.OK:
 				fmt.Fprintf(w, "poll %s: unknown since %s ago (%d calls in %d polls): %s\n", src, ago(now, p.At), p.Calls, p.Polls, p.Error)
+			case !stopped.IsZero():
+				fmt.Fprintf(w, "poll %s: unknown, agentd stopped %s ago\n", src, ago(now, stopped))
 			case stale > 0 && now.Sub(p.At) > stale:
 				fmt.Fprintf(w, "poll %s: unknown, no poll recorded for %s\n", src, ago(now, p.At))
 			default:

@@ -33,6 +33,9 @@ type workState struct {
 	nextPoll map[string]time.Time // when each forge source is next due
 	// pollTally holds each source's quiet polls since its last record.
 	pollTally map[string]PollPayload
+	// liveCursor is each source's cursor as far as polls have moved it,
+	// ahead of its event.
+	liveCursor map[string]time.Time
 }
 
 // workerMsg is an event a worker appended, or the end of its job.
@@ -43,7 +46,7 @@ type workerMsg struct {
 
 func newWorkState() *workState {
 	return &workState{inFlight: map[string]bool{}, wake: make(chan struct{}, 1), nextPoll: map[string]time.Time{},
-		pollTally: map[string]PollPayload{}}
+		pollTally: map[string]PollPayload{}, liveCursor: map[string]time.Time{}}
 }
 
 // signal wakes the loop, if it is not already due to wake.

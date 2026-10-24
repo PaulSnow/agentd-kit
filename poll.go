@@ -48,6 +48,9 @@ const pollHeartbeat = 6 * time.Hour
 // has the same id.
 const pollOverlap = 2 * time.Minute
 
+// gitlabPages is how many pages of 100 one GitLab list may take.
+const gitlabPages = 10
+
 // PollConfig turns on agentd's own poll of the forges, per forge: each
 // needs that forge's CLI logged in. Every is how often.
 type PollConfig struct {
@@ -204,7 +207,13 @@ func (s *Supervisor) pollSource(src string, now time.Time) pollResult {
 	if src == SourceGitHub {
 		return pollGitHub(s.api, s.st, inv)
 	}
-	return pollGitLab(s.api, s.st, inv, now)
+	s.work.mu.Lock()
+	since := s.work.liveCursor[src]
+	s.work.mu.Unlock()
+	if c := s.st.Cursors[src]; c.IsZero() || c.After(since) {
+		since = c
+	}
+	return pollGitLab(s.api, since, inv, now)
 }
 
 // recordPoll logs what a poll begun at start found: its items and its
@@ -213,8 +222,11 @@ func (s *Supervisor) pollSource(src string, now time.Time) pollResult {
 // when the source is next due. A poll that failed writes no items, even
 // those it found before the failure: its cursor stays, so the next poll
 // finds them again. The GitHub cursor is Last-Modified and moves whenever
-// GitHub sends a new one; the GitLab cursor moves only with a record, so
-// quiet polls write nothing.
+// GitHub sends a new one. The GitLab cursor moves with every poll that
+// worked, but in memory: its event is written only with a record, so quiet
+// polls write nothing, and a restart asks again from the last record's.
+// The tally is in memory too: a restart loses the quiet polls since the
+// last record from the count.
 func (s *Supervisor) recordPoll(src string, r pollResult, start time.Time) {
 	wait := s.cfg.Poll.Every.Duration
 	if r.wait > wait {
@@ -241,6 +253,11 @@ func (s *Supervisor) recordPoll(src string, r pollResult, start time.Time) {
 	}
 	prev, seen := s.st.Polls[src]
 	record := p.Items > 0 || !seen || prev.OK != p.OK || prev.Error != p.Error || start.Sub(prev.At) >= pollHeartbeat
+	if r.err == nil && !r.cursor.IsZero() {
+		s.work.mu.Lock()
+		s.work.liveCursor[src] = r.cursor
+		s.work.mu.Unlock()
+	}
 	moved := r.err == nil && r.cursor.After(s.st.Cursors[src]) && (src == SourceGitHub || record || s.st.Cursors[src].IsZero())
 	if moved {
 		s.emit("", Event{Kind: KindCursor, Mode: ModeShared, Cursor: &CursorPayload{Source: src, AsOf: r.cursor}})
@@ -395,10 +412,11 @@ func gitlabItem(key, path string, w gitlabWork, mr bool, since time.Time) ItemPa
 // while it runs, or in a skew between the clocks, is asked for again next
 // time, and found again under the same id. Any call
 // that fails makes the whole poll unknown and leaves the cursor, so a
-// failure never leaves a gap. The first poll is the baseline: it sets the
-// cursor only.
-func pollGitLab(api ForgeAPI, st *LogState, inv *Inventory, now time.Time) pollResult {
-	since := st.Cursors[SourceGitLab]
+// failure never leaves a gap. Each list is read page by page, up to
+// gitlabPages pages; a list longer than that makes the poll unknown rather
+// than leave out what is past it. The first poll is the baseline: it sets
+// the cursor only.
+func pollGitLab(api ForgeAPI, since time.Time, inv *Inventory, now time.Time) pollResult {
 	cursor := now.Add(-pollOverlap)
 	if since.IsZero() {
 		return pollResult{cursor: cursor}
@@ -425,8 +443,18 @@ func pollGitLab(api ForgeAPI, st *LogState, inv *Inventory, now time.Time) pollR
 		}
 		for _, kind := range []string{"issues", "merge_requests"} {
 			var list []gitlabWork
-			if !get(fmt.Sprintf("/projects/%s/%s?%s", url.PathEscape(repo.Path), kind, q), &list) {
-				return pollResult{calls: r.calls, err: r.err}
+			for page := 1; ; page++ {
+				if page > gitlabPages {
+					return pollResult{calls: r.calls, err: fmt.Errorf("GitLab %s %s: more than %d updated since %s", repo.Key, kind, gitlabPages*100, since.UTC().Format(time.RFC3339))}
+				}
+				var one []gitlabWork
+				if !get(fmt.Sprintf("/projects/%s/%s?%s&page=%d", url.PathEscape(repo.Path), kind, q, page), &one) {
+					return pollResult{calls: r.calls, err: r.err}
+				}
+				list = append(list, one...)
+				if len(one) < 100 {
+					break
+				}
 			}
 			for _, w := range list {
 				if !w.UpdatedAt.After(since) {
