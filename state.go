@@ -94,13 +94,21 @@ type QuestionsEscalation struct {
 
 // DialogEscalation tracks a session's dialog escalations: one per dialog
 // episode (a dialog showing, whatever its screen does, until a pass sees
-// none), and at most one per DialogEscalationGap. Open follows the observe
-// events; N and Last follow the escalations, so replay rebuilds them.
+// none), and at most one per DialogEscalationGap. Showing and Episode
+// follow the observe events; Escalated, N and Last follow the escalations,
+// which carry the episode they were made for, so they settle the same
+// whichever comes first: an escalation a worker finishes after the dialog
+// went away settles an episode that is over.
 type DialogEscalation struct {
-	Open bool      // the dialog now showing has been escalated
-	N    int       // dialog escalations so far, numbering their keys
-	Last time.Time // when the last was posted
+	Showing   bool      // a dialog shows, as the last observation logged said
+	Episode   int       // dialog episodes seen so far; the one showing, if any
+	Escalated int       // the latest episode escalated
+	N         int       // dialog escalations so far, numbering their keys
+	Last      time.Time // when the last was posted
 }
+
+// Open says whether the dialog now showing has been escalated.
+func (d DialogEscalation) Open() bool { return d.Showing && d.Escalated == d.Episode }
 
 // DialogEscalationGap is the least time between two dialog escalations of
 // one session.

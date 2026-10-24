@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -47,9 +48,23 @@ func TestSlowGateDoesNotDelayARestart(t *testing.T) {
 	doneWithDelivery(t, h, "d")
 	h.status("gone", working)
 	release := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
 	h.runner.onGate = func() { <-release }
-	if err := h.sup.Pass(); err != nil {
-		t.Fatal(err)
+	passed := make(chan error, 1)
+	go func() { passed <- h.sup.Pass() }()
+	select {
+	case err := <-passed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the pass waited for the gate")
 	}
 	waitFor(t, "the gate to start", func() bool { return h.runner.gateCount() == 1 })
 	if h.tmux.count("new-session", "gone") != 1 {
@@ -78,7 +93,7 @@ func TestRunningJobIsNotStartedTwice(t *testing.T) {
 	doneWithDelivery(t, h, "d")
 	release := make(chan struct{})
 	h.runner.onGate = func() { <-release }
-	h.sup.Pass()
+	h.sup.Pass() // returns at once: TestSlowGateDoesNotDelayARestart
 	waitFor(t, "the gate to start", func() bool { return h.runner.gateCount() == 1 })
 	h.clock.advance(5 * time.Minute)
 	h.sup.Pass()
@@ -159,5 +174,84 @@ func TestOwnerRecordWakesTheLoop(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A job that ends at once, a delivery that is held say, does not wake the
+// loop: it waits for the poll, rather than passing again and again.
+func TestQuickJobsDoNotSpinTheLoop(t *testing.T) {
+	h := newHarness(t, false, "d")
+	h.cfg.PollInterval = Duration{time.Hour}
+	doneWithDelivery(t, h, "d")
+	s := h.cfg.Sessions["d"]
+	s.Hold = "waiting for the owner's review"
+	h.cfg.Sessions["d"] = s
+	buf := &lockedBuffer{}
+	h.sup = NewSupervisor(h.cfg, NewLogWriter(buf), h.clock, h.tmux, h.git, h.forge, h.runner, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- h.sup.Run(ctx, false) }()
+	waitFor(t, "the loop to wait", func() bool { return h.clock.waiting() >= 2 })
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if n := h.tmux.count("has-session", "d"); n != 1 {
+		t.Fatalf("%d passes with the clock stopped, want 1", n)
+	}
+}
+
+// A dialog the owner answers while its escalation command still runs is
+// over when that escalation settles: the next dialog is escalated, and the
+// loop's state is the replay's.
+func TestDialogAnsweredDuringItsEscalation(t *testing.T) {
+	h := newHarness(t, false, "dlg")
+	h.status("dlg", working)
+	h.alive("dlg", "Do you want to proceed?\n❯ 1. Yes")
+	release := make(chan struct{})
+	h.runner.onRun = func() { <-release }
+	h.sup.Pass() // the escalation starts, and waits
+	waitFor(t, "the escalation to start", func() bool { return h.runner.attemptCount() == 1 })
+	h.clock.advance(5 * time.Minute)
+	h.tmux.setPane("dlg", "working again")
+	h.sup.Pass() // the dialog is gone; the escalation is still running
+	close(release)
+	h.sup.Wait()
+	sameAfterReplay(t, h, "after the late escalation")
+	if h.sup.Tracks()["dlg"].Dialog.Open() {
+		t.Fatal("the escalation settled a dialog that had gone away")
+	}
+	h.runner.onRun = nil
+	h.clock.advance(31 * time.Minute)
+	h.tmux.setPane("dlg", "Do you want to delete it?\n❯ 1. Yes")
+	h.ticks(2, 5*time.Minute)
+	if len(h.runner.calls) != 2 {
+		t.Fatalf("escalations = %d, want the second dialog's too", len(h.runner.calls))
+	}
+	sameAfterReplay(t, h, "after the second dialog")
+}
+
+// clone copies every map and slice of a Track, so a worker never shares
+// one with the loop. A field added to Track must be added to clone, and
+// here.
+func TestCloneCopiesEveryMapAndSlice(t *testing.T) {
+	cloned := map[string]bool{"Restarts": true, "Crashes": true, "Posted": true, "Delivered": true, "Skipped": true, "Failures": true,
+		"DeliveredRefs": true, "Blocked": true, "GaveUp": true, "CutShort": true, "Filtered": true, "Deliveries": true}
+	ty := reflect.TypeOf(Track{})
+	for i := 0; i < ty.NumField(); i++ {
+		f := ty.Field(i)
+		if k := f.Type.Kind(); (k == reflect.Map || k == reflect.Slice) && !cloned[f.Name] {
+			t.Errorf("Track.%s is a %s that clone does not copy", f.Name, k)
+		}
+	}
+	tr := newTrack()
+	tr.Posted["a"], tr.Delivered["a"], tr.Skipped["a"], tr.Blocked["a"], tr.Filtered["a"] = true, "x", true, "x", true
+	tr.Failures["a"] = []time.Time{{}}
+	c := tr.clone()
+	c.Posted["b"], c.Delivered["b"], c.Skipped["b"], c.Blocked["b"], c.Filtered["b"] = true, "y", true, "y", true
+	c.Failures["a"] = append(c.Failures["a"], time.Time{})
+	if len(tr.Posted)+len(tr.Delivered)+len(tr.Skipped)+len(tr.Blocked)+len(tr.Filtered) != 5 || len(tr.Failures["a"]) != 1 {
+		t.Fatalf("the clone shares the original's maps: %+v", tr)
 	}
 }

@@ -117,27 +117,40 @@ func (s *Supervisor) mode() string { return mode(s.shadow) }
 // In a worker, a failed append stops its job, not the pass, and the event
 // is also queued for the loop to apply to the session's own Track.
 func (s *Supervisor) emit(name string, e Event) {
+	if s.worker {
+		s.emitQueued(name, e)
+		return
+	}
 	e.V, e.Time, e.Session, e.Mode = EventVersion, s.clock.Now(), name, s.mode()
 	if err := s.log.Append(e); err != nil {
 		fmt.Fprintf(os.Stderr, "agentd: event log: %v\n", err)
 		if s.halt == nil {
 			s.halt = fmt.Errorf("event log append failed; stopping this pass: %w", err)
 		}
-		if s.worker {
-			s.work.mu.Lock()
-			if s.work.err == nil {
-				s.work.err = s.halt
-			}
-			s.work.mu.Unlock()
+		return
+	}
+	s.st.apply(e)
+}
+
+// emitQueued is emit for a worker: the append and the queueing happen
+// under one lock, so the loop applies the workers' events in the order the
+// log holds them.
+func (s *Supervisor) emitQueued(name string, e Event) {
+	s.work.mu.Lock()
+	defer s.work.mu.Unlock()
+	e.V, e.Time, e.Session, e.Mode = EventVersion, s.clock.Now(), name, s.mode()
+	if err := s.log.Append(e); err != nil {
+		fmt.Fprintf(os.Stderr, "agentd: event log: %v\n", err)
+		if s.halt == nil {
+			s.halt = fmt.Errorf("event log append failed; stopping this job: %w", err)
+		}
+		if s.work.err == nil {
+			s.work.err = s.halt
 		}
 		return
 	}
 	s.st.apply(e)
-	if s.worker {
-		s.work.mu.Lock()
-		s.work.queue = append(s.work.queue, workerMsg{event: e})
-		s.work.mu.Unlock()
-	}
+	s.work.queue = append(s.work.queue, workerMsg{event: e})
 }
 
 // act performs one action, or in shadow mode records that it would. The
@@ -239,10 +252,12 @@ func (s *Supervisor) surfaceCutShort() {
 
 // Run passes until the context ends. A pass stopped by a failed append is
 // reported and the next pass tries again; with once, its error is returned.
-// The next pass comes after the poll interval, or sooner: when a worker's
-// job ends, or when another process appended an owner record to the log
-// (looked for every WakeCheck), so an answer or a clear is acted on within
-// a minute. A --once run waits for its jobs before it stops.
+// The next pass comes after the poll interval, or sooner when another
+// process appended an owner record to the log (looked for every WakeCheck),
+// so a clear is acted on within a minute. What a worker finished is applied
+// at the next pass; it is in the log already. A run waits for its jobs
+// before it stops: a --once run for all of them, one told to stop for up
+// to StopWait.
 func (s *Supervisor) Run(ctx context.Context, once bool) error {
 	s.emit("", Event{Kind: KindStart, Start: &StartPayload{Sessions: s.cfg.SessionNames()}})
 	s.surfaceCutShort()
@@ -267,6 +282,7 @@ func (s *Supervisor) Run(ctx context.Context, once bool) error {
 		}
 		select {
 		case <-ctx.Done():
+			s.waitStop()
 			s.emit("", Event{Kind: KindStop, Stop: &StopPayload{Reason: ctx.Err().Error()}})
 			return nil
 		case <-s.clock.After(s.cfg.PollInterval.Duration):
@@ -520,9 +536,11 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 	switch state {
 	case Done:
 		// Each delivery runs in a worker: its gate and forge calls take
-		// minutes, and the other sessions do not wait for them.
+		// minutes, and the other sessions do not wait for them. One held,
+		// or waiting out its backoff, starts none.
 		for _, d := range sess.Deliver {
-			if t.Delivered[name+":"+d.Worktree] != "" {
+			key := name + ":" + d.Worktree
+			if t.Delivered[key] != "" || !s.retryDue(t, "deliver:"+key, now) || sess.Hold != "" && t.Skipped["hold:"+key] {
 				continue
 			}
 			d := d
@@ -739,7 +757,7 @@ func (s *Supervisor) escalateQuestions(name, questions string, t *Track, now tim
 	key := fmt.Sprintf("questions:%s:%d", name, q.Episode)
 	if !t.Posted[key] {
 		s.post(name, ActEscalate, key, fmt.Sprintf("%s is blocked on you. Questions from STATUS.md:\n%s", name, questions), t, now,
-			settles{QuestionsHash: hash}, full)
+			settles{QuestionsHash: hash, Episode: q.Episode}, full)
 		return
 	}
 	if hash == q.Hash || (!q.LastUpdate.IsZero() && now.Sub(q.LastUpdate) < QuestionsUpdateGap) {
@@ -747,7 +765,7 @@ func (s *Supervisor) escalateQuestions(name, questions string, t *Track, now tim
 	}
 	n := q.Updates + 1
 	s.post(name, ActUpdate, fmt.Sprintf("%s:update:%d", key, n), fmt.Sprintf("%s changed its open Questions in STATUS.md; they now read:\n%s", name, questions), t, now,
-		settles{QuestionsHash: hash, Update: n}, full)
+		settles{QuestionsHash: hash, Update: n, Episode: q.Episode}, full)
 }
 
 // escalateDialog posts one escalation per dialog episode, keyed to the
@@ -755,13 +773,13 @@ func (s *Supervisor) escalateQuestions(name, questions string, t *Track, now tim
 // is one post, and at most one per DialogEscalationGap.
 func (s *Supervisor) escalateDialog(name, pattern string, t *Track, now time.Time) {
 	dq := &t.Dialog
-	if dq.Open || (!dq.Last.IsZero() && now.Sub(dq.Last) < DialogEscalationGap) {
+	if dq.Open() || (!dq.Last.IsZero() && now.Sub(dq.Last) < DialogEscalationGap) {
 		return
 	}
 	n := dq.N + 1
 	s.post(name, ActEscalate, fmt.Sprintf("dialog:%s:%d", name, n),
 		fmt.Sprintf("%s is stopped at a permission or confirmation dialog (the screen matches %q); agentd will not answer it. Attach and answer it.", name, pattern),
-		t, now, settles{Dialog: n})
+		t, now, settles{Dialog: n, Episode: dq.Episode})
 }
 
 // cutUTF8 cuts text to at most n bytes on a UTF-8 boundary, marking the cut.
@@ -795,6 +813,9 @@ func (s *Supervisor) post(name, action, key, message string, t *Track, now time.
 	// The escalation command runs in a worker, once per key at a time;
 	// one started from a worker already is one.
 	if !s.worker {
+		if !s.retryDue(t, key, now) {
+			return false
+		}
 		s.spawn(name, "post:"+key, func(w *Supervisor, wt *Track) {
 			w.post(name, action, key, message, wt, now, what, also...)
 		})
@@ -818,14 +839,14 @@ func (s *Supervisor) post(name, action, key, message string, t *Track, now time.
 	for i, part := range tmpl {
 		argv[i] = strings.NewReplacer("{console}", console, "{message}", message).Replace(part)
 	}
-	err := s.act(name, action, &ActPayload{Key: key, Console: console, Message: message, QuestionsHash: what.QuestionsHash, Update: what.Update, Dialog: what.Dialog},
+	err := s.act(name, action, &ActPayload{Key: key, Console: console, Message: message, QuestionsHash: what.QuestionsHash, Update: what.Update, Dialog: what.Dialog, Episode: what.Episode},
 		func() error { return s.runner.Run(argv) })
 	if err == nil {
 		return true
 	}
 	if s.halt == nil && s.failed(t, key) {
 		s.skipOnce(name, key+":gave-up", fmt.Sprintf("escalation command failed %d times; not retrying: %v", len(t.Failures[key]), err), t,
-			&SkipPayload{Escalation: key, Console: console, Message: message, QuestionsHash: what.QuestionsHash, Update: what.Update, Dialog: what.Dialog})
+			&SkipPayload{Escalation: key, Console: console, Message: message, QuestionsHash: what.QuestionsHash, Update: what.Update, Dialog: what.Dialog, Episode: what.Episode})
 		return true
 	}
 	return false
@@ -837,6 +858,7 @@ type settles struct {
 	QuestionsHash string
 	Update        int
 	Dialog        int
+	Episode       int // the Questions or dialog episode it is for
 }
 
 // deliver pushes a finished session's branch and opens a merge request,

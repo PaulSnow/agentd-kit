@@ -98,9 +98,10 @@ func (st *LogState) apply(e Event) {
 		if State(o.State) == UsageLimited {
 			t.Limited = true
 		}
-		if !o.Dialog {
-			t.Dialog.Open = false
+		if o.Dialog && !t.Dialog.Showing {
+			t.Dialog.Episode++
 		}
+		t.Dialog.Showing = o.Dialog
 		t.Questions.observeQuestions(o.Questions, o.Done)
 		if !o.Questions || o.Done {
 			t.Asked = ""
@@ -135,8 +136,8 @@ func (st *LogState) apply(e Event) {
 		if k.Escalation != "" {
 			t.Posted[k.Escalation] = true // given up on
 			t.GaveUp = append(t.GaveUp, k.Escalation)
-			t.settleQuestions(k.QuestionsHash, k.Update, e.Time)
-			t.settleDialog(k.Dialog, e.Time)
+			t.settleQuestions(k.QuestionsHash, k.Update, k.Episode, e.Time)
+			t.settleDialog(k.Dialog, k.Episode, e.Time)
 		}
 		if k.Worktree != "" && k.Delivered == "" {
 			t.Blocked[k.Worktree] = k.Reason
@@ -166,7 +167,7 @@ func (st *LogState) apply(e Event) {
 			t.Would++
 		}
 		t.applyAction(e.Act, e.Kind == KindAction, true, e.Time)
-		if a := e.Act; (a.Action == ActEscalate || a.Action == ActUpdate) && strings.HasPrefix(a.Key, "questions:") {
+		if a := e.Act; (a.Action == ActEscalate || a.Action == ActUpdate) && strings.HasPrefix(a.Key, "questions:") && a.Episode == t.Questions.Episode {
 			t.Asked, t.AskedAt = questionText(e.Session, a.Message), e.Time
 			if t.Filtered[a.Key] {
 				t.Asked = "" // the generic message, not the questions
@@ -225,8 +226,8 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 		if a.Action == ActEscalate {
 			t.Escalations += n
 		}
-		t.settleQuestions(a.QuestionsHash, a.Update, at)
-		t.settleDialog(a.Dialog, at)
+		t.settleQuestions(a.QuestionsHash, a.Update, a.Episode, at)
+		t.settleDialog(a.Dialog, a.Episode, at)
 	case ActOpen:
 		ref := a.Ref
 		if ref == "" {
@@ -239,9 +240,10 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 }
 
 // settleQuestions settles a Questions escalation or update, posted or given
-// up on: it carries the hash of the text it covered.
-func (t *Track) settleQuestions(hash string, update int, at time.Time) {
-	if hash == "" {
+// up on: it carries the hash of the text it covered, and the episode it was
+// posted for. One for an episode that has since closed settles nothing.
+func (t *Track) settleQuestions(hash string, update, episode int, at time.Time) {
+	if hash == "" || episode != t.Questions.Episode {
 		return
 	}
 	t.Questions.Hash = hash
@@ -250,9 +252,16 @@ func (t *Track) settleQuestions(hash string, update int, at time.Time) {
 	}
 }
 
-// settleDialog settles a dialog escalation, posted or given up on.
-func (t *Track) settleDialog(n int, at time.Time) {
-	if n > 0 {
-		t.Dialog.Open, t.Dialog.N, t.Dialog.Last = true, n, at
+// settleDialog settles dialog escalation n, posted or given up on, for
+// its episode.
+func (t *Track) settleDialog(n, episode int, at time.Time) {
+	if n <= 0 {
+		return
+	}
+	if n > t.Dialog.N {
+		t.Dialog.N, t.Dialog.Last = n, at
+	}
+	if episode > t.Dialog.Escalated {
+		t.Dialog.Escalated = episode
 	}
 }

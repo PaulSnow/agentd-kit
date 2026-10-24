@@ -6,9 +6,13 @@ import (
 )
 
 // WakeCheck is how often a running agentd looks for owner records that
-// another process appended (agentd clear, mark-delivered, an answer), so
-// one is acted on within a minute rather than at the next poll.
+// another process appended (agentd clear, mark-delivered), so one is acted
+// on within a minute rather than at the next poll.
 const WakeCheck = 15 * time.Second
+
+// StopWait is how long a run that is told to stop waits for its running
+// jobs. One still running then is cut short: the next start warns of it.
+const StopWait = time.Minute
 
 // workState is what the loop and its workers share. Slow work, a delivery
 // (its gate and forge calls) or an escalation command, runs in a worker
@@ -25,7 +29,7 @@ type workState struct {
 	inFlight map[string]bool // job keys running now; the loop's alone
 	jobs     sync.WaitGroup
 	err      error         // the first event a worker could not append
-	wake     chan struct{} // signalled when a job ends or the owner wrote to the log
+	wake     chan struct{} // signalled when the owner wrote to the log
 }
 
 // workerMsg is an event a worker appended, or the end of its job.
@@ -60,13 +64,25 @@ func (s *Supervisor) spawn(name, key string, job func(w *Supervisor, t *Track)) 
 	s.work.jobs.Add(1)
 	go func() {
 		defer s.work.jobs.Done()
+		defer func() {
+			s.work.mu.Lock()
+			s.work.queue = append(s.work.queue, workerMsg{done: key})
+			s.work.mu.Unlock()
+		}()
 		job(&w, w.st.track(name))
-		s.work.mu.Lock()
-		s.work.queue = append(s.work.queue, workerMsg{done: key})
-		s.work.mu.Unlock()
-		s.work.signal()
 	}()
 	return true
+}
+
+// waitStop waits for the running jobs, up to StopWait.
+func (s *Supervisor) waitStop() {
+	done := make(chan struct{})
+	go func() { s.work.jobs.Wait(); close(done) }()
+	select {
+	case <-done:
+		s.drain()
+	case <-s.clock.After(StopWait):
+	}
 }
 
 // drain applies what the workers queued, in the order they appended it,

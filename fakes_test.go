@@ -406,6 +406,7 @@ type fakeRunner struct {
 	gateExit int
 	gateErr  error
 	onGate   func()
+	onRun    func()   // runs during an escalation command
 	gateEnv  []string // the environment the last gate ran with
 }
 
@@ -429,6 +430,20 @@ func (r *fakeRunner) Gate(dir string, argv, env []string, timeout time.Duration)
 	return r.gateExit, "gate output", r.gateErr
 }
 
+// attemptCount is how many escalation commands have started.
+func (r *fakeRunner) attemptCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.attempts
+}
+
+// setPane changes a session's screen while the supervisor may be reading it.
+func (f *fakeTmux) setPane(name, pane string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.panes[name] = pane
+}
+
 // gateCount is how many gates have started.
 func (r *fakeRunner) gateCount() int {
 	r.mu.Lock()
@@ -438,8 +453,14 @@ func (r *fakeRunner) gateCount() int {
 
 func (r *fakeRunner) Run(argv []string) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.attempts++
+	onRun := r.onRun
+	r.mu.Unlock()
+	if onRun != nil { // unlocked: it may wait, as a slow console does
+		onRun()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.failing > 0 {
 		r.failing--
 		return errors.New("console unreachable")
