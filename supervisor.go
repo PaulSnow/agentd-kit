@@ -57,6 +57,8 @@ type Supervisor struct {
 	// is done until the next pass: an action whose record could be lost
 	// could be repeated after a replay.
 	halt error
+	// runCtx ends when the run is told to stop; agent jobs end with it.
+	runCtx context.Context
 	// tailOff is how far into the event log this run has read, so each
 	// pass picks up what the owner wrote meanwhile: agentd clear.
 	tailOff int64
@@ -92,6 +94,7 @@ func NewSupervisor(cfg *Config, log *Log, clock Clock, tmux Tmux, git Git, forge
 		usage:  newUsageReader(),
 
 		checkpointRe: regexp.MustCompile(cfg.Policies.Context.Checkpoint),
+		runCtx:       context.Background(),
 		tailOff:      log.Size(),
 		limitRe:      regexp.MustCompile(cfg.Policies.UsageLimit.Pattern),
 		trustRe:      regexp.MustCompile(`^(?:` + cfg.Policies.Trust.Pattern + `)$`),
@@ -274,6 +277,7 @@ func (s *Supervisor) surfaceCutShort() {
 // before it stops: a --once run for all of them, one told to stop for up
 // to StopWait.
 func (s *Supervisor) Run(ctx context.Context, once bool) error {
+	s.runCtx = ctx
 	s.emit("", Event{Kind: KindStart, Start: &StartPayload{Sessions: s.cfg.SessionNames()}})
 	s.surfaceCutShort()
 	if !once {
@@ -336,7 +340,6 @@ func (s *Supervisor) watchOwner(ctx context.Context, off int64) {
 // last pass is applied first.
 func (s *Supervisor) Pass() error {
 	s.halt = nil
-	s.drain()
 	s.ownerRecords()
 	for _, name := range s.cfg.SessionNames() {
 		if s.halt != nil {
@@ -346,21 +349,35 @@ func (s *Supervisor) Pass() error {
 	}
 	if s.halt == nil {
 		s.pollForges(s.clock.Now())
+		s.triageItems(s.clock.Now())
 	}
 	return s.halt
 }
 
-// ownerRecords applies what the owner wrote to the event log since the last
-// pass: a clear lifts a session's park, and a mark-delivered record settles
-// a delivery, while agentd runs.
+// ownerRecords applies what the workers queued, then what others wrote to
+// the event log since the last pass: a clear lifts a session's park, a
+// mark-delivered record settles a delivery, a seen mark takes items off
+// the triage list, an item another process logged (agentd items) is added
+// or retitled, and another run's triage counts, while agentd runs. The
+// queue is taken and the log read under the workers' lock, so every
+// queued event is in what was read and none is applied after a later one.
 func (s *Supervisor) ownerRecords() {
+	s.work.mu.Lock()
 	events, off, err := s.log.Tail(s.tailOff)
+	s.drainLocked()
+	s.work.mu.Unlock()
 	if err != nil {
 		s.emit("", Event{Kind: KindError, Error: &ErrorPayload{Step: "reading owner records", Error: err.Error()}})
 		return
 	}
 	s.tailOff = off
 	for _, e := range events {
+		shared := e.Kind == KindSeen || e.Kind == KindTriage || e.Kind == KindError && e.Error.Triage != nil ||
+			e.Kind == KindItem && s.st.itemChanged(*e.Item)
+		if e.Session == "" && shared {
+			s.st.apply(e)
+			continue
+		}
 		if _, ok := s.cfg.Sessions[e.Session]; ok && e.Mode == ModeOwner {
 			s.st.apply(e)
 			if e.Kind == KindClear {

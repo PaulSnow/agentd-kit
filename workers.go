@@ -111,9 +111,14 @@ func (s *Supervisor) waitStop() {
 // and forgets the jobs that ended. Only the loop drains.
 func (s *Supervisor) drain() {
 	s.work.mu.Lock()
+	defer s.work.mu.Unlock()
+	s.drainLocked()
+}
+
+// drainLocked is drain with the workers' lock held.
+func (s *Supervisor) drainLocked() {
 	q := s.work.queue
 	s.work.queue = nil
-	s.work.mu.Unlock()
 	for _, m := range q {
 		if m.done != "" {
 			delete(s.work.inFlight, m.done)

@@ -24,6 +24,13 @@
     "github": false,
     "gitlab": false
   },
+  "jobs": {
+    "triage": false,
+    "model": "haiku",
+    "timeout": "2m",
+    "max_input": 16384,
+    "batch": 20
+  },
   "policies": {
     "restart": {
       "enabled": true,

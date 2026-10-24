@@ -195,6 +195,7 @@ func (ps *pageState) load() (PageData, error) {
 	data.Report = ReportFrom(ps.cfg, ps.st, ps.host, now)
 	data.Needs = NeedsFrom(ps.cfg, ps.st, data.Report, now)
 	data.New = ps.st.SortedItems(true)
+	SortByUrgency(data.New)
 	return data, nil
 }
 
@@ -710,7 +711,7 @@ table { border-collapse: collapse; } td { padding: .1rem .6rem .1rem 0; vertical
 </section>
 <section id="new"><h2>New since last visit</h2>
 {{if .New}}<form method="post" action="/seen"><input type="hidden" name="token" value="{{.Token}}"><input type="hidden" name="view" value="{{.ViewQ}}">
-<table>{{range .New}}<tr><td><input type="checkbox" name="id" value="{{.ID}}" checked></td><td class="muted">{{when .SourceTime}}</td><td>{{.Kind}}</td><td>{{.Repository}}</td><td>{{if .Link}}<a href="{{.Link}}">{{.Title}}</a>{{else}}{{.Title}}{{end}}</td><td class="muted">{{.Author}}</td></tr>{{end}}</table>
+<table>{{range .New}}<tr><td><input type="checkbox" name="id" value="{{.ID}}" checked></td><td class="muted">{{when .SourceTime}}</td><td>{{.Kind}}</td><td>{{.Repository}}</td><td>{{if .Link}}<a href="{{.Link}}">{{.Title}}</a>{{else}}{{.Title}}{{end}}</td><td class="muted">{{.Author}}</td>{{with .Triaged}}<td>{{.NeedsOwner}}/{{.Urgency}}</td><td>{{.Summary}}</td>{{else}}<td class="muted">untriaged</td><td></td>{{end}}</tr>{{end}}</table>
 <button type="submit">Mark the ticked items seen</button></form>
 {{else}}<p class="muted">Nothing new.</p>{{end}}
 </section>

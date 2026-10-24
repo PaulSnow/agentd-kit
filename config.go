@@ -35,6 +35,8 @@ type Config struct {
 	Page PageConfig `json:"page"`
 	// Poll is agentd's own poll of the forges for new items.
 	Poll PollConfig `json:"poll"`
+	// Jobs are the agent jobs: small, checked claude -p calls.
+	Jobs JobsConfig `json:"jobs"`
 }
 
 // Account is a Claude login a session runs under: its config directory,
@@ -341,6 +343,12 @@ func (c *Config) finish(base string) error {
 	c.Tracking.Manifest = path("tracking.manifest", c.Tracking.Manifest)
 	c.Tracking.Snapshot = path("tracking.snapshot", c.Tracking.Snapshot)
 	c.Tracking.Mail = path("tracking.mail", c.Tracking.Mail)
+	if _, ok := c.Accounts[c.Jobs.Account]; c.Jobs.Account != "" && !ok {
+		errs = append(errs, fmt.Errorf("jobs.account %q is not in accounts", c.Jobs.Account))
+	}
+	if c.Jobs.Timeout.Duration < 0 || c.Jobs.MaxInput < 0 || c.Jobs.Batch < 0 {
+		errs = append(errs, errors.New("jobs.timeout, jobs.max_input and jobs.batch must not be negative"))
+	}
 	if c.Poll.Every.Duration <= 0 {
 		errs = append(errs, errors.New("poll.every must be positive"))
 	}

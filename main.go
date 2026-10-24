@@ -56,6 +56,8 @@ func main() {
 		err = pageCmd(os.Args[2:])
 	case "items":
 		err = itemsCmd(os.Args[2:], os.Stdout)
+	case "triage":
+		err = triageCmd(os.Args[2:], os.Stdout)
 	case "version", "--version":
 		fmt.Println("agentd", version)
 		return
@@ -83,6 +85,7 @@ func usage() {
   agentd report [--config PATH] [--log PATH] [--shadow] [--host NAME] --out PATH
   agentd page [--config PATH] [--log PATH] [--shadow]
   agentd items [--config PATH] [--log PATH] [--new] [--seen ID,...]
+  agentd triage [--config PATH] --items FILE
   agentd version
 
 run supervises the configured sessions; --shadow observes and logs what it
@@ -96,7 +99,8 @@ writes report.json for the tracking site from the event log, atomically.
 items lists what is new since the owner last looked: issues, requests and
 discussions from the tracking snapshots, and mail findings; --seen marks
 items seen. page serves the owner's page on page.address, to the owner only;
-its one write marks items seen.`)
+its one write marks items seen. triage tries the triage job on the items in
+FILE with one call (retried once on failure) and prints its checked answer and cost; it logs nothing.`)
 }
 
 func loadConfigFlag(fs *flag.FlagSet, args []string) (*Config, *string, error) {

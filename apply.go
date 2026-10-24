@@ -33,6 +33,24 @@ func NewLogState(cfg *Config, mode string) *LogState {
 		Cursors: map[string]time.Time{}, Polls: map[string]PollRecord{}, cfg: cfg}
 }
 
+// setItem changes a copy of the item and puts the copy in its place: a
+// worker's state shares the loop's items, so an item is never changed in
+// place.
+func (st *LogState) setItem(id string, change func(*Item)) {
+	if it := st.Items[id]; it != nil {
+		c := *it
+		change(&c)
+		st.Items[id] = &c
+	}
+}
+
+// itemChanged says whether it is new to st, or carries another title than
+// the item st has under its id.
+func (st *LogState) itemChanged(it ItemPayload) bool {
+	known, ok := st.Items[it.ID]
+	return !ok || ItemHash(known.ItemPayload) != ItemHash(it)
+}
+
 // track returns the session's Track, creating it.
 func (st *LogState) track(name string) *Track {
 	t, ok := st.Tracks[name]
@@ -78,21 +96,34 @@ func (st *LogState) apply(e Event) {
 		case KindStop:
 			st.Stopped = e.Time
 		case KindItem:
-			// An item is one however often it is seen: the first sighting
-			// stands, and so does the owner's having seen it.
+			// An item is one however often it is seen: the first sighting's
+			// time stands, and so does the owner's having seen it. A
+			// sighting under a new title replaces the item's text, so it is
+			// triaged again.
 			if _, ok := st.Items[e.Item.ID]; !ok {
 				st.Items[e.Item.ID] = &Item{ItemPayload: *e.Item, FirstSeen: e.Time}
+			} else if st.itemChanged(*e.Item) {
+				st.setItem(e.Item.ID, func(it *Item) { it.ItemPayload = *e.Item })
 			}
 		case KindSeen:
 			for _, id := range e.Seen.IDs {
-				if it := st.Items[id]; it != nil {
-					it.Seen = true
-				}
+				st.setItem(id, func(it *Item) { it.Seen = true })
 			}
 		case KindCursor:
 			st.Cursors[e.Cursor.Source] = e.Cursor.AsOf
 		case KindPoll:
 			st.Polls[e.Poll.Source] = PollRecord{PollPayload: *e.Poll, At: e.Time}
+		case KindTriage:
+			for _, r := range e.Triage.Results {
+				r := r
+				st.setItem(r.ID, func(it *Item) { it.Triage = &r })
+			}
+		case KindError:
+			if e.Error.Triage != nil {
+				for _, id := range e.Error.Triage.Failed {
+					st.setItem(id, func(it *Item) { it.TriageFailed = e.Time })
+				}
+			}
 		}
 		return
 	}
