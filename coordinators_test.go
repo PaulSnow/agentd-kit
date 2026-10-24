@@ -216,11 +216,11 @@ func TestWakeOnlyWhenDue(t *testing.T) {
 		t.Fatalf("wakes = %+v", w)
 	}
 	h.transcriptOf("c", "t3", summaryLine("c3", "m3", "Asked.", h.clock.Now(), 100))
-	if err := answerAs(h, "b", AnswerPayload{ID: "D1", Choice: "b"}); err != nil {
+	if err := answerAs(h, "b", AnswerPayload{ID: "Q1", Choice: "b"}); err != nil {
 		t.Fatal(err)
 	}
 	h.ticks(2, time.Minute)
-	if w := h.wakes(); len(w) != 4 || w[3].Reason != "answer: b/D1" {
+	if w := h.wakes(); len(w) != 4 || w[3].Reason != "answer: b/Q1" {
 		t.Fatalf("wakes = %+v", w)
 	}
 	h.transcriptOf("c", "t3", summaryLine("c4", "m4", "Done.", h.clock.Now(), 100))

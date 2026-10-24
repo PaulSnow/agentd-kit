@@ -79,11 +79,16 @@ type Track struct {
 	CutShort      []string           // actions a crash of agentd cut short
 	// Decisions: what the session raised in questions.json, as last read
 	// (DecisionsHash), the hash of its STATUS.md Questions, and the
-	// owner's answers by decision id.
+	// owner's answers by decision id. Raised is what it raised through its
+	// tools and has not superseded, RaisedCount how many it raised in all,
+	// and Deadlines the owner's deadlines by decision id.
 	Decisions       []Decision
 	DecisionsHash   string
 	StatusQuestions string
 	Answers         map[string]AnswerRecord
+	Raised          []Decision
+	RaisedCount     int
+	Deadlines       map[string]DeadlineRecord
 
 	Asked      string // the Questions text last posted, while they stay open
 	AskedAt    time.Time
@@ -201,7 +206,7 @@ func (t *Track) clear() {
 func newTrack() *Track {
 	return &Track{Posted: map[string]bool{}, Delivered: map[string]string{}, Skipped: map[string]bool{}, Failures: map[string][]time.Time{},
 		Blocked: map[string]string{}, Filtered: map[string]bool{}, Usage: map[string]UsagePayload{},
-		Answers: map[string]AnswerRecord{}}
+		Answers: map[string]AnswerRecord{}, Deadlines: map[string]DeadlineRecord{}}
 }
 
 // restartsInWindow counts restarts inside the backoff window.

@@ -209,7 +209,7 @@ func TestMCPHandshake(t *testing.T) {
 			t.Fatalf("tool %s has no schema", tool.Name)
 		}
 	}
-	if !reflect.DeepEqual(names, []string{"report_progress", "request_step"}) {
+	if !reflect.DeepEqual(names, []string{"report_progress", "raise_decision", "request_step"}) {
 		t.Fatalf("tools %v", names)
 	}
 	if rs[2].Error != nil || string(rs[2].ID) != "3" {
@@ -442,7 +442,7 @@ func TestFactsPackNamesTheTools(t *testing.T) {
 	if err := json.Unmarshal(facts, &f); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(f.Tools, []string{"report_progress", "request_step"}) || len(f.Items) != 2 || f.Items[0].ID != "A1" ||
+	if !reflect.DeepEqual(f.Tools, []string{"report_progress", "raise_decision", "request_step"}) || len(f.Items) != 2 || f.Items[0].ID != "A1" ||
 		!reflect.DeepEqual(f.Acknowledge, []FactRuling{{ID: "R1", Kind: RulingRestriction, Text: "Do not touch the gears."}}) {
 		t.Fatalf("facts %s", facts)
 	}
