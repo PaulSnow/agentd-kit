@@ -40,7 +40,7 @@
       "window": "1h",
       "backoff_initial": "1m",
       "backoff_max": "30m",
-      "command": ["bash", "-lic", "exec claude --session-id \"$1\" \"$2\"", "agentd", "{session_id}", "{prompt}"],
+      "command": ["bash", "-lic", "exec claude --session-id \"$1\" --mcp-config=\"$2\" \"$3\"", "agentd", "{session_id}", "{mcp}", "{prompt}"],
       "width": 220,
       "height": 50
     },

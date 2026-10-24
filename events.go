@@ -320,7 +320,7 @@ func (e Event) check() error {
 	// too; the owner marks items seen.
 	failedTriage := e.Kind == KindError && e.Error.Triage != nil
 	switch {
-	case (e.Kind == KindItem || e.Kind == KindCursor || e.Kind == KindTriage || failedTriage) != (e.Mode == ModeShared):
+	case e.Kind != KindCase && (e.Kind == KindItem || e.Kind == KindCursor || e.Kind == KindTriage || failedTriage) != (e.Mode == ModeShared):
 		return fmt.Errorf("a %s event must not carry mode %q", e.Kind, e.Mode)
 	case e.Kind == KindSeen && e.Mode != ModeOwner:
 		return fmt.Errorf("a seen event is the owner's, not %q", e.Mode)
@@ -332,10 +332,13 @@ func (e Event) check() error {
 		if err := e.Case.check(); err != nil {
 			return err
 		}
+		// A session's tool call is a fact both runs read, like an item.
 		owner := e.Mode == ModeOwner && e.Session == ""
 		run := (e.Mode == ModeLive || e.Mode == ModeShadow) && e.Session != ""
-		if e.Case.Ruling != nil && !owner || e.Case.Ruling == nil && !run {
-			return errors.New("a ruling is the owner's, for no one session; a pack or report is a run's, for one")
+		shared := e.Mode == ModeShared && e.Session != ""
+		switch c := e.Case; {
+		case (c.Ruling != nil || c.Goal != nil) && !owner, (c.Pack != nil || c.Report != nil) && !run, c.Call != nil && !shared:
+			return errors.New("a ruling or goal is the owner's, for no one session; a pack or report is a run's, for one; a call is a shared fact of one session")
 		}
 	}
 	switch e.Mode {

@@ -252,6 +252,9 @@ func (st *LogState) apply(e Event) {
 			t.Would++
 		}
 		t.applyAction(e.Act, e.Kind == KindAction, true, e.Time)
+		if a := e.Act; e.Kind == KindAction && a.Action == ActGate && a.Exit != nil && *a.Exit == 0 && a.SHA != "" && !contains(t.Gated, a.SHA) {
+			t.Gated = append(t.Gated[:len(t.Gated):len(t.Gated)], a.SHA)
+		}
 		if a := e.Act; (a.Action == ActEscalate || a.Action == ActUpdate) && strings.HasPrefix(a.Key, "questions:") && a.Episode == t.Questions.Episode {
 			t.Asked, t.AskedAt = questionText(e.Session, a.Message), e.Time
 			if t.Filtered[a.Key] {

@@ -151,7 +151,7 @@ func TestRestartPromptPathsAreQuoted(t *testing.T) {
 	}
 	bin, home := t.TempDir(), t.TempDir()
 	got := filepath.Join(h.dir, "prompt")
-	writeFile(t, filepath.Join(bin, "claude"), "#!/bin/sh\nprintf '%s' \"$3\" > '"+got+"'\n")
+	writeFile(t, filepath.Join(bin, "claude"), "#!/bin/sh\nprintf '%s' \"$4\" > '"+got+"'\n")
 	if err := os.Chmod(filepath.Join(bin, "claude"), 0o755); err != nil {
 		t.Fatal(err)
 	}

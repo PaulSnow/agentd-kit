@@ -18,7 +18,8 @@ import (
 // A case is one issue: the sessions that work it, the context pack agentd
 // handed them, what they report, and the owner's rulings. It is a
 // projection of the event log, never a separate store: a case event carries
-// exactly one of a pack, a report or a ruling, and apply folds it.
+// exactly one of a pack, a report, a ruling, the owner's goal or a
+// session's tool call, and apply folds it.
 
 // CasePayload is one fact about a case, named by its id: the repository's
 // forge and project and the issue number, as an issue item's id names it.
@@ -27,6 +28,8 @@ type CasePayload struct {
 	Pack   *CasePack   `json:"pack,omitempty"`
 	Report *CaseReport `json:"report,omitempty"`
 	Ruling *CaseRuling `json:"ruling,omitempty"`
+	Goal   *CaseGoal   `json:"goal,omitempty"`
+	Call   *CaseCall   `json:"call,omitempty"`
 }
 
 // CasePack is the context pack a launch handed the session: the facts
@@ -64,17 +67,21 @@ const (
 )
 
 // check refuses a case payload that names no case, carries other than
-// exactly one of a pack, a report or a ruling, or a ruling of an unknown
-// kind or without the id a restriction or waiver has.
+// exactly one of a pack, a report, a ruling, a goal or a call, a ruling of
+// an unknown kind or without the id a restriction or waiver has, or a call
+// of an unknown tool.
 func (p *CasePayload) check() error {
 	n := 0
-	for _, set := range []bool{p.Pack != nil, p.Report != nil, p.Ruling != nil} {
+	for _, set := range []bool{p.Pack != nil, p.Report != nil, p.Ruling != nil, p.Goal != nil, p.Call != nil} {
 		if set {
 			n++
 		}
 	}
 	if _, _, ok := splitCase(p.Case); !ok || n != 1 || p.Case != strings.ToLower(p.Case) {
-		return errors.New("a case event names its case and carries exactly one of a pack, a report or a ruling")
+		return errors.New("a case event names its case and carries exactly one of a pack, a report, a ruling, a goal or a call")
+	}
+	if p.Call != nil {
+		return p.Call.check()
 	}
 	if r := p.Ruling; r != nil {
 		switch r.Kind {
@@ -121,6 +128,12 @@ type Case struct {
 	Rulings  []RulingRecord    // every ruling, in order
 	Active   []RulingRecord    // the restrictions and waivers in force
 	Closed   bool
+	Goal     []GoalItem          // the done-when items, the superseded too
+	Progress *ProgressRecord     // the latest accepted report_progress
+	Drift    []DriftFlag         // what that report's restatement drifted on
+	Steps    []StepRecord        // every step a session asked for
+	Refused  int                 // calls refused
+	Acked    map[string][]string // the rulings each session acknowledged
 }
 
 // RulingRecord is a ruling and when it was made.
@@ -144,6 +157,17 @@ func (st *LogState) applyCase(e Event) {
 	case p.Pack != nil:
 		c.Pack, c.PackAt = *p.Pack, e.Time
 		c.Packs++
+		// A launch is a fresh context: what the session acknowledged
+		// before, it has not seen, and acknowledges again.
+		if _, ok := c.Acked[e.Session]; ok {
+			acked := make(map[string][]string, len(c.Acked))
+			for k, v := range c.Acked {
+				if k != e.Session {
+					acked[k] = v
+				}
+			}
+			c.Acked = acked
+		}
 	case p.Report != nil:
 		c.Report, c.ReportAt = *p.Report, e.Time
 		reports := make(map[string]string, len(c.Reports)+1)
@@ -164,6 +188,10 @@ func (st *LogState) applyCase(e Event) {
 		case RulingReopen:
 			c.Closed = false
 		}
+	case p.Goal != nil:
+		c.applyGoal(p.Goal)
+	case p.Call != nil:
+		c.applyCall(e)
 	}
 	st.Cases[p.Case] = &c
 }
@@ -326,23 +354,31 @@ func caseState(c *Case, ts []*Track) string {
 
 // CaseView is a case as agentd cases and the page show it.
 type CaseView struct {
-	ID         string         `json:"id"`
-	Repository string         `json:"repository"` // the forge and project, as items name it
-	Issue      int            `json:"issue"`
-	Title      string         `json:"title,omitempty"`
-	State      string         `json:"state"`
-	Since      time.Time      `json:"since"` // waiting since: the state's start, or the case's first fact
-	Sessions   []string       `json:"sessions,omitempty"`
-	Item       string         `json:"item,omitempty"`
-	ItemState  string         `json:"item_state,omitempty"`
-	Next       []string       `json:"next,omitempty"`
-	Pack       string         `json:"pack,omitempty"` // the last context pack's hash
-	Packs      int            `json:"packs,omitempty"`
-	Active     []RulingRecord `json:"active,omitempty"`
-	Urgency    string         `json:"urgency,omitempty"` // the issue item's triage
-	Rank       int            `json:"rank"`
-	Pinned     bool           `json:"pinned,omitempty"`
-	Priority   int            `json:"priority,omitempty"` // the repository's this week, 0 unlisted
+	ID         string    `json:"id"`
+	Repository string    `json:"repository"` // the forge and project, as items name it
+	Issue      int       `json:"issue"`
+	Title      string    `json:"title,omitempty"`
+	State      string    `json:"state"`
+	Since      time.Time `json:"since"` // waiting since: the state's start, or the case's first fact
+	Sessions   []string  `json:"sessions,omitempty"`
+	Item       string    `json:"item,omitempty"`
+	ItemState  string    `json:"item_state,omitempty"`
+	Next       []string  `json:"next,omitempty"`
+	// Unverified marks Item, ItemState and Next as STATUS.md's, which
+	// agentd parses but cannot check; Progress is the checked report.
+	Unverified bool            `json:"unverified,omitempty"`
+	Goal       []GoalItem      `json:"goal,omitempty"`
+	Progress   *ProgressRecord `json:"progress,omitempty"`
+	Drift      []DriftFlag     `json:"drift,omitempty"`
+	Steps      []StepRecord    `json:"steps,omitempty"`
+	Refused    int             `json:"refused,omitempty"`
+	Pack       string          `json:"pack,omitempty"` // the last context pack's hash
+	Packs      int             `json:"packs,omitempty"`
+	Active     []RulingRecord  `json:"active,omitempty"`
+	Urgency    string          `json:"urgency,omitempty"` // the issue item's triage
+	Rank       int             `json:"rank"`
+	Pinned     bool            `json:"pinned,omitempty"`
+	Priority   int             `json:"priority,omitempty"` // the repository's this week, 0 unlisted
 }
 
 // CasesFrom is every case the state knows, sorted by id: the cases of the
@@ -382,6 +418,8 @@ func CasesFrom(cfg *Config, st *LogState) []CaseView {
 			}
 			v.Since = c.First
 			v.Item, v.ItemState, v.Next = c.Report.Item, c.Report.State, c.Report.Next
+			v.Unverified = c.Report.Hash != ""
+			v.Goal, v.Progress, v.Drift, v.Steps, v.Refused = c.Goal, c.Progress, c.Drift, c.Steps, c.Refused
 			v.Pack, v.Packs = c.Pack.Hash, c.Packs
 			v.Active = c.Active
 		}
@@ -560,8 +598,20 @@ func casesCmd(args []string, w io.Writer) error {
 		mode = ModeShadow
 	}
 	if fs.NArg() > 0 {
-		if fs.Arg(0) != "rule" || fs.NArg() < 3 || fs.NArg() > 4 {
-			return errors.New("usage: agentd cases rule CASE restriction|waiver|close|reopen [TEXT]")
+		goal := fs.Arg(0) == "goal" && fs.NArg() == 3
+		if !goal && (fs.Arg(0) != "rule" || fs.NArg() < 3 || fs.NArg() > 4) {
+			return errors.New("usage: agentd cases rule CASE restriction|waiver|close|reopen [TEXT], or agentd cases goal CASE FILE|-")
+		}
+		var body []byte
+		if goal {
+			if fs.Arg(2) == "-" {
+				body, err = io.ReadAll(os.Stdin)
+			} else {
+				body, err = os.ReadFile(fs.Arg(2))
+			}
+			if err != nil {
+				return err
+			}
 		}
 		log, events, err := openLoaded(cfg.EventLog)
 		if err != nil {
@@ -569,6 +619,9 @@ func casesCmd(args []string, w io.Writer) error {
 		}
 		defer log.Close()
 		st := NewLogState(cfg, mode).Fold(events)
+		if goal {
+			return RecordGoal(log, cfg, st, time.Now(), fs.Arg(1), string(body))
+		}
 		return RecordRuling(log, cfg, st, time.Now(), fs.Arg(1), fs.Arg(2), fs.Arg(3), "owner")
 	}
 	events, _, err := ReadLog(cfg.EventLog)
@@ -594,7 +647,7 @@ func casesCmd(args []string, w io.Writer) error {
 		}{week, cs})
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "RANK\tCASE\tSTATE\tSINCE\tSESSIONS\tITEM\tURGENCY\tRULINGS\tTITLE")
+	fmt.Fprintln(tw, "RANK\tCASE\tSTATE\tSINCE\tSESSIONS\tITEM\tREPORT\tURGENCY\tRULINGS\tTITLE")
 	for _, c := range cs {
 		rank := strconv.Itoa(c.Rank)
 		if c.Pinned {
@@ -608,12 +661,28 @@ func casesCmd(args []string, w io.Writer) error {
 		if c.ItemState != "" {
 			item += " (" + c.ItemState + ")"
 		}
+		if c.Unverified && item != "" {
+			item += " unverified"
+		}
+		report := ""
+		if p := c.Progress; p != nil {
+			met := 0
+			for _, it := range p.Items {
+				if it.Status == StatusMet {
+					met++
+				}
+			}
+			report = fmt.Sprintf("%d/%d met", met, len(current(c.Goal)))
+			if len(c.Drift) > 0 {
+				report += fmt.Sprintf(", drift %d", len(c.Drift))
+			}
+		}
 		since := ""
 		if !c.Since.IsZero() {
 			since = c.Since.Local().Format("2006-01-02 15:04")
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", rank, c.ID, c.State, since, strings.Join(c.Sessions, ","),
-			cutUTF8(item, 60), c.Urgency, strings.Join(rulings, ","), cutUTF8(c.Title, 60))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", rank, c.ID, c.State, since, strings.Join(c.Sessions, ","),
+			cutUTF8(item, 60), report, c.Urgency, strings.Join(rulings, ","), cutUTF8(c.Title, 60))
 	}
 	return tw.Flush()
 }

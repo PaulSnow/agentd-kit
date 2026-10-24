@@ -17,6 +17,7 @@ import (
 // watches. The owner's copy lives outside the repository; agentd.example.json
 // beside this file shows the shape.
 type Config struct {
+	Path          string   `json:"-"` // the file it was loaded from, when it was
 	EventLog      string   `json:"event_log"`
 	PollInterval  Duration `json:"poll_interval"`
 	TranscriptDir string   `json:"transcript_dir"`
@@ -292,7 +293,7 @@ func DefaultConfig() Config {
 				Window:         Duration{time.Hour},
 				BackoffInitial: Duration{time.Minute},
 				BackoffMax:     Duration{30 * time.Minute},
-				Command:        []string{"bash", "-lic", `exec claude --session-id "$1" "$2"`, "agentd", "{session_id}", "{prompt}"},
+				Command:        []string{"bash", "-lic", `exec claude --session-id "$1" --mcp-config="$2" "$3"`, "agentd", "{session_id}", "{mcp}", "{prompt}"},
 				Width:          220,
 				Height:         50,
 			},
@@ -339,6 +340,7 @@ func LoadConfig(path string) (*Config, error) {
 	if err := cfg.finish(filepath.Dir(path)); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+	cfg.Path = path
 	return &cfg, nil
 }
 

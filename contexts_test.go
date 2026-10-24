@@ -215,7 +215,7 @@ func TestRestartPromptFromProgress(t *testing.T) {
 			cmd = c.args[1]
 		}
 	}
-	i := strings.Index(cmd, "{")
+	i := strings.Index(cmd, `{"why"`)
 	j := strings.LastIndex(cmd, "}")
 	if i < 0 || j < i {
 		t.Fatalf("no facts in the prompt: %s", cmd)

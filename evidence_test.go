@@ -193,7 +193,7 @@ func TestExampleConfigLoads(t *testing.T) {
 // would keep a crashed session alive and take the nudges meant for Claude.
 func TestDefaultRestartCommandEndsWithClaude(t *testing.T) {
 	cmd := DefaultConfig().Policies.Restart.Command
-	if cmd[2] != `exec claude --session-id "$1" "$2"` {
+	if cmd[2] != `exec claude --session-id "$1" --mcp-config="$2" "$3"` {
 		t.Fatalf("restart command does not end with the claude invocation: %q", cmd)
 	}
 	for _, part := range cmd {
@@ -212,7 +212,7 @@ func TestDefaultRestartCommandKeepsPermissions(t *testing.T) {
 			t.Fatalf("default restart command bypasses permissions: %q", part)
 		}
 	}
-	if cmd := strings.Join(DefaultConfig().Policies.Restart.Command, " "); !strings.Contains(cmd, `claude --session-id "$1" "$2"`) || !strings.Contains(cmd, "{prompt}") || strings.Contains(cmd, "--continue") {
+	if cmd := strings.Join(DefaultConfig().Policies.Restart.Command, " "); !strings.Contains(cmd, `claude --session-id "$1" --mcp-config="$2" "$3"`) || !strings.Contains(cmd, "{prompt}") || strings.Contains(cmd, "--continue") {
 		t.Fatalf("default restart command is not a fresh claude with a prompt: %q", cmd)
 	}
 	path := filepath.Join(t.TempDir(), "c.json")

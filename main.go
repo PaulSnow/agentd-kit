@@ -62,6 +62,8 @@ func main() {
 		err = triageCmd(os.Args[2:], os.Stdout)
 	case "cases":
 		err = casesCmd(os.Args[2:], os.Stdout)
+	case "mcp":
+		err = mcpCmd(os.Args[2:], os.Stdin, os.Stdout)
 	case "version", "--version":
 		fmt.Println("agentd", version)
 		return
@@ -92,6 +94,8 @@ func usage() {
   agentd triage [--config PATH] --items FILE
   agentd cases [--config PATH] [--log PATH] [--shadow] [--json]
   agentd cases [--config PATH] [--log PATH] rule CASE restriction|waiver|close|reopen [TEXT]
+  agentd cases [--config PATH] [--log PATH] goal CASE FILE|-
+  agentd mcp [--config PATH] [--log PATH] --session NAME
   agentd version
 
 run supervises the configured sessions; --shadow observes and logs what it
@@ -110,7 +114,11 @@ FILE with one call (retried once on failure) and prints its checked answer and c
 cases lists the cases, one per issue, ranked: the owner's pins and the
 repositories' order from tracking.priorities when that file exists, then
 what needs the owner, triage urgency and age; rule records the owner's
-one-shot restriction or waiver on a case, or closes or reopens it.`)
+one-shot restriction or waiver on a case, or closes or reopens it; goal
+records the done-when items of the issue body in FILE (- for standard
+input) as the case's goal, A1 on. mcp serves the session's tools,
+report_progress and request_step, on standard input and output for its
+case alone; the restart command's {mcp} passes it to a fresh session.`)
 }
 
 func loadConfigFlag(fs *flag.FlagSet, args []string) (*Config, *string, error) {

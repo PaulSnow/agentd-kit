@@ -89,6 +89,7 @@ type Track struct {
 	AskedAt    time.Time
 	Filtered   map[string]bool // escalation keys whose text was withheld
 	Deliveries []DeliveryRecord
+	Gated      []string // the commits a gate agentd ran passed on
 }
 
 // DeliveryRecord is one request a delivery opened, found, or was told of.

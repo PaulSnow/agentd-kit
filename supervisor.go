@@ -383,7 +383,8 @@ func (s *Supervisor) Pass() error {
 // the event log since the last pass: a clear lifts a session's park, a
 // mark-delivered record settles a delivery, a seen mark takes items off
 // the triage list, an item another process logged (agentd items) is added
-// or retitled, and another run's triage counts, while agentd runs. The
+// or retitled, another run's triage counts, and a session's tool call
+// its server logged is folded into its case, while agentd runs. The
 // queue is taken and the log read under the workers' lock, so every
 // queued event is in what was read and none is applied after a later one.
 func (s *Supervisor) ownerRecords() {
@@ -400,6 +401,12 @@ func (s *Supervisor) ownerRecords() {
 		shared := e.Kind == KindSeen || e.Kind == KindTriage || e.Kind == KindError && e.Error.Triage != nil ||
 			e.Kind == KindItem && s.st.itemChanged(*e.Item) || e.Kind == KindCase && e.Mode == ModeOwner
 		if e.Session == "" && shared {
+			s.st.apply(e)
+			continue
+		}
+		// A session's tool call, which its server logged, is a shared fact
+		// of that session's case.
+		if _, ok := s.cfg.Sessions[e.Session]; ok && e.Kind == KindCase && e.Mode == ModeShared && e.Case.Call != nil {
 			s.st.apply(e)
 			continue
 		}
@@ -666,7 +673,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			why = "answered"
 		}
 		id := newSessionID()
-		cmd, facts := s.launchCommand(sess, t, id, why)
+		cmd, facts := s.launchCommand(name, sess, t, id, why)
 		line, err := s.launchLine(sess, cmd)
 		if err != nil {
 			// Not final, and not a crash: the owner may fix the account.
