@@ -22,6 +22,9 @@ type Tracking struct {
 	Manifest string `json:"manifest"`
 	Snapshot string `json:"snapshot"`
 	Mail     string `json:"mail"` // the mail findings file, beside the snapshot
+	// Priorities is the weekly review's file: each repository's priority
+	// this week and the owner's pinned cases. agentd cases ranks by it.
+	Priorities string `json:"priorities"`
 }
 
 // ManifestRepo is one entry of the tracking system's repository manifest.

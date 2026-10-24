@@ -23,6 +23,7 @@ type LogState struct {
 	Items   map[string]*Item      // new items by id, and whether the owner saw them
 	Cursors map[string]time.Time  // how far each source of items has been read
 	Polls   map[string]PollRecord // each forge source's latest poll record
+	Cases   map[string]*Case      // each case by id
 
 	cfg *Config // its policies, read as each event is applied
 }
@@ -30,7 +31,7 @@ type LogState struct {
 // NewLogState is the empty state of mode under the configuration's policies.
 func NewLogState(cfg *Config, mode string) *LogState {
 	return &LogState{Mode: mode, Tracks: map[string]*Track{}, Pending: map[string]Event{}, Items: map[string]*Item{},
-		Cursors: map[string]time.Time{}, Polls: map[string]PollRecord{}, cfg: cfg}
+		Cursors: map[string]time.Time{}, Polls: map[string]PollRecord{}, Cases: map[string]*Case{}, cfg: cfg}
 }
 
 // setItem changes a copy of the item and puts the copy in its place: a
@@ -89,6 +90,10 @@ func (st *LogState) apply(e Event) {
 		return
 	}
 	st.Events++
+	if e.Kind == KindCase {
+		st.applyCase(e)
+		return
+	}
 	if e.Session == "" {
 		switch e.Kind {
 		case KindStart:
