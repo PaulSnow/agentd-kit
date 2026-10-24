@@ -17,11 +17,12 @@ import (
 // does.
 type fakeForgeAPI struct {
 	mu           sync.Mutex
-	notes        string            // the notifications body
-	lastModified string            // its Last-Modified
-	pollInterval string            // X-Poll-Interval, if any
-	github       map[string]string // other GitHub paths: body
-	gitlab       map[string]string // parts of a GitLab path: body
+	notes        string              // the notifications body
+	lastModified string              // its Last-Modified
+	pollInterval string              // X-Poll-Interval, if any
+	github       map[string]string   // other GitHub paths: body
+	gitlab       map[string]string   // parts of a GitLab path: body
+	gitlabSeq    map[string][]string // a GitLab key's next bodies, before its body
 	githubErr    error
 	gitlabErr    error
 	calls        []string
@@ -60,8 +61,15 @@ func (f *fakeForgeAPI) GitLab(path string) (APIResponse, error) {
 	}
 	// The longest key whose parts, split at "|", the path all contains
 	// answers, so a page can have its own.
+	// A key starting with "=" answers that path alone.
 	match := ""
+	if _, ok := f.gitlab["="+path]; ok {
+		match = "=" + path
+	}
 	for key := range f.gitlab {
+		if strings.HasPrefix(key, "=") || match != "" && match[0] == '=' {
+			continue
+		}
 		all := true
 		for _, part := range strings.Split(key, "|") {
 			all = all && strings.Contains(path, part)
@@ -72,6 +80,10 @@ func (f *fakeForgeAPI) GitLab(path string) (APIResponse, error) {
 	}
 	if match != "" && f.gitlab[match] == fakeNotFound {
 		return APIResponse{Status: http.StatusNotFound, Body: []byte(`{"message":"404 Not found"}`)}, nil
+	}
+	if q := f.gitlabSeq[match]; match != "" && len(q) > 0 {
+		f.gitlabSeq[match] = q[1:]
+		return APIResponse{Status: http.StatusOK, Body: []byte(q[0])}, nil
 	}
 	if match != "" {
 		return APIResponse{Status: http.StatusOK, Body: []byte(f.gitlab[match])}, nil

@@ -114,6 +114,7 @@ const (
 	ActWake     = "wake"   // a coordinator's pack written and its pointer typed: a judgment is due
 	ActCIFix    = "ci-fix" // a session relaunched to fix its request's own CI failure
 	ActRaise    = "raise"  // agentd raised a decision for the owner on a session: a CI failure it will not fix again
+	ActMerge    = "merge"  // a request's target fast-forwarded to its gated, green head
 )
 
 // StartPayload is a run's start: the sessions it supervises.
