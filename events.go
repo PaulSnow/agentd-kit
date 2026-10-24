@@ -326,10 +326,13 @@ func (e Event) check() error {
 		return errors.New("an answer event is the owner's, for one session")
 	case e.Kind == KindDecision && (e.Mode == ModeOwner || e.Session == ""):
 		return errors.New("a decision event is a run's, for one session")
-	case e.Kind == KindCase && (e.Case.Ruling != nil) != (e.Mode == ModeOwner && e.Session == ""):
-		return errors.New("a ruling is the owner's, for no one session; a pack or report is a run's, for one")
-	case e.Kind == KindCase && (e.Case.Pack != nil) == (e.Case.Report != nil) && (e.Case.Report != nil || e.Case.Ruling == nil):
-		return errors.New("a case event carries one of a pack, a report or a ruling")
+	case e.Kind == KindCase:
+		if err := e.Case.check(); err != nil {
+			return err
+		}
+		if (e.Case.Ruling != nil) != (e.Mode == ModeOwner && e.Session == "") {
+			return errors.New("a ruling is the owner's, for no one session; a pack or report is a run's, for one")
+		}
 	}
 	switch e.Mode {
 	case ModeLive, ModeShadow, ModeOwner, ModeShared:

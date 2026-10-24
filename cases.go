@@ -63,6 +63,33 @@ const (
 	RulingReopen      = "reopen"
 )
 
+// check refuses a case payload that names no case, carries other than
+// exactly one of a pack, a report or a ruling, or a ruling of an unknown
+// kind or without the id a restriction or waiver has.
+func (p *CasePayload) check() error {
+	n := 0
+	for _, set := range []bool{p.Pack != nil, p.Report != nil, p.Ruling != nil} {
+		if set {
+			n++
+		}
+	}
+	if _, _, ok := splitCase(p.Case); !ok || n != 1 {
+		return errors.New("a case event names its case and carries exactly one of a pack, a report or a ruling")
+	}
+	if r := p.Ruling; r != nil {
+		switch r.Kind {
+		case RulingRestriction, RulingWaiver:
+			if r.ID == "" {
+				return fmt.Errorf("a %s ruling needs its id", r.Kind)
+			}
+		case RulingClose, RulingReopen:
+		default:
+			return fmt.Errorf("unknown ruling %q", r.Kind)
+		}
+	}
+	return nil
+}
+
 // maxRuling bounds a ruling's text.
 const maxRuling = 500
 
@@ -177,7 +204,8 @@ func splitCase(id string) (string, int, bool) {
 }
 
 // notePack logs the context pack a launch handed the session, when it
-// works a case.
+// works a case. The facts are as typed, unscreened, so their hash is the
+// prompt's; the launch's act event logs the same text in its command.
 func (s *Supervisor) notePack(name string, sess Session, facts []byte) {
 	id := s.cfg.caseOf(sess)
 	if id == "" {
@@ -206,13 +234,19 @@ func (s *Supervisor) noteReport(name string, sess Session, ev Evidence) {
 	s.emit(name, Event{Kind: KindCase, Case: &CasePayload{Case: id, Report: &r}})
 }
 
-// RecordRuling logs the owner's ruling on a case: a known case, a known
-// kind, the text a restriction or waiver needs, and nothing a closed case
-// cannot take. A restriction or waiver gets the next id of the case's life.
+// RecordRuling logs the owner's ruling on a case: a known case (one the
+// log, a configured session or an issue item names), a known kind, the
+// text a restriction or waiver needs, and nothing a closed case cannot
+// take. A restriction or waiver gets the next id of the case's life. The
+// id is read from st, folded before the append without a lock held across
+// both, so two rulings recorded at the same moment could share an id.
 func RecordRuling(log *Log, cfg *Config, st *LogState, now time.Time, id, kind, text, by string) error {
 	known := st.Cases[id] != nil
 	for _, sess := range cfg.Sessions {
 		known = known || cfg.caseOf(sess) == id
+	}
+	if it := st.Items[id]; it != nil && it.Kind == ItemIssue && !it.OwnerOnly {
+		known = true
 	}
 	if !known {
 		return fmt.Errorf("no case %q", id)
@@ -242,8 +276,11 @@ func RecordRuling(log *Log, cfg *Config, st *LogState, now time.Time, id, kind, 
 		if text != "" {
 			return fmt.Errorf("a %s takes no text", kind)
 		}
-		if c.Closed == (kind == RulingClose) {
-			return fmt.Errorf("case %s is already %sd", id, kind)
+		if c.Closed && kind == RulingClose {
+			return fmt.Errorf("case %s is already closed", id)
+		}
+		if !c.Closed && kind == RulingReopen {
+			return fmt.Errorf("case %s is open", id)
 		}
 	default:
 		return fmt.Errorf("unknown ruling %q: restriction, waiver, close or reopen", kind)
@@ -360,9 +397,16 @@ func CasesFrom(cfg *Config, st *LogState) []CaseView {
 			}
 		}
 		v.State = caseState(c, ts)
-		for _, t := range ts {
-			if v.State == CaseNeedsYou && !t.Since.IsZero() && (t.State == BlockedOnOwner || t.State == CrashLooping) {
-				v.Since = t.Since
+		if v.State == CaseNeedsYou {
+			// Waiting on the owner since the first of its sessions to wait.
+			var since time.Time
+			for _, t := range ts {
+				if !t.Since.IsZero() && (t.State == BlockedOnOwner || t.State == CrashLooping) && (since.IsZero() || t.Since.Before(since)) {
+					since = t.Since
+				}
+			}
+			if !since.IsZero() {
+				v.Since = since
 			}
 		}
 		out = append(out, v)
@@ -411,6 +455,11 @@ func LoadPriorities(path string) (*Priorities, error) {
 			return nil, fmt.Errorf("%s: repository %q needs a priority of 1 or more", path, r.Repository)
 		}
 	}
+	for _, id := range pr.Pins {
+		if _, _, ok := splitCase(id); !ok {
+			return nil, fmt.Errorf("%s: pin %q is not a case such as gitlab/example-org/widgets#17", path, id)
+		}
+	}
 	return &pr, nil
 }
 
@@ -420,12 +469,14 @@ var urgencyOrder = map[string]int{"now": 0, "today": 1, "later": 2}
 // RankCases orders the cases and numbers them from 1: the owner's pins
 // first, in pin order; then what needs the owner; then, with priorities,
 // the repository's priority this week, listed before unlisted; then triage
-// urgency, the oldest waiting, and the id. Closed cases come last. Without
+// urgency, the oldest waiting (a case with no time yet after the dated),
+// and the id. Closed cases come last. Without
 // priorities there are no pins and no repository order.
 func RankCases(cs []CaseView, pr *Priorities) {
 	pin, prio := map[string]int{}, map[string]int{}
 	if pr != nil {
 		for i, id := range pr.Pins {
+			id = strings.ToLower(id)
 			if _, ok := pin[id]; !ok {
 				pin[id] = i + 1
 			}
@@ -466,6 +517,10 @@ func RankCases(cs []CaseView, pr *Priorities) {
 		}
 		if ua, ub := urgency(a), urgency(b); ua != ub {
 			return ua < ub
+		}
+		// A case with no time yet has waited for nothing: after the dated.
+		if az, bz := a.Since.IsZero(), b.Since.IsZero(); az != bz {
+			return bz
 		}
 		if !a.Since.Equal(b.Since) {
 			return a.Since.Before(b.Since)

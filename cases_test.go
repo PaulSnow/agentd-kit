@@ -320,6 +320,11 @@ func TestLoadPriorities(t *testing.T) {
 	if pr, err := LoadPriorities(p); err != nil || pr != nil {
 		t.Fatalf("missing: %+v, %v", pr, err)
 	}
+	writeFile(t, p, `{"week":"2026-W43","pins":["widgets"]}`)
+	if _, err := LoadPriorities(p); err == nil {
+		t.Fatal("a pin that is no case was accepted")
+	}
+	os.Remove(p)
 	if pr, err := LoadPriorities(""); err != nil || pr != nil {
 		t.Fatalf("unconfigured: %+v, %v", pr, err)
 	}
@@ -374,5 +379,129 @@ func TestCasesCmd(t *testing.T) {
 	}
 	if err := json.Unmarshal(out.Bytes(), &doc); err != nil || len(doc.Cases) != 1 || doc.Cases[0].Rank != 1 || doc.Cases[0].Item != "second" {
 		t.Fatalf("json %s: %v", out.String(), err)
+	}
+}
+
+// packs is the facts of every pack logged, in order.
+func packs(t *testing.T, h *harness) []restartFacts {
+	t.Helper()
+	var out []restartFacts
+	for _, e := range h.events() {
+		if e.Kind == KindCase && e.Case.Pack != nil {
+			var f restartFacts
+			if err := json.Unmarshal(e.Case.Pack.Facts, &f); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// A rotation hands the fresh session a pack too; a shadow run, which
+// launches nothing, logs none.
+func TestCasePackOnRotationNotInShadow(t *testing.T) {
+	h := newHarness(t, false, "s")
+	s := h.cfg.Sessions["s"]
+	s.Issue = 7
+	h.cfg.Sessions["s"] = s
+	h.cfg.TranscriptDir = filepath.Join(h.dir, "projects")
+	h.status("s", progressText("second", "coding"))
+	h.git.merge, h.git.mergeSubject = "m0", "Merge #18: items"
+	h.ticks(1, time.Minute)
+	id := ""
+	for _, e := range h.events() {
+		if e.Kind == KindAction && e.Act.Action == ActRestart {
+			id = e.Act.Transcript
+		}
+	}
+	h.transcript(id, usageLine("m1", 10, 150000, 0, 5, false))
+	h.git.merge, h.git.mergeSubject = "m1", "Merge #21: contexts"
+	h.ticks(8, time.Minute)
+	if n := h.count(KindAction, ActRotate, "s"); n != 1 {
+		t.Fatalf("rotations = %d", n)
+	}
+	if ps := packs(t, h); len(ps) != 2 || ps[0].Why != "restart" || ps[1].Why != "rotation" {
+		t.Fatalf("packs %+v", ps)
+	}
+
+	sh := newHarness(t, true, "s1")
+	s1 := sh.cfg.Sessions["s1"]
+	s1.Issue = 7
+	sh.cfg.Sessions["s1"] = s1
+	sh.status("s1", progressText("second", "coding"))
+	sh.ticks(2, 5*time.Minute)
+	if n := sh.count(KindWould, ActRestart, "s1"); n == 0 {
+		t.Fatal("the shadow would not restart")
+	}
+	if ps := packs(t, sh); len(ps) != 0 {
+		t.Fatalf("shadow packs %+v", ps)
+	}
+}
+
+// A case event is refused unless it names a case and carries exactly one
+// of a pack, a report or a well-formed ruling, in the mode its part needs.
+func TestCaseEventCheck(t *testing.T) {
+	at := time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC)
+	pack := &CasePack{Hash: "h", Facts: json.RawMessage(`{}`)}
+	report := &CaseReport{Hash: "h"}
+	ruling := &CaseRuling{Kind: RulingRestriction, ID: "R1", Text: "x"}
+	run := func(p CasePayload) Event {
+		return Event{V: EventVersion, Time: at, Kind: KindCase, Mode: ModeLive, Session: "s1", Case: &p}
+	}
+	owner := func(p CasePayload) Event {
+		return Event{V: EventVersion, Time: at, Kind: KindCase, Mode: ModeOwner, Case: &p}
+	}
+	for _, ok := range []Event{run(CasePayload{Case: widgetsCase, Pack: pack}), run(CasePayload{Case: widgetsCase, Report: report}),
+		owner(CasePayload{Case: widgetsCase, Ruling: ruling}), owner(CasePayload{Case: widgetsCase, Ruling: &CaseRuling{Kind: RulingClose}})} {
+		if err := ok.check(); err != nil {
+			t.Errorf("%+v refused: %v", ok.Case, err)
+		}
+	}
+	for _, bad := range []Event{
+		run(CasePayload{Case: widgetsCase}),
+		run(CasePayload{Case: "", Pack: pack}),
+		run(CasePayload{Case: "widgets", Pack: pack}),
+		run(CasePayload{Case: widgetsCase, Pack: pack, Report: report}),
+		owner(CasePayload{Case: widgetsCase, Pack: pack, Ruling: ruling}),
+		owner(CasePayload{Case: widgetsCase, Ruling: &CaseRuling{Kind: "pardon"}}),
+		owner(CasePayload{Case: widgetsCase, Ruling: &CaseRuling{Kind: RulingWaiver, Text: "no id"}}),
+		run(CasePayload{Case: widgetsCase, Ruling: ruling}),
+		owner(CasePayload{Case: widgetsCase, Pack: pack}),
+	} {
+		if err := bad.check(); err == nil {
+			t.Errorf("%+v (mode %s) accepted", bad.Case, bad.Mode)
+		}
+	}
+}
+
+// A case only an issue item names can be ruled on, as agentd cases lists it.
+func TestRulingOnAnItemCase(t *testing.T) {
+	h := caseHarness(t)
+	NewLogWriter(h.buf).Append(Event{V: EventVersion, Time: h.clock.Now(), Kind: KindItem, Mode: ModeShared,
+		Item: &ItemPayload{ID: "gitlab/example-org/widgets#9", Kind: ItemIssue, Repository: "gitlab/example-org/widgets", Title: "Wobble"}})
+	st := NewLogState(h.cfg, ModeLive).Fold(h.events())
+	if err := RecordRuling(NewLogWriter(h.buf), h.cfg, st, h.clock.Now(), "gitlab/example-org/widgets#9", RulingClose, "", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range casesOf(h, ModeLive) {
+		if c.ID == "gitlab/example-org/widgets#9" && c.State != CaseClosed {
+			t.Fatalf("case %+v", c)
+		}
+	}
+}
+
+// A pin matches whatever case it is written in, and a case with no
+// time yet ranks after the ones that have waited.
+func TestRankPinsAndUndated(t *testing.T) {
+	at := time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC)
+	cs := []CaseView{
+		{ID: "gitlab/example-org/widgets#1", Repository: "gitlab/example-org/widgets", State: CaseWorking},
+		{ID: "gitlab/example-org/widgets#2", Repository: "gitlab/example-org/widgets", State: CaseWorking, Since: at},
+		{ID: "gitlab/example-org/widgets#3", Repository: "gitlab/example-org/widgets", State: CaseWorking, Since: at.Add(time.Hour)},
+	}
+	RankCases(cs, &Priorities{Pins: []string{"gitlab/Example-Org/widgets#3"}})
+	if got := rankIDs(cs); !reflect.DeepEqual(got, []string{"gitlab/example-org/widgets#3", "gitlab/example-org/widgets#2", "gitlab/example-org/widgets#1"}) {
+		t.Fatalf("got %v", got)
 	}
 }
