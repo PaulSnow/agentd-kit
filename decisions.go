@@ -223,10 +223,11 @@ func (srv *MCPServer) refusal(err error, d Decision) problem {
 }
 
 // withholdDecision is d with its words left out: its id, type, option
-// keys, limits, default and whether it blocks stay, so it can still be
-// answered from the session's own screen.
+// keys and whether it blocks stay, so it can still be answered from the
+// session's own screen. Its limits and default go too, since either may
+// be what matched; with no default, no deadline applies one.
 func withholdDecision(d Decision) Decision {
-	w := Decision{ID: d.ID, Type: d.Type, Limits: d.Limits, Default: d.Default, Blocking: d.Blocking, Supersedes: d.Supersedes, Withheld: true}
+	w := Decision{ID: d.ID, Type: d.Type, Blocking: d.Blocking, Supersedes: d.Supersedes, Withheld: true}
 	for _, o := range d.Options {
 		w.Options = append(w.Options, DecisionOption{Key: o.Key})
 	}

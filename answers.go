@@ -215,7 +215,7 @@ func checkDecisions(ds []Decision) error {
 // first marker, (a) and (b) or (1) and (2), so a sentence such as "the
 // retry count is 3." is not taken for one.
 var (
-	optionMarker = regexp.MustCompile(`(?i)(?:^|\s)(?:\(([a-e1-5])\)|([a-e])\))(?:\s|$)`)
+	optionMarker = regexp.MustCompile(`(?i)\(([a-e1-5])\)|(?:^|\s)([a-e])\)`)
 	yesOrNo      = regexp.MustCompile(`(?i)\byes\s*(?:or|/)\s*no\s*\??\s*$`)
 )
 
@@ -292,6 +292,9 @@ func checkLimits(d Decision) error {
 	}
 	if d.Type != DecisionNumber && d.Type != DecisionDate && d.Type != DecisionChooseMany {
 		return fmt.Errorf("decision %s: a %s question takes no limits", d.ID, d.Type)
+	}
+	if len(l.Min) > 40 || len(l.Max) > 40 {
+		return fmt.Errorf("decision %s: limits min and max are at most 40 characters each", d.ID)
 	}
 	var bounds []float64
 	for _, raw := range []json.RawMessage{l.Min, l.Max} {
@@ -530,7 +533,10 @@ func decisionHash(d Decision) string {
 
 // decisionTexts are the words of a decision, for screening.
 func decisionTexts(d Decision) []string {
-	texts := []string{d.Question, d.Context, d.Why, d.IfWrong, d.Recommendation, d.Default}
+	texts := []string{d.Question, d.Context, d.Why, d.IfWrong, d.Recommendation, d.Default, d.Deadline}
+	if l := d.Limits; l != nil {
+		texts = append(texts, string(l.Min), string(l.Max))
+	}
 	for _, o := range d.Options {
 		texts = append(texts, o.Label, o.Consequence)
 	}

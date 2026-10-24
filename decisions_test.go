@@ -450,3 +450,23 @@ func TestDecisionReview1(t *testing.T) {
 		t.Fatal("a settled decision was superseded")
 	}
 }
+
+// Review round 2: a withheld decision keeps neither its default nor its
+// limits; markers followed by punctuation still make a list; limits are
+// bounded.
+func TestDecisionReview2(t *testing.T) {
+	w := withholdDecision(Decision{ID: "D1", Type: DecisionNumber, Default: "4", Limits: &DecisionLimits{Min: json.RawMessage(`1`)}})
+	if w.Default != "" || w.Limits != nil || !w.Withheld {
+		t.Fatalf("withheld %+v", w)
+	}
+	for _, q := range []string{"Which: (a), (b), or (c)?", "Use (a): rebase or (b): merge?", "Pick (a) (b)"} {
+		if err := checkDecision(Decision{ID: "D1", Type: DecisionText, Question: q, Context: "c", Why: "w", IfWrong: "i", Recommendation: "r"}); err == nil {
+			t.Errorf("%q accepted as text", q)
+		}
+	}
+	long := json.RawMessage("0." + strings.Repeat("0", 60) + "1")
+	if err := checkDecision(Decision{ID: "D1", Type: DecisionNumber, Question: "q", Context: "c", Why: "w", IfWrong: "i", Recommendation: "r",
+		Limits: &DecisionLimits{Min: long}}); err == nil {
+		t.Fatal("a 63-character limit was accepted")
+	}
+}
