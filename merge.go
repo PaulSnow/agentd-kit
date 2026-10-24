@@ -32,11 +32,6 @@ const MergeFastForward = "fast-forward"
 // sourceMerge is the merge check's entry among the poll worker's due times.
 const sourceMerge = "merge"
 
-// mergePolicy is MergePolicyFile.
-type mergePolicy struct {
-	Merge string `json:"merge"`
-}
-
 // mergeKey keys a request's merge, its failures and its refusals.
 func mergeKey(repo, ref string) string { return "merge:" + ciKey(repo, ref) }
 
@@ -84,7 +79,9 @@ func (s *Supervisor) mergeBlocked(t *Track, w ciWatched, r CIRecord, ok bool, no
 	case !ok || r.Head == "":
 		return "no-ci", "" // the CI watcher has not recorded it yet
 	case r.Session != w.Session || r.Delivered != w.Delivered || t.ciStale(r):
-		return "stale", "its CI record is from before its latest delivery"
+		return "stale", "" // the watcher records the delivery at its next round
+	case r.State == CIPending:
+		return "ci-pending", "" // CI is running
 	case r.State != CISuccess:
 		return "ci-" + r.State, fmt.Sprintf("CI on %s is %s, not green", shortHash(r.Head), r.State)
 	case !contains(t.Gated, r.Head):
@@ -94,6 +91,8 @@ func (s *Supervisor) mergeBlocked(t *Track, w ciWatched, r CIRecord, ok bool, no
 	}
 	fkey := mergeKey(w.Repository, w.Ref) + ":" + r.Head
 	if s.failed(t, fkey) {
+		// A skip, not a decision: the request is still open, for the
+		// owner to merge, and its errors are in the log.
 		return "gave-up", fmt.Sprintf("the merge call failed %d times on %s; not retrying", len(t.Failures[fkey]), shortHash(r.Head))
 	}
 	if !s.retryDue(t, fkey, now) {
@@ -120,7 +119,7 @@ func (s *Supervisor) mergeSkip(name string, t *Track, w ciWatched, head, code, w
 		return
 	}
 	s.skipOnce(name, mergeKey(w.Repository, w.Ref)+":"+head+":"+code, fmt.Sprintf("not merging %s in %s: %s", w.Ref, w.Repository, why), t,
-		&SkipPayload{Action: ActMerge, Repository: w.Repository})
+		&SkipPayload{Action: ActMerge, Repository: w.Repository, Head: head})
 }
 
 // mergeView is what the forge says of a request about to merge: its
@@ -176,8 +175,10 @@ func (s *Supervisor) mergeRequest(name string, t *Track, w ciWatched, r CIRecord
 		unknown(err)
 		return
 	}
-	var pol mergePolicy
-	if b == nil || json.Unmarshal(b, &pol) != nil || pol.Merge != MergeFastForward {
+	// Keys are matched exactly: json.Unmarshal into a struct would take
+	// "MERGE" too.
+	var pol map[string]any
+	if b == nil || json.Unmarshal(b, &pol) != nil || pol["merge"] != MergeFastForward {
 		skip("no-grant", fmt.Sprintf("%s on %s at %s does not grant merge: %s", MergePolicyFile, v.target, shortHash(tip), MergeFastForward))
 		return
 	}
@@ -313,14 +314,18 @@ func githubMergeView(api ForgeAPI, project, ref string) (mergeView, error) {
 		return mergeView{}, err
 	}
 	v := mergeView{head: pr.Head.SHA, target: pr.Base.Ref, url: pr.HTMLURL, open: pr.State == "open" && !pr.Merged}
-	// Moving the branch skips what GitHub's own merge would ask: a draft,
-	// or a request its branch protection blocks (a review it lacks), is
-	// held. A mergeable_state GitHub has not computed yet is not.
-	switch {
-	case pr.Draft:
+	// Moving the branch skips what GitHub's own merge would ask, so only a
+	// request GitHub says it would merge as it stands is not held: clean,
+	// or with hooks, or unstable (a check that is not required fails).
+	// A state GitHub has not computed yet, unknown after every push, is
+	// held until a later round finds it computed.
+	switch pr.MergeableState {
+	case "clean", "has_hooks", "unstable":
+	default:
+		v.held = fmt.Sprintf("GitHub says it is %q, not clean", pr.MergeableState)
+	}
+	if pr.Draft {
 		v.held = "it is a draft"
-	case pr.MergeableState == "blocked" || pr.MergeableState == "dirty" || pr.MergeableState == "draft":
-		v.held = fmt.Sprintf("GitHub says it is %s", pr.MergeableState)
 	}
 	v.tip = func(target string) (string, error) {
 		var r struct {

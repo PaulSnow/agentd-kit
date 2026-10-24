@@ -176,7 +176,7 @@ func TestMergeNeedsBothGrants(t *testing.T) {
 		}
 	}
 
-	for name, body := range map[string]string{"absent": fakeNotFound, "other": `{"merge":"squash"}`, "torn": `{"merge":`} {
+	for name, body := range map[string]string{"absent": fakeNotFound, "other": `{"merge":"squash"}`, "torn": `{"merge":`, "case": `{"MERGE":"fast-forward"}`} {
 		t.Run(name, func(t *testing.T) {
 			h, api := mergeHarness(t)
 			api.set(func() { api.gitlab[mergePolicyPath+"|ref="+mergeTip] = body })
@@ -234,7 +234,7 @@ func TestMergeWaitsForBlockingDecision(t *testing.T) {
 	}
 }
 
-// CI that is not green on the head holds the merge; a failed merge call is
+// CI still running on the head holds the merge; a failed merge call is
 // retried within the restart policy, then given up on.
 func TestMergeNeedsGreenAndGivesUp(t *testing.T) {
 	h, api := mergeHarness(t)
@@ -243,7 +243,8 @@ func TestMergeNeedsGreenAndGivesUp(t *testing.T) {
 	if len(h.forge.merges) != 0 {
 		t.Fatalf("merged on pending CI: %+v", h.forge.merges)
 	}
-	if s := h.mergeSkips(); len(s) != 1 || !strings.Contains(s[0], "is pending, not green") {
+	// Running CI is waited for, without a record each round.
+	if s := h.mergeSkips(); len(s) != 0 {
 		t.Fatalf("skips = %q", s)
 	}
 	api.pipelines("c0ffee", "success", nil, "success", nil)
@@ -257,13 +258,14 @@ func TestMergeNeedsGreenAndGivesUp(t *testing.T) {
 	if !strings.Contains(s[len(s)-1], "failed") || !strings.Contains(s[len(s)-1], "not retrying") {
 		t.Fatalf("skips = %q", s)
 	}
+	sameAfterReplay(t, h, "after giving up")
 }
 
 // GitHub: the pull request's head and base, the base's tip, the policy
 // file at it, asked raw, and the compare that says fast-forward.
 func TestMergeGitHubView(t *testing.T) {
 	api := &fakeForgeAPI{github: map[string]string{
-		"/repos/example-org/gadgets/pulls/4":                                     `{"state":"open","merged":false,"html_url":"https://github.com/example-org/gadgets/pull/4","head":{"sha":"abc1234def"},"base":{"ref":"main"}}`,
+		"/repos/example-org/gadgets/pulls/4":                                     `{"state":"open","merged":false,"mergeable_state":"clean","html_url":"https://github.com/example-org/gadgets/pull/4","head":{"sha":"abc1234def"},"base":{"ref":"main"}}`,
 		"/repos/example-org/gadgets/git/ref/heads/main":                          `{"object":{"sha":"0123456789"}}`,
 		"/repos/example-org/gadgets/contents/.agentd/policy.json?ref=0123456789": `{"merge":"fast-forward"}`,
 		"/repos/example-org/gadgets/compare/0123456789...abc1234def":             `{"status":"ahead","behind_by":0}`,
@@ -289,14 +291,14 @@ func TestMergeGitHubView(t *testing.T) {
 	if why, _ := v.fastForward(tip, v.head); !strings.Contains(why, "not a fast-forward") {
 		t.Fatalf("diverged = %q", why)
 	}
-	for _, held := range []string{`"draft":true`, `"mergeable_state":"blocked"`} {
+	if v.held != "" {
+		t.Fatalf("clean held: %q", v.held)
+	}
+	for _, held := range []string{`"mergeable_state":"clean","draft":true`, `"mergeable_state":"blocked"`, `"mergeable_state":"dirty"`, `"mergeable_state":"unknown"`, `"merged":false`} {
 		api.github["/repos/example-org/gadgets/pulls/4"] = `{"state":"open",` + held + `,"head":{"sha":"abc1234def"},"base":{"ref":"main"}}`
 		if v, err := githubMergeView(api, "example-org/gadgets", "#4"); err != nil || v.held == "" {
 			t.Fatalf("%s: held = %q, %v", held, v.held, err)
 		}
-	}
-	if v, err := githubMergeView(api, "example-org/gadgets", "#4"); err != nil || v.held == "" {
-		t.Fatalf("held = %+v, %v", v, err)
 	}
 	api.github["/repos/example-org/gadgets/pulls/4"] = `{"state":"closed","merged":true}`
 	if v, err := githubMergeView(api, "example-org/gadgets", "#4"); err != nil || v.open {
