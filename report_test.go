@@ -127,10 +127,10 @@ func TestReportDeliveriesFromSkips(t *testing.T) {
 	h := newHarness(t, false, "s1")
 	at := h.clock.Now()
 	events := []Event{
-		{Time: at, Kind: KindStart, Details: map[string]any{"mode": ModeLive}},
-		{Time: at, Session: "s1", Kind: KindSkip, Details: map[string]any{"delivered": "s1:a", "outcome": "!7", "repository": "widgets", "mode": ModeLive}},
-		{Time: at, Session: "s1", Kind: KindSkip, Details: map[string]any{"delivered": "s1:b", "outcome": "failed", "repository": "widgets", "mode": ModeLive}},
-		{Time: at, Session: "s1", Kind: KindSkip, Details: map[string]any{"delivered": "s1:c", "outcome": "nothing", "repository": "widgets", "mode": ModeLive}},
+		{V: EventVersion, Time: at, Kind: KindStart, Mode: ModeLive, Start: &StartPayload{}},
+		{V: EventVersion, Time: at, Session: "s1", Kind: KindSkip, Mode: ModeLive, Skip: &SkipPayload{Key: "a", Delivered: "s1:a", Outcome: "!7", Repository: "widgets"}},
+		{V: EventVersion, Time: at, Session: "s1", Kind: KindSkip, Mode: ModeLive, Skip: &SkipPayload{Key: "b", Delivered: "s1:b", Outcome: "failed", Repository: "widgets"}},
+		{V: EventVersion, Time: at, Session: "s1", Kind: KindSkip, Mode: ModeLive, Skip: &SkipPayload{Key: "c", Delivered: "s1:c", Outcome: "nothing", Repository: "widgets"}},
 	}
 	r := BuildReport(h.cfg, events, ModeLive, "host-a", at)
 	if len(r.Repositories) != 1 || len(r.Repositories[0].Deliveries) != 1 || r.Repositories[0].Deliveries[0].Ref != "!7" {
@@ -179,7 +179,7 @@ func TestReportIsWrittenAtomically(t *testing.T) {
 func TestReportCommand(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "events.jsonl")
-	writeFile(t, logPath, `{"time":"2026-10-22T00:00:00Z","kind":"start","details":{"mode":"live"}}`+"\n")
+	writeFile(t, logPath, `{"v":2,"time":"2026-10-22T00:00:00Z","kind":"start","mode":"live","start":{"sessions":[]}}`+"\n")
 	cfgPath := filepath.Join(dir, "agentd.json")
 	writeFile(t, cfgPath, `{"event_log": "`+logPath+`", "transcript_dir": ""}`)
 	out := filepath.Join(dir, "site", "report.json")
@@ -250,7 +250,7 @@ func TestReportScreensNames(t *testing.T) {
 	if err := MarkDelivered(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "s1", h.deliverSpec(t, "s1"), "embargoed-!41"); err != nil {
 		t.Fatal(err)
 	}
-	h.buf.WriteString(`{"time":"2026-10-22T00:10:00Z","session":"ghost","kind":"observe","details":{"state":"working","mode":"live"}}` + "\n")
+	h.buf.WriteString(`{"v":2,"time":"2026-10-22T00:10:00Z","session":"ghost","kind":"observe","mode":"live","observe":{"state":"working","reason":"","alive":true,"done":false,"questions":false,"limited":false,"trust":false,"dialog":false,"command":"claude","head":""}}` + "\n")
 	h.cfg.ConfidentialPatterns = []string{"(?i)embargoed"}
 	out := filepath.Join(t.TempDir(), "report.json")
 	if err := WriteReport(out, BuildReport(h.cfg, h.events(), ModeLive, "host-a", h.clock.Now())); err != nil {
@@ -285,8 +285,8 @@ func TestShadowReportListsWouldOpen(t *testing.T) {
 	h := newHarness(t, true, "s1")
 	at := h.clock.Now()
 	events := []Event{
-		{Time: at, Kind: KindStart, Details: map[string]any{"mode": ModeShadow}},
-		{Time: at, Session: "s1", Kind: KindWould, Details: map[string]any{"action": ActOpen, "delivered": "s1:wt", "repository": "widgets", "mode": ModeShadow}},
+		{V: EventVersion, Time: at, Kind: KindStart, Mode: ModeShadow, Start: &StartPayload{}},
+		{V: EventVersion, Time: at, Session: "s1", Kind: KindWould, Mode: ModeShadow, Act: &ActPayload{Action: ActOpen, Delivered: "s1:wt", Repository: "widgets"}},
 	}
 	r := BuildReport(h.cfg, events, ModeShadow, "host-a", at)
 	if len(r.Repositories) != 1 || len(r.Repositories[0].Deliveries) != 1 || r.Repositories[0].Deliveries[0].Ref != "would-open" {

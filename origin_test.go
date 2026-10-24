@@ -153,7 +153,7 @@ func TestWrongOriginIsNotPushed(t *testing.T) {
 	}
 	skips := 0
 	for _, e := range h.events() {
-		if e.Kind == KindSkip && strings.Contains(detailString(e, "reason"), "origin") {
+		if e.Kind == KindSkip && strings.Contains(skipReason(e), "origin") {
 			skips++
 		}
 	}

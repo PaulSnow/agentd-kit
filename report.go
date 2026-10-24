@@ -75,24 +75,6 @@ type ReportQuestion struct {
 	OwnerOnly bool      `json:"owner_only"`
 }
 
-// reportSession is what BuildReport folds the log into for one session.
-type reportSession struct {
-	state      State
-	since      time.Time
-	head       string
-	asks       bool
-	question   string
-	askedAt    time.Time
-	filtered   map[string]bool // escalation keys whose text was withheld when posted
-	deliveries []reportDelivery
-}
-
-// reportDelivery is a delivery and the repository it went to.
-type reportDelivery struct {
-	ReportDelivery
-	repository string
-}
-
 // Questions escalations and updates start with one of these, after the
 // session's name, ahead of the text from STATUS.md.
 var questionPrefixes = []string{" is blocked on you. Questions from STATUS.md:\n", " changed its open Questions in STATUS.md; they now read:\n"}
@@ -139,81 +121,7 @@ func BuildReport(cfg *Config, events []Event, mode, host string, now time.Time) 
 		}
 		return ""
 	}
-	sessions := map[string]*reportSession{}
-	started := ""
-	for _, e := range events {
-		if e.Session == "" {
-			if e.Kind == KindStart {
-				started = detailString(e, "mode")
-			}
-			continue
-		}
-		if _, ok := cfg.Sessions[e.Session]; !ok {
-			continue // a session no longer configured is not reported
-		}
-		if m := eventMode(e, started); m != mode && m != ModeOwner {
-			continue
-		}
-		rs := sessions[e.Session]
-		if rs == nil {
-			rs = &reportSession{filtered: map[string]bool{}}
-			sessions[e.Session] = rs
-		}
-		deliver := func(ref string) {
-			repo := detailString(e, "repository")
-			if repo == "" {
-				repo = deliveredTo(e.Session, detailString(e, "delivered"))
-			}
-			rs.deliveries = append(rs.deliveries, reportDelivery{ReportDelivery{Session: e.Session, Ref: ref, At: e.Time}, repo})
-		}
-		switch e.Kind {
-		case KindObserve:
-			if st := detailString(e, "state"); st != "" && rs.state == "" {
-				rs.state, rs.since = State(st), e.Time
-			}
-			rs.head = detailString(e, "head")
-			asks, _ := e.Details["questions"].(bool)
-			done, _ := e.Details["done"].(bool)
-			if rs.asks = asks && !done; !rs.asks {
-				rs.question = ""
-			}
-		case KindTransition:
-			rs.state, rs.since = State(detailString(e, "to")), e.Time
-		case KindAction, KindWould:
-			if e.Kind == KindWould && mode != ModeShadow {
-				continue
-			}
-			switch detailString(e, "action") {
-			case ActOpen:
-				ref := detailString(e, "ref")
-				if ref == "" && e.Kind == KindWould {
-					ref = "would-open"
-				}
-				if ref != "" {
-					deliver(ref)
-				}
-			case ActEscalate, ActUpdate:
-				if key := detailString(e, "key"); strings.HasPrefix(key, "questions:") {
-					rs.question, rs.askedAt = questionText(e.Session, detailString(e, "message")), e.Time
-					if rs.filtered[key] {
-						rs.question = "" // the generic message, not the questions
-					}
-				}
-			}
-		case KindSkip:
-			if k := detailString(e, "filtered"); k != "" {
-				rs.filtered[k] = true
-			}
-			if detailString(e, "delivered") != "" {
-				// The outcome is the request found already open or
-				// merged, or failed or nothing, which deliver nothing.
-				if ref := detailString(e, "outcome"); ref != "" && ref != "failed" && ref != "nothing" {
-					deliver(ref)
-				}
-			}
-		}
-	}
-
+	st := NewLogState(cfg, mode).Fold(events)
 	repos := map[string]*ReportRepo{}
 	// group is the report's entry for the configured repository name, nil
 	// when its name or identity matches a confidential pattern.
@@ -236,9 +144,11 @@ func BuildReport(cfg *Config, events []Event, mode, host string, now time.Time) 
 		}
 		return rr
 	}
-	names := make([]string, 0, len(sessions))
-	for n := range sessions {
-		names = append(names, n)
+	var names []string
+	for n := range st.Tracks {
+		if _, ok := cfg.Sessions[n]; ok { // a session no longer configured is not reported
+			names = append(names, n)
+		}
 	}
 	sort.Strings(names)
 	var public, all digestCounts
@@ -249,30 +159,33 @@ func BuildReport(cfg *Config, events []Event, mode, host string, now time.Time) 
 		}
 	}
 	for _, n := range names {
-		rs := sessions[n]
+		rs := st.Tracks[n]
 		if secret(n) {
 			continue
 		}
 		rr := group(cfg.Sessions[n].Repository)
-		if rr != nil && rs.state != "" {
-			c := ReportCase{Session: n, State: string(rs.state), Since: rs.since, Head: rs.head, OwnerOnly: rr.OwnerOnly}
+		if rr != nil && rs.State != "" {
+			c := ReportCase{Session: n, State: string(rs.State), Since: rs.Since, Head: rs.Head, OwnerOnly: rr.OwnerOnly}
 			if secret(c.Head) {
 				c.Head = ""
 			}
 			rr.Cases = append(rr.Cases, c)
 			count(c.State, 0, 0, c.OwnerOnly)
 		}
-		for _, d := range rs.deliveries {
-			dr := group(d.repository)
+		for _, d := range rs.Deliveries {
+			repo := d.Repository
+			if repo == "" {
+				repo = deliveredTo(n, d.Delivered)
+			}
+			dr := group(repo)
 			if dr == nil || secret(d.Ref) {
 				continue
 			}
-			d.OwnerOnly = dr.OwnerOnly
-			dr.Deliveries = append(dr.Deliveries, d.ReportDelivery)
-			count("", 1, 0, d.OwnerOnly)
+			dr.Deliveries = append(dr.Deliveries, ReportDelivery{Session: n, Ref: d.Ref, At: d.At, OwnerOnly: dr.OwnerOnly})
+			count("", 1, 0, dr.OwnerOnly)
 		}
-		if rr != nil && rs.asks && rs.question != "" && !secret(rs.question) {
-			rr.Questions = append(rr.Questions, ReportQuestion{Session: n, Since: rs.askedAt, Text: rs.question, OwnerOnly: true})
+		if rr != nil && rs.Questions.Open && rs.Asked != "" && !secret(rs.Asked) {
+			rr.Questions = append(rr.Questions, ReportQuestion{Session: n, Since: rs.AskedAt, Text: rs.Asked, OwnerOnly: true})
 			count("", 0, 1, true)
 		}
 	}

@@ -23,76 +23,55 @@ type SessionStatus struct {
 	Delivered   []string
 	Would       int
 	Errors      int
+	Blocked     []string // why a delivery is declined, per worktree not yet delivered
+	GaveUp      []string // escalations given up on
+	CutShort    []string // actions a crash of agentd cut short, and pending intents
 }
 
-// Summarize folds the event log into one row per session.
-func Summarize(events []Event) ([]SessionStatus, map[string]any) {
-	rows := map[string]*SessionStatus{}
-	meta := map[string]any{"events": len(events)}
-	row := func(name string) *SessionStatus {
-		r, ok := rows[name]
-		if !ok {
-			r = &SessionStatus{Name: name}
-			rows[name] = r
-		}
-		return r
+// Summarize folds the event log for mode through the one reader into one
+// row per session: every configured session, whether or not it has events
+// yet, and any other session the log names.
+func Summarize(cfg *Config, events []Event, mode string) ([]SessionStatus, map[string]any) {
+	st := NewLogState(cfg, mode).Fold(events)
+	meta := map[string]any{"events": st.Events, "mode": mode}
+	if !st.Started.IsZero() {
+		meta["started"] = st.Started
 	}
-	for _, e := range events {
-		if e.Session == "" {
-			switch e.Kind {
-			case KindStart:
-				meta["mode"] = detailString(e, "mode")
-				meta["started"] = e.Time
-				delete(meta, "stopped")
-			case KindStop:
-				meta["stopped"] = e.Time
-			}
-			continue
-		}
-		r := row(e.Session)
-		switch e.Kind {
-		case KindObserve:
-			r.LastSeen = e.Time
-			r.Head = detailString(e, "head")
-			r.Reason = detailString(e, "reason")
-			if st := detailString(e, "state"); st != "" && r.State == "" {
-				r.State, r.Since = State(st), e.Time
-			}
-		case KindTransition:
-			r.State, r.Since = State(detailString(e, "to")), e.Time
-			r.Reason = detailString(e, "reason")
-		case KindAction, KindWould:
-			if e.Kind == KindWould {
-				r.Would++
-			}
-			switch detailString(e, "action") {
-			case ActRestart:
-				r.Restarts++
-			case ActNudge:
-				r.Nudges++
-			case ActEscalate:
-				r.Escalations++
-			case ActOpen:
-				ref := detailString(e, "ref")
-				if ref == "" {
-					ref = "would-open"
-				}
-				r.Delivered = append(r.Delivered, ref)
-			}
-		case KindSkip:
-			if detailString(e, "delivered") != "" {
-				r.Delivered = append(r.Delivered, detailString(e, "outcome"))
-			}
-		case KindError:
-			r.Errors++
-		}
+	if !st.Stopped.IsZero() {
+		meta["stopped"] = st.Stopped
 	}
-	out := make([]SessionStatus, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, *r)
+	for _, n := range cfg.SessionNames() {
+		st.track(n)
+	}
+	pending := map[string][]string{}
+	for _, e := range st.CutShort() {
+		pending[e.Session] = append(pending[e.Session], e.Act.Action+" "+e.Act.Key+" (no outcome yet)")
+	}
+	out := make([]SessionStatus, 0, len(st.Tracks))
+	for name, t := range st.Tracks {
+		r := SessionStatus{Name: name, State: t.State, Since: t.Since, LastSeen: t.LastSeen, Head: t.Head, Reason: t.Reason,
+			Restarts: t.RestartCount, Nudges: t.NudgeCount, Escalations: t.Escalations, Delivered: t.DeliveredRefs,
+			Would: t.Would, Errors: t.Errors, GaveUp: t.GaveUp, CutShort: append(append([]string(nil), t.CutShort...), pending[name]...)}
+		for _, d := range cfg.Sessions[name].Deliver {
+			if why := t.Blocked[d.Worktree]; why != "" && t.Delivered[name+":"+d.Worktree] == "" {
+				r.Blocked = append(r.Blocked, why)
+			}
+		}
+		out = append(out, r)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, meta
+}
+
+// statusMode is the mode status shows by default: the latest run's.
+func statusMode(events []Event) string {
+	m := ModeLive
+	for _, e := range events {
+		if e.Kind == KindStart {
+			m = e.Mode
+		}
+	}
+	return m
 }
 
 // PrintStatus writes the table.
@@ -117,6 +96,15 @@ func PrintStatus(w io.Writer, rows []SessionStatus, meta map[string]any, now tim
 		why := r.Reason
 		if r.Errors > 0 {
 			why = fmt.Sprintf("%s (%d errors)", why, r.Errors)
+		}
+		for _, b := range r.Blocked {
+			why += "; delivery: " + b
+		}
+		for _, g := range r.GaveUp {
+			why += "; gave up escalating " + g
+		}
+		for _, c := range r.CutShort {
+			why += "; cut short: " + c
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\n",
 			r.Name, r.State, ago(now, r.Since), ago(now, r.LastSeen), r.Restarts, r.Nudges, r.Escalations, delivered, why)

@@ -26,11 +26,11 @@ func (w *syncWriter) Sync() error { w.syncs++; return w.fail }
 func TestLogAppendSyncs(t *testing.T) {
 	w := &syncWriter{}
 	l := NewLogWriter(w)
-	if err := l.Append(Event{Kind: KindStart}); err != nil || w.syncs != 1 {
+	if err := l.Append(startEvent()); err != nil || w.syncs != 1 {
 		t.Fatalf("append: %v, syncs %d", err, w.syncs)
 	}
 	w.fail = errors.New("disk gone")
-	if err := l.Append(Event{Kind: KindStop}); err == nil {
+	if err := l.Append(Event{V: EventVersion, Kind: KindStop, Mode: ModeLive, Stop: &StopPayload{}}); err == nil {
 		t.Fatal("a failed sync was not reported")
 	}
 }
@@ -57,7 +57,7 @@ func TestLogFileIsPrivateAndLocked(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- l.Append(Event{Kind: KindStart}) }()
+	go func() { done <- l.Append(startEvent()) }()
 	select {
 	case err := <-done:
 		t.Fatalf("append did not wait for the lock: %v", err)
@@ -79,7 +79,7 @@ func TestLogFileIsPrivateAndLocked(t *testing.T) {
 func TestMalformedMiddleLineStopsStartup(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "events.jsonl")
-	writeFile(t, logPath, `{"time":"2026-10-22T00:00:00Z","kind":"start"}`+"\n"+`{"kind":`+"\n"+`{"time":"2026-10-22T00:01:00Z","kind":"stop"}`+"\n")
+	writeFile(t, logPath, `{"v":2,"time":"2026-10-22T00:00:00Z","kind":"start","mode":"live","start":{"sessions":[]}}`+"\n"+`{"kind":`+"\n"+`{"v":2,"time":"2026-10-22T00:01:00Z","kind":"stop","mode":"live","stop":{"reason":"once"}}`+"\n")
 	if _, _, err := ReadLog(logPath); err == nil || !strings.Contains(err.Error(), "line 2") {
 		t.Fatalf("ReadLog: %v, want an error at line 2", err)
 	}
@@ -95,7 +95,7 @@ func TestMalformedMiddleLineStopsStartup(t *testing.T) {
 func TestTornFinalLineIsDroppedWithWarning(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "events.jsonl")
-	writeFile(t, logPath, `{"time":"2026-10-22T00:00:00Z","kind":"start"}`+"\n"+`{"time":"2026-10-22T00:01:00Z","kind":"obs`)
+	writeFile(t, logPath, `{"v":2,"time":"2026-10-22T00:00:00Z","kind":"start","mode":"live","start":{"sessions":[]}}`+"\n"+`{"time":"2026-10-22T00:01:00Z","kind":"obs`)
 	cfgPath := filepath.Join(dir, "agentd.json")
 	writeFile(t, cfgPath, `{"event_log": "`+logPath+`", "transcript_dir": ""}`)
 	if err := runCmd([]string{"--config", cfgPath, "--once"}); err != nil {
@@ -108,23 +108,11 @@ func TestTornFinalLineIsDroppedWithWarning(t *testing.T) {
 	warned := false
 	for _, e := range events {
 		if e.Kind == KindWarning {
-			n, ok := detailInt(e, "bytes")
-			warned = ok && n == len(`{"time":"2026-10-22T00:01:00Z","kind":"obs`)
+			warned = e.Warning.Bytes == len(`{"time":"2026-10-22T00:01:00Z","kind":"obs`)
 		}
 	}
 	if !warned || events[0].Kind != KindStart || len(events) != 4 {
 		t.Fatalf("events = %+v", events)
-	}
-}
-
-// A missing number is not a zero.
-func TestDetailIntMissingIsUnknown(t *testing.T) {
-	e := Event{Details: map[string]any{"n": float64(0)}}
-	if n, ok := detailInt(e, "n"); !ok || n != 0 {
-		t.Fatalf("present zero = %d, %v", n, ok)
-	}
-	if _, ok := detailInt(e, "missing"); ok {
-		t.Fatal("a missing detail read as a number")
 	}
 }
 
@@ -142,8 +130,8 @@ func TestUnchangedUnknownIsAbsent(t *testing.T) {
 			continue
 		}
 		seen++
-		if _, ok := e.Details["unchanged_s"]; ok {
-			t.Fatalf("unchanged_s logged for a screen never seen: %v", e.Details)
+		if e.Observe.UnchangedS != nil {
+			t.Fatalf("unchanged_s logged for a screen never seen: %+v", e.Observe)
 		}
 	}
 	if seen == 0 {
@@ -164,7 +152,7 @@ func TestMarkDeliveredAfterTornLineSurvivesReplay(t *testing.T) {
 	writeFile(t, cfgPath, `{"event_log": "`+logPath+`", "transcript_dir": "", "policies": {"escalate": {"command": ["post", "{message}"]}},
 		"repositories": {"r": {"forge": "gitlab", "project": "a/b", "allow": ["push", "open"], "gate": ["./bin/check"]}},
 		"sessions": {"d": {"workdir": "work", "cwd": "wt", "deliver": [{"repository": "r", "worktree": "wt", "target": "main", "mr_file": "work/mr.md"}]}}}`)
-	writeFile(t, logPath, `{"time":"2026-10-22T00:00:00Z","kind":"start"}`+"\n"+`{"time":"2026-10-22T00:01:00Z","kind":"obs`)
+	writeFile(t, logPath, `{"v":2,"time":"2026-10-22T00:00:00Z","kind":"start","mode":"live","start":{"sessions":[]}}`+"\n"+`{"time":"2026-10-22T00:01:00Z","kind":"obs`)
 	if err := markDeliveredCmd([]string{"--config", cfgPath, "d", wt, "!7"}); err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +187,7 @@ func TestFailedAppendLeavesNoFragment(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer l.Close()
-	if err := l.Append(Event{Kind: KindStart}); err != nil {
+	if err := l.Append(startEvent()); err != nil {
 		t.Fatal(err)
 	}
 	info, _ := os.Stat(path)
@@ -216,7 +204,7 @@ func TestFailedAppendLeavesNoFragment(t *testing.T) {
 	if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &limit); err != nil {
 		t.Skipf("cannot lower the file-size limit: %v", err)
 	}
-	err = l.Append(Event{Kind: KindObserve, Details: map[string]any{"head": strings.Repeat("x", 200)}})
+	err = l.Append(Event{V: EventVersion, Kind: KindObserve, Mode: ModeLive, Observe: &ObservePayload{Head: strings.Repeat("x", 200)}})
 	if rerr := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &old); rerr != nil {
 		t.Fatal(rerr)
 	}
@@ -236,10 +224,22 @@ func TestFailedAppendLeavesNoFragment(t *testing.T) {
 // newline-terminated last line that does not parse, or has no kind, is
 // corruption like a line in the middle, and stops startup.
 func TestCompleteMalformedLastLineIsAnError(t *testing.T) {
-	for name, last := range map[string]string{"unparsable": `{"kind":`, "no kind": `{"time":"2026-10-22T00:01:00Z"}`} {
+	for name, last := range map[string]string{
+		"unparsable":      `{"kind":`,
+		"no kind":         `{"v":2,"time":"2026-10-22T00:01:00Z","mode":"live"}`,
+		"old version":     `{"time":"2026-10-22T00:01:00Z","kind":"stop","details":{"mode":"live"}}`,
+		"wrong payload":   `{"v":2,"time":"2026-10-22T00:01:00Z","kind":"stop","mode":"live","start":{"sessions":[]}}`,
+		"no mode":         `{"v":2,"time":"2026-10-22T00:01:00Z","kind":"stop","stop":{"reason":"x"}}`,
+		"unknown field":   `{"v":2,"time":"2026-10-22T00:01:00Z","kind":"stop","mode":"live","stop":{"reason":"x"},"details":{}}`,
+		"unknown kind":    `{"v":2,"time":"2026-10-22T00:01:00Z","kind":"poke","mode":"live"}`,
+		"unknown mode":    `{"v":2,"time":"2026-10-22T00:01:00Z","kind":"stop","mode":"both","stop":{"reason":"x"}}`,
+		"two payloads":    `{"v":2,"time":"2026-10-22T00:01:00Z","kind":"stop","mode":"live","stop":{"reason":"x"},"start":{"sessions":[]}}`,
+		"action no act":   `{"v":2,"time":"2026-10-22T00:01:00Z","kind":"action","mode":"live"}`,
+		"version too new": `{"v":3,"time":"2026-10-22T00:01:00Z","kind":"stop","mode":"live","stop":{"reason":"x"}}`,
+	} {
 		dir := t.TempDir()
 		logPath := filepath.Join(dir, "events.jsonl")
-		writeFile(t, logPath, `{"time":"2026-10-22T00:00:00Z","kind":"start"}`+"\n"+last+"\n")
+		writeFile(t, logPath, `{"v":2,"time":"2026-10-22T00:00:00Z","kind":"start","mode":"live","start":{"sessions":[]}}`+"\n"+last+"\n")
 		if _, _, err := ReadLog(logPath); err == nil || !strings.Contains(err.Error(), "line 2") {
 			t.Errorf("%s: ReadLog = %v, want an error at line 2", name, err)
 		}
@@ -247,6 +247,26 @@ func TestCompleteMalformedLastLineIsAnError(t *testing.T) {
 		writeFile(t, cfgPath, `{"event_log": "`+logPath+`", "transcript_dir": ""}`)
 		if err := runCmd([]string{"--config", cfgPath, "--once"}); err == nil {
 			t.Errorf("%s: run started over a corrupt last line", name)
+		}
+	}
+}
+
+// startEvent is a start event as a live run writes it.
+func startEvent() Event {
+	return Event{V: EventVersion, Kind: KindStart, Mode: ModeLive, Start: &StartPayload{}}
+}
+
+// Append refuses an event agentd could not read back, so a bad record
+// never reaches the log.
+func TestAppendRefusesAnUnreadableEvent(t *testing.T) {
+	l := NewLogWriter(&bytes.Buffer{})
+	for _, e := range []Event{
+		{Kind: KindStart, Mode: ModeLive, Start: &StartPayload{}},
+		{V: EventVersion, Kind: KindStart, Mode: ModeLive},
+		{V: EventVersion, Kind: KindAction, Mode: ModeLive, Skip: &SkipPayload{}},
+	} {
+		if err := l.Append(e); err == nil {
+			t.Errorf("appended %+v", e)
 		}
 	}
 }

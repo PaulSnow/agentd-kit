@@ -1,8 +1,7 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -20,7 +19,7 @@ func TestEveryEventCarriesItsMode(t *testing.T) {
 			want = "shadow"
 		}
 		for _, e := range h.events() {
-			if got := detailString(e, "mode"); got != want {
+			if got := e.Mode; got != want {
 				t.Fatalf("shadow=%v: event %+v has mode %q, want %q", shadow, e, got, want)
 			}
 		}
@@ -85,53 +84,13 @@ func TestShadowFetches(t *testing.T) {
 	}
 }
 
-// oldFormat rewrites the harness's log as the previous version wrote it:
-// only start events carry a mode.
-func oldFormat(t *testing.T, h *harness) {
-	t.Helper()
-	var out bytes.Buffer
-	for _, e := range h.events() {
-		if e.Kind != KindStart {
-			delete(e.Details, "mode")
-		}
-		b, err := json.Marshal(e)
-		if err != nil {
-			t.Fatal(err)
-		}
-		out.Write(append(b, '\n'))
-	}
-	h.buf.Reset()
-	h.buf.Write(out.Bytes())
-}
-
-// A log written before events carried a mode replays as before: an untagged
-// event belongs to the mode of the start before it, and an untagged
-// mark-delivered record is the owner's. Nothing is escalated or delivered
-// again, in either mode.
-func TestOldFormatLogReplays(t *testing.T) {
-	for _, shadow := range []bool{false, true} {
-		h := newHarness(t, shadow, "s1", "d", "m")
-		h.status("s1", blocked)
-		h.alive("s1", "waiting")
-		doneWithDelivery(t, h, "d")
-		doneWithDelivery(t, h, "m")
-		h.git.branches = map[string]string{h.dir + "/m/wt": "other"}
-		h.sup.Run(contextWithCancel(t), true)
-		h.ticks(3, 5*time.Minute)
-		h.buf.WriteString(`{"time":"2026-10-22T00:20:00Z","session":"m","kind":"action","details":{"action":"open","delivered":"m:` + h.dir + `/m/wt","ref":"!7","by":"mark-delivered"}}` + "\n")
-		posts, opens := h.count(kindFor(shadow), ActEscalate, ""), h.count(kindFor(shadow), ActOpen, "")
-		oldFormat(t, h)
-		h.restart(shadow)
-		h.ticks(6, 5*time.Minute)
-		if got := h.count(kindFor(shadow), ActEscalate, ""); got != posts {
-			t.Fatalf("shadow=%v: escalations = %d after replaying the old log, want %d", shadow, got, posts)
-		}
-		if got := h.count(kindFor(shadow), ActOpen, ""); got != opens {
-			t.Fatalf("shadow=%v: opens = %d after replaying the old log, want %d", shadow, got, opens)
-		}
-		if got := h.sup.Tracks()["m"].Delivered["m:"+h.dir+"/m/wt"]; got != "!7" {
-			t.Fatalf("shadow=%v: the untagged mark-delivered record was not read: %q", shadow, got)
-		}
+// A log written before events were versioned and typed is refused whole,
+// with the line and the reason, never half read: the logs of that format
+// were shadow logs, and are started afresh.
+func TestOldFormatLogIsRefused(t *testing.T) {
+	old := `{"time":"2026-10-22T00:00:00Z","kind":"start","details":{"mode":"shadow","sessions":["s1"]}}` + "\n"
+	if _, _, err := ReadEvents(strings.NewReader(old)); err == nil || !strings.Contains(err.Error(), "line 1") || !strings.Contains(err.Error(), "fresh log") {
+		t.Fatalf("ReadEvents = %v, want line 1 refused with the way out", err)
 	}
 }
 

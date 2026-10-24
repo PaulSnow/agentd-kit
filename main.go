@@ -3,7 +3,7 @@
 // judgment, through escalation.
 //
 //	agentd run [--config PATH] [--log PATH] [--shadow] [--once] [--every 5m]
-//	agentd status [--config PATH] [--log PATH]
+//	agentd status [--config PATH] [--log PATH] [--mode live|shadow]
 //	agentd config [--config PATH]
 //	agentd mark-delivered [--config PATH] [--log PATH] SESSION WORKTREE REF
 //	agentd clear [--config PATH] [--log PATH] SESSION
@@ -69,7 +69,7 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   agentd run [--config PATH] [--log PATH] [--shadow] [--once] [--every 5m]
-  agentd status [--config PATH] [--log PATH]
+  agentd status [--config PATH] [--log PATH] [--mode live|shadow]
   agentd config [--config PATH]
   agentd mark-delivered [--config PATH] [--log PATH] SESSION WORKTREE REF
   agentd clear [--config PATH] [--log PATH] SESSION
@@ -197,6 +197,7 @@ func openLoaded(path string) (*Log, []Event, error) {
 
 func statusCmd(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	modeFlag := fs.String("mode", "", "live or shadow (default: the latest run's mode)")
 	cfg, _, err := loadConfigFlag(fs, args)
 	if err != nil {
 		return err
@@ -205,7 +206,15 @@ func statusCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	rows, meta := Summarize(events)
+	mode := *modeFlag
+	switch mode {
+	case "":
+		mode = statusMode(events)
+	case ModeLive, ModeShadow:
+	default:
+		return fmt.Errorf("--mode must be live or shadow")
+	}
+	rows, meta := Summarize(cfg, events, mode)
 	PrintStatus(os.Stdout, rows, meta, time.Now())
 	return nil
 }

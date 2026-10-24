@@ -37,7 +37,7 @@ func TestRepeatedCrashCauseParks(t *testing.T) {
 	exits := 0
 	for _, e := range h.events() {
 		if e.Kind == KindCrash && e.Session == "mon" {
-			if n, ok := detailInt(e, "exit"); ok && n == 1 && detailString(e, "screen_hash") != "" {
+			if c := e.Crash; c.Exit != nil && *c.Exit == 1 && c.ScreenHash != "" {
 				exits++
 			}
 		}

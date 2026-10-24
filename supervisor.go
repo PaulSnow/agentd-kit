@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -49,7 +51,7 @@ type Supervisor struct {
 	// pass picks up what the owner wrote meanwhile: agentd clear.
 	tailOff int64
 
-	tracks       map[string]*Track
+	st           *LogState
 	limitRe      *regexp.Regexp
 	trustRe      *regexp.Regexp
 	dialogs      []*regexp.Regexp
@@ -75,7 +77,7 @@ func NewSupervisor(cfg *Config, log *Log, clock Clock, tmux Tmux, git Git, forge
 		forge:   AllowedForge{Repos: cfg.Repositories, Forge: forge},
 		runner:  runner,
 		shadow:  shadow,
-		tracks:  map[string]*Track{},
+		st:      NewLogState(cfg, mode(shadow)),
 		tailOff: log.Size(),
 		limitRe: regexp.MustCompile(cfg.Policies.UsageLimit.Pattern),
 		trustRe: regexp.MustCompile(`^(?:` + cfg.Policies.Trust.Pattern + `)$`),
@@ -85,39 +87,35 @@ func NewSupervisor(cfg *Config, log *Log, clock Clock, tmux Tmux, git Git, forge
 	}
 }
 
-func (s *Supervisor) track(name string) *Track {
-	t, ok := s.tracks[name]
-	if !ok {
-		t = newTrack()
-		s.tracks[name] = t
-	}
-	return t
-}
+func (s *Supervisor) track(name string) *Track { return s.st.track(name) }
 
 // Tracks exposes the memory for the status command and tests.
-func (s *Supervisor) Tracks() map[string]*Track { return s.tracks }
+func (s *Supervisor) Tracks() map[string]*Track { return s.st.Tracks }
 
-// mode is the mode this run tags its events with.
-func (s *Supervisor) mode() string {
-	if s.shadow {
+// mode is the mode a run tags its events with.
+func mode(shadow bool) string {
+	if shadow {
 		return ModeShadow
 	}
 	return ModeLive
 }
 
-func (s *Supervisor) emit(name, kind string, details map[string]any) {
-	d := make(map[string]any, len(details)+1)
-	for k, v := range details {
-		d[k] = v
-	}
-	d["mode"] = s.mode()
-	e := Event{Time: s.clock.Now(), Session: name, Kind: kind, Details: d}
+func (s *Supervisor) mode() string { return mode(s.shadow) }
+
+// emit appends e for session name, tagged with this run's version, time
+// and mode, then applies it: the live path changes the state only through
+// apply, as replay does. An event that could not be written is not
+// applied, and stops the pass.
+func (s *Supervisor) emit(name string, e Event) {
+	e.V, e.Time, e.Session, e.Mode = EventVersion, s.clock.Now(), name, s.mode()
 	if err := s.log.Append(e); err != nil {
 		fmt.Fprintf(os.Stderr, "agentd: event log: %v\n", err)
 		if s.halt == nil {
 			s.halt = fmt.Errorf("event log append failed; stopping this pass: %w", err)
 		}
+		return
 	}
+	s.st.apply(e)
 }
 
 // act performs one action, or in shadow mode records that it would. The
@@ -125,43 +123,48 @@ func (s *Supervisor) emit(name, kind string, details map[string]any) {
 // cannot be written the pass stops, and an action whose intent was not
 // recorded is not taken. It returns the action's error; nil means the action
 // counts as taken.
-func (s *Supervisor) act(name, action string, details map[string]any, do func() error) error {
-	return s.perform(name, action, details, s.shadow, do)
+func (s *Supervisor) act(name, action string, a *ActPayload, do func() error) error {
+	return s.perform(name, action, a, s.shadow, do)
 }
 
 // actRead performs an action that writes nothing anyone else sees, a fetch,
 // in shadow mode too, so the shadow decides from current refs.
-func (s *Supervisor) actRead(name, action string, details map[string]any, do func() error) error {
-	return s.perform(name, action, details, false, do)
+func (s *Supervisor) actRead(name, action string, a *ActPayload, do func() error) error {
+	return s.perform(name, action, a, false, do)
 }
 
-func (s *Supervisor) perform(name, action string, details map[string]any, would bool, do func() error) error {
+// perform records the intent, with an id its outcome repeats, runs do,
+// and records the outcome: the action, or an error naming it. do may fill
+// in a, as an open fills in the reference it got.
+func (s *Supervisor) perform(name, action string, a *ActPayload, would bool, do func() error) error {
 	if s.halt != nil {
 		return s.halt
 	}
-	record := func(kind string, err error) {
-		d := map[string]any{"action": action}
-		for k, v := range details {
-			d[k] = v
-		}
-		if err != nil {
-			d["error"] = err.Error()
-		}
-		s.emit(name, kind, d)
-	}
+	a.Action = action
 	if would {
-		record(KindWould, nil)
+		s.emit(name, Event{Kind: KindWould, Act: a})
 		return nil
 	}
-	if record(KindIntent, nil); s.halt != nil {
+	a.Intent = newIntentID()
+	intent := *a
+	if s.emit(name, Event{Kind: KindIntent, Act: &intent}); s.halt != nil {
 		return s.halt
 	}
 	if err := do(); err != nil {
-		record(KindError, err)
+		s.emit(name, Event{Kind: KindError, Error: &ErrorPayload{Key: a.Key, Error: err.Error(), Act: a}})
 		return err
 	}
-	record(KindAction, nil)
+	s.emit(name, Event{Kind: KindAction, Act: a})
 	return nil
+}
+
+// newIntentID is a random id pairing an intent with its outcome.
+func newIntentID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprint(time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // retryDue says whether a keyed action that has failed may be tried again:
@@ -174,169 +177,60 @@ func (s *Supervisor) retryDue(t *Track, key string, now time.Time) bool {
 	return now.Sub(f[len(f)-1]) >= backoff(len(f), s.cfg.Policies.Restart)
 }
 
-// failed records a failed try of a keyed action and says whether the
-// policy's MaxRestarts tries are used up.
-func (s *Supervisor) failed(t *Track, key string, now time.Time) bool {
-	t.Failures[key] = append(t.Failures[key], now)
+// failed says whether a keyed action's failed tries, each recorded by its
+// error event, have used up the policy's MaxRestarts.
+func (s *Supervisor) failed(t *Track, key string) bool {
 	return len(t.Failures[key]) >= s.cfg.Policies.Restart.MaxRestarts
 }
 
-// skipOnce logs why a policy declined, once per key.
-func (s *Supervisor) skipOnce(name, key, reason string, t *Track, details map[string]any) {
+// skipOnce logs why a policy declined, once per key. facts, when given,
+// are the facts it was declined on.
+func (s *Supervisor) skipOnce(name, key, reason string, t *Track, facts *SkipPayload) {
 	if t.Skipped[key] {
 		return
 	}
-	t.Skipped[key] = true
-	d := map[string]any{"key": key, "reason": reason}
-	for k, v := range details {
-		d[k] = v
+	p := SkipPayload{}
+	if facts != nil {
+		p = *facts
 	}
-	s.emit(name, KindSkip, d)
+	p.Key, p.Reason = key, reason
+	s.emit(name, Event{Kind: KindSkip, Skip: &p})
 }
 
-// Replay rebuilds the per-session memory from the event log. A run reads
-// only the events of its own mode, plus the owner's records: live and shadow
-// never share state. In shadow mode the would events count as if taken, so
-// the shadow keeps its own counters.
+// Replay rebuilds the per-session memory from the event log, through the
+// same apply the live path uses. A run reads only the events of its own
+// mode, plus the owner's records: live and shadow never share state.
 func (s *Supervisor) Replay(events []Event) {
-	started := "" // the mode of the latest start event
-	for _, e := range events {
-		if e.Session == "" {
-			if e.Kind == KindStart {
-				started = detailString(e, "mode")
-			}
-			continue
-		}
-		if m := eventMode(e, started); m != s.mode() && m != ModeOwner {
-			continue
-		}
-		t := s.track(e.Session)
-		switch e.Kind {
-		case KindObserve:
-			if alive, _ := e.Details["alive"].(bool); alive {
-				t.Live = true
-			}
-			t.Observed = true
-			t.Hash = detailString(e, "pane_hash")
-			if since, err := time.Parse(time.RFC3339Nano, detailString(e, "pane_since")); err == nil && !since.Equal(t.HashSince) {
-				t.HashSince = since
-				t.Nudges = 0
-			}
-			t.Limited, _ = e.Details["limited"].(bool)
-			if d, _ := e.Details["dialog"].(bool); !d {
-				t.Dialog.Open = false
-			}
-			if alive, _ := e.Details["alive"].(bool); alive {
-				t.noteCommand(detailString(e, "command"), s.cfg.Policies.PaneCommands, e.Time)
-			}
-			asks, _ := e.Details["questions"].(bool)
-			done, _ := e.Details["done"].(bool)
-			t.Questions.observeQuestions(asks, done)
-			if st := detailString(e, "state"); st != "" && t.State == "" {
-				t.State, t.Since = State(st), e.Time
-			}
-		case KindTransition:
-			t.State, t.Since = State(detailString(e, "to")), e.Time
-		case KindCrash:
-			c := Crash{Exit: -1, Screen: detailString(e, "screen_hash")}
-			if n, ok := detailInt(e, "exit"); ok {
-				c.Exit = n
-			}
-			t.noteCrash(c, s.cfg.Policies.Restart.MaxCrashes)
-		case KindClear:
-			t.clear()
-		case KindSkip:
-			if k := detailString(e, "delivered"); k != "" {
-				t.Delivered[k] = detailString(e, "outcome")
-			}
-			if k := detailString(e, "escalation"); k != "" {
-				t.Posted[k] = true // given up on
-				t.replayQuestionsPost(e)
-				t.replayDialog(e)
-			}
-			t.Skipped[detailString(e, "key")] = true
-		case KindError:
-			if k := detailString(e, "key"); k != "" {
-				t.Failures[k] = append(t.Failures[k], e.Time)
-			}
-			if detailString(e, "action") == ActRestart {
-				t.Restarts = append(t.Restarts, e.Time)
-			}
-		case KindAction, KindWould:
-			if e.Kind == KindWould && !s.shadow {
-				continue
-			}
-			switch detailString(e, "action") {
-			case ActRestart:
-				t.Restarts = append(t.Restarts, e.Time)
-				if e.Kind == KindAction { // a would-be restart started nothing
-					t.Hash, t.HashSince, t.Observed, t.Live = "", e.Time, true, true
-				}
-			case ActNudge:
-				t.Nudges++
-				t.LastNudge = e.Time
-			case ActResume:
-				t.Limited = false
-			case ActTrust:
-				t.TrustHash = detailString(e, "pane_hash")
-			case ActEscalate, ActUpdate:
-				t.Posted[detailString(e, "key")] = true
-				t.replayQuestionsPost(e)
-				t.replayDialog(e)
-			case ActOpen:
-				ref := detailString(e, "ref")
-				if ref == "" {
-					ref = "would-open"
-				}
-				t.Delivered[detailString(e, "delivered")] = ref
-			}
-		}
-	}
+	s.st.Fold(events)
 }
 
-// eventMode is the mode an event was written in. Events written before
-// events carried a mode have none: such an event belongs to the run that
-// wrote the start event before it, and a mark-delivered record is the
-// owner's.
-func eventMode(e Event, started string) string {
-	if m := detailString(e, "mode"); m != "" {
-		return m
-	}
-	if detailString(e, "by") == "mark-delivered" {
-		return ModeOwner
-	}
-	return started
-}
-
-// replayQuestionsPost settles a Questions escalation or update: posted, or
-// given up on, it carries the hash of the text it covered.
-func (t *Track) replayQuestionsPost(e Event) {
-	h := detailString(e, "questions_hash")
-	if h == "" {
-		return
-	}
-	t.Questions.Hash = h
-	if n, ok := detailInt(e, "update"); ok {
-		t.Questions.Updates, t.Questions.LastUpdate = n, e.Time
+// surfaceCutShort logs a warning for each intent the log holds with no
+// outcome: an action a crash of agentd cut short. apply counts what the
+// owner or a session may have seen as done, so it is never repeated.
+func (s *Supervisor) surfaceCutShort() {
+	for _, e := range s.st.CutShort() {
+		s.emit(e.Session, Event{Kind: KindWarning, Warning: &WarningPayload{
+			Warning: "an action was cut short by a crash of agentd and has no recorded outcome; it is not repeated", Intent: e.Act}})
 	}
 }
 
 // Run passes until the context ends. A pass stopped by a failed append is
 // reported and the next pass tries again; with once, its error is returned.
 func (s *Supervisor) Run(ctx context.Context, once bool) error {
-	s.emit("", KindStart, map[string]any{"sessions": s.cfg.SessionNames()})
+	s.emit("", Event{Kind: KindStart, Start: &StartPayload{Sessions: s.cfg.SessionNames()}})
+	s.surfaceCutShort()
 	for {
 		err := s.Pass()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "agentd: %v\n", err)
 		}
 		if once {
-			s.emit("", KindStop, map[string]any{"reason": "once"})
+			s.emit("", Event{Kind: KindStop, Stop: &StopPayload{Reason: "once"}})
 			return err
 		}
 		select {
 		case <-ctx.Done():
-			s.emit("", KindStop, map[string]any{"reason": ctx.Err().Error()})
+			s.emit("", Event{Kind: KindStop, Stop: &StopPayload{Reason: ctx.Err().Error()}})
 			return nil
 		case <-time.After(s.cfg.PollInterval.Duration):
 		}
@@ -363,19 +257,13 @@ func (s *Supervisor) Pass() error {
 func (s *Supervisor) ownerRecords() {
 	events, off, err := s.log.Tail(s.tailOff)
 	if err != nil {
-		s.emit("", KindError, map[string]any{"step": "reading owner records", "error": err.Error()})
+		s.emit("", Event{Kind: KindError, Error: &ErrorPayload{Step: "reading owner records", Error: err.Error()}})
 		return
 	}
 	s.tailOff = off
 	for _, e := range events {
-		if _, ok := s.cfg.Sessions[e.Session]; !ok || detailString(e, "mode") != ModeOwner {
-			continue
-		}
-		switch {
-		case e.Kind == KindClear:
-			s.track(e.Session).clear()
-		case e.Kind == KindAction && detailString(e, "by") == "mark-delivered":
-			s.track(e.Session).Delivered[detailString(e, "delivered")] = detailString(e, "ref")
+		if _, ok := s.cfg.Sessions[e.Session]; ok && e.Mode == ModeOwner {
+			s.st.apply(e)
 		}
 	}
 }
@@ -459,122 +347,107 @@ func (s *Supervisor) step(name string, sess Session) {
 	t := s.track(name)
 	ev, err := s.observe(name, sess)
 	if err != nil {
-		s.emit(name, KindError, map[string]any{"error": err.Error()})
+		s.emit(name, Event{Kind: KindError, Error: &ErrorPayload{Step: "observe", Error: err.Error()}})
 		return
 	}
-	if ev.Alive {
-		t.Live = true
-	} else if t.Live && !ev.Status.Done {
+	if !ev.Alive && t.Live && !ev.Status.Done {
 		screen := ev.DeadScreen
 		if !ev.PaneDead {
 			screen = shortHash(t.Hash) // gone outright: the last screen seen
 		}
-		if s.crash(name, t, Crash{Exit: ev.Exit, Screen: screen}, nil); s.halt != nil {
+		if s.crash(name, t, Crash{Exit: ev.Exit, Screen: screen}, false); s.halt != nil {
 			return
 		}
 	}
-	if ev.Dialog == "" {
-		t.Dialog.Open = false // the dialog episode has ended
-	}
 	state, reason := Classify(t, ev, s.cfg.Policies, now)
+	// The observe event, applied, ends a dialog episode and opens or
+	// closes the Questions escalation: each is a field it compares.
 	if s.logObserve(name, t, ev, state, reason, now); s.halt != nil {
 		return
 	}
-	t.Questions.observeQuestions(ev.Status.Questions != "", ev.Status.Done)
 	state = s.actOn(name, sess, t, ev, state, now)
 	if ev.Alive && state != Done && state != CrashLooping {
 		s.watchCommand(name, ev.Command, t, now)
 	}
 	if state != t.State {
-		s.emit(name, KindTransition, map[string]any{"from": string(t.State), "to": string(state), "reason": reason})
-		t.State, t.Since = state, now
+		s.emit(name, Event{Kind: KindTransition, Transition: &TransitionPayload{From: string(t.State), To: string(state), Reason: reason}})
 	}
 }
 
 // crash records one crash and its cause, and whether it parked the session.
-func (s *Supervisor) crash(name string, t *Track, c Crash, extra map[string]any) {
-	t.noteCrash(c, s.cfg.Policies.Restart.MaxCrashes)
-	d := map[string]any{"screen_hash": c.Screen, "crashes": len(t.Crashes), "parked": t.Parked}
+func (s *Supervisor) crash(name string, t *Track, c Crash, restartError bool) {
+	// The event says what the crash makes of the count; apply makes it so.
+	after := Track{Crashes: append([]Crash(nil), t.Crashes...)}
+	after.noteCrash(c, s.cfg.Policies.Restart.MaxCrashes)
+	p := CrashPayload{ScreenHash: c.Screen, Crashes: len(after.Crashes), Parked: after.Parked, RestartError: restartError}
 	if c.Exit >= 0 {
-		d["exit"] = c.Exit
+		exit := c.Exit
+		p.Exit = &exit
 	}
-	for k, v := range extra {
-		d[k] = v
-	}
-	s.emit(name, KindCrash, d)
+	s.emit(name, Event{Kind: KindCrash, Crash: &p})
 }
 
 func (s *Supervisor) logObserve(name string, t *Track, ev Evidence, state State, reason string, now time.Time) {
-	d := map[string]any{
-		"state":     string(state),
-		"reason":    reason,
-		"alive":     ev.Alive,
-		"done":      ev.Status.Done,
-		"questions": ev.Status.Questions != "",
-		"limited":   ev.Limited,
-		"trust":     ev.TrustPrompt,
-		"dialog":    ev.Dialog != "",
-		"command":   ev.Command,
-		"head":      ev.Status.Head,
+	o := ObservePayload{
+		State:     string(state),
+		Reason:    reason,
+		Alive:     ev.Alive,
+		Done:      ev.Status.Done,
+		Questions: ev.Status.Questions != "",
+		Limited:   ev.Limited,
+		Trust:     ev.TrustPrompt,
+		Dialog:    ev.Dialog != "",
+		Command:   ev.Command,
+		Head:      ev.Status.Head,
 	}
 	if s.confidentialMatch(ev.Status.Head) > 0 {
-		d["head"] = "(withheld: matches a confidential pattern)"
+		o.Head = "(withheld: matches a confidential pattern)"
 	}
 	if ev.Alive {
-		d["pane_hash"] = ev.PaneHash
-		d["pane_since"] = t.HashSince.Format(time.RFC3339Nano)
+		since := t.HashSince
+		o.PaneHash, o.PaneSince = ev.PaneHash, &since
 	}
 	if ev.Transcript.Found {
-		d["transcript_role"] = ev.Transcript.Role
-		d["transcript_stop"] = ev.Transcript.StopReason
-		d["transcript_at"] = ev.Transcript.At.Format(time.RFC3339)
+		at := ev.Transcript.At
+		o.TranscriptRole, o.TranscriptStop, o.TranscriptAt = ev.Transcript.Role, ev.Transcript.StopReason, &at
 	}
 	if s.cfg.Policies.Restart.Enabled {
-		d["restarts"] = t.restartsInWindow(now, s.cfg.Policies.Restart.Window.Duration)
+		n := t.restartsInWindow(now, s.cfg.Policies.Restart.Window.Duration)
+		o.Restarts = &n
 	}
-	same := t.LastObs != nil && len(t.LastObs) == len(d)
-	if same {
-		for k, v := range d {
-			if k == "reason" {
-				continue
-			}
-			if t.LastObs[k] != v {
-				same = false
-				break
-			}
-		}
-	}
-	if same {
+	if t.LastObs != nil && sameObservation(*t.LastObs, o) {
 		return
 	}
-	t.LastObs = d
-	d = copyDetails(d)
+	t.LastObs = &o
+	logged := o
 	if !t.HashSince.IsZero() { // unknown until the screen is first seen
-		d["unchanged_s"] = int(now.Sub(t.HashSince).Seconds())
+		n := int(now.Sub(t.HashSince).Seconds())
+		logged.UnchangedS = &n
 	}
-	s.emit(name, KindObserve, d)
+	s.emit(name, Event{Kind: KindObserve, Observe: &logged})
 }
 
-func copyDetails(d map[string]any) map[string]any {
-	c := make(map[string]any, len(d)+1)
-	for k, v := range d {
-		c[k] = v
+// sameObservation says whether two observations differ only in their
+// reason, which rewords as time passes and is not evidence of its own.
+func sameObservation(a, b ObservePayload) bool {
+	a.Reason, b.Reason = "", ""
+	eqTime := func(x, y *time.Time) bool { return (x == nil) == (y == nil) && (x == nil || x.Equal(*y)) }
+	eqInt := func(x, y *int) bool { return (x == nil) == (y == nil) && (x == nil || *x == *y) }
+	if !eqTime(a.PaneSince, b.PaneSince) || !eqTime(a.TranscriptAt, b.TranscriptAt) || !eqInt(a.Restarts, b.Restarts) {
+		return false
 	}
-	return c
+	a.PaneSince, b.PaneSince, a.TranscriptAt, b.TranscriptAt, a.Restarts, b.Restarts = nil, nil, nil, nil, nil, nil
+	return a == b
 }
 
-// actOn applies the policy for the state and returns the state the session
-// is in afterwards.
 func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, state State, now time.Time) State {
 	pol := s.cfg.Policies
 	// The limit has cleared. Only a session that can take a line is told to
 	// go on: never one that is DONE, waits on the owner, or shows a dialog.
 	if t.Limited && ev.Alive && (state == Working || state == Idle) {
-		if s.typeInto(name, ActResume, map[string]any{"message": pol.Nudge.ResumeMessage}, t, ev.PaneHash, func() error {
+		s.typeInto(name, ActResume, &ActPayload{Message: pol.Nudge.ResumeMessage}, t, ev.PaneHash, func() error {
 			return s.tmux.Type(name, pol.Nudge.ResumeMessage)
-		}) == nil {
-			t.Limited = false
-		}
+		})
 	}
 	switch state {
 	case Done:
@@ -601,11 +474,11 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 		if err != nil {
 			// Not final, and not a crash: the owner may fix the account.
 			// There is no fallback to another account.
-			s.skipOnce(name, "account:"+name, "not restarting: "+err.Error(), t, map[string]any{"account": sess.Account})
+			s.skipOnce(name, "account:"+name, "not restarting: "+err.Error(), t, &SkipPayload{Account: sess.Account})
 			s.escalate(name, "account:"+name, fmt.Sprintf("%s is gone and cannot be restarted under its account: %v. Fix the account; agentd will not use another.", name, err), t, now)
 			return state
 		}
-		err = s.act(name, ActRestart, map[string]any{"attempt": n + 1, "cwd": sess.Cwd, "respawn": ev.PaneDead, "account": sess.Account, "command": line}, func() error {
+		err = s.act(name, ActRestart, &ActPayload{Attempt: n + 1, Cwd: sess.Cwd, Respawn: ev.PaneDead, Account: sess.Account, Command: line}, func() error {
 			if ev.PaneDead {
 				return s.tmux.Respawn(name, sess.Cwd, line)
 			}
@@ -614,20 +487,19 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 		if s.halt != nil {
 			return state
 		}
-		t.Restarts = append(t.Restarts, now) // a failed attempt counts toward the backoff
+		// A failed attempt counts toward the backoff too: its error event
+		// is applied as a restart.
 		if s.shadow {
 			// Nothing was started, so the session still gone next pass has
 			// not crashed: it is not live, and stays failed.
 			return state
 		}
 		if err == nil {
-			t.Hash, t.HashSince, t.Observed, t.Live = "", now, true, true
-			t.Nudges, t.LastNudge, t.Limited = 0, time.Time{}, false
 			return Starting
 		}
 		// A restart that fails is a crash, its error the cause: the same
 		// error twice parks the session like any repeated crash.
-		if s.crash(name, t, Crash{Exit: -1, Screen: "restart:" + shortHash(HashPane(err.Error()))}, map[string]any{"restart_error": true}); t.Parked {
+		if s.crash(name, t, Crash{Exit: -1, Screen: "restart:" + shortHash(HashPane(err.Error()))}, true); t.Parked {
 			return CrashLooping
 		}
 	case CrashLooping:
@@ -641,17 +513,15 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			name, len(t.Crashes), exit, last.Screen, name)
 		s.escalate(name, key, msg, t, now)
 	case UsageLimited:
-		t.Limited = true
+		// The observe event, applied, remembers the limit.
 	case Starting:
 		// Once per screen: a prompt still showing the same screen after the
 		// keys did not take them, and sending them again could answer
 		// whatever replaced it.
 		if ev.TrustPrompt && ev.PaneHash != t.TrustHash {
-			if s.typeInto(name, ActTrust, map[string]any{"keys": pol.Trust.Keys, "pane_hash": ev.PaneHash}, t, ev.PaneHash, func() error {
+			s.typeInto(name, ActTrust, &ActPayload{Keys: pol.Trust.Keys, PaneHash: ev.PaneHash}, t, ev.PaneHash, func() error {
 				return s.tmux.Keys(name, pol.Trust.Keys...)
-			}) == nil {
-				t.TrustHash = ev.PaneHash
-			}
+			})
 		}
 	case BlockedOnOwner:
 		switch {
@@ -677,7 +547,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 		if !t.LastNudge.IsZero() && now.Sub(t.LastNudge) < pol.Nudge.Stall.Duration {
 			return state
 		}
-		err := s.typeInto(name, ActNudge, map[string]any{"nudge": t.Nudges + 1, "message": pol.Nudge.Message}, t, ev.PaneHash, func() error {
+		s.typeInto(name, ActNudge, &ActPayload{Nudge: t.Nudges + 1, Message: pol.Nudge.Message}, t, ev.PaneHash, func() error {
 			if err := s.tmux.Type(name, pol.Nudge.Message); err != nil {
 				return err
 			}
@@ -688,10 +558,6 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			}
 			return nil
 		})
-		if err == nil {
-			t.Nudges++
-			t.LastNudge = now
-		}
 	}
 	return state
 }
@@ -735,13 +601,13 @@ var (
 // with a skip naming it, and so is a screen whose hash is no longer seen,
 // the one the decision was made from. The checks are reads, so shadow mode
 // makes them too.
-func (s *Supervisor) typeInto(name, action string, details map[string]any, t *Track, seen string, do func() error) error {
+func (s *Supervisor) typeInto(name, action string, a *ActPayload, t *Track, seen string, do func() error) error {
 	if s.halt != nil {
 		return s.halt
 	}
 	info, err := s.tmux.Pane(name)
 	if err != nil {
-		s.emit(name, KindError, map[string]any{"action": action, "step": "pane", "error": err.Error()})
+		s.emit(name, Event{Kind: KindError, Error: &ErrorPayload{Step: action + ": pane", Error: err.Error()}})
 		return err
 	}
 	for _, c := range s.cfg.Policies.PaneCommands {
@@ -753,19 +619,19 @@ func (s *Supervisor) typeInto(name, action string, details map[string]any, t *Tr
 		// would answer it.
 		pane, err := s.tmux.CapturePane(name, PaneLines)
 		if err != nil {
-			s.emit(name, KindError, map[string]any{"action": action, "step": "capture", "error": err.Error()})
+			s.emit(name, Event{Kind: KindError, Error: &ErrorPayload{Step: action + ": capture", Error: err.Error()}})
 			return err
 		}
 		if now := HashPane(pane); now != seen {
 			s.skipOnce(name, "screen-changed:"+action+":"+shortHash(now), "the screen changed since it was read this pass; not typing", t,
-				map[string]any{"action": action})
+				&SkipPayload{Action: action})
 			return errScreenChanged
 		}
-		return s.act(name, action, details, do)
+		return s.act(name, action, a, do)
 	}
 	s.skipOnce(name, "pane-command:"+name+":"+info.Command,
 		fmt.Sprintf("pane runs %q, not one of %s; not typing into it", info.Command, strings.Join(s.cfg.Policies.PaneCommands, ", ")), t,
-		map[string]any{"action": action, "command": info.Command})
+		&SkipPayload{Action: action, Command: info.Command})
 	return errNotClaude
 }
 
@@ -793,20 +659,16 @@ func (s *Supervisor) escalateQuestions(name, questions string, t *Track, now tim
 	questions = cutUTF8(questions, 2000)
 	key := fmt.Sprintf("questions:%s:%d", name, q.Episode)
 	if !t.Posted[key] {
-		if s.post(name, ActEscalate, key, fmt.Sprintf("%s is blocked on you. Questions from STATUS.md:\n%s", name, questions), t, now,
-			map[string]any{"questions_hash": hash}, full) {
-			q.Hash = hash
-		}
+		s.post(name, ActEscalate, key, fmt.Sprintf("%s is blocked on you. Questions from STATUS.md:\n%s", name, questions), t, now,
+			settles{QuestionsHash: hash}, full)
 		return
 	}
 	if hash == q.Hash || (!q.LastUpdate.IsZero() && now.Sub(q.LastUpdate) < QuestionsUpdateGap) {
 		return
 	}
 	n := q.Updates + 1
-	if s.post(name, ActUpdate, fmt.Sprintf("%s:update:%d", key, n), fmt.Sprintf("%s changed its open Questions in STATUS.md; they now read:\n%s", name, questions), t, now,
-		map[string]any{"questions_hash": hash, "update": n}, full) {
-		q.Hash, q.Updates, q.LastUpdate = hash, n, now
-	}
+	s.post(name, ActUpdate, fmt.Sprintf("%s:update:%d", key, n), fmt.Sprintf("%s changed its open Questions in STATUS.md; they now read:\n%s", name, questions), t, now,
+		settles{QuestionsHash: hash, Update: n}, full)
 }
 
 // escalateDialog posts one escalation per dialog episode, keyed to the
@@ -818,18 +680,9 @@ func (s *Supervisor) escalateDialog(name, pattern string, t *Track, now time.Tim
 		return
 	}
 	n := dq.N + 1
-	if s.post(name, ActEscalate, fmt.Sprintf("dialog:%s:%d", name, n),
+	s.post(name, ActEscalate, fmt.Sprintf("dialog:%s:%d", name, n),
 		fmt.Sprintf("%s is stopped at a permission or confirmation dialog (the screen matches %q); agentd will not answer it. Attach and answer it.", name, pattern),
-		t, now, map[string]any{"dialog": n}) {
-		dq.Open, dq.N, dq.Last = true, n, now
-	}
-}
-
-// replayDialog settles a dialog escalation, posted or given up on.
-func (t *Track) replayDialog(e Event) {
-	if n, ok := detailInt(e, "dialog"); ok {
-		t.Dialog.Open, t.Dialog.N, t.Dialog.Last = true, n, e.Time
-	}
+		t, now, settles{Dialog: n})
 }
 
 // cutUTF8 cuts text to at most n bytes on a UTF-8 boundary, marking the cut.
@@ -845,7 +698,7 @@ func cutUTF8(text string, n int) string {
 
 // escalate posts one decision to the console, once per key.
 func (s *Supervisor) escalate(name, key, message string, t *Track, now time.Time) {
-	s.post(name, ActEscalate, key, message, t, now, nil)
+	s.post(name, ActEscalate, key, message, t, now, settles{})
 }
 
 // post sends one message to the console as action, once per key, and says
@@ -855,16 +708,10 @@ func (s *Supervisor) escalate(name, key, message string, t *Track, now time.Time
 // replaced, before it is posted or logged, by one that names only the
 // session; one skip records that it was filtered, without the text. Each of
 // also, the uncut text a message was cut from, is screened the same way.
-// extra details go on the events that settle the key.
-func (s *Supervisor) post(name, action, key, message string, t *Track, now time.Time, extra map[string]any, also ...string) bool {
+// what goes on the events that settle the key, posted or given up on.
+func (s *Supervisor) post(name, action, key, message string, t *Track, now time.Time, what settles, also ...string) bool {
 	if t.Posted[key] {
 		return true
-	}
-	with := func(d map[string]any) map[string]any {
-		for k, v := range extra {
-			d[k] = v
-		}
-		return d
 	}
 	if i := s.confidentialMatch(append(also, message)...); i > 0 {
 		var what string
@@ -873,7 +720,7 @@ func (s *Supervisor) post(name, action, key, message string, t *Track, now time.
 			what, message = "update", fmt.Sprintf("%s changed its open Questions; the details were withheld because they matched a confidential pattern. Look at the session directly.", name)
 		}
 		s.skipOnce(name, key+":filtered", fmt.Sprintf("%s text matched confidential pattern %d; posted a generic message instead", what, i), t,
-			map[string]any{"filtered": key})
+			&SkipPayload{Filtered: key})
 	}
 	console := s.cfg.Console(name)
 	tmpl := s.cfg.Policies.Escalate.Command // never empty: refused at load
@@ -884,20 +731,25 @@ func (s *Supervisor) post(name, action, key, message string, t *Track, now time.
 	for i, part := range tmpl {
 		argv[i] = strings.NewReplacer("{console}", console, "{message}", message).Replace(part)
 	}
-	err := s.act(name, action, with(map[string]any{"key": key, "console": console, "message": message}), func() error {
-		return s.runner.Run(argv)
-	})
+	err := s.act(name, action, &ActPayload{Key: key, Console: console, Message: message, QuestionsHash: what.QuestionsHash, Update: what.Update, Dialog: what.Dialog},
+		func() error { return s.runner.Run(argv) })
 	if err == nil {
-		t.Posted[key] = true
 		return true
 	}
-	if s.failed(t, key, now) {
-		t.Posted[key] = true
+	if s.halt == nil && s.failed(t, key) {
 		s.skipOnce(name, key+":gave-up", fmt.Sprintf("escalation command failed %d times; not retrying: %v", len(t.Failures[key]), err), t,
-			with(map[string]any{"escalation": key, "console": console, "message": message}))
+			&SkipPayload{Escalation: key, Console: console, Message: message, QuestionsHash: what.QuestionsHash, Update: what.Update, Dialog: what.Dialog})
 		return true
 	}
 	return false
+}
+
+// settles is what an escalation's events record for the Questions or
+// dialog episode it settles.
+type settles struct {
+	QuestionsHash string
+	Update        int
+	Dialog        int
 }
 
 // deliver pushes a finished session's branch and opens a merge request,
@@ -913,40 +765,41 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 	if !s.retryDue(t, fkey, now) {
 		return
 	}
-	details := map[string]any{"delivered": key, "repository": d.Repository, "worktree": d.Worktree, "target": d.Target}
+	wt := &SkipPayload{Worktree: d.Worktree}
 	if sess.Hold != "" {
-		s.skipOnce(name, "hold:"+key, "delivery held: "+sess.Hold, t, map[string]any{"worktree": d.Worktree})
+		s.skipOnce(name, "hold:"+key, "delivery held: "+sess.Hold, t, wt)
 		return
 	}
 	for _, write := range []string{"push", "open"} {
 		if err := s.forge.allowed(d.Repository, write); err != nil {
 			// Not final: the allow-list may grant the write later, so this is
 			// not recorded as a delivery outcome.
-			s.skipOnce(name, "deliver:"+key+":not-allowed", err.Error(), t, map[string]any{"worktree": d.Worktree, "repository": d.Repository})
+			s.skipOnce(name, "deliver:"+key+":not-allowed", err.Error(), t, &SkipPayload{Worktree: d.Worktree, Repository: d.Repository})
 			s.escalate(name, "deliver:"+key+":not-allowed", fmt.Sprintf("%s is DONE but %s; nothing delivered.", name, err), t, now)
 			return
 		}
 	}
 	if _, err := os.Stat(d.MRFile); err != nil {
 		// Not final: the text may still be written, and the stat is cheap.
-		s.skipOnce(name, "deliver:"+key+":no-mr-text", "DONE but the merge-request text is missing: "+d.MRFile, t, map[string]any{"worktree": d.Worktree, "mr_file": d.MRFile})
+		s.skipOnce(name, "deliver:"+key+":no-mr-text", "DONE but the merge-request text is missing: "+d.MRFile, t, &SkipPayload{Worktree: d.Worktree, MRFile: d.MRFile})
 		s.escalate(name, "deliver:"+key+":no-mr-text", fmt.Sprintf("%s is DONE but %s is missing; nothing delivered.", name, d.MRFile), t, now)
 		return
 	}
 	// fail records a failed step and, when the tries are used up, gives the delivery up.
+	// Each failed try was counted by its error event.
 	fail := func(step string, err error) {
-		if !s.failed(t, fkey, now) {
+		if s.halt != nil || !s.failed(t, fkey) {
 			return
 		}
 		n := len(t.Failures[fkey])
-		t.Delivered[key] = "failed"
-		s.skipOnce(name, fkey+":gave-up", fmt.Sprintf("delivery failed %d times; not retrying", n), t, map[string]any{"delivered": key, "outcome": "failed", "worktree": d.Worktree})
+		s.skipOnce(name, fkey+":gave-up", fmt.Sprintf("delivery failed %d times; not retrying", n), t,
+			&SkipPayload{Delivered: key, Outcome: "failed", Worktree: d.Worktree, Repository: d.Repository})
 		s.escalate(name, fkey+":failed", fmt.Sprintf("%s is DONE but delivering %s failed %d times, last at %s: %v. Not retrying; deliver it by hand and run agentd mark-delivered.",
 			name, d.Worktree, n, step, err), t, now)
 	}
 	// read reports a failed read of the worktree the same way.
 	read := func(step string, err error) {
-		s.emit(name, KindError, map[string]any{"key": fkey, "step": step, "error": err.Error()})
+		s.emit(name, Event{Kind: KindError, Error: &ErrorPayload{Key: fkey, Step: step, Error: err.Error()}})
 		fail(step, err)
 	}
 	// The push goes to the URL built from the configuration, whatever the
@@ -966,10 +819,10 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 		shown := redactRemote(remote)
 		s.skipOnce(name, "deliver:"+key+":origin:"+shortHash(HashPane(strings.Join(remotes, " "))),
 			fmt.Sprintf("worktree's origin %s is not the project %s on %s; not delivering", shown, repoCfg.Project, repoCfg.Host), t,
-			map[string]any{"worktree": d.Worktree, "origin": shown})
+			&SkipPayload{Worktree: d.Worktree, Origin: shown})
 		return
 	}
-	if err := s.actRead(name, ActFetch, map[string]any{"key": fkey, "worktree": d.Worktree}, func() error { return s.git.Fetch(d.Worktree) }); err != nil {
+	if err := s.actRead(name, ActFetch, &ActPayload{Key: fkey, Worktree: d.Worktree}, func() error { return s.git.Fetch(d.Worktree) }); err != nil {
 		fail("fetch", err)
 		return
 	}
@@ -979,7 +832,7 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 		return
 	}
 	if !clean {
-		s.skipOnce(name, "deliver:"+key+":dirty", "worktree is not clean; not delivering", t, map[string]any{"worktree": d.Worktree})
+		s.skipOnce(name, "deliver:"+key+":dirty", "worktree is not clean; not delivering", t, wt)
 		return
 	}
 	branch, err := s.git.Branch(d.Worktree)
@@ -994,7 +847,7 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 		if branch != d.Target {
 			reason = "worktree has a detached HEAD; not delivering"
 		}
-		s.skipOnce(name, "deliver:"+key+":branch:"+branch, reason, t, map[string]any{"worktree": d.Worktree, "branch": branch})
+		s.skipOnce(name, "deliver:"+key+":branch:"+branch, reason, t, &SkipPayload{Worktree: d.Worktree, Branch: branch})
 		return
 	}
 	head, err := s.git.Head(d.Worktree)
@@ -1002,7 +855,6 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 		read("head", err)
 		return
 	}
-	details["head"] = head
 	// The branch name and every commit message go to the forge with the
 	// push, so they are screened before anything names them, in the log
 	// or on the forge. Not final: delivery waits for the text or the
@@ -1014,7 +866,7 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 	}
 	if i := s.confidentialMatch(branch, messages); i > 0 {
 		s.skipOnce(name, "deliver:"+key+":confidential-commits", fmt.Sprintf("the branch name or a commit message ahead of %s matches confidential pattern %d; delivery waits for the owner", d.Target, i), t,
-			map[string]any{"worktree": d.Worktree})
+			wt)
 		s.escalate(name, "deliver:"+key+":confidential-commits", fmt.Sprintf("%s is DONE but its branch name or a commit message ahead of %s matches confidential pattern %d; nothing pushed. Reword the commits or the branch, or change the patterns.",
 			name, d.Target, i), t, now)
 		return
@@ -1047,16 +899,14 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 			delivers = in
 		}
 		if delivers {
-			t.Delivered[key] = r.Ref
-			details["outcome"], details["url"], details["branch"] = r.Ref, r.URL, branch
-			s.skipOnce(name, "deliver:"+key+":exists", fmt.Sprintf("%s already has merge request %s; not delivering again", branch, r.Ref), t, details)
+			s.skipOnce(name, "deliver:"+key+":exists", fmt.Sprintf("%s already has merge request %s; not delivering again", branch, r.Ref), t,
+				&SkipPayload{Delivered: key, Outcome: r.Ref, URL: r.URL, Branch: branch, Head: head, Repository: d.Repository, Worktree: d.Worktree, Target: d.Target})
 			return
 		}
 	}
 	if ahead == 0 {
-		t.Delivered[key] = "nothing"
-		details["outcome"] = "nothing"
-		s.skipOnce(name, "deliver:"+key+":nothing", fmt.Sprintf("%s has nothing ahead of %s; not delivering", branch, d.Target), t, details)
+		s.skipOnce(name, "deliver:"+key+":nothing", fmt.Sprintf("%s has nothing ahead of %s; not delivering", branch, d.Target), t,
+			&SkipPayload{Delivered: key, Outcome: "nothing", Branch: branch, Head: head, Repository: d.Repository, Worktree: d.Worktree, Target: d.Target})
 		return
 	}
 	title, err := s.git.FirstSubject(d.Worktree, d.Target)
@@ -1078,7 +928,7 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 	// the patterns.
 	if i := s.confidentialMatch(title, string(body)); i > 0 {
 		s.skipOnce(name, "deliver:"+key+":confidential", fmt.Sprintf("merge request title or text matches confidential pattern %d; delivery waits for the owner", i), t,
-			map[string]any{"worktree": d.Worktree, "mr_file": d.MRFile})
+			&SkipPayload{Worktree: d.Worktree, MRFile: d.MRFile})
 		s.escalate(name, "deliver:"+key+":confidential", fmt.Sprintf("%s is DONE but its merge request title or text (%s) matches confidential pattern %d; nothing delivered. Change the text or the patterns.",
 			name, d.MRFile, i), t, now)
 		return
@@ -1097,11 +947,11 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 	for _, prefix := range rewrites {
 		if url := pushURL(repo); prefix != "" && strings.HasPrefix(url, prefix) {
 			s.skipOnce(name, "deliver:"+key+":rewrite:"+shortHash(HashPane(prefix)), fmt.Sprintf("git config rewrites the push URL %s (prefix %s); not pushing", url, prefix), t,
-				map[string]any{"worktree": d.Worktree})
+				wt)
 			return
 		}
 	}
-	if err := s.act(name, ActPush, map[string]any{"key": fkey, "branch": branch, "repository": d.Repository}, func() error {
+	if err := s.act(name, ActPush, &ActPayload{Key: fkey, Branch: branch, Repository: d.Repository}, func() error {
 		return s.forge.PushAllowed(d.Repository, d.Worktree, head, branch)
 	}); err != nil {
 		fail("push", err)
@@ -1109,24 +959,21 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 	}
 	mr := MergeRequest{Project: repo.Project, Source: branch, Target: d.Target, Title: title, Description: string(body), Assignee: repo.Assignee}
 	var res MergeResult
-	od := map[string]any{"key": fkey, "delivered": key, "repository": d.Repository, "branch": branch, "head": head, "target": d.Target, "title": title, "draft": draft}
+	od := &ActPayload{Key: fkey, Delivered: key, Repository: d.Repository, Branch: branch, Head: head, Target: d.Target, Title: title, Draft: draft}
 	if s.shadow {
 		s.act(name, ActOpen, od, nil)
-		t.Delivered[key] = "would-open"
 		return
 	}
 	err = s.act(name, ActOpen, od, func() (err error) {
 		res, err = s.forge.OpenAllowed(d.Repository, mr, d.Worktree)
 		if err == nil {
-			od["ref"], od["url"] = res.Ref, res.URL
+			od.Ref, od.URL = res.Ref, res.URL
 		}
 		return err
 	})
 	if err != nil {
 		fail("open", err)
-		return
 	}
-	t.Delivered[key] = res.Ref
 }
 
 // gate runs the repository's gate in the worktree on HEAD and says whether
@@ -1137,7 +984,7 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 // tree. Shadow mode logs the gate it would run and runs none.
 func (s *Supervisor) gate(name, key, fkey string, d Deliver, repo Repository, head string, t *Track, fail func(string, error)) bool {
 	if len(repo.Gate) == 0 { // refused at load; never deliver ungated
-		s.skipOnce(name, "deliver:"+key+":no-gate", fmt.Sprintf("repository %s has no gate; not delivering", d.Repository), t, map[string]any{"worktree": d.Worktree})
+		s.skipOnce(name, "deliver:"+key+":no-gate", fmt.Sprintf("repository %s has no gate; not delivering", d.Repository), t, &SkipPayload{Worktree: d.Worktree})
 		return false
 	}
 	timeout := repo.GateTimeout.Duration
@@ -1152,34 +999,36 @@ func (s *Supervisor) gate(name, key, fkey string, d Deliver, repo Repository, he
 	}
 	config, err := s.git.ConfigHash(d.Worktree)
 	if err != nil {
-		s.emit(name, KindError, map[string]any{"key": fkey, "step": "config", "error": err.Error()})
+		s.emit(name, Event{Kind: KindError, Error: &ErrorPayload{Key: fkey, Step: "config", Error: err.Error()}})
 		fail("config", err)
 		return false
 	}
-	gd := map[string]any{"key": gkey, "command": repo.Gate, "sha": head, "worktree": d.Worktree}
+	gd := &ActPayload{Key: gkey, Gate: repo.Gate, SHA: head, Worktree: d.Worktree}
 	err = s.act(name, ActGate, gd, func() error {
 		start := s.clock.Now()
 		exit, output, err := s.runner.Gate(d.Worktree, repo.Gate, gateEnv(repo), timeout)
-		gd["duration_s"] = s.clock.Now().Sub(start).Seconds()
+		took := s.clock.Now().Sub(start).Seconds()
+		gd.DurationS = &took
 		if err == nil && exit != 0 {
 			err = fmt.Errorf("gate %s exited %d", strings.Join(repo.Gate, " "), exit)
-			gd["exit"] = exit
+			gd.Exit = &exit
 		}
 		if err != nil {
 			// The end of its output says why, unless it is confidential.
 			if output = strings.ToValidUTF8(output[max(0, len(output)-2000):], ""); s.confidentialMatch(output) > 0 {
 				output = "(withheld: matches a confidential pattern)"
 			}
-			gd["output"] = output
+			gd.Output = output
 			return err
 		}
-		gd["exit"] = 0
+		zero := 0
+		gd.Exit = &zero
 		return nil
 	})
 	if err != nil {
-		if s.halt == nil && s.failed(t, gkey, s.clock.Now()) {
+		if s.halt == nil && s.failed(t, gkey) {
 			n := len(t.Failures[gkey])
-			s.skipOnce(name, gkey+":gave-up", fmt.Sprintf("the gate failed %d times on %s; not retrying that commit", n, shortHash(head)), t, map[string]any{"worktree": d.Worktree, "sha": head})
+			s.skipOnce(name, gkey+":gave-up", fmt.Sprintf("the gate failed %d times on %s; not retrying that commit", n, shortHash(head)), t, &SkipPayload{Worktree: d.Worktree, SHA: head})
 			s.escalate(name, gkey+":failed", fmt.Sprintf("%s is DONE but its gate failed %d times on %s, last: %v. Nothing is pushed; a new commit is gated afresh.",
 				name, n, shortHash(head), err), t, s.clock.Now())
 		}
@@ -1199,12 +1048,12 @@ func (s *Supervisor) gate(name, key, fkey string, d Deliver, repo Repository, he
 		}
 	}
 	if err != nil {
-		s.emit(name, KindError, map[string]any{"key": fkey, "step": "after gate", "error": err.Error()})
+		s.emit(name, Event{Kind: KindError, Error: &ErrorPayload{Key: fkey, Step: "after gate", Error: err.Error()}})
 		fail("after gate", err)
 		return false
 	}
 	s.skipOnce(name, "deliver:"+key+":moved:"+head, fmt.Sprintf("the tree or the git config changed while the gate ran on %s; not pushing it, the next pass gates it again", shortHash(head)), t,
-		map[string]any{"worktree": d.Worktree, "sha": head, "head": now})
+		&SkipPayload{Worktree: d.Worktree, SHA: head, Head: now})
 	return false
 }
 
@@ -1230,8 +1079,8 @@ func MarkDelivered(cfg *Config, log *Log, now time.Time, session, worktree, ref 
 	if ref == "" {
 		return fmt.Errorf("the merge request reference must not be empty")
 	}
-	return log.Append(Event{Time: now, Session: session, Kind: KindAction, Details: map[string]any{
-		"action": ActOpen, "delivered": session + ":" + worktree, "ref": ref, "by": "mark-delivered", "mode": ModeOwner}})
+	return log.Append(Event{V: EventVersion, Time: now, Session: session, Kind: KindAction, Mode: ModeOwner, Act: &ActPayload{
+		Action: ActOpen, Delivered: session + ":" + worktree, Ref: ref, By: "mark-delivered"}})
 }
 
 // ClearSession records the owner's clearing of a parked session: its crash
@@ -1242,7 +1091,7 @@ func ClearSession(cfg *Config, log *Log, now time.Time, session string) error {
 	if _, ok := cfg.Sessions[session]; !ok {
 		return fmt.Errorf("session %q is not configured", session)
 	}
-	return log.Append(Event{Time: now, Session: session, Kind: KindClear, Details: map[string]any{"by": "clear", "mode": ModeOwner}})
+	return log.Append(Event{V: EventVersion, Time: now, Session: session, Kind: KindClear, Mode: ModeOwner, Clear: &ClearPayload{By: "clear"}})
 }
 
 // launchLine is the shell command line that runs argv for sess under its
