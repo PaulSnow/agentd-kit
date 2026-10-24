@@ -702,6 +702,11 @@ func buildView(data PageData, q viewQuery, now time.Time) pageView {
 		}
 	}
 	for _, rr := range data.Report.Repositories {
+		// The page lists new items under New since last visit, so a
+		// repository the report holds only items for adds no row.
+		if len(rr.Cases)+len(rr.Deliveries)+len(rr.Questions) == 0 {
+			continue
+		}
 		r := get(rr.Repository, rr.Name)
 		r.Cases = rr.Cases
 		needs := map[string]bool{}

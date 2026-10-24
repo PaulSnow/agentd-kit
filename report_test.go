@@ -296,3 +296,83 @@ func TestShadowReportListsWouldOpen(t *testing.T) {
 		t.Fatalf("live report = %+v", live.Repositories)
 	}
 }
+
+// appendItem logs an item as agentd items would, and its triage when one
+// is given.
+func appendItem(h *harness, at time.Time, it ItemPayload, tr *TriageResult) {
+	w := NewLogWriter(h.buf)
+	w.Append(Event{V: EventVersion, Time: at, Kind: KindItem, Mode: ModeShared, Item: &it})
+	if tr != nil {
+		tr.ID, tr.Hash = it.ID, ItemHash(it)
+		w.Append(Event{V: EventVersion, Time: at, Kind: KindTriage, Mode: ModeShared, Triage: &TriagePayload{Results: []TriageResult{*tr}}})
+	}
+}
+
+// The report holds the new items: each under its repository, with its
+// triage, through the fields the report names alone. Everything from mail
+// is for the owner only, and so is an item of a repository agentd is not
+// configured for; an item with confidential text is left out whole, and
+// one the owner saw long ago is no longer new.
+func TestReportItems(t *testing.T) {
+	h := reportHarness(t)
+	h.cfg.ConfidentialPatterns = []string{`(?i)secret-project`}
+	now := h.clock.Now()
+	widgets := "gitlab/example-org/widgets"
+	appendItem(h, now, ItemPayload{ID: widgets + "#5", Kind: ItemIssue, Repository: widgets, Title: "Widgets wobble",
+		Link: "https://gitlab.example.com/example-org/widgets/-/issues/5", Author: "someone"},
+		&TriageResult{Kind: "bug", NeedsOwner: "no", Urgency: "today", Summary: "The widgets wobble.", Suggested: "fix"})
+	appendItem(h, now, ItemPayload{ID: "mail:t1", Kind: ItemMailQuestion, Repository: widgets, Title: "Are widgets blue?", OwnerOnly: true}, nil)
+	appendItem(h, now, ItemPayload{ID: "mail:t2", Kind: ItemMailReport, Title: "Monthly numbers", OwnerOnly: true}, nil)
+	appendItem(h, now, ItemPayload{ID: "github/example-org/gadgets#2", Kind: ItemIssue, Repository: "github/example-org/gadgets", Title: "Gadgets jam"}, nil)
+	appendItem(h, now, ItemPayload{ID: widgets + "#6", Kind: ItemIssue, Repository: widgets, Title: "Port the secret-project widget"}, nil)
+	appendItem(h, now.Add(-30*24*time.Hour), ItemPayload{ID: widgets + "#1", Kind: ItemIssue, Repository: widgets, Title: "Old news"}, nil)
+	if err := MarkSeen(NewLogWriter(h.buf), now, []string{widgets + "#1"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	r := BuildReport(h.cfg, h.events(), ModeLive, "host-a", now)
+	b, _ := json.Marshal(r)
+	for _, gone := range []string{"secret-project", "Old news", "someone"} {
+		if strings.Contains(string(b), gone) {
+			t.Fatalf("the report carries %q:\n%s", gone, b)
+		}
+	}
+	items := map[string]ReportItem{}
+	repoOf := map[string]ReportRepo{}
+	for _, rr := range r.Repositories {
+		for _, it := range rr.Items {
+			items[it.ID] = it
+			repoOf[it.ID] = rr
+		}
+	}
+	if len(items) != 4 {
+		t.Fatalf("items %+v", items)
+	}
+	if it := items[widgets+"#5"]; it.OwnerOnly || it.Urgency != "today" || it.Summary != "The widgets wobble." || it.Title != "Widgets wobble" ||
+		it.Link == "" || repoOf[it.ID].Repository != widgets || repoOf[it.ID].OwnerOnly {
+		t.Fatalf("issue %+v in %+v", it, repoOf[it.ID].Repository)
+	}
+	if it := items["mail:t1"]; !it.OwnerOnly || repoOf[it.ID].Repository != widgets {
+		t.Fatalf("mail with a repository %+v", it)
+	}
+	if it := items["mail:t2"]; !it.OwnerOnly || repoOf[it.ID].Repository != "" || !repoOf[it.ID].OwnerOnly {
+		t.Fatalf("mail without one %+v", it)
+	}
+	if it := items["github/example-org/gadgets#2"]; !it.OwnerOnly || !repoOf[it.ID].OwnerOnly {
+		t.Fatalf("an unconfigured repository's item %+v", it)
+	}
+	if !strings.Contains(r.Digest, "1 new item") || !strings.Contains(r.OwnerDigest, "4 new items") {
+		t.Fatalf("digests = %q, %q", r.Digest, r.OwnerDigest)
+	}
+	// Nothing about a mail item reaches anyone but the owner, its triage
+	// included.
+	appendItem(h, now, ItemPayload{ID: "mail:t3", Kind: ItemMailReport, Repository: widgets, Title: "Quarterly", OwnerOnly: true},
+		&TriageResult{Kind: "report", NeedsOwner: "no", Urgency: "later", Summary: "Numbers are in.", Suggested: "read"})
+	r = BuildReport(h.cfg, h.events(), ModeLive, "host-a", now)
+	for _, rr := range r.Repositories {
+		for _, it := range rr.Items {
+			if strings.HasPrefix(it.ID, "mail:") && !it.OwnerOnly {
+				t.Fatalf("mail item published: %+v", it)
+			}
+		}
+	}
+}

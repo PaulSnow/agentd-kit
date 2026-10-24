@@ -46,7 +46,37 @@ type ReportRepo struct {
 	Cases      []ReportCase     `json:"cases"`
 	Deliveries []ReportDelivery `json:"deliveries"`
 	Questions  []ReportQuestion `json:"questions"`
+	Items      []ReportItem     `json:"items"`
 }
+
+// ReportItem is a new item (#18): an issue, a request, a discussion or a
+// mail finding, with its triage while it holds for the item's text. Only
+// these fields are published; who wrote it is not. An item from mail is
+// for the owner only, and so is one of a repository agentd is not
+// configured for, since the site cannot tell who may see it.
+type ReportItem struct {
+	ID         string    `json:"id"`
+	Kind       string    `json:"kind"`
+	Title      string    `json:"title"`
+	Link       string    `json:"link,omitempty"`
+	SourceTime time.Time `json:"source_time"`
+	FirstSeen  time.Time `json:"first_seen"`
+	Seen       bool      `json:"seen"`
+	NeedsOwner string    `json:"needs_owner,omitempty"`
+	Urgency    string    `json:"urgency,omitempty"`
+	Summary    string    `json:"summary,omitempty"`
+	OwnerOnly  bool      `json:"owner_only"`
+}
+
+// fromMail says whether an item is derived from mail, by any of the marks
+// a mail finding carries: everything from mail is for the owner only.
+func fromMail(it ItemPayload) bool {
+	return it.OwnerOnly || it.Kind == ItemMailQuestion || it.Kind == ItemMailReport || strings.HasPrefix(it.ID, "mail:")
+}
+
+// reportItemWindow is how long an item the owner has seen stays in the
+// report; one not yet seen stays until it is.
+const reportItemWindow = 7 * 24 * time.Hour
 
 // ReportCase is one session's state, and the first line of its STATUS.md.
 type ReportCase struct {
@@ -135,26 +165,33 @@ func ReportFrom(cfg *Config, st *LogState, host string, now time.Time) Report {
 	}
 	mode := st.Mode
 	repos := map[string]*ReportRepo{}
-	// group is the report's entry for the configured repository name, nil
-	// when its name or identity matches a confidential pattern.
-	group := func(name string) *ReportRepo {
-		key, ownerOnly := "", true
-		r, ok := cfg.Repositories[name]
-		if ok {
-			key, ownerOnly = repoKey(r.Forge, r.Project), r.OwnerOnly
-		} else {
-			name = ""
-		}
+	// entry is the report's entry for the repository with key, which the
+	// configuration names name ("" when it does not), nil when its name or
+	// identity matches a confidential pattern.
+	entry := func(key, name string, ownerOnly bool) *ReportRepo {
 		if secret(name, key) {
 			return nil
 		}
 		rr := repos[key]
 		if rr == nil {
 			rr = &ReportRepo{Repository: key, Name: name, OwnerOnly: ownerOnly,
-				Cases: []ReportCase{}, Deliveries: []ReportDelivery{}, Questions: []ReportQuestion{}}
+				Cases: []ReportCase{}, Deliveries: []ReportDelivery{}, Questions: []ReportQuestion{}, Items: []ReportItem{}}
 			repos[key] = rr
 		}
 		return rr
+	}
+	// group is the entry for the configured repository name.
+	group := func(name string) *ReportRepo {
+		r, ok := cfg.Repositories[name]
+		if !ok {
+			return entry("", "", true)
+		}
+		return entry(repoKey(r.Forge, r.Project), name, r.OwnerOnly)
+	}
+	// configured is the configured repository with key, by name.
+	configured := map[string]string{}
+	for name, r := range cfg.Repositories {
+		configured[repoKey(r.Forge, r.Project)] = name
 	}
 	var names []string
 	for n := range st.Tracks {
@@ -168,6 +205,31 @@ func ReportFrom(cfg *Config, st *LogState, host string, now time.Time) Report {
 		all.add(state, delivered, asked)
 		if !ownerOnly {
 			public.add(state, delivered, asked)
+		}
+	}
+	for _, it := range st.SortedItems(false) {
+		if it.Seen && now.Sub(it.FirstSeen) > reportItemWindow {
+			continue
+		}
+		var rr *ReportRepo
+		if name, ok := configured[it.Repository]; ok && it.Repository != "" {
+			rr = group(name)
+		} else {
+			rr = entry(it.Repository, "", true)
+		}
+		ri := ReportItem{ID: it.ID, Kind: it.Kind, Title: it.Title, Link: it.Link, SourceTime: it.SourceTime, FirstSeen: it.FirstSeen,
+			Seen: it.Seen, OwnerOnly: fromMail(it.ItemPayload)}
+		if tr := it.Triage; tr != nil && tr.Hash == ItemHash(it.ItemPayload) {
+			ri.NeedsOwner, ri.Urgency, ri.Summary = tr.NeedsOwner, tr.Urgency, tr.Summary
+		}
+		if rr == nil || secret(ri.ID, ri.Title, ri.Link, ri.Summary) {
+			continue
+		}
+		ri.OwnerOnly = ri.OwnerOnly || rr.OwnerOnly
+		rr.Items = append(rr.Items, ri)
+		all.items++
+		if !ri.OwnerOnly {
+			public.items++
 		}
 	}
 	for _, n := range names {
@@ -204,7 +266,7 @@ func ReportFrom(cfg *Config, st *LogState, host string, now time.Time) Report {
 	report := Report{Schema: ReportSchema, WrittenAt: now, Host: host, Mode: mode, Repositories: []ReportRepo{},
 		Digest: public.digest(), OwnerDigest: all.digest()}
 	for _, rr := range repos {
-		if len(rr.Cases)+len(rr.Deliveries)+len(rr.Questions) > 0 {
+		if len(rr.Cases)+len(rr.Deliveries)+len(rr.Questions)+len(rr.Items) > 0 {
 			report.Repositories = append(report.Repositories, *rr)
 		}
 	}
@@ -219,6 +281,7 @@ type digestCounts struct {
 	states    map[State]int
 	delivered int
 	asked     int
+	items     int
 }
 
 // add counts a case in state (when not ""), deliveries and questions.
@@ -233,8 +296,8 @@ func (d *digestCounts) add(state string, delivered, asked int) {
 	d.asked += asked
 }
 
-// digest is one plain summary: sessions by state, the deliveries, and the
-// questions waiting on the owner.
+// digest is one plain summary: sessions by state, the deliveries, the
+// questions waiting on the owner, and the new items.
 func (d digestCounts) digest() string {
 	total := 0
 	var parts []string
@@ -248,7 +311,8 @@ func (d digestCounts) digest() string {
 	if len(parts) > 0 {
 		line += ": " + strings.Join(parts, ", ")
 	}
-	return fmt.Sprintf("%s; %s delivered; %s waiting on the owner.", line, plural(d.delivered, "request"), plural(d.asked, "question"))
+	return fmt.Sprintf("%s; %s delivered; %s waiting on the owner; %s.", line, plural(d.delivered, "request"), plural(d.asked, "question"),
+		plural(d.items, "new item"))
 }
 
 // plural is n with noun, made plural unless n is one.
