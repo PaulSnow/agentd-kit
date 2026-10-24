@@ -101,8 +101,9 @@ func TestCutShortIntentIsShownAndNotRepeated(t *testing.T) {
 	// process is as good as dead after it.
 	w := &failingWriter{failOn: `"kind":"action"`}
 	h.sup = NewSupervisor(h.cfg, NewLogWriter(w), h.clock, h.tmux, h.git, h.forge, h.runner, false)
-	if err := h.sup.Pass(); err == nil {
-		t.Fatal("the pass went on after the outcome could not be recorded")
+	h.sup.Pass()
+	if err := h.sup.Wait(); err == nil {
+		t.Fatal("the job went on after the outcome could not be recorded")
 	}
 	if len(h.runner.calls) != 1 {
 		t.Fatalf("posted %d times, want the one cut short", len(h.runner.calls))

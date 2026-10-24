@@ -146,6 +146,7 @@ type ActPayload struct {
 	QuestionsHash string `json:"questions_hash,omitempty"`
 	Update        int    `json:"update,omitempty"`
 	Dialog        int    `json:"dialog,omitempty"`
+	Episode       int    `json:"episode,omitempty"` // the Questions or dialog episode it settles
 
 	// Delivery: a fetch, push or open.
 	Delivered  string `json:"delivered,omitempty"`
@@ -198,6 +199,7 @@ type SkipPayload struct {
 	QuestionsHash string `json:"questions_hash,omitempty"`
 	Update        int    `json:"update,omitempty"`
 	Dialog        int    `json:"dialog,omitempty"`
+	Episode       int    `json:"episode,omitempty"`
 }
 
 // CrashPayload is one crash: its cause (exit status when known, and the
