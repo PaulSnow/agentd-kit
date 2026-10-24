@@ -457,7 +457,7 @@ func TestReportSharedKeyAndOwnerOnlyRepository(t *testing.T) {
 	h := reportHarness(t)
 	inner := h.cfg.Repositories["widgets"]
 	inner.Host, inner.OwnerOnly = "gitlab.internal.example", true
-	h.cfg.Repositories["a-inner"] = inner
+	h.cfg.Repositories["z-inner"] = inner // sorts after widgets: its owner_only must still count
 	appendItem(h, h.clock.Now(), ItemPayload{ID: "mail:m1", Kind: ItemMailReport, Repository: "github/example-org/gadgets", Title: "Mail", OwnerOnly: true}, nil)
 	h.cfg.Repositories["gadgets"] = Repository{Forge: "github", Project: "example-org/gadgets"}
 	for i := 0; i < 20; i++ {
@@ -466,13 +466,29 @@ func TestReportSharedKeyAndOwnerOnlyRepository(t *testing.T) {
 			if !rr.OwnerOnly {
 				t.Fatalf("repository %q (%s) is public", rr.Repository, rr.Name)
 			}
-			if rr.Repository == "gitlab/example-org/widgets" && rr.Name != "a-inner" {
+			if rr.Repository == "gitlab/example-org/widgets" && rr.Name != "widgets" {
 				t.Fatalf("name %q", rr.Name)
 			}
 			for _, c := range rr.Cases {
 				if !c.OwnerOnly {
 					t.Fatalf("case %+v public", c)
 				}
+			}
+		}
+	}
+}
+
+// A confidential name of any repository sharing a key leaves the shared
+// entry out whole, whichever name sorts first.
+func TestReportSharedKeyConfidentialName(t *testing.T) {
+	for _, name := range []string{"a-hush", "zz-hush"} {
+		h := reportHarness(t)
+		h.cfg.ConfidentialPatterns = []string{`hush`}
+		h.cfg.Repositories[name] = h.cfg.Repositories["widgets"]
+		r := BuildReport(h.cfg, h.events(), ModeLive, "host-a", h.clock.Now())
+		for _, rr := range r.Repositories {
+			if rr.Repository == "gitlab/example-org/widgets" {
+				t.Fatalf("%s: the shared entry was published: %+v", name, rr)
 			}
 		}
 	}

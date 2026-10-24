@@ -201,9 +201,11 @@ func ReportFrom(cfg *Config, st *LogState, host string, now time.Time) Report {
 		return rr
 	}
 	// configured names the configured repository with each key, the first
-	// by name when several share one (the key leaves out the host), and
-	// keyOwnerOnly says whether any of them is for the owner only.
-	configured, keyOwnerOnly := map[string]string{}, map[string]bool{}
+	// by name when several share one (the key leaves out the host);
+	// keyOwnerOnly says whether any of them is for the owner only, and
+	// keySecret whether any of their names matches a confidential pattern,
+	// which leaves the shared entry out whole.
+	configured, keyOwnerOnly, keySecret := map[string]string{}, map[string]bool{}, map[string]bool{}
 	repoNames := make([]string, 0, len(cfg.Repositories))
 	for name := range cfg.Repositories {
 		repoNames = append(repoNames, name)
@@ -216,6 +218,7 @@ func ReportFrom(cfg *Config, st *LogState, host string, now time.Time) Report {
 			configured[key] = name
 		}
 		keyOwnerOnly[key] = keyOwnerOnly[key] || r.OwnerOnly
+		keySecret[key] = keySecret[key] || secret(name)
 	}
 	// group is the entry for the configured repository name.
 	group := func(name string) *ReportRepo {
@@ -224,6 +227,9 @@ func ReportFrom(cfg *Config, st *LogState, host string, now time.Time) Report {
 			return entry("", "", true)
 		}
 		key := repoKey(r.Forge, r.Project)
+		if keySecret[key] {
+			return nil
+		}
 		return entry(key, configured[key], keyOwnerOnly[key])
 	}
 	var names []string
