@@ -479,6 +479,9 @@ func (s *Supervisor) step(name string, sess Session) {
 			return
 		}
 	}
+	if s.readDecisions(name, sess, t, &ev); s.halt != nil {
+		return
+	}
 	state, reason := Classify(t, ev, s.cfg.Policies, now)
 	// The observe event, applied, ends a dialog episode and opens or
 	// closes the Questions escalation: each is a field it compares.
@@ -527,11 +530,13 @@ func (s *Supervisor) logObserve(name string, t *Track, ev Evidence, state State,
 		Alive:     ev.Alive,
 		Done:      ev.Status.Done,
 		Questions: ev.Status.Questions != "",
-		Limited:   ev.Limited,
-		Trust:     ev.TrustPrompt,
-		Dialog:    ev.Dialog != "",
-		Command:   ev.Command,
-		Head:      ev.Status.Head,
+
+		StatusQuestions: ev.StatusQuestions,
+		Limited:         ev.Limited,
+		Trust:           ev.TrustPrompt,
+		Dialog:          ev.Dialog != "",
+		Command:         ev.Command,
+		Head:            ev.Status.Head,
 	}
 	if s.confidentialMatch(ev.Status.Head) > 0 {
 		o.Head = "(withheld: matches a confidential pattern)"
@@ -583,10 +588,17 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 	}
 	// The limit has cleared. Only a session that can take a line is told to
 	// go on: never one that is DONE, waits on the owner, or shows a dialog.
+	// One line is typed per pass at most: the screen a second line would
+	// go to has not been read since the first.
+	typed := false
 	if t.Limited && ev.Alive && (state == Working || state == Idle) {
+		typed = true
 		s.typeInto(name, ActResume, &ActPayload{Message: pol.Nudge.ResumeMessage}, t, ev.PaneHash, func() error {
 			return s.tmux.Type(name, pol.Nudge.ResumeMessage)
 		})
+	}
+	if !typed {
+		typed = s.deliverAnswers(name, sess, t, ev, state)
 	}
 	switch state {
 	case Done:
@@ -614,8 +626,15 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 				return state
 			}
 		}
+		// A session gone with answers waiting is restarted with them: the
+		// file is written first, and the prompt names it.
+		why := "restart"
+		ids, at := t.freshAnswers()
+		if len(ids) > 0 {
+			why = "answered"
+		}
 		id := newSessionID()
-		line, err := s.launchLine(sess, s.launchCommand(sess, t, id, "restart"))
+		line, err := s.launchLine(sess, s.launchCommand(sess, t, id, why))
 		if err != nil {
 			// Not final, and not a crash: the owner may fix the account.
 			// There is no fallback to another account.
@@ -623,7 +642,13 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			s.escalate(name, "account:"+name, fmt.Sprintf("%s is gone and cannot be restarted under its account: %v. Fix the account; agentd will not use another.", name, err), t, now)
 			return state
 		}
-		err = s.act(name, ActRestart, &ActPayload{Attempt: n + 1, Cwd: sess.Cwd, Respawn: ev.PaneDead, Account: sess.Account, Command: line, Transcript: id}, func() error {
+		answers := t.answersFor(false)
+		err = s.act(name, ActRestart, &ActPayload{Attempt: n + 1, Cwd: sess.Cwd, Respawn: ev.PaneDead, Account: sess.Account, Command: line, Transcript: id, Answers: ids, AnswersAt: at}, func() error {
+			if len(ids) > 0 {
+				if err := writeAnswers(sess.Workdir, answers); err != nil {
+					return err
+				}
+			}
 			if ev.PaneDead {
 				return s.tmux.Respawn(name, sess.Cwd, line)
 			}
@@ -679,7 +704,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 				fmt.Sprintf("%s has shown the same screen since %s with a tool call as its last turn; it is probably waiting at a permission prompt. Attach and answer it.", name, t.HashSince.Format(time.RFC3339)), t, now)
 		}
 	case Idle:
-		if !pol.Nudge.Enabled {
+		if !pol.Nudge.Enabled || typed {
 			return state
 		}
 		if t.Nudges >= pol.Nudge.Max {
@@ -770,7 +795,13 @@ func (s *Supervisor) typeInto(name, action string, a *ActPayload, t *Track, seen
 			return err
 		}
 		if now := HashPane(pane); now != seen {
-			s.skipOnce(name, "screen-changed:"+action+":"+shortHash(now), "the screen changed since it was read this pass; not typing", t,
+			// Answers wait for a working session whose screen may move
+			// every pass: that is logged once for the answers.
+			key := "screen-changed:" + action + ":" + shortHash(now)
+			if len(a.Answers) > 0 {
+				key = "screen-changed:" + action + ":" + strings.Join(a.Answers, ",") + ":" + fmt.Sprint(a.AnswersAt[len(a.AnswersAt)-1].Unix())
+			}
+			s.skipOnce(name, key, "the screen changed since it was read this pass; not typing", t,
 				&SkipPayload{Action: action})
 			return errScreenChanged
 		}

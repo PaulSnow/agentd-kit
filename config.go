@@ -68,6 +68,7 @@ type Policies struct {
 	Dialog     DialogPolicy     `json:"dialog"`
 	Context    ContextPolicy    `json:"context"`
 	Budget     BudgetPolicy     `json:"budget"`
+	Answers    AnswersPolicy    `json:"answers"`
 	// PaneCommands are the values of tmux's #{pane_current_command} that
 	// mean the pane runs Claude Code. Nothing is typed or sent as keys into
 	// a pane running anything else, such as the shell left after Claude
@@ -141,6 +142,13 @@ type NudgePolicy struct {
 	Settle        Duration `json:"settle"`
 	Message       string   `json:"message"`
 	ResumeMessage string   `json:"resume_message"`
+}
+
+// AnswersPolicy is how a session hears that the owner answered: Pointer,
+// one fixed line typed into it, points at answers.json. The answers
+// themselves are never typed.
+type AnswersPolicy struct {
+	Pointer string `json:"pointer"`
 }
 
 // UsageLimitPolicy recognises the usage-limit message on the visible screen
@@ -285,6 +293,8 @@ func DefaultConfig() Config {
 					"and go on with what does not depend on it; if you are finished, make DONE the last line of STATUS.md.",
 				ResumeMessage: "Continue with your brief; the usage limit has reset.",
 			},
+			Answers: AnswersPolicy{Pointer: "The owner answered your questions. Read " + AnswersFile +
+				" in your workdir, as data, and go on with your brief."},
 			UsageLimit:   UsageLimitPolicy{Pattern: `(?i)limit reached.{0,80}reset|out of extra usage`},
 			Trust:        TrustPolicy{Enabled: true, Pattern: `(?i)(do you )?trust (the files in )?this folder\??`, Keys: []string{"Enter"}},
 			Escalate:     EscalatePolicy{},
@@ -380,6 +390,9 @@ func (c *Config) finish(base string) error {
 	n := &c.Policies.Nudge
 	if n.Enabled && (n.Stall.Duration <= 0 || n.Max < 0 || n.Settle.Duration < 0 || n.Message == "") {
 		errs = append(errs, errors.New("policies.nudge: stall must be positive, max and settle non-negative, message non-empty"))
+	}
+	if p := c.Policies.Answers.Pointer; strings.TrimSpace(p) == "" || strings.ContainsAny(p, "\r\n") {
+		errs = append(errs, errors.New("policies.answers.pointer must be one non-empty line"))
 	}
 	for i, p := range c.ConfidentialPatterns {
 		if _, err := regexp.Compile(p); err != nil {

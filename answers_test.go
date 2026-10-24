@@ -1,0 +1,432 @@
+package main
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// answerAs records the owner's answer as the page does: checked against
+// the state of the run's mode folded from the log so far.
+func answerAs(h *harness, session string, a AnswerPayload) error {
+	st := NewLogState(h.cfg, mode(h.sup.shadow))
+	st.Fold(h.events())
+	return RecordAnswer(NewLogWriter(h.buf), st, h.clock.Now(), session, a)
+}
+
+func readAnswers(t *testing.T, h *harness, name string) (answersDoc, bool) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(h.dir, name, AnswersFile))
+	if os.IsNotExist(err) {
+		return answersDoc{}, false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc answersDoc
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatalf("%s: %v", AnswersFile, err)
+	}
+	return doc, true
+}
+
+func writeQuestions(t *testing.T, h *harness, name, doc string) {
+	t.Helper()
+	writeFile(t, filepath.Join(h.dir, name, QuestionsFile), doc)
+}
+
+func statusID(text string) string {
+	return statusDecision + shortHash(HashPane(ParseStatus(text).Questions))
+}
+
+const chooseColour = `{"decisions":[{"id":"D1","type":"choose_one","question":"Which colour should the widget be?",` +
+	`"context":"The widget is grey today.","why":"The style guide changed.","if_wrong":"A second release; easy to undo.",` +
+	`"recommendation":"b","options":[{"key":"a","label":"Blue","consequence":"Matches the old logo."},` +
+	`{"key":"b","label":"Green","consequence":"Matches the new guide."}],"blocking":true}]}`
+
+// An answer to STATUS.md's Questions round-trips: the owner's answer is an
+// owner event, agentd writes it to answers.json and types the fixed
+// pointer line once, never the answer, and the session is no longer
+// blocked on those questions. A replay neither writes nor types again.
+func TestAnswerRoundTrips(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.alive("s1", "waiting")
+	h.status("s1", question(1))
+	h.ticks(2, 5*time.Minute)
+	if h.state("s1") != BlockedOnOwner {
+		t.Fatalf("state %s", h.state("s1"))
+	}
+	id := statusID(question(1))
+	if err := answerAs(h, "s1", AnswerPayload{ID: id, Text: "Version 3 gates them.", Note: "ask again if unsure"}); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(3, 5*time.Minute)
+	doc, ok := readAnswers(t, h, "s1")
+	if !ok || len(doc.Answers) != 1 || doc.Answers[0].ID != id || doc.Answers[0].Text != "Version 3 gates them." || doc.Answers[0].Note != "ask again if unsure" {
+		t.Fatalf("answers.json = %+v", doc)
+	}
+	pointer := h.cfg.Policies.Answers.Pointer
+	var types []string
+	for _, c := range h.tmux.calls {
+		if c.op == "type" {
+			types = append(types, c.args[0])
+		}
+	}
+	if len(types) != 1 || types[0] != pointer {
+		t.Fatalf("typed %q, want the pointer once", types)
+	}
+	if h.state("s1") == BlockedOnOwner || h.count(KindAction, ActAnswer, "s1") != 1 {
+		t.Fatalf("state %s, %d answer actions", h.state("s1"), h.count(KindAction, ActAnswer, "s1"))
+	}
+	h.restart(false)
+	h.ticks(3, 5*time.Minute)
+	if n := h.tmux.count("type", "s1"); n != 1 {
+		t.Fatalf("typed %d times after a replay", n)
+	}
+	if !h.sup.Tracks()["s1"].Answers[id].Delivered {
+		t.Fatal("replay lost the delivery")
+	}
+	// Reworded questions are new: they block again until answered.
+	h.status("s1", question(2))
+	h.ticks(2, 5*time.Minute)
+	if h.state("s1") != BlockedOnOwner {
+		t.Fatalf("reworded questions: state %s", h.state("s1"))
+	}
+}
+
+// Shadow mode records the answer and the delivery it would make, once,
+// and writes and types nothing.
+func TestShadowAnswerOnlyRecords(t *testing.T) {
+	h := newHarness(t, true, "s1")
+	h.alive("s1", "waiting")
+	h.status("s1", question(1))
+	h.ticks(2, 5*time.Minute)
+	if err := answerAs(h, "s1", AnswerPayload{ID: statusID(question(1)), Text: "Yes."}); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(4, 5*time.Minute)
+	if _, ok := readAnswers(t, h, "s1"); ok || typed(h, "s1") != 0 {
+		t.Fatalf("shadow wrote or typed: %d typed", typed(h, "s1"))
+	}
+	if n := h.count(KindWould, ActAnswer, "s1"); n != 1 {
+		t.Fatalf("%d would-be answers, want 1", n)
+	}
+}
+
+// Decisions raised in questions.json block until answered; the answer
+// arrives in the JSON #3 names. An answer in the owner's own words is
+// delivered but does not settle the decision. A replay rebuilds the open
+// and answered decisions.
+func TestDecisionsFile(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.alive("s1", "waiting")
+	h.status("s1", working)
+	writeQuestions(t, h, "s1", chooseColour)
+	h.ticks(2, 5*time.Minute)
+	if h.state("s1") != BlockedOnOwner || h.count(KindDecision, "", "s1") != 1 {
+		t.Fatalf("state %s, %d decision events", h.state("s1"), h.count(KindDecision, "", "s1"))
+	}
+	if msg := h.runner.calls[0][4]; !strings.Contains(msg, "Which colour should the widget be?") {
+		t.Fatalf("escalation %q", msg)
+	}
+	if err := answerAs(h, "s1", AnswerPayload{ID: "D1", Other: "Neither; use the brand red."}); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(2, 5*time.Minute)
+	if doc, _ := readAnswers(t, h, "s1"); len(doc.Answers) != 1 || doc.Answers[0].Other == "" || h.state("s1") != BlockedOnOwner {
+		t.Fatalf("other: %+v, state %s", doc, h.state("s1"))
+	}
+	if err := answerAs(h, "s1", AnswerPayload{ID: "D1", Choice: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(2, 5*time.Minute)
+	b, _ := os.ReadFile(filepath.Join(h.dir, "s1", AnswersFile))
+	if string(b) != `{"answers":[{"id":"D1","choice":"b"}]}`+"\n" || h.state("s1") == BlockedOnOwner {
+		t.Fatalf("answers.json %s, state %s", b, h.state("s1"))
+	}
+	before := h.sup.Tracks()["s1"]
+	h.restart(false)
+	after := h.sup.Tracks()["s1"]
+	if len(after.Decisions) != 1 || after.Decisions[0].ID != "D1" || after.waits(after.Decisions[0]) || !after.Answers["D1"].Delivered ||
+		after.DecisionsHash != before.DecisionsHash {
+		t.Fatalf("replay: %+v", after)
+	}
+	if n := h.tmux.count("type", "s1"); n != 2 {
+		t.Fatalf("typed %d times, want 2", n)
+	}
+}
+
+// A refused questions.json is logged once, with why, and the decisions
+// read before it stand.
+func TestRefusedDecisionsFile(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.alive("s1", "waiting")
+	h.status("s1", working)
+	writeQuestions(t, h, "s1", chooseColour)
+	h.ticks(1, 5*time.Minute)
+	writeQuestions(t, h, "s1", `{"decisions":[{"id":"D2","type":"text","question":"Pick a or b?"}]}`)
+	h.ticks(3, 5*time.Minute)
+	var refused []string
+	for _, e := range h.events() {
+		if e.Kind == KindDecision && e.Decision.Refused != "" {
+			refused = append(refused, e.Decision.Refused)
+		}
+	}
+	if len(refused) != 1 || !strings.Contains(refused[0], "D2") {
+		t.Fatalf("refusals %q", refused)
+	}
+	if ds := h.sup.Tracks()["s1"].Decisions; len(ds) != 1 || ds[0].ID != "D1" {
+		t.Fatalf("decisions %+v", ds)
+	}
+}
+
+// A session gone with open Questions is parked, not restarted; once the
+// owner answers, it is restarted with a prompt naming answers.json, which
+// is written first.
+func TestDeadBlockedSessionRestartsWithAnswers(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.status("s1", question(1))
+	h.ticks(3, 5*time.Minute)
+	if h.state("s1") != BlockedOnOwner || h.tmux.count("new-session", "s1") != 0 {
+		t.Fatalf("state %s, %d starts", h.state("s1"), h.tmux.count("new-session", "s1"))
+	}
+	if err := answerAs(h, "s1", AnswerPayload{ID: statusID(question(1)), Text: "Use version 3."}); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(1, 5*time.Minute)
+	var cmd string
+	for _, c := range h.tmux.calls {
+		if c.op == "new-session" {
+			cmd = c.args[1]
+		}
+	}
+	file := filepath.Join(h.dir, "s1", AnswersFile)
+	if !strings.Contains(cmd, `"why":"answered"`) || !strings.Contains(cmd, file) || !strings.Contains(cmd, h.cfg.Policies.Answers.Pointer) {
+		t.Fatalf("restart command %q", cmd)
+	}
+	if doc, ok := readAnswers(t, h, "s1"); !ok || doc.Answers[0].Text != "Use version 3." {
+		t.Fatalf("answers.json %+v", doc)
+	}
+	if !h.sup.Tracks()["s1"].Answers[statusID(question(1))].Delivered || typed(h, "s1") != 0 {
+		t.Fatal("the restart did not deliver the answer, or typed it")
+	}
+}
+
+// An answer is checked against its decision: of its type, one of its
+// options, one answer or other but not both; an unknown or closed
+// decision records nothing.
+func TestAnswerIsChecked(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.alive("s1", "waiting")
+	h.status("s1", working)
+	writeQuestions(t, h, "s1", chooseColour)
+	h.ticks(1, 5*time.Minute)
+	yes := true
+	for name, a := range map[string]AnswerPayload{
+		"unknown decision":  {ID: "D9", Choice: "a"},
+		"not an option":     {ID: "D1", Choice: "c"},
+		"wrong type":        {ID: "D1", Answer: &yes},
+		"both":              {ID: "D1", Choice: "a", Other: "or not"},
+		"none":              {ID: "D1", Note: "only a note"},
+		"status, none open": {ID: statusDecision + "abc", Text: "x"},
+		"long note":         {ID: "D1", Choice: "a", Note: strings.Repeat("n", maxNote+1)},
+	} {
+		if err := answerAs(h, "s1", a); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if err := answerAs(h, "nobody", AnswerPayload{ID: "D1", Choice: "a"}); err == nil {
+		t.Error("an unknown session accepted")
+	}
+	if n := h.count(KindAnswer, "", ""); n != 0 {
+		t.Fatalf("%d answers recorded", n)
+	}
+}
+
+// What a session may raise is checked: plain unique ids, the decision form
+// filled in, and the narrowest type.
+func TestDecisionsAreChecked(t *testing.T) {
+	var ok QuestionsDoc
+	if err := json.Unmarshal([]byte(chooseColour), &ok); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkDecisions(ok.Decisions); err != nil {
+		t.Fatal(err)
+	}
+	base := ok.Decisions[0]
+	bad := map[string]func(d *Decision){
+		"id":             func(d *Decision) { d.ID = "has space" },
+		"status id":      func(d *Decision) { d.ID = statusDecision + "x" },
+		"no question":    func(d *Decision) { d.Question = " " },
+		"no if_wrong":    func(d *Decision) { d.IfWrong = "" },
+		"long question":  func(d *Decision) { d.Question = strings.Repeat("q", maxQuestion+1) },
+		"type":           func(d *Decision) { d.Type = "number" },
+		"yes and no":     func(d *Decision) { d.Options[0].Label, d.Options[1].Label = "Yes", "No" },
+		"one option":     func(d *Decision) { d.Options = d.Options[:1] },
+		"key":            func(d *Decision) { d.Options[1].Key = "a" },
+		"no consequence": func(d *Decision) { d.Options[0].Consequence = "" },
+		"default":        func(d *Decision) { d.Default = "z" },
+		"text options":   func(d *Decision) { d.Type = DecisionText },
+		"yes_no options": func(d *Decision) { d.Type = DecisionYesNo },
+	}
+	for name, change := range bad {
+		d := base
+		d.Options = append([]DecisionOption(nil), base.Options...)
+		change(&d)
+		if checkDecisions([]Decision{d}) == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if checkDecisions([]Decision{base, base}) == nil {
+		t.Error("a duplicate id accepted")
+	}
+}
+
+// The pointer line is one non-empty line.
+func TestAnswersPointerIsChecked(t *testing.T) {
+	for _, p := range []string{"", "two\nlines"} {
+		cfg := DefaultConfig()
+		cfg.Policies.Answers.Pointer = p
+		if err := cfg.finish(t.TempDir()); err == nil || !strings.Contains(err.Error(), "answers.pointer") {
+			t.Errorf("pointer %q: %v", p, err)
+		}
+	}
+}
+
+// A dead session answered in the owner's own words is restarted with the
+// answer, and waits on the owner again once it is delivered. A later
+// restart's facts still name answers.json.
+func TestDeadSessionAnsweredOtherIsRestarted(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.status("s1", working)
+	writeQuestions(t, h, "s1", chooseColour)
+	h.ticks(2, 5*time.Minute)
+	if h.state("s1") != BlockedOnOwner || h.tmux.count("new-session", "s1") != 0 {
+		t.Fatalf("state %s", h.state("s1"))
+	}
+	if err := answerAs(h, "s1", AnswerPayload{ID: "D1", Other: "Ask the widgets team."}); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(1, 5*time.Minute)
+	if n := h.tmux.count("new-session", "s1"); n != 1 {
+		t.Fatalf("%d starts, want 1", n)
+	}
+	if doc, ok := readAnswers(t, h, "s1"); !ok || doc.Answers[0].Other != "Ask the widgets team." {
+		t.Fatalf("answers.json %+v", doc)
+	}
+	h.alive("s1", "waiting")
+	h.ticks(2, 5*time.Minute)
+	if h.state("s1") != BlockedOnOwner {
+		t.Fatalf("after the delivery: state %s", h.state("s1"))
+	}
+	tr := h.sup.Tracks()["s1"]
+	if p := h.sup.restartPrompt(h.cfg.Sessions["s1"], tr, "restart"); !strings.Contains(p, `"answers":`) || strings.Contains(p, h.cfg.Policies.Answers.Pointer) {
+		t.Fatalf("a later restart's prompt %q", p)
+	}
+}
+
+// An answer is to the decision as it was raised: a reworded question, or
+// an id raised again for another, waits for the owner again.
+func TestAnswerToAChangedQuestionWaits(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.alive("s1", "waiting")
+	h.status("s1", working)
+	writeQuestions(t, h, "s1", chooseColour)
+	h.ticks(2, 5*time.Minute)
+	if err := answerAs(h, "s1", AnswerPayload{ID: "D1", Choice: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(2, 5*time.Minute)
+	if h.state("s1") == BlockedOnOwner {
+		t.Fatal("still blocked after the answer")
+	}
+	writeQuestions(t, h, "s1", strings.Replace(chooseColour, "Which colour should the widget be?", "Which colour should the gadget be?", 1))
+	h.ticks(2, 5*time.Minute)
+	if h.state("s1") != BlockedOnOwner {
+		t.Fatalf("reworded question: state %s", h.state("s1"))
+	}
+	if _, ok := h.sup.Tracks()["s1"].answer("D1"); ok {
+		t.Fatal("the old answer fits the reworded question")
+	}
+}
+
+// Delivering marks the answers it delivered only: an answer given between
+// the delivery's intent and its action is delivered again after a replay.
+func TestLaterAnswerIsNotTakenAsDelivered(t *testing.T) {
+	cfg := DefaultConfig()
+	st := NewLogState(&cfg, ModeLive)
+	t0 := pageAt
+	t1 := t0.Add(time.Minute)
+	d := Decision{ID: "D1", Type: DecisionText, Question: "q", Blocking: true}
+	for _, e := range []Event{
+		{V: EventVersion, Time: t0, Kind: KindDecision, Mode: ModeLive, Session: "s1", Decision: &DecisionPayload{Hash: "h", Decisions: []Decision{d}}},
+		{V: EventVersion, Time: t0, Kind: KindAnswer, Mode: ModeOwner, Session: "s1", Answer: &AnswerPayload{ID: "D1", Text: "first", Asked: decisionHash(d)}},
+		{V: EventVersion, Time: t1, Kind: KindAnswer, Mode: ModeOwner, Session: "s1", Answer: &AnswerPayload{ID: "D1", Text: "second", Asked: decisionHash(d)}},
+		{V: EventVersion, Time: t1, Kind: KindAction, Mode: ModeLive, Session: "s1", Act: &ActPayload{Action: ActAnswer, Answers: []string{"D1"}, AnswersAt: []time.Time{t0}}},
+	} {
+		st.apply(e)
+	}
+	if r := st.Tracks["s1"].Answers["D1"]; r.Text != "second" || r.Delivered {
+		t.Fatalf("the later answer is %+v", r)
+	}
+}
+
+// What a session raises is screened before it is logged: a decision whose
+// words match a confidential pattern is logged by id, type and option keys
+// only.
+func TestDecisionsAreScreened(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.cfg.ConfidentialPatterns = []string{"(?i)style guide"}
+	h.restart(false)
+	h.alive("s1", "waiting")
+	h.status("s1", working)
+	writeQuestions(t, h, "s1", chooseColour)
+	h.ticks(2, 5*time.Minute)
+	if strings.Contains(h.buf.String(), "style guide") || strings.Contains(h.buf.String(), "Which colour") {
+		t.Fatalf("the log holds the decision's words:\n%s", h.buf.String())
+	}
+	ds := h.sup.Tracks()["s1"].Decisions
+	if len(ds) != 1 || !ds[0].Withheld || len(ds[0].Options) != 2 || ds[0].Options[1].Key != "b" || h.state("s1") != BlockedOnOwner {
+		t.Fatalf("decisions %+v, state %s", ds, h.state("s1"))
+	}
+}
+
+// An answer delivery cut short by a crash of agentd may not have written
+// the file, so it is not taken as delivered and is delivered again.
+func TestCutShortAnswerIsDeliveredAgain(t *testing.T) {
+	cfg := DefaultConfig()
+	st := NewLogState(&cfg, ModeLive)
+	d := Decision{ID: "D1", Type: DecisionText, Question: "q", Blocking: true}
+	act := &ActPayload{Action: ActAnswer, Intent: "i1", Answers: []string{"D1"}, AnswersAt: []time.Time{pageAt}}
+	for _, e := range []Event{
+		{V: EventVersion, Time: pageAt, Kind: KindDecision, Mode: ModeLive, Session: "s1", Decision: &DecisionPayload{Hash: "h", Decisions: []Decision{d}}},
+		{V: EventVersion, Time: pageAt, Kind: KindAnswer, Mode: ModeOwner, Session: "s1", Answer: &AnswerPayload{ID: "D1", Text: "yes", Asked: decisionHash(d)}},
+		{V: EventVersion, Time: pageAt, Kind: KindWarning, Mode: ModeLive, Session: "s1", Warning: &WarningPayload{Warning: "cut short", Intent: act}},
+	} {
+		st.apply(e)
+	}
+	if st.Tracks["s1"].Answers["D1"].Delivered {
+		t.Fatal("an answer cut short is taken as delivered")
+	}
+}
+
+// questions.json is read only as a regular file, never through a link,
+// and never more than its limit.
+func TestQuestionsFileMustBeRegular(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "elsewhere.json"), chooseColour)
+	if err := os.Symlink(filepath.Join(dir, "elsewhere.json"), filepath.Join(dir, QuestionsFile)); err != nil {
+		t.Fatal(err)
+	}
+	if _, ds, err := readQuestions(dir); err == nil || ds != nil {
+		t.Fatalf("read through a link: %v, %v", ds, err)
+	}
+	os.Remove(filepath.Join(dir, QuestionsFile))
+	writeFile(t, filepath.Join(dir, QuestionsFile), strings.Repeat(" ", maxQuestionsFile+10))
+	if _, _, err := readQuestions(dir); err == nil || !strings.Contains(err.Error(), "over") {
+		t.Fatalf("an oversized file: %v", err)
+	}
+}

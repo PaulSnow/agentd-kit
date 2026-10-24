@@ -47,6 +47,8 @@ type Event struct {
 	Checkpoint *CheckpointPayload `json:"checkpoint,omitempty"`
 	Poll       *PollPayload       `json:"poll,omitempty"`
 	Triage     *TriagePayload     `json:"triage,omitempty"`
+	Decision   *DecisionPayload   `json:"decision,omitempty"`
+	Answer     *AnswerPayload     `json:"answer,omitempty"`
 }
 
 // Event kinds.
@@ -70,6 +72,8 @@ const (
 	KindCheckpoint = "checkpoint" // a merge newly at the head of a session's worktree
 	KindPoll       = "poll"       // a poll of a forge that found something, failed, or recovered
 	KindTriage     = "triage"     // the checked answer of a triage job: each item's kind, needs and summary
+	KindDecision   = "decision"   // a session's questions.json changed: the decisions it raises
+	KindAnswer     = "answer"     // the owner answered one of a session's decisions
 )
 
 // Modes, in the mode every event carries. A run reads only the events of
@@ -95,6 +99,7 @@ const (
 	ActUpdate   = "update" // the open Questions escalation's text changed
 	ActRotate   = "rotate" // a fresh context at a checkpoint: not a crash, not a restart
 	ActStop     = "stop"   // the budget or the stop time was reached
+	ActAnswer   = "answer" // the owner's answers written to answers.json and the pointer typed
 )
 
 // StartPayload is a run's start: the sessions it supervises.
@@ -111,23 +116,26 @@ type StopPayload struct {
 // UnchangedS is absent until the screen has been seen, since until then
 // the time is unknown; Restarts is absent when restarts are off.
 type ObservePayload struct {
-	State          string     `json:"state"`
-	Reason         string     `json:"reason"`
-	Alive          bool       `json:"alive"`
-	Done           bool       `json:"done"`
-	Questions      bool       `json:"questions"`
-	Limited        bool       `json:"limited"`
-	Trust          bool       `json:"trust"`
-	Dialog         bool       `json:"dialog"`
-	Command        string     `json:"command"`
-	Head           string     `json:"head"`
-	PaneHash       string     `json:"pane_hash,omitempty"`
-	PaneSince      *time.Time `json:"pane_since,omitempty"`
-	TranscriptRole string     `json:"transcript_role,omitempty"`
-	TranscriptStop string     `json:"transcript_stop,omitempty"`
-	TranscriptAt   *time.Time `json:"transcript_at,omitempty"`
-	Restarts       *int       `json:"restarts,omitempty"`
-	UnchangedS     *int       `json:"unchanged_s,omitempty"`
+	State     string `json:"state"`
+	Reason    string `json:"reason"`
+	Alive     bool   `json:"alive"`
+	Done      bool   `json:"done"`
+	Questions bool   `json:"questions"`
+	// StatusQuestions is the hash of STATUS.md's Questions section, as an
+	// answer names it, or "" when it asks nothing.
+	StatusQuestions string     `json:"status_questions,omitempty"`
+	Limited         bool       `json:"limited"`
+	Trust           bool       `json:"trust"`
+	Dialog          bool       `json:"dialog"`
+	Command         string     `json:"command"`
+	Head            string     `json:"head"`
+	PaneHash        string     `json:"pane_hash,omitempty"`
+	PaneSince       *time.Time `json:"pane_since,omitempty"`
+	TranscriptRole  string     `json:"transcript_role,omitempty"`
+	TranscriptStop  string     `json:"transcript_stop,omitempty"`
+	TranscriptAt    *time.Time `json:"transcript_at,omitempty"`
+	Restarts        *int       `json:"restarts,omitempty"`
+	UnchangedS      *int       `json:"unchanged_s,omitempty"`
 }
 
 // TransitionPayload is a change of state and the evidence for it.
@@ -158,6 +166,12 @@ type ActPayload struct {
 	Checkpoint string `json:"checkpoint,omitempty"`
 	// A stop: why.
 	Reason string `json:"reason,omitempty"`
+	// An answer, or a restart that hands answers over: the decisions whose
+	// answers answers.json holds, newly delivered.
+	Answers []string `json:"answers,omitempty"`
+	// AnswersAt is when each of Answers was given, so a later answer to
+	// the same decision is not taken as delivered.
+	AnswersAt []time.Time `json:"answers_at,omitempty"`
 
 	// Typing: a nudge, a resume, the trust keys.
 	Message  string   `json:"message,omitempty"`
@@ -279,7 +293,8 @@ func (e Event) check() error {
 		KindStart: e.Start != nil, KindStop: e.Stop != nil, KindObserve: e.Observe != nil, KindTransition: e.Transition != nil,
 		KindSkip: e.Skip != nil, KindCrash: e.Crash != nil, KindClear: e.Clear != nil, KindError: e.Error != nil, KindWarning: e.Warning != nil,
 		KindItem: e.Item != nil, KindSeen: e.Seen != nil, KindCursor: e.Cursor != nil, KindUsage: e.Usage != nil,
-		KindCheckpoint: e.Checkpoint != nil, KindPoll: e.Poll != nil, KindTriage: e.Triage != nil, "act": e.Act != nil,
+		KindCheckpoint: e.Checkpoint != nil, KindPoll: e.Poll != nil, KindTriage: e.Triage != nil, KindDecision: e.Decision != nil,
+		KindAnswer: e.Answer != nil, "act": e.Act != nil,
 	}
 	want := e.Kind
 	switch e.Kind {
@@ -302,6 +317,10 @@ func (e Event) check() error {
 		return fmt.Errorf("a %s event must not carry mode %q", e.Kind, e.Mode)
 	case e.Kind == KindSeen && e.Mode != ModeOwner:
 		return fmt.Errorf("a seen event is the owner's, not %q", e.Mode)
+	case e.Kind == KindAnswer && (e.Mode != ModeOwner || e.Session == ""):
+		return errors.New("an answer event is the owner's, for one session")
+	case e.Kind == KindDecision && (e.Mode == ModeOwner || e.Session == ""):
+		return errors.New("a decision event is a run's, for one session")
 	}
 	switch e.Mode {
 	case ModeLive, ModeShadow, ModeOwner, ModeShared:

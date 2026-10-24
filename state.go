@@ -77,10 +77,18 @@ type Track struct {
 	Blocked       map[string]string  // worktree: the last reason its delivery was declined
 	GaveUp        []string           // escalation keys given up on
 	CutShort      []string           // actions a crash of agentd cut short
-	Asked         string             // the Questions text last posted, while they stay open
-	AskedAt       time.Time
-	Filtered      map[string]bool // escalation keys whose text was withheld
-	Deliveries    []DeliveryRecord
+	// Decisions: what the session raised in questions.json, as last read
+	// (DecisionsHash), the hash of its STATUS.md Questions, and the
+	// owner's answers by decision id.
+	Decisions       []Decision
+	DecisionsHash   string
+	StatusQuestions string
+	Answers         map[string]AnswerRecord
+
+	Asked      string // the Questions text last posted, while they stay open
+	AskedAt    time.Time
+	Filtered   map[string]bool // escalation keys whose text was withheld
+	Deliveries []DeliveryRecord
 }
 
 // DeliveryRecord is one request a delivery opened, found, or was told of.
@@ -175,7 +183,8 @@ func (t *Track) clear() {
 
 func newTrack() *Track {
 	return &Track{Posted: map[string]bool{}, Delivered: map[string]string{}, Skipped: map[string]bool{}, Failures: map[string][]time.Time{},
-		Blocked: map[string]string{}, Filtered: map[string]bool{}, Usage: map[string]UsagePayload{}}
+		Blocked: map[string]string{}, Filtered: map[string]bool{}, Usage: map[string]UsagePayload{},
+		Answers: map[string]AnswerRecord{}}
 }
 
 // restartsInWindow counts restarts inside the backoff window.

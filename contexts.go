@@ -494,19 +494,25 @@ func ParseProgress(text string) Progress {
 // restartFacts is what agentd hands a fresh session about where it stands,
 // as one compact JSON document: data, not instructions.
 type restartFacts struct {
-	Why       string   `json:"why"` // rotation or restart
+	Why       string   `json:"why"` // rotation, restart, or answered: restarted with the owner's answers
 	Brief     string   `json:"brief"`
 	Progress  string   `json:"progress"`
 	Item      string   `json:"item,omitempty"`
 	State     string   `json:"state,omitempty"`
 	LastMerge string   `json:"last_merge,omitempty"`
 	Next      []string `json:"next,omitempty"`
+	Answers   string   `json:"answers,omitempty"` // the owner's answers, when restarted with them
 }
 
 // restartPrompt is the fresh session's prompt: the fixed instruction, then
 // the facts agentd recorded, from the progress file and the last merge.
 func (s *Supervisor) restartPrompt(sess Session, t *Track, why string) string {
 	f := restartFacts{Why: why, Brief: sess.Workdir + "/BRIEF.md", Progress: sess.Workdir + "/STATUS.md"}
+	// Answers the owner gave stay in the file and are named in every
+	// fresh session's facts, since the context that read them is gone.
+	if len(t.answersFor(false)) > 0 {
+		f.Answers = sess.Workdir + "/" + AnswersFile
+	}
 	if b, err := os.ReadFile(f.Progress); err == nil {
 		p := ParseProgress(string(b))
 		f.Item, f.State, f.Next = p.Item, p.State, p.Next
@@ -518,7 +524,11 @@ func (s *Supervisor) restartPrompt(sess Session, t *Track, why string) string {
 	enc := json.NewEncoder(&b)
 	enc.SetEscapeHTML(false)
 	enc.Encode(f)
-	return DefaultRestartPrompt + " " + strings.TrimSuffix(b.String(), "\n")
+	prompt := DefaultRestartPrompt + " "
+	if why == "answered" {
+		prompt += s.cfg.Policies.Answers.Pointer + " "
+	}
+	return prompt + strings.TrimSuffix(b.String(), "\n")
 }
 
 // launchCommand is the restart policy's command for a fresh session, with
