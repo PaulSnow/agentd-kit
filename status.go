@@ -26,6 +26,11 @@ type SessionStatus struct {
 	Blocked     []string // why a delivery is declined, per worktree not yet delivered
 	GaveUp      []string // escalations given up on
 	CutShort    []string // actions a crash of agentd cut short, and pending intents
+	Context     int64    // the current transcript's context in tokens, or -1 when unknown
+	Spend       int64    // input-equivalent tokens over every transcript, or -1 when unknown
+	Guessed     bool     // a figure rests on a transcript agentd did not launch
+	Rotations   int
+	Stopped     string // why the budget stopped it
 }
 
 // Summarize folds the event log for mode through the one reader into one
@@ -51,7 +56,14 @@ func Summarize(cfg *Config, events []Event, mode string) ([]SessionStatus, map[s
 	for name, t := range st.Tracks {
 		r := SessionStatus{Name: name, State: t.State, Since: t.Since, LastSeen: t.LastSeen, Head: t.Head, Reason: t.Reason,
 			Restarts: t.RestartCount, Nudges: t.NudgeCount, Escalations: t.Escalations, Delivered: t.DeliveredRefs,
-			Would: t.Would, Errors: t.Errors, GaveUp: t.GaveUp, CutShort: append(append([]string(nil), t.CutShort...), pending[name]...)}
+			Would: t.Would, Errors: t.Errors, GaveUp: t.GaveUp, CutShort: append(append([]string(nil), t.CutShort...), pending[name]...),
+			Context: -1, Spend: -1, Guessed: t.guessed(), Rotations: t.Rotations, Stopped: t.Stopped}
+		if u, ok := t.current(); ok {
+			r.Context = u.Context
+		}
+		if sp, ok := t.spend(); ok {
+			r.Spend = sp
+		}
 		for _, d := range cfg.Sessions[name].Deliver {
 			if why := t.Blocked[d.Worktree]; why != "" && t.Delivered[name+":"+d.Worktree] == "" {
 				r.Blocked = append(r.Blocked, why)
@@ -87,7 +99,7 @@ func PrintStatus(w io.Writer, rows []SessionStatus, meta map[string]any, now tim
 		fmt.Fprintf(w, "%s; %d events\n", line, meta["events"])
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "SESSION\tSTATE\tFOR\tSEEN\tRESTARTS\tNUDGES\tESCALATED\tDELIVERED\tWHY")
+	fmt.Fprintln(tw, "SESSION\tSTATE\tFOR\tSEEN\tCONTEXT\tSPEND\tRESTARTS\tROTATED\tNUDGES\tESCALATED\tDELIVERED\tWHY")
 	for _, r := range rows {
 		delivered := strings.Join(r.Delivered, ",")
 		if delivered == "" {
@@ -106,8 +118,12 @@ func PrintStatus(w io.Writer, rows []SessionStatus, meta map[string]any, now tim
 		for _, c := range r.CutShort {
 			why += "; no outcome: " + c
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\n",
-			r.Name, r.State, ago(now, r.Since), ago(now, r.LastSeen), r.Restarts, r.Nudges, r.Escalations, delivered, why)
+		if r.Guessed {
+			why += "; tokens from the newest transcript in its directory, a guess"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%s\t%s\n",
+			r.Name, r.State, ago(now, r.Since), ago(now, r.LastSeen), tokens(r.Context), tokens(r.Spend), r.Restarts, r.Rotations,
+			r.Nudges, r.Escalations, delivered, why)
 	}
 	tw.Flush()
 }
@@ -126,4 +142,17 @@ func ago(now, t time.Time) string {
 		return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
 	}
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
+}
+
+// tokens abbreviates a token count, or "?" when it is unknown.
+func tokens(n int64) string {
+	switch {
+	case n < 0:
+		return "?"
+	case n < 10000:
+		return fmt.Sprint(n)
+	case n < 10000000:
+		return fmt.Sprintf("%dk", n/1000)
+	}
+	return fmt.Sprintf("%dM", n/1000000)
 }

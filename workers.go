@@ -125,6 +125,7 @@ func (t *Track) clone() *Track {
 	c.Skipped = copyMap(t.Skipped)
 	c.Blocked = copyMap(t.Blocked)
 	c.Filtered = copyMap(t.Filtered)
+	c.Usage = copyMap(t.Usage)
 	c.Failures = make(map[string][]time.Time, len(t.Failures))
 	for k, v := range t.Failures {
 		c.Failures[k] = append([]time.Time(nil), v...)

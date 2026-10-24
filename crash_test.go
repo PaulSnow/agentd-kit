@@ -151,7 +151,7 @@ func TestRestartPromptPathsAreQuoted(t *testing.T) {
 	}
 	bin, home := t.TempDir(), t.TempDir()
 	got := filepath.Join(h.dir, "prompt")
-	writeFile(t, filepath.Join(bin, "claude"), "#!/bin/sh\nprintf '%s' \"$1\" > '"+got+"'\n")
+	writeFile(t, filepath.Join(bin, "claude"), "#!/bin/sh\nprintf '%s' \"$3\" > '"+got+"'\n")
 	if err := os.Chmod(filepath.Join(bin, "claude"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestRestartPromptPathsAreQuoted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), filepath.Join(weird, "BRIEF.md")) || !strings.Contains(string(b), filepath.Join(weird, "STATUS.md")) {
+	if f := promptFacts(t, string(b)); f.Brief != filepath.Join(weird, "BRIEF.md") || f.Progress != filepath.Join(weird, "STATUS.md") || f.Why != "restart" {
 		t.Fatalf("prompt = %q", b)
 	}
 	if _, err := os.Stat(filepath.Join(h.dir, "pwned")); err == nil {

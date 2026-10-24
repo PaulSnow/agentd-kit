@@ -236,7 +236,7 @@ func TestDialogAnsweredDuringItsEscalation(t *testing.T) {
 // shares one with the loop. A field added to Track must be added to clone, and
 // here.
 func TestCloneCopiesEveryMapAndSlice(t *testing.T) {
-	cloned := map[string]bool{"Restarts": true, "Crashes": true, "Posted": true, "Delivered": true, "Skipped": true, "Failures": true,
+	cloned := map[string]bool{"Restarts": true, "Usage": true, "Crashes": true, "Posted": true, "Delivered": true, "Skipped": true, "Failures": true,
 		"DeliveredRefs": true, "Blocked": true, "GaveUp": true, "CutShort": true, "Filtered": true, "Deliveries": true, "LastObs": true}
 	ty := reflect.TypeOf(Track{})
 	for i := 0; i < ty.NumField(); i++ {

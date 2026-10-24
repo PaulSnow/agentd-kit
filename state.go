@@ -17,6 +17,7 @@ const (
 	Done           State = "done"
 	Failed         State = "failed"
 	CrashLooping   State = "crash-looping"
+	Stopped        State = "stopped" // the budget or the stop time was reached
 )
 
 // Track is what the supervisor remembers about one session between passes.
@@ -41,6 +42,18 @@ type Track struct {
 	// NotClaudeSince is when the pane was first seen running a command
 	// that is not Claude, or zero while it runs Claude.
 	NotClaudeSince time.Time
+
+	// Context and spend. Transcript is the Claude Code session id agentd
+	// last launched the session under, or "" when it has not; Measured is
+	// the transcript last measured; Usage is every transcript's totals.
+	Transcript string
+	Measured   string
+	Usage      map[string]UsagePayload
+	Checkpoint Checkpoint // the latest merge seen at the worktree's head
+	Launched   time.Time  // the latest restart or rotation started
+	RotatedFor string     // the merge the latest rotation was at
+	Rotations  int        // rotations, taken or would-be, ever
+	Stopped    string     // why the session was stopped, until the owner clears it
 
 	Posted    map[string]bool        // escalation keys already posted, or given up on
 	Questions QuestionsEscalation    // the escalation of the Questions section
@@ -154,13 +167,13 @@ func (t *Track) noteCrash(c Crash, max int) {
 
 // clear is the owner's clearing of a parked session.
 func (t *Track) clear() {
-	t.Crashes, t.Parked = nil, false
+	t.Crashes, t.Parked, t.Stopped = nil, false, ""
 	t.Clears++
 }
 
 func newTrack() *Track {
 	return &Track{Posted: map[string]bool{}, Delivered: map[string]string{}, Skipped: map[string]bool{}, Failures: map[string][]time.Time{},
-		Blocked: map[string]string{}, Filtered: map[string]bool{}}
+		Blocked: map[string]string{}, Filtered: map[string]bool{}, Usage: map[string]UsagePayload{}}
 }
 
 // restartsInWindow counts restarts inside the backoff window.
@@ -235,6 +248,8 @@ func Classify(t *Track, ev Evidence, pol Policies, now time.Time) (State, string
 		return CrashLooping, fmt.Sprintf("parked after %d crashes; waiting for the owner to run agentd clear", len(t.Crashes))
 	case ev.Status.Done:
 		return Done, "STATUS.md ends with DONE"
+	case t.Stopped != "":
+		return Stopped, "stopped: " + t.Stopped + "; waiting for the owner to run agentd clear"
 	case !ev.Alive && ev.Status.Questions != "":
 		return BlockedOnOwner, "tmux session gone and STATUS.md has open Questions; parked for the owner, not restarted"
 	case !ev.Alive:

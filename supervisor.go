@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -49,6 +48,7 @@ type Supervisor struct {
 	shadow bool
 	worker bool       // this copy runs one job off the loop
 	work   *workState // shared by the loop and its workers
+	usage  *usageReader
 
 	// halt is the first failed append of the pass. Once set, nothing more
 	// is done until the next pass: an action whose record could be lost
@@ -86,6 +86,7 @@ func NewSupervisor(cfg *Config, log *Log, clock Clock, tmux Tmux, git Git, forge
 		shadow:  shadow,
 		st:      NewLogState(cfg, mode(shadow)),
 		work:    newWorkState(),
+		usage:   newUsageReader(),
 		tailOff: log.Size(),
 		limitRe: regexp.MustCompile(cfg.Policies.UsageLimit.Pattern),
 		trustRe: regexp.MustCompile(`^(?:` + cfg.Policies.Trust.Pattern + `)$`),
@@ -413,11 +414,7 @@ func (s *Supervisor) observe(name string, sess Session) (Evidence, error) {
 			}
 		}
 	}
-	if root := s.cfg.TranscriptDir; root != "" {
-		// An account with its own config directory keeps its transcripts there.
-		if a := s.cfg.Accounts[sess.Account]; sess.Account != "" && a.ConfigDir != "" {
-			root = filepath.Join(a.ConfigDir, "projects")
-		}
+	if root := s.transcriptRoot(sess); root != "" {
 		ev.Transcript = ReadTranscript(TranscriptDir(root, sess.Cwd))
 	}
 	return ev, nil
@@ -431,7 +428,7 @@ func (s *Supervisor) step(name string, sess Session) {
 		s.emit(name, Event{Kind: KindError, Error: &ErrorPayload{Step: "observe", Error: err.Error()}})
 		return
 	}
-	if !ev.Alive && t.Live && !ev.Status.Done {
+	if !ev.Alive && t.Live && !ev.Status.Done && t.Stopped == "" {
 		screen := ev.DeadScreen
 		if !ev.PaneDead {
 			screen = shortHash(t.Hash) // gone outright: the last screen seen
@@ -439,6 +436,9 @@ func (s *Supervisor) step(name string, sess Session) {
 		if s.crash(name, t, Crash{Exit: ev.Exit, Screen: screen}, false); s.halt != nil {
 			return
 		}
+	}
+	if s.stopForBudget(name, t, ev, now); s.halt != nil {
+		return
 	}
 	state, reason := Classify(t, ev, s.cfg.Policies, now)
 	// The observe event, applied, ends a dialog episode and opens or
@@ -452,6 +452,11 @@ func (s *Supervisor) step(name string, sess Session) {
 	}
 	if state != t.State {
 		s.emit(name, Event{Kind: KindTransition, Transition: &TransitionPayload{From: string(t.State), To: string(state), Reason: reason}})
+	}
+	// The transcript and the worktree are read in a worker, from what the
+	// transcript gained since the last read; the next pass acts on them.
+	if s.halt == nil {
+		s.spawn(name, "measure:"+name, func(w *Supervisor, wt *Track) { w.measure(name, sess, wt) })
 	}
 }
 
@@ -526,6 +531,9 @@ func sameObservation(a, b ObservePayload) bool {
 
 func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, state State, now time.Time) State {
 	pol := s.cfg.Policies
+	if (state == Working || state == Idle) && !t.Limited && s.rotate(name, sess, t, ev, now) {
+		return Starting
+	}
 	// The limit has cleared. Only a session that can take a line is told to
 	// go on: never one that is DONE, waits on the owner, or shows a dialog.
 	if t.Limited && ev.Alive && (state == Working || state == Idle) {
@@ -559,12 +567,8 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 				return state
 			}
 		}
-		brief, status := sess.Workdir+"/BRIEF.md", sess.Workdir+"/STATUS.md"
-		cmd := make([]string, len(pol.Restart.Command))
-		for i, part := range pol.Restart.Command {
-			cmd[i] = strings.NewReplacer("{brief}", brief, "{status}", status).Replace(part)
-		}
-		line, err := s.launchLine(sess, cmd)
+		id := newSessionID()
+		line, err := s.launchLine(sess, s.launchCommand(sess, t, id, "restart"))
 		if err != nil {
 			// Not final, and not a crash: the owner may fix the account.
 			// There is no fallback to another account.
@@ -572,7 +576,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			s.escalate(name, "account:"+name, fmt.Sprintf("%s is gone and cannot be restarted under its account: %v. Fix the account; agentd will not use another.", name, err), t, now)
 			return state
 		}
-		err = s.act(name, ActRestart, &ActPayload{Attempt: n + 1, Cwd: sess.Cwd, Respawn: ev.PaneDead, Account: sess.Account, Command: line}, func() error {
+		err = s.act(name, ActRestart, &ActPayload{Attempt: n + 1, Cwd: sess.Cwd, Respawn: ev.PaneDead, Account: sess.Account, Command: line, Transcript: id}, func() error {
 			if ev.PaneDead {
 				return s.tmux.Respawn(name, sess.Cwd, line)
 			}

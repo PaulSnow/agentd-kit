@@ -36,6 +36,9 @@ type Git interface {
 	FirstSubject(dir, target string) (string, error)
 	// Messages is every commit message, in full, in origin/target..HEAD.
 	Messages(dir, target string) (string, error)
+	// LastMerge is the newest merge commit reachable from HEAD and its
+	// subject, or "" when there is none.
+	LastMerge(dir string) (sha, subject string, err error)
 }
 
 // MergeRequest is what to open on the forge.
@@ -349,6 +352,15 @@ func (g ExecGit) FirstSubject(dir, target string) (string, error) {
 
 func (g ExecGit) Messages(dir, target string) (string, error) {
 	return gitOut(g.Timeout, dir, "log", "--format=%B", "origin/"+target+"..HEAD")
+}
+
+func (g ExecGit) LastMerge(dir string) (string, string, error) {
+	out, err := gitOut(g.Timeout, dir, "log", "-1", "--merges", "--format=%H%x00%s", "HEAD")
+	if err != nil {
+		return "", "", err
+	}
+	sha, subject, _ := strings.Cut(strings.TrimSpace(out), "\x00")
+	return sha, subject, nil
 }
 
 // ExecForge pushes with git and opens with glab or gh, by the repository's
