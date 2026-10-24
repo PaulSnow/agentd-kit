@@ -8,8 +8,11 @@ import (
 
 // LogState is what the event log says for one mode: each session's Track,
 // the intents still waiting for their outcome, and the run's start and
-// stop. apply is the only code that changes it, so replay, the live path
-// (emit, then apply) and every view read the log the same way.
+// stop. apply is the only code that changes what the log decides, so
+// replay, the live path (emit, then apply) and every view read the log the
+// same way. The one exception is the pane memory a pass keeps between its
+// own observations (Classify's noteHash), which the observe event it logs
+// then records.
 type LogState struct {
 	Mode    string
 	Tracks  map[string]*Track
@@ -59,7 +62,7 @@ func (st *LogState) CutShort() []Event {
 // ignored; the owner's records count for both. In shadow mode a would event
 // counts as the action taken, so the shadow keeps its own counters.
 func (st *LogState) apply(e Event) {
-	if e.Mode != st.Mode && e.Mode != ModeOwner && e.Kind != KindWarning {
+	if e.Mode != st.Mode && e.Mode != ModeOwner && e.Mode != "" {
 		return
 	}
 	st.Events++
@@ -89,9 +92,10 @@ func (st *LogState) apply(e Event) {
 			t.HashSince = *o.PaneSince
 			t.Nudges = 0
 		}
-		// The limit is remembered until the resume line is typed, not
-		// only while the message shows: that is when it is typed.
-		if o.Limited {
+		// The limit is remembered from a pass that found the session
+		// usage-limited until the resume line is typed, not only while the
+		// message shows: that is when it is typed.
+		if State(o.State) == UsageLimited {
 			t.Limited = true
 		}
 		if !o.Dialog {
@@ -119,6 +123,7 @@ func (st *LogState) apply(e Event) {
 		k := e.Skip
 		if k.Delivered != "" {
 			t.Delivered[k.Delivered] = k.Outcome
+			t.DeliveredRefs = append(t.DeliveredRefs, k.Outcome)
 			// Found already open or merged; failed and nothing deliver nothing.
 			if k.Outcome != "failed" && k.Outcome != "nothing" {
 				t.Deliveries = append(t.Deliveries, DeliveryRecord{Ref: k.Outcome, Repository: k.Repository, Delivered: k.Delivered, At: e.Time})
@@ -160,7 +165,7 @@ func (st *LogState) apply(e Event) {
 			}
 			t.Would++
 		}
-		t.applyAction(e.Act, e.Kind == KindAction, e.Time)
+		t.applyAction(e.Act, e.Kind == KindAction, true, e.Time)
 		if a := e.Act; (a.Action == ActEscalate || a.Action == ActUpdate) && strings.HasPrefix(a.Key, "questions:") {
 			t.Asked, t.AskedAt = questionText(e.Session, a.Message), e.Time
 			if t.Filtered[a.Key] {
@@ -175,9 +180,13 @@ func (st *LogState) apply(e Event) {
 		if a := e.Warning.Intent; a != nil {
 			delete(st.Pending, a.Intent)
 			t.CutShort = append(t.CutShort, a.Action+" "+a.Key)
+			at := e.Time
+			if e.Warning.IntentAt != nil {
+				at = *e.Warning.IntentAt
+			}
 			switch a.Action {
 			case ActEscalate, ActUpdate, ActNudge, ActResume, ActTrust:
-				t.applyAction(a, false, e.Time)
+				t.applyAction(a, false, false, at)
 			}
 		}
 	}
@@ -185,27 +194,37 @@ func (st *LogState) apply(e Event) {
 
 // applyAction folds an action taken (or, in shadow mode, one that would
 // have been). taken is false for a would event and for an action cut short,
-// which started nothing that can be observed.
-func (t *Track) applyAction(a *ActPayload, taken bool, at time.Time) {
+// which started nothing that can be observed; counted is false for an
+// action cut short, which the views list apart rather than count.
+func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
+	n := 0
+	if counted {
+		n = 1
+	}
 	switch a.Action {
 	case ActRestart:
 		t.Restarts = append(t.Restarts, at)
-		t.RestartCount++
+		t.RestartCount += n
 		if taken { // a would-be restart started nothing
 			t.Hash, t.HashSince, t.Observed, t.Live = "", at, true, true
 			t.Nudges, t.LastNudge, t.Limited = 0, time.Time{}, false
 		}
 	case ActNudge:
 		t.Nudges++
-		t.NudgeCount++
+		t.NudgeCount += n
 		t.LastNudge = at
+		if a.PaneHash != "" { // the screen after the nudge's echo
+			t.Hash = a.PaneHash
+		}
 	case ActResume:
 		t.Limited = false
 	case ActTrust:
 		t.TrustHash = a.PaneHash
 	case ActEscalate, ActUpdate:
 		t.Posted[a.Key] = true
-		t.Escalations++
+		if a.Action == ActEscalate {
+			t.Escalations += n
+		}
 		t.settleQuestions(a.QuestionsHash, a.Update, at)
 		t.settleDialog(a.Dialog, at)
 	case ActOpen:

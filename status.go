@@ -45,7 +45,7 @@ func Summarize(cfg *Config, events []Event, mode string) ([]SessionStatus, map[s
 	}
 	pending := map[string][]string{}
 	for _, e := range st.CutShort() {
-		pending[e.Session] = append(pending[e.Session], e.Act.Action+" "+e.Act.Key+" (no outcome yet)")
+		pending[e.Session] = append(pending[e.Session], e.Act.Action+" "+e.Act.Key+" (no outcome yet: running, or cut short)")
 	}
 	out := make([]SessionStatus, 0, len(st.Tracks))
 	for name, t := range st.Tracks {
@@ -98,13 +98,13 @@ func PrintStatus(w io.Writer, rows []SessionStatus, meta map[string]any, now tim
 			why = fmt.Sprintf("%s (%d errors)", why, r.Errors)
 		}
 		for _, b := range r.Blocked {
-			why += "; delivery: " + b
+			why += "; delivery last declined: " + b
 		}
 		for _, g := range r.GaveUp {
 			why += "; gave up escalating " + g
 		}
 		for _, c := range r.CutShort {
-			why += "; cut short: " + c
+			why += "; no outcome: " + c
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\n",
 			r.Name, r.State, ago(now, r.Since), ago(now, r.LastSeen), r.Restarts, r.Nudges, r.Escalations, delivered, why)

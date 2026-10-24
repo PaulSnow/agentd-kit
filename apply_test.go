@@ -10,11 +10,10 @@ import (
 )
 
 // trackView is what a Track holds that the log decides: everything but
-// the pane memory a pass keeps for itself (the hash a nudge's echo is
-// absorbed into, and the last observation, kept to log only changes).
+// the last observation, which a pass keeps to log only changes.
 func trackView(t *Track) Track {
 	c := *t
-	c.Hash, c.LastObs = "", nil
+	c.LastObs = nil
 	return c
 }
 
@@ -24,7 +23,7 @@ func trackView(t *Track) Track {
 // a gate, gives an escalation up and delivers.
 func TestReplayEqualsTheLiveState(t *testing.T) {
 	for _, shadow := range []bool{false, true} {
-		h := newHarness(t, shadow, "mon", "idle", "ask", "dlg", "lim", "d", "gate")
+		h := newHarness(t, shadow, "mon", "idle", "ask", "dlg", "lim", "d", "gate", "md")
 		h.status("mon", working)
 		n := 0
 		h.tmux.deadScreen["mon"] = func() string { n++; return fmt.Sprintf("error %d", n%2) }
@@ -41,6 +40,8 @@ func TestReplayEqualsTheLiveState(t *testing.T) {
 		doneWithDelivery(t, h, "gate")
 		h.git.branches = map[string]string{h.dir + "/gate/wt": "feature"}
 		h.runner.failing = 2
+		h.status("md", "# Finished\n\nDONE\n")
+		h.deliver("md", Deliver{Repository: "widgets", Worktree: h.dir + "/md/wt", Target: "main", MRFile: h.dir + "/md/missing.md"})
 		h.sup.Run(contextWithCancel(t), true)
 		for i := 0; i < 30; i++ {
 			switch i {
@@ -54,6 +55,14 @@ func TestReplayEqualsTheLiveState(t *testing.T) {
 				h.tmux.commands["lim"] = ""
 			case 14:
 				h.status("ask", working)
+			case 16:
+				// The owner's records, written by other processes.
+				if err := MarkDelivered(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "md", h.dir+"/md/wt", "!9"); err != nil {
+					t.Fatal(err)
+				}
+				if err := ClearSession(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "mon"); err != nil {
+					t.Fatal(err)
+				}
 			}
 			h.ticks(1, 7*time.Minute)
 			sameAfterReplay(t, h, fmt.Sprintf("shadow=%v pass %d", shadow, i))
@@ -116,7 +125,7 @@ func TestCutShortIntentIsShownAndNotRepeated(t *testing.T) {
 	var out bytes.Buffer
 	rows, meta := Summarize(h.cfg, h.events(), ModeLive)
 	PrintStatus(&out, rows, meta, h.clock.now)
-	if !strings.Contains(out.String(), "cut short: escalate questions:ask:1") {
+	if !strings.Contains(out.String(), "no outcome: escalate questions:ask:1") {
 		t.Fatalf("status does not show the cut-short escalation:\n%s", out.String())
 	}
 }
@@ -153,7 +162,7 @@ func TestStatusShowsSilentSessionsAndBlockers(t *testing.T) {
 	}
 	var out bytes.Buffer
 	PrintStatus(&out, rows, meta, h.clock.now)
-	for _, want := range []string{"quiet", "delivery: DONE but the merge-request text is missing", "gave up escalating questions:ask:1"} {
+	for _, want := range []string{"quiet", "delivery last declined: DONE but the merge-request text is missing", "gave up escalating questions:ask:1"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("status lacks %q:\n%s", want, out.String())
 		}
@@ -175,5 +184,42 @@ func TestStatusKeepsModesApart(t *testing.T) {
 	live, _ := Summarize(h.cfg, events, ModeLive)
 	if shadow[0].Restarts == 0 || live[0].Restarts != 0 || live[0].State != "" {
 		t.Fatalf("shadow %+v, live %+v", shadow[0], live[0])
+	}
+}
+
+// An observation whose append failed is logged again at the next pass,
+// rather than taken as already logged.
+func TestFailedObserveIsLoggedAgain(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.status("s1", working)
+	h.alive("s1", "working")
+	w := &failingWriter{failOn: `"kind":"observe"`}
+	h.sup = NewSupervisor(h.cfg, NewLogWriter(w), h.clock, h.tmux, h.git, h.forge, h.runner, false)
+	if err := h.sup.Pass(); err == nil {
+		t.Fatal("the failed append did not stop the pass")
+	}
+	w.failOn = ""
+	h.clock.advance(5 * time.Minute)
+	if err := h.sup.Pass(); err != nil {
+		t.Fatal(err)
+	}
+	h.buf = &bytes.Buffer{}
+	h.buf.Write(w.Bytes())
+	if h.count(KindObserve, "", "s1") != 1 || !h.sup.Tracks()["s1"].Live {
+		t.Fatalf("observe events = %d, live = %v", h.count(KindObserve, "", "s1"), h.sup.Tracks()["s1"].Live)
+	}
+}
+
+// A live run's warning about an escalation it cut short settles that
+// escalation for the live run only; the shadow's state does not see it.
+func TestCutShortWarningKeepsToItsMode(t *testing.T) {
+	h := newHarness(t, false, "ask")
+	at := h.clock.Now()
+	events := []Event{{V: EventVersion, Time: at, Session: "ask", Kind: KindWarning, Mode: ModeLive,
+		Warning: &WarningPayload{Warning: "cut short", Intent: &ActPayload{Action: ActEscalate, Key: "questions:ask:1"}}}}
+	live := NewLogState(h.cfg, ModeLive).Fold(events).Tracks["ask"]
+	shadow := NewLogState(h.cfg, ModeShadow).Fold(events).Tracks["ask"]
+	if !live.Posted["questions:ask:1"] || shadow != nil {
+		t.Fatalf("live posted %v, shadow track %+v", live.Posted, shadow)
 	}
 }

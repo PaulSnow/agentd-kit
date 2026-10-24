@@ -209,8 +209,9 @@ func (s *Supervisor) Replay(events []Event) {
 // owner or a session may have seen as done, so it is never repeated.
 func (s *Supervisor) surfaceCutShort() {
 	for _, e := range s.st.CutShort() {
+		at := e.Time
 		s.emit(e.Session, Event{Kind: KindWarning, Warning: &WarningPayload{
-			Warning: "an action was cut short by a crash of agentd and has no recorded outcome; it is not repeated", Intent: e.Act}})
+			Warning: "an action was cut short by a crash of agentd and has no recorded outcome; it is not repeated", Intent: e.Act, IntentAt: &at}})
 	}
 }
 
@@ -418,13 +419,16 @@ func (s *Supervisor) logObserve(name string, t *Track, ev Evidence, state State,
 	if t.LastObs != nil && sameObservation(*t.LastObs, o) {
 		return
 	}
-	t.LastObs = &o
 	logged := o
 	if !t.HashSince.IsZero() { // unknown until the screen is first seen
 		n := int(now.Sub(t.HashSince).Seconds())
 		logged.UnchangedS = &n
 	}
-	s.emit(name, Event{Kind: KindObserve, Observe: &logged})
+	// Only an observation that reached the log counts as logged: one that
+	// did not is logged again at the next pass.
+	if s.emit(name, Event{Kind: KindObserve, Observe: &logged}); s.halt == nil {
+		t.LastObs = &o
+	}
 }
 
 // sameObservation says whether two observations differ only in their
@@ -547,14 +551,17 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 		if !t.LastNudge.IsZero() && now.Sub(t.LastNudge) < pol.Nudge.Stall.Duration {
 			return state
 		}
-		s.typeInto(name, ActNudge, &ActPayload{Nudge: t.Nudges + 1, Message: pol.Nudge.Message}, t, ev.PaneHash, func() error {
+		nudge := &ActPayload{Nudge: t.Nudges + 1, Message: pol.Nudge.Message}
+		s.typeInto(name, ActNudge, nudge, t, ev.PaneHash, func() error {
 			if err := s.tmux.Type(name, pol.Nudge.Message); err != nil {
 				return err
 			}
-			// Absorb the echo of the typed line, so it is not mistaken for progress.
+			// Absorb the echo of the typed line, so it is not mistaken for
+			// progress: the screen after it goes on the nudge's event, and
+			// apply takes it as the screen last seen.
 			s.clock.Sleep(time.Second)
 			if pane, err := s.tmux.CapturePane(name, PaneLines); err == nil {
-				t.Hash = HashPane(pane)
+				nudge.PaneHash = HashPane(pane)
 			}
 			return nil
 		})
@@ -579,7 +586,6 @@ func (t *Track) noteCommand(cmd string, commands []string, now time.Time) {
 // Claude, such as the shell left after Claude exited, for the stall time:
 // nothing is typed into it, so without a word it would sit there unseen.
 func (s *Supervisor) watchCommand(name, cmd string, t *Track, now time.Time) {
-	t.noteCommand(cmd, s.cfg.Policies.PaneCommands, now)
 	since := t.NotClaudeSince
 	if since.IsZero() || now.Sub(since) < s.cfg.Policies.Nudge.Stall.Duration {
 		return
@@ -650,8 +656,9 @@ func (s *Supervisor) confidentialMatch(texts ...string) int {
 
 // escalateQuestions posts the session's open Questions once per episode,
 // and each later change of their text as one short update, at most one per
-// pass and one per QuestionsUpdateGap, carrying the text current then. Both carry the hash of the text they cover, so replay knows which
-// text the console has seen.
+// pass and one per QuestionsUpdateGap, carrying the text current then. Both
+// carry the hash of the text they cover, so replay knows which text the
+// console has seen.
 func (s *Supervisor) escalateQuestions(name, questions string, t *Track, now time.Time) {
 	q := &t.Questions
 	hash := shortHash(HashPane(questions))
@@ -706,9 +713,9 @@ func (s *Supervisor) escalate(name, key, message string, t *Track, now time.Time
 // retried on the backoff schedule and given up after MaxRestarts tries,
 // with one skip saying so. A message that matches a confidential pattern is
 // replaced, before it is posted or logged, by one that names only the
-// session; one skip records that it was filtered, without the text. Each of
-// also, the uncut text a message was cut from, is screened the same way.
-// what goes on the events that settle the key, posted or given up on.
+// session; one skip records that it was filtered, without the text. Each
+// text in also, the uncut text a message was cut from, is screened the same
+// way. what goes on the events that settle the key, posted or given up on.
 func (s *Supervisor) post(name, action, key, message string, t *Track, now time.Time, what settles, also ...string) bool {
 	if t.Posted[key] {
 		return true

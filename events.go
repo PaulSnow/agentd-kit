@@ -229,9 +229,10 @@ type ErrorPayload struct {
 // line of the log it cut off, or an intent with no outcome, an action cut
 // short by a crash of agentd, which is shown and never silently repeated.
 type WarningPayload struct {
-	Warning string      `json:"warning"`
-	Bytes   int         `json:"bytes,omitempty"`
-	Intent  *ActPayload `json:"intent,omitempty"`
+	Warning  string      `json:"warning"`
+	Bytes    int         `json:"bytes,omitempty"`
+	Intent   *ActPayload `json:"intent,omitempty"`
+	IntentAt *time.Time  `json:"intent_at,omitempty"` // when the intent was recorded
 }
 
 // check refuses an event this agentd cannot read exactly: another version,
