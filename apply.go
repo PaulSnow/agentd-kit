@@ -308,7 +308,7 @@ func (st *LogState) apply(e Event) {
 				at = *e.Warning.IntentAt
 			}
 			switch a.Action {
-			case ActEscalate, ActUpdate, ActNudge, ActResume, ActTrust, ActRotate, ActDecline, ActWake:
+			case ActEscalate, ActUpdate, ActNudge, ActResume, ActTrust, ActRotate, ActDecline, ActWake, ActMerge:
 				t.applyAction(a, false, false, at)
 			}
 			// An answer cut short may not have reached the file: it is
@@ -375,6 +375,13 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 			t.Nudges, t.LastNudge, t.Limited = 0, time.Time{}, false
 			t.launched(a.Transcript, at)
 		}
+	case ActMerge:
+		// Taken, would-be or cut short: the forge may have merged it, so
+		// it is never tried again.
+		if t.Merges == nil {
+			t.Merges = map[string]string{}
+		}
+		t.Merges[ciKey(a.Repository, a.Ref)] = a.Head
 	case ActRaise:
 		if counted && a.Raised != nil {
 			if t.CIRaised == nil {

@@ -208,7 +208,9 @@ type EscalatePolicy struct {
 }
 
 // Repository is a forge project agentd may deliver to. Allow lists the writes
-// the forge client may make for it: "push" and "open". There is no "merge".
+// the forge client may make for it: "push", "open" and "merge". A merge is
+// only ever a fast-forward of a gated tree (#1 D2), and only where the
+// repository's own policy on the target branch grants it too (merge.go).
 // Host (by default gitlab.com or github.com) and Project build the one URL
 // delivery pushes to, over Transport, ssh (the default) or https; glab and
 // gh are pointed at Host.
@@ -492,11 +494,11 @@ func (c *Config) finish(base string) error {
 		}
 		c.Repositories[name] = repo
 		for _, a := range repo.Allow {
-			if a != "push" && a != "open" {
-				errs = append(errs, fmt.Errorf("repositories.%s.allow: %q is not push or open", name, a))
+			if a != "push" && a != "open" && a != "merge" {
+				errs = append(errs, fmt.Errorf("repositories.%s.allow: %q is not push, open or merge", name, a))
 			}
-			if a == "push" && len(repo.Gate) == 0 {
-				errs = append(errs, fmt.Errorf("repositories.%s allows push but has no gate: nothing is delivered without one", name))
+			if (a == "push" || a == "merge") && len(repo.Gate) == 0 {
+				errs = append(errs, fmt.Errorf("repositories.%s allows %s but has no gate: nothing is delivered or merged without one", name, a))
 			}
 		}
 		if repo.GateTimeout.Duration < 0 {

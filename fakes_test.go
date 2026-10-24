@@ -408,6 +408,8 @@ type fakeForge struct {
 	fail           error
 	recordThenFail error
 	pushErr        error // what a push returns, after recording it
+	merges         []mergedRequest
+	mergeErr       error // what a merge returns, after recording it
 }
 
 type mergedRequest struct {
@@ -434,6 +436,13 @@ func (f *fakeForge) Open(repo Repository, mr MergeRequest, dir string) (MergeRes
 		return MergeResult{}, f.recordThenFail
 	}
 	return f.result(len(f.opens)), nil
+}
+
+func (f *fakeForge) Merge(repo Repository, ref, head, target string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.merges = append(f.merges, mergedRequest{ref: ref, target: target, head: head})
+	return f.mergeErr
 }
 
 func (f *fakeForge) result(n int) MergeResult {

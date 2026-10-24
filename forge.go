@@ -72,7 +72,7 @@ type MergeResult struct {
 	Merged bool   // merged, from Find; otherwise open
 }
 
-// Forge performs writes on a forge. It can push and open; it cannot merge.
+// Forge performs writes on a forge: push, open, and a fast-forward merge.
 // Find is its one read: the open and merged requests from a branch of the
 // project itself, forks left out, each with its head commit. Closed ones are left out, since the branch may be
 // delivered again; the supervisor decides which, if any, delivers HEAD.
@@ -81,6 +81,10 @@ type Forge interface {
 	Push(dir, url, sha, branch string) error
 	Open(repo Repository, mr MergeRequest, dir string) (MergeResult, error)
 	Find(repo Repository, source, target string) ([]MergeResult, error)
+	// Merge fast-forwards target to head, the request ref's head: never
+	// a merge commit, a squash or a rebase. It fails when that is not a
+	// fast-forward.
+	Merge(repo Repository, ref, head, target string) error
 }
 
 // AllowedForge wraps a Forge with the per-repository allow-list. Every write
@@ -189,6 +193,15 @@ func (a AllowedForge) OpenAllowed(repo string, mr MergeRequest, dir string) (Mer
 	return a.Forge.Open(a.Repos[repo], mr, dir)
 }
 
+// MergeAllowed fast-forwards a request's target if the repository allows
+// merge. Whether the merge is due (merge.go) is the caller's to check.
+func (a AllowedForge) MergeAllowed(repo, ref, head, target string) error {
+	if err := a.allowed(repo, "merge"); err != nil {
+		return err
+	}
+	return a.Forge.Merge(a.Repos[repo], ref, head, target)
+}
+
 // runTimed runs a command in dir and returns its standard output, or its
 // combined output when combined is set. The command runs in a process group
 // of its own; if it is still running after timeout the whole group is killed,
@@ -251,6 +264,9 @@ const GateOutputMax = 64 * 1024
 // unattended fetch or push must fail, not wait for a human. Replace refs,
 // which would let a session swap one object for another, are not used.
 var gitEnv = []string{"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "SSH_ASKPASS=", "GCM_INTERACTIVE=never", "GIT_NO_REPLACE_OBJECTS=1"}
+
+// forgeEnv is gitEnv for gh and glab, which ask for nothing either.
+var forgeEnv = append(append([]string(nil), gitEnv...), "GH_PROMPT_DISABLED=1", "NO_PROMPT=1")
 
 // gitSafe go before every git command agentd runs: the worktree's config,
 // which the session can write, may not start a file-system monitor or a
@@ -604,9 +620,9 @@ func (g ExecGit) LastMerge(dir string) (string, string, time.Time, error) {
 	return f[0], f[2], at, nil
 }
 
-// ExecForge pushes with git and opens with glab or gh, by the repository's
-// forge, each call bounded by Timeout. It has no merge method, so no
-// configuration can make it merge.
+// ExecForge pushes with git, and opens and merges with glab or gh, by the
+// repository's forge, each call bounded by Timeout. Its merge is a
+// fast-forward only.
 type ExecForge struct{ Timeout time.Duration }
 
 // Push sends exactly sha, the commit the supervisor checked, never
@@ -638,6 +654,45 @@ func (f ExecForge) Find(repo Repository, source, target string) ([]MergeResult, 
 		return findGitHub(f.Timeout, repo, source, target)
 	}
 	return nil, fmt.Errorf("unknown forge %q", repo.Forge)
+}
+
+func (f ExecForge) Merge(repo Repository, ref, head, target string) error {
+	switch repo.Forge {
+	case "gitlab":
+		return mergeGitLab(f.Timeout, repo, ref, head)
+	case "github":
+		return mergeGitHub(f.Timeout, repo, head, target)
+	}
+	return fmt.Errorf("unknown forge %q", repo.Forge)
+}
+
+// mergeGitLab merges the request through GitLab's merge call, which
+// merges only while the request's head is sha, and without a squash. It
+// fast-forwards because the caller saw the project's merge method is ff,
+// under which GitLab refuses a request that is not a fast-forward.
+func mergeGitLab(timeout time.Duration, repo Repository, ref, head string) error {
+	proj := strings.ReplaceAll(repo.Project, "/", "%2F")
+	args := glabArgs(repo, "-X", "PUT", "projects/"+proj+"/merge_requests/"+strings.TrimPrefix(ref, "!")+"/merge",
+		"-f", "sha="+head, "-F", "squash=false")
+	if _, err := runTimed(timeout, "", forgeEnv, false, "glab", args...); err != nil {
+		return fmt.Errorf("glab: %s", exitMessage(err))
+	}
+	return nil
+}
+
+// mergeGitHub moves the target branch to head without force, which GitHub
+// does only for a fast-forward; GitHub has no fast-forward merge method,
+// and marks the request merged once the target contains its head.
+func mergeGitHub(timeout time.Duration, repo Repository, head, target string) error {
+	args := []string{"api", "--method", "PATCH", "repos/" + repo.Project + "/git/refs/heads/" + target,
+		"-f", "sha=" + head, "-F", "force=false"}
+	if repo.Host != "" {
+		args = append(args, "--hostname", repo.Host)
+	}
+	if _, err := runTimed(timeout, "", forgeEnv, false, "gh", args...); err != nil {
+		return fmt.Errorf("gh: %s", exitMessage(err))
+	}
+	return nil
 }
 
 // findGitLab lists the project's merge requests from source to target in
