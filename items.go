@@ -61,6 +61,8 @@ type ItemPayload struct {
 // SeenPayload is the owner marking items seen.
 type SeenPayload struct {
 	IDs []string `json:"ids"`
+	// From is the address the page was asked from, when it was.
+	From string `json:"from,omitempty"`
 }
 
 // CursorPayload is how far a source has been read: the snapshot's AsOf,
@@ -217,12 +219,12 @@ func RefreshItems(st *LogState, tr Tracking, now time.Time) ([]Event, error) {
 }
 
 // MarkSeen records the owner marking items seen, as an owner record both
-// modes read.
-func MarkSeen(log *Log, now time.Time, ids []string) error {
+// modes read; from is the page's caller, or empty.
+func MarkSeen(log *Log, now time.Time, ids []string, from string) error {
 	if len(ids) == 0 {
 		return errors.New("name at least one item to mark seen")
 	}
-	return log.Append(Event{V: EventVersion, Time: now, Kind: KindSeen, Mode: ModeOwner, Seen: &SeenPayload{IDs: ids}})
+	return log.Append(Event{V: EventVersion, Time: now, Kind: KindSeen, Mode: ModeOwner, Seen: &SeenPayload{IDs: ids, From: from}})
 }
 
 // SortedItems lists st's items, the newest first, unseen ones only when
@@ -269,7 +271,7 @@ func itemsCmd(args []string, w io.Writer) error {
 				return fmt.Errorf("no item %q", id)
 			}
 		}
-		return MarkSeen(log, time.Now(), ids)
+		return MarkSeen(log, time.Now(), ids, "")
 	}
 	fresh, rerr := RefreshItems(st, cfg.Tracking, time.Now())
 	for _, e := range fresh {

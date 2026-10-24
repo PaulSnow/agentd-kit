@@ -9,6 +9,7 @@
 //	agentd clear [--config PATH] [--log PATH] SESSION
 //	agentd inventory [--config PATH]
 //	agentd report [--config PATH] [--log PATH] [--shadow] [--host NAME] --out PATH
+//	agentd page [--config PATH] [--log PATH] [--shadow]
 //	agentd items [--config PATH] [--log PATH] [--new] [--seen ID,...]
 package main
 
@@ -51,6 +52,8 @@ func main() {
 		err = inventoryCmd(os.Args[2:], os.Stdout)
 	case "report":
 		err = reportCmd(os.Args[2:])
+	case "page":
+		err = pageCmd(os.Args[2:])
 	case "items":
 		err = itemsCmd(os.Args[2:], os.Stdout)
 	case "version", "--version":
@@ -78,6 +81,7 @@ func usage() {
   agentd clear [--config PATH] [--log PATH] SESSION
   agentd inventory [--config PATH]
   agentd report [--config PATH] [--log PATH] [--shadow] [--host NAME] --out PATH
+  agentd page [--config PATH] [--log PATH] [--shadow]
   agentd items [--config PATH] [--log PATH] [--new] [--seen ID,...]
   agentd version
 
@@ -91,7 +95,8 @@ manifest with its open work and clones, from the tracking snapshot. report
 writes report.json for the tracking site from the event log, atomically.
 items lists what is new since the owner last looked: issues, requests and
 discussions from the tracking snapshots, and mail findings; --seen marks
-items seen.`)
+items seen. page serves the owner's page on page.address, to the owner only;
+its one write marks items seen.`)
 }
 
 func loadConfigFlag(fs *flag.FlagSet, args []string) (*Config, *string, error) {

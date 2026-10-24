@@ -37,7 +37,13 @@ type SessionStatus struct {
 // row per session: every configured session, whether or not it has events
 // yet, and any other session the log names.
 func Summarize(cfg *Config, events []Event, mode string) ([]SessionStatus, map[string]any) {
-	st := NewLogState(cfg, mode).Fold(events)
+	return SummarizeState(cfg, NewLogState(cfg, mode).Fold(events))
+}
+
+// SummarizeState is Summarize over a state already folded, which it reads
+// and does not change.
+func SummarizeState(cfg *Config, st *LogState) ([]SessionStatus, map[string]any) {
+	mode := st.Mode
 	meta := map[string]any{"events": st.Events, "mode": mode}
 	if !st.Started.IsZero() {
 		meta["started"] = st.Started
@@ -46,24 +52,28 @@ func Summarize(cfg *Config, events []Event, mode string) ([]SessionStatus, map[s
 		meta["stopped"] = st.Stopped
 	}
 	// A source no longer polled is left out.
-	for src := range st.Polls {
-		if src == SourceGitHub && !cfg.Poll.GitHub || src == SourceGitLab && !cfg.Poll.GitLab {
-			delete(st.Polls, src)
+	polls := map[string]PollRecord{}
+	for src, p := range st.Polls {
+		if src == SourceGitHub && cfg.Poll.GitHub || src == SourceGitLab && cfg.Poll.GitLab {
+			polls[src] = p
 		}
 	}
-	if len(st.Polls) > 0 {
-		meta["polls"] = st.Polls
+	if len(polls) > 0 {
+		meta["polls"] = polls
 		meta["poll_stale"] = pollHeartbeat + 2*cfg.Poll.Every.Duration
 	}
+	tracks := copyMap(st.Tracks)
 	for _, n := range cfg.SessionNames() {
-		st.track(n)
+		if tracks[n] == nil {
+			tracks[n] = newTrack()
+		}
 	}
 	pending := map[string][]string{}
 	for _, e := range st.CutShort() {
 		pending[e.Session] = append(pending[e.Session], e.Act.Action+" "+e.Act.Key+" (no outcome yet: running, or cut short)")
 	}
-	out := make([]SessionStatus, 0, len(st.Tracks))
-	for name, t := range st.Tracks {
+	out := make([]SessionStatus, 0, len(tracks))
+	for name, t := range tracks {
 		r := SessionStatus{Name: name, State: t.State, Since: t.Since, LastSeen: t.LastSeen, Head: t.Head, Reason: t.Reason,
 			Restarts: t.RestartCount, Nudges: t.NudgeCount, Escalations: t.Escalations, Delivered: t.DeliveredRefs,
 			Would: t.Would, Errors: t.Errors, GaveUp: t.GaveUp, CutShort: append(append([]string(nil), t.CutShort...), pending[name]...),

@@ -237,7 +237,7 @@ func TestDialogAnsweredDuringItsEscalation(t *testing.T) {
 // here.
 func TestCloneCopiesEveryMapAndSlice(t *testing.T) {
 	cloned := map[string]bool{"Restarts": true, "Usage": true, "Crashes": true, "Posted": true, "Delivered": true, "Skipped": true, "Failures": true,
-		"DeliveredRefs": true, "Blocked": true, "GaveUp": true, "CutShort": true, "Filtered": true, "Deliveries": true, "LastObs": true}
+		"DeliveredRefs": true, "Blocked": true, "GaveUp": true, "CutShort": true, "Filtered": true, "Deliveries": true, "LastObs": true, "Escalated": true}
 	ty := reflect.TypeOf(Track{})
 	for i := 0; i < ty.NumField(); i++ {
 		f := ty.Field(i)

@@ -124,7 +124,7 @@ func TestMarkSeenSurvivesReplay(t *testing.T) {
 			st.apply(e)
 		}
 	}
-	if err := MarkSeen(log, time.Now(), []string{"gitlab/example-org/widgets#19"}); err != nil {
+	if err := MarkSeen(log, time.Now(), []string{"gitlab/example-org/widgets#19"}, ""); err != nil {
 		t.Fatal(err)
 	}
 	events, _, err := ReadEvents(bytes.NewReader(buf.Bytes()))
@@ -140,7 +140,7 @@ func TestMarkSeenSurvivesReplay(t *testing.T) {
 			t.Fatalf("%s: a refresh after replay made %d events, %v", mode, len(again), err)
 		}
 	}
-	if err := MarkSeen(log, time.Now(), nil); err == nil {
+	if err := MarkSeen(log, time.Now(), nil, ""); err == nil {
 		t.Fatal("marked nothing seen")
 	}
 }

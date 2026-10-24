@@ -7,6 +7,12 @@
     "snapshot": "~/tracking/data/snapshot.json",
     "mail": "~/tracking/data/mail-findings.json"
   },
+  "page": {
+    "address": "192.0.2.10:8770",
+    "hosts": ["192.0.2.10:8770", "host-a.example.net:8770"],
+    "whois": ["peer-whois", "--json", "{addr}"],
+    "owner": "owner@example.com"
+  },
   "confidential_patterns": ["(?i)embargoed", "(?i)customer:\\s*\\w+"],
   "timeouts": {
     "tmux": "10s",

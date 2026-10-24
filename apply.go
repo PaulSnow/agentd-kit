@@ -280,6 +280,12 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 		t.Posted[a.Key] = true
 		if a.Action == ActEscalate {
 			t.Escalations += n
+			if counted {
+				t.Escalated = append(t.Escalated, EscalationRecord{Key: a.Key, Message: a.Message, At: at})
+				if len(t.Escalated) > keptEscalations {
+					t.Escalated = t.Escalated[len(t.Escalated)-keptEscalations:]
+				}
+			}
 		}
 		t.settleQuestions(a.QuestionsHash, a.Update, a.Episode, at)
 		t.settleDialog(a.Dialog, a.Episode, at)
@@ -292,6 +298,17 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 		t.DeliveredRefs = append(t.DeliveredRefs, ref)
 		t.Deliveries = append(t.Deliveries, DeliveryRecord{Ref: ref, Repository: a.Repository, Delivered: a.Delivered, At: at})
 	}
+}
+
+// keptEscalations is how many of a session's latest escalations its Track
+// keeps, for the page.
+const keptEscalations = 10
+
+// EscalationRecord is one escalation posted: its key, its text and when.
+type EscalationRecord struct {
+	Key     string
+	Message string
+	At      time.Time
 }
 
 // settleQuestions settles a Questions escalation or update, posted or given
