@@ -174,9 +174,14 @@ type TrustPolicy struct {
 // DialogPolicy recognises a Claude Code permission or confirmation dialog on
 // the visible screen. Patterns are regular expressions; a session showing a
 // match is blocked on the owner and never typed into, since a typed line or
-// a key would answer the dialog.
+// a key would answer the dialog. A screen with a dialog's shape, a
+// question line and numbered options, is one without any pattern.
+// DeclineAfter, when positive, declines a dialog still showing that long
+// with Escape, which lets the agent adapt; it is off by default, and
+// nothing ever approves one.
 type DialogPolicy struct {
-	Patterns []string `json:"patterns"`
+	Patterns     []string `json:"patterns"`
+	DeclineAfter Duration `json:"decline_after"`
 }
 
 // EscalatePolicy runs Command, with {console} and {message} substituted, once
@@ -414,6 +419,9 @@ func (c *Config) finish(base string) error {
 		if _, err := regexp.Compile(p); err != nil {
 			errs = append(errs, fmt.Errorf("policies.dialog.patterns[%d]: %w", i, err))
 		}
+	}
+	if c.Policies.Dialog.DeclineAfter.Duration < 0 {
+		errs = append(errs, errors.New("policies.dialog.decline_after must not be negative"))
 	}
 	if len(c.Policies.PaneCommands) == 0 {
 		errs = append(errs, errors.New("policies.pane_commands must name at least one command"))

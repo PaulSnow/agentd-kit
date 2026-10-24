@@ -465,7 +465,7 @@ func (s *Supervisor) observe(name string, sess Session) (Evidence, error) {
 		if err != nil {
 			return ev, err
 		}
-		ev.PaneHash = HashPane(pane)
+		ev.PaneHash = StillHash(pane)
 		screen, err := s.tmux.CapturePane(name, 0)
 		if err != nil {
 			return ev, err
@@ -477,6 +477,9 @@ func (s *Supervisor) observe(name string, sess Session) (Evidence, error) {
 				ev.Dialog = re.String()
 				break
 			}
+		}
+		if ev.Dialog == "" && dialogShape(screen) {
+			ev.Dialog = "a question line with numbered options"
 		}
 	}
 	if root := s.transcriptRoot(sess); root != "" {
@@ -729,6 +732,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			s.escalateQuestions(name, ev.Status.Questions, t, now)
 		case ev.Dialog != "":
 			s.escalateDialog(name, ev.Dialog, t, now)
+			s.declineDialog(name, t, ev, now)
 		default:
 			s.escalate(name, fmt.Sprintf("tool-wait:%s:%d", name, t.HashSince.Unix()),
 				fmt.Sprintf("%s has shown the same screen since %s with a tool call as its last turn; it is probably waiting at a permission prompt. Attach and answer it.", name, t.HashSince.Format(time.RFC3339)), t, now)
@@ -757,7 +761,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			// apply takes it as the screen last seen.
 			s.clock.Sleep(time.Second)
 			if pane, err := s.tmux.CapturePane(name, PaneLines); err == nil {
-				nudge.PaneHash = HashPane(pane)
+				nudge.PaneHash = StillHash(pane)
 			}
 			return nil
 		})
@@ -795,6 +799,7 @@ func (s *Supervisor) watchCommand(name, cmd string, t *Track, now time.Time) {
 var (
 	errNotClaude     = errors.New("the pane does not run Claude")
 	errScreenChanged = errors.New("the screen changed since it was read")
+	errParked        = errors.New("the session is parked")
 )
 
 // typeInto performs an action that types or sends keys, only after asking
@@ -806,6 +811,10 @@ var (
 func (s *Supervisor) typeInto(name, action string, a *ActPayload, t *Track, seen string, do func() error) error {
 	if s.halt != nil {
 		return s.halt
+	}
+	if t.Parked {
+		s.skipOnce(name, "parked:"+action+":"+name+":"+fmt.Sprint(len(t.Crashes)), "the session is parked; not typing", t, &SkipPayload{Action: action})
+		return errParked
 	}
 	info, err := s.tmux.Pane(name)
 	if err != nil {
@@ -824,7 +833,7 @@ func (s *Supervisor) typeInto(name, action string, a *ActPayload, t *Track, seen
 			s.emit(name, Event{Kind: KindError, Error: &ErrorPayload{Step: action + ": capture", Error: err.Error()}})
 			return err
 		}
-		if now := HashPane(pane); now != seen {
+		if now := StillHash(pane); now != seen {
 			// Answers wait for a working session whose screen may move
 			// every pass: that is logged once for the answers.
 			key := "screen-changed:" + action + ":" + shortHash(now)
@@ -889,9 +898,27 @@ func (s *Supervisor) escalateDialog(name, pattern string, t *Track, now time.Tim
 		return
 	}
 	n := dq.N + 1
-	s.post(name, ActEscalate, fmt.Sprintf("dialog:%s:%d", name, n),
-		fmt.Sprintf("%s is stopped at a permission or confirmation dialog (the screen matches %q); agentd will not answer it. Attach and answer it.", name, pattern),
-		t, now, settles{Dialog: n, Episode: dq.Episode})
+	msg := fmt.Sprintf("%s is stopped at a permission or confirmation dialog (the screen matches %q); agentd will not answer it. Attach and answer it.", name, pattern)
+	if after := s.cfg.Policies.Dialog.DeclineAfter.Duration; after > 0 {
+		msg += fmt.Sprintf(" If it still shows at %s, agentd will decline it (Escape).", dq.Since.Add(after).Format(time.RFC3339))
+	}
+	s.post(name, ActEscalate, fmt.Sprintf("dialog:%s:%d", name, n), msg, t, now, settles{Dialog: n, Episode: dq.Episode})
+}
+
+// declineDialog sends Escape, once per episode, to a dialog that has shown
+// for the policy's DeclineAfter: a refusal lets the agent adapt where a
+// dialog nobody answers stops it for good. It never approves: Escape is the
+// only key it sends, and only to the screen the pass read.
+func (s *Supervisor) declineDialog(name string, t *Track, ev Evidence, now time.Time) {
+	after := s.cfg.Policies.Dialog.DeclineAfter.Duration
+	dq := &t.Dialog
+	if after <= 0 || !dq.Showing || dq.Declined >= dq.Episode || now.Sub(dq.Since) < after {
+		return
+	}
+	keys := []string{"Escape"}
+	s.typeInto(name, ActDecline, &ActPayload{Keys: keys, PaneHash: ev.PaneHash, Episode: dq.Episode}, t, ev.PaneHash, func() error {
+		return s.tmux.Keys(name, keys...)
+	})
 }
 
 // cutUTF8 cuts text to at most n bytes on a UTF-8 boundary, marking the cut.

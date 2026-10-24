@@ -93,6 +93,7 @@ const (
 	ActNudge    = "nudge"
 	ActResume   = "resume"
 	ActTrust    = "trust"
+	ActDecline  = "decline" // Escape sent to a dialog shown past the policy's time
 	ActFetch    = "fetch"
 	ActPush     = "push"
 	ActOpen     = "open"

@@ -157,6 +157,7 @@ func (st *LogState) apply(e Event) {
 		}
 		if o.Dialog && !t.Dialog.Showing {
 			t.Dialog.Episode++
+			t.Dialog.Since = e.Time
 		}
 		t.Dialog.Showing = o.Dialog
 		t.StatusQuestions = o.StatusQuestions
@@ -331,6 +332,12 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 		t.Limited = false
 	case ActTrust:
 		t.TrustHash = a.PaneHash
+	case ActDecline:
+		// Once per episode, a would-be or cut-short one too: Escape twice
+		// could reach whatever the first left on screen.
+		if a.Episode > t.Dialog.Declined {
+			t.Dialog.Declined = a.Episode
+		}
 	case ActEscalate, ActUpdate:
 		t.Posted[a.Key] = true
 		if a.Action == ActEscalate {

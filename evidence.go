@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -171,6 +172,63 @@ func fenceOf(line string) (string, string) {
 func HashPane(text string) string {
 	sum := sha256.Sum256([]byte(text))
 	return hex.EncodeToString(sum[:])
+}
+
+// The parts of a Claude Code screen that move while nothing else does: the
+// spinner glyph and its rotating verb, elapsed-time counters, token counts
+// and clock times. A session at a dialog under a running subagent shows
+// all of them ticking.
+var (
+	spinnerLine  = regexp.MustCompile(`(?m)^(\s*)[·✢✳✶✻✽*](\s+)[\p{L}-]+…`)
+	elapsedCount = regexp.MustCompile(`\b(?:\d+h\s?)?(?:\d+m\s?)?\d+(?:\.\d+)?s\b|\b\d+h\s?\d+m\b`)
+	tokenCount   = regexp.MustCompile(`[↑↓]?\s*\d+(?:\.\d+)?k?\s+tokens\b`)
+	clockTime    = regexp.MustCompile(`\b\d{1,2}:\d{2}(?::\d{2})?\b`)
+)
+
+// stillText is screen with what moves on its own replaced by fixed text,
+// so a screen that differs only in its counters reads the same.
+func stillText(screen string) string {
+	screen = spinnerLine.ReplaceAllString(screen, "$1*$2…")
+	screen = elapsedCount.ReplaceAllString(screen, "#s")
+	screen = tokenCount.ReplaceAllString(screen, "# tokens")
+	return clockTime.ReplaceAllString(screen, "#:#")
+}
+
+// StillHash hashes screen text without its counters and spinners: the hash
+// stillness is judged by, and the one a typing action compares before it
+// types.
+func StillHash(screen string) string { return HashPane(stillText(screen)) }
+
+// dialogOption is a dialog's numbered option, the selected one marked.
+var dialogOption = regexp.MustCompile(`^(?:❯\s*)?(\d)\.\s+\S`)
+
+// dialogShape says whether the screen shows a dialog's shape wherever it
+// comes from, the main session or a subagent: a line that is wholly a
+// question, followed within a few lines by options numbered 1 and 2.
+func dialogShape(screen string) bool {
+	lines := strings.Split(screen, "\n")
+	for i := range lines {
+		lines[i] = strings.Trim(lines[i], " \t│┃|")
+	}
+	for i, line := range lines {
+		if !strings.HasSuffix(line, "?") || strings.HasPrefix(line, ">") {
+			continue
+		}
+		next := 1
+		for j := i + 1; j < len(lines) && j <= i+4; j++ {
+			m := dialogOption.FindStringSubmatch(lines[j])
+			if m == nil || m[1] != fmt.Sprint(next) {
+				if next > 1 {
+					break
+				}
+				continue
+			}
+			if next++; next > 2 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // shortHash abbreviates a hash for keys and the status table.
