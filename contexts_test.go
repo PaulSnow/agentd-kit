@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// call is one line of a fake transcript: an assistant turn and its usage.
+// usageLine is one line of a fake transcript: an assistant turn and its usage.
 func usageLine(id string, in, cw, cr, out int64, sidechain bool) string {
 	b, _ := json.Marshal(map[string]any{"type": "assistant", "isSidechain": sidechain, "timestamp": "2026-10-22T00:00:00Z",
 		"message": map[string]any{"id": id, "usage": map[string]int64{"input_tokens": in, "cache_creation_input_tokens": cw,
@@ -171,7 +171,7 @@ func TestRotateAtCheckpointNotBefore(t *testing.T) {
 	if _, ok := tr.current(); ok {
 		t.Fatal("the new transcript's context is known before it has a call")
 	}
-	if sp, ok := tr.spend(); !ok || sp != spendOf(tr.Usage[id]) {
+	if sp, ok := tr.spend(true); !ok || sp != spendOf(tr.Usage[id]) {
 		t.Fatalf("spend = %d, %v", sp, ok)
 	}
 	h.ticks(3, time.Minute)
@@ -322,6 +322,9 @@ func TestLiveDoesNotRotateOnGuess(t *testing.T) {
 	h.git.merge = "m0"
 	h.transcript("outside", usageLine("m1", 10, 150000, 0, 5, false))
 	h.ticks(2, time.Minute)
+	if u, ok := h.sup.Tracks()["s"].current(); !ok || !u.Guessed {
+		t.Fatalf("the guess was not measured: %+v, %v", u, ok)
+	}
 	h.git.merge = "m1"
 	for i := 0; i < 8; i++ {
 		h.tmux.setPane("s", fmt.Sprint("working ", i))
@@ -349,5 +352,99 @@ func TestStatusShowsContextAndSpend(t *testing.T) {
 	rows, _ = Summarize(h2.cfg, h2.events(), ModeLive)
 	if rows[0].Context != -1 || rows[0].Spend != -1 {
 		t.Fatalf("unmeasured row = %+v", rows[0])
+	}
+}
+
+// A session measured by a guess before agentd launched it is held to its
+// budget from the launch on, and the guess no longer counts.
+func TestBudgetAfterGuessThenLaunch(t *testing.T) {
+	h := newHarness(t, false, "s")
+	h.cfg.TranscriptDir = filepath.Join(h.dir, "projects")
+	h.cfg.Policies.Budget.SessionTokens = 1000
+	h.alive("s", "working")
+	h.transcript("outside", usageLine("o1", 900, 0, 0, 0, false))
+	h.ticks(2, time.Minute)
+	if sp, ok := h.sup.Tracks()["s"].spend(true); ok {
+		t.Fatalf("live counted a guess: %d", sp)
+	}
+	h.tmux.alive["s"] = false // gone: restarted under a transcript agentd names
+	h.ticks(1, time.Minute)
+	id := h.sup.Tracks()["s"].Transcript
+	h.transcript(id, usageLine("m1", 5000, 0, 0, 0, false))
+	h.ticks(2, time.Minute)
+	if n := h.count(KindAction, ActStop, "s"); n != 1 || !strings.Contains(h.sup.Tracks()["s"].Stopped, "spend 5000") {
+		t.Fatalf("stops = %d, why %q", n, h.sup.Tracks()["s"].Stopped)
+	}
+}
+
+// A stopped session cleared by the owner is restarted, not counted as a
+// crash, and its cap counts from the clear.
+func TestClearAfterStop(t *testing.T) {
+	h, id := contextHarness(t, false)
+	h.cfg.Policies.Budget.SessionTokens = 1000
+	h.transcript(id, usageLine("m1", 2000, 0, 0, 0, false))
+	h.ticks(3, time.Minute)
+	if h.count(KindAction, ActStop, "s") != 1 {
+		t.Fatal("not stopped")
+	}
+	h.sup.st.apply(Event{V: EventVersion, Time: h.clock.Now(), Session: "s", Kind: KindClear, Mode: ModeOwner, Clear: &ClearPayload{By: "clear"}})
+	h.ticks(4, time.Minute)
+	if h.count(KindCrash, "", "s") != 0 || h.count(KindAction, ActStop, "s") != 1 || !h.tmux.alive["s"] {
+		t.Fatalf("after clear: crashes %d, stops %d, alive %v", h.count(KindCrash, "", "s"), h.count(KindAction, ActStop, "s"), h.tmux.alive["s"])
+	}
+}
+
+// A finished session over its budget is left to deliver.
+func TestDoneSessionNotStopped(t *testing.T) {
+	h, id := contextHarness(t, false)
+	h.cfg.Policies.Budget.SessionTokens = 1000
+	h.status("s", "# s\n\nDONE\n")
+	h.transcript(id, usageLine("m1", 2000, 0, 0, 0, false))
+	h.ticks(3, time.Minute)
+	if n := h.count(KindAction, ActStop, "s"); n != 0 {
+		t.Fatalf("a DONE session was stopped: %d", n)
+	}
+}
+
+// Going back to an older merge, by checking out an older branch, is not a
+// checkpoint.
+func TestOlderMergeIsNoCheckpoint(t *testing.T) {
+	h, id := contextHarness(t, false)
+	base := h.clock.Now()
+	h.git.mergeAt = map[string]time.Time{"m0": base.Add(-time.Hour), "m1": base}
+	h.transcript(id, usageLine("m1", 10, 150000, 0, 5, false))
+	h.git.merge = "m1"
+	h.ticks(8, time.Minute)
+	h.git.merge = "m0"
+	h.ticks(8, time.Minute)
+	if n := h.count(KindAction, ActRotate, "s"); n != 1 || h.count(KindCheckpoint, "", "s") != 2 {
+		t.Fatalf("rotations %d, checkpoints %d", n, h.count(KindCheckpoint, "", "s"))
+	}
+}
+
+// A rotation that keeps failing is escalated once, and not tried for ever.
+func TestFailedRotationEscalates(t *testing.T) {
+	h, id := contextHarness(t, false)
+	h.transcript(id, usageLine("m1", 10, 150000, 0, 5, false))
+	h.git.merge = "m1"
+	h.ticks(6, time.Minute)
+	if h.count(KindAction, ActRotate, "s") != 1 {
+		t.Fatal("not rotated")
+	}
+	h.git.merge = "m2"
+	h.tmux.alive["s"] = true
+	h.transcript(h.sup.Tracks()["s"].Transcript, usageLine("n1", 10, 150000, 0, 5, false))
+	h.tmux.mu.Lock()
+	h.tmux.replaceErr = fmt.Errorf("respawn refused")
+	h.tmux.mu.Unlock()
+	h.ticks(240, time.Minute)
+	tries, escalations := h.tmux.count("replace", "s")-1, 0
+	for _, e := range h.events() {
+		if e.Kind == KindAction && e.Act.Action == ActEscalate && strings.HasPrefix(e.Act.Key, "rotate:") {
+			escalations++
+		}
+	}
+	if tries != h.cfg.Policies.Restart.MaxRestarts || escalations != 1 {
+		t.Fatalf("tries %d, escalations %d", tries, escalations)
 	}
 }

@@ -50,10 +50,16 @@ type UsagePayload struct {
 // a session is its baseline, a merge from before agentd looked, at which
 // nothing is rotated.
 type CheckpointPayload struct {
-	SHA      string `json:"sha"`
-	Subject  string `json:"subject"`
-	Baseline bool   `json:"baseline,omitempty"`
+	SHA       string    `json:"sha"`
+	Subject   string    `json:"subject"`
+	Committed time.Time `json:"committed"`
+	Baseline  bool      `json:"baseline,omitempty"`
 }
+
+// launchWait is how long a launched session has to write its transcript
+// before agentd decides the command did not pass the session id on, and
+// guesses instead.
+const launchWait = 10 * time.Minute
 
 // Checkpoint is the latest checkpoint seen for a session, and when.
 type Checkpoint struct {
@@ -68,32 +74,39 @@ func spendOf(u UsagePayload) int64 {
 }
 
 // current is the usage of the transcript the session now runs, when known:
-// the one agentd launched, or, for a session it did not launch, the guess.
+// the one agentd launched, or the guess, for a session it did not launch or
+// whose launched transcript never appeared.
 func (t *Track) current() (UsagePayload, bool) {
 	u, ok := t.Usage[t.Measured]
-	if !ok || t.Transcript != "" && t.Measured != t.Transcript {
+	if !ok || t.Transcript != "" && t.Measured != t.Transcript && !u.Guessed {
 		return UsagePayload{}, false
 	}
 	return u, true
 }
 
-// spend is the session's spend over every transcript measured for it.
-func (t *Track) spend() (int64, bool) {
+// spend is the session's spend since the owner last cleared it: every
+// transcript agentd launched it under, and, while it has launched none, the
+// current guess. exact leaves the guess out, as live mode does. A guess
+// agentd has since replaced with a launch, or another file that was newest
+// for a while, is never counted.
+func (t *Track) spend(exact bool) (int64, bool) {
 	var n int64
+	known := false
 	for _, u := range t.Usage {
-		n += u.Spend
-	}
-	return n, len(t.Usage) > 0
-}
-
-// guessed says whether the session's spend rests on a guessed transcript.
-func (t *Track) guessed() bool {
-	for _, u := range t.Usage {
-		if u.Guessed {
-			return true
+		if !u.Guessed {
+			n, known = n+u.Spend, true
 		}
 	}
-	return false
+	if u := t.Usage[t.Measured]; t.guessed() && !exact {
+		n, known = n+u.Spend, true
+	}
+	return n - t.SpendBase, known
+}
+
+// guessed says whether the session is measured by a guess.
+func (t *Track) guessed() bool {
+	u, ok := t.Usage[t.Measured]
+	return ok && u.Guessed
 }
 
 // callUsage is one model call's tokens.
@@ -107,17 +120,18 @@ func (c *callUsage) add(o callUsage, sign int64) {
 }
 
 // transcriptFile is how far one transcript file has been read and what it
-// held. Claude Code writes a call that has several content blocks as several
-// lines with the same message id; each counts once, with its last line's
-// usage.
+// held. Claude Code writes a call that has several content blocks as
+// several consecutive lines with the same message id; each call counts
+// once, with its last line's usage, so only the last call is remembered.
 type transcriptFile struct {
 	off     int64
-	partial []byte               // a last line not yet ended
-	calls   map[string]callUsage // by message id
+	partial []byte // a last line not yet ended
+	lastID  string
+	last    callUsage
+	calls   int
 	sum     callUsage
 	context int64
 	known   bool // a main-chain call has been read, so context is known
-	anon    int  // lines with usage and no id, each its own call
 }
 
 // usageReader reads transcripts in the workers, each file from where the
@@ -134,7 +148,7 @@ func newUsageReader() *usageReader { return &usageReader{files: map[string]*tran
 func (r *usageReader) read(path string) (*transcriptFile, error) {
 	f := r.files[path]
 	if f == nil {
-		f = &transcriptFile{calls: map[string]callUsage{}}
+		f = &transcriptFile{}
 		r.files[path] = f
 	}
 	fh, err := os.Open(path)
@@ -147,7 +161,7 @@ func (r *usageReader) read(path string) (*transcriptFile, error) {
 		return nil, err
 	}
 	if info.Size() < f.off {
-		*f = transcriptFile{calls: map[string]callUsage{}}
+		*f = transcriptFile{}
 	}
 	if _, err := fh.Seek(f.off, io.SeekStart); err != nil {
 		return nil, err
@@ -194,14 +208,12 @@ func (f *transcriptFile) note(line []byte) {
 	if id == "" {
 		id = l.RequestID
 	}
-	if id == "" {
-		f.anon++
-		id = fmt.Sprintf("\x00%d", f.anon)
+	if id != "" && id == f.lastID {
+		f.sum.add(f.last, -1)
+	} else {
+		f.calls++
 	}
-	if prev, ok := f.calls[id]; ok {
-		f.sum.add(prev, -1)
-	}
-	f.calls[id] = u
+	f.lastID, f.last = id, u
 	f.sum.add(u, 1)
 	if !l.IsSidechain {
 		f.context, f.known = u.in+u.cw+u.cr, true
@@ -223,7 +235,7 @@ func (r *usageReader) measure(dir, id string) (UsagePayload, bool, error) {
 	if !main.known {
 		return UsagePayload{}, false, nil
 	}
-	sum, calls := main.sum, len(main.calls)
+	sum, calls := main.sum, main.calls
 	subs, _ := filepath.Glob(filepath.Join(dir, id, "subagents", "*.jsonl"))
 	sort.Strings(subs)
 	for _, p := range subs {
@@ -232,7 +244,7 @@ func (r *usageReader) measure(dir, id string) (UsagePayload, bool, error) {
 			continue // a subagent file that went away: its calls are not counted
 		}
 		sum.add(f.sum, 1)
-		calls += len(f.calls)
+		calls += f.calls
 	}
 	u := UsagePayload{Transcript: id, Calls: calls, Input: sum.in, CacheWrite: sum.cw, CacheRead: sum.cr, Output: sum.out, Context: main.context}
 	u.Spend = spendOf(u)
@@ -280,7 +292,9 @@ func (s *Supervisor) measure(name string, sess Session, t *Track) {
 	if root := s.transcriptRoot(sess); root != "" {
 		dir := TranscriptDir(root, sess.Cwd)
 		id, guessed := t.Transcript, false
-		if id == "" {
+		if _, err := os.Stat(filepath.Join(dir, id+".jsonl")); id == "" || err != nil && t.Launched.Before(s.clock.Now().Add(-launchWait)) {
+			// Not launched by agentd, or by a command that does not pass
+			// the session id on: the newest transcript is a guess.
 			id, guessed = newestTranscript(dir), true
 		}
 		if id != "" {
@@ -292,9 +306,12 @@ func (s *Supervisor) measure(name string, sess Session, t *Track) {
 			}
 		}
 	}
-	sha, subject, err := s.git.LastMerge(sess.Cwd)
-	if err == nil && sha != "" && sha != t.Checkpoint.SHA {
-		s.emit(name, Event{Kind: KindCheckpoint, Checkpoint: &CheckpointPayload{SHA: sha, Subject: subject, Baseline: t.Checkpoint.SHA == ""}})
+	// Only a newer merge is a checkpoint: a checkout of an older branch
+	// goes back to an earlier merge, which is not one reached now.
+	sha, subject, at, err := s.git.LastMerge(sess.Cwd)
+	if err == nil && sha != "" && sha != t.Checkpoint.SHA && !at.Before(t.Checkpoint.Committed) {
+		s.emit(name, Event{Kind: KindCheckpoint, Checkpoint: &CheckpointPayload{SHA: sha, Subject: subject, Committed: at,
+			Baseline: t.Checkpoint.SHA == ""}})
 	}
 }
 
@@ -319,6 +336,11 @@ func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, no
 		return false
 	}
 	key := "rotate:" + name + ":" + cp.SHA
+	if s.failed(t, key) {
+		s.escalate(name, key, fmt.Sprintf("%s could not be rotated at %s after %d tries; its context stays at %d tokens. See agentd status.",
+			name, shortHash(cp.SHA), len(t.Failures[key]), u.Context), t, now)
+		return false
+	}
 	if !s.retryDue(t, key, now) {
 		return false
 	}
@@ -343,15 +365,14 @@ func (s *Supervisor) overBudget(t *Track, now time.Time) string {
 	if b.StopAt != nil && !now.Before(*b.StopAt) {
 		return "stop time " + b.StopAt.Format(time.RFC3339) + " reached"
 	}
-	counts := func(t *Track) bool { return s.shadow || !t.guessed() }
-	if sp, ok := t.spend(); b.SessionTokens > 0 && ok && counts(t) && sp >= b.SessionTokens {
+	if sp, ok := t.spend(!s.shadow); b.SessionTokens > 0 && ok && sp >= b.SessionTokens {
 		return fmt.Sprintf("session spend %d reached its cap of %d", sp, b.SessionTokens)
 	}
 	if b.RunTokens > 0 {
 		var total int64
 		for _, o := range s.st.Tracks {
-			if sp, ok := o.spend(); ok && counts(o) {
-				total += sp
+			if sp, ok := o.spend(!s.shadow); ok {
+				total += sp + o.SpendBase // a clear lifts a session's cap, not the run's
 			}
 		}
 		if total >= b.RunTokens {

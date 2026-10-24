@@ -61,7 +61,7 @@ func Summarize(cfg *Config, events []Event, mode string) ([]SessionStatus, map[s
 		if u, ok := t.current(); ok {
 			r.Context = u.Context
 		}
-		if sp, ok := t.spend(); ok {
+		if sp, ok := t.spend(mode == ModeLive); ok {
 			r.Spend = sp
 		}
 		for _, d := range cfg.Sessions[name].Deliver {

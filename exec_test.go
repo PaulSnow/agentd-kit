@@ -294,7 +294,7 @@ func TestLastMergeFindsTheNewestMerge(t *testing.T) {
 	writeFile(t, filepath.Join(wt, "a"), "a\n")
 	gitRun(t, wt, "add", "a")
 	gitRun(t, wt, "commit", "-q", "-m", "base")
-	if sha, _, err := g.LastMerge(wt); err != nil || sha != "" {
+	if sha, _, _, err := g.LastMerge(wt); err != nil || sha != "" {
 		t.Fatalf("no merge: %q, %v", sha, err)
 	}
 	gitRun(t, wt, "checkout", "-q", "-b", "feature")
@@ -308,8 +308,8 @@ func TestLastMergeFindsTheNewestMerge(t *testing.T) {
 	writeFile(t, filepath.Join(wt, "c"), "c\n")
 	gitRun(t, wt, "add", "c")
 	gitRun(t, wt, "commit", "-q", "-m", "next")
-	sha, subject, err := g.LastMerge(wt)
-	if err != nil || sha != merge || subject != "Merge #21: contexts" {
+	sha, subject, at, err := g.LastMerge(wt)
+	if err != nil || sha != merge || subject != "Merge #21: contexts" || time.Since(at) > time.Hour {
 		t.Fatalf("LastMerge = %q %q %v, want %q", sha, subject, err, merge)
 	}
 }

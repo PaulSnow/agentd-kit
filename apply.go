@@ -130,7 +130,7 @@ func (st *LogState) apply(e Event) {
 	case KindUsage:
 		u := *e.Usage
 		t.Usage[u.Transcript] = u
-		if t.Transcript == "" || u.Transcript == t.Transcript {
+		if t.Transcript == "" || u.Transcript == t.Transcript || u.Guessed {
 			t.Measured = u.Transcript
 		}
 	case KindCheckpoint:
@@ -145,6 +145,9 @@ func (st *LogState) apply(e Event) {
 		}
 		t.noteCrash(c, st.cfg.Policies.Restart.MaxCrashes)
 	case KindClear:
+		if sp, ok := t.spend(st.Mode == ModeLive); ok {
+			t.SpendBase += sp
+		}
 		t.clear()
 	case KindSkip:
 		k := e.Skip
@@ -212,8 +215,14 @@ func (st *LogState) apply(e Event) {
 				at = *e.Warning.IntentAt
 			}
 			switch a.Action {
-			case ActEscalate, ActUpdate, ActNudge, ActResume, ActTrust, ActRotate, ActStop:
+			case ActEscalate, ActUpdate, ActNudge, ActResume, ActTrust, ActRotate:
 				t.applyAction(a, false, false, at)
+			}
+			// A rotation cut short may have started its session: measure
+			// the transcript it named, which a guess replaces if it never
+			// appears. A stop cut short is simply tried again.
+			if a.Action == ActRotate {
+				t.launched(a.Transcript, at)
 			}
 		}
 	}

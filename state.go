@@ -54,6 +54,7 @@ type Track struct {
 	RotatedFor string     // the merge the latest rotation was at
 	Rotations  int        // rotations, taken or would-be, ever
 	Stopped    string     // why the session was stopped, until the owner clears it
+	SpendBase  int64      // the spend when the owner last cleared it, which its cap counts from
 
 	Posted    map[string]bool        // escalation keys already posted, or given up on
 	Questions QuestionsEscalation    // the escalation of the Questions section

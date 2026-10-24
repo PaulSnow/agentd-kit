@@ -36,9 +36,9 @@ type Git interface {
 	FirstSubject(dir, target string) (string, error)
 	// Messages is every commit message, in full, in origin/target..HEAD.
 	Messages(dir, target string) (string, error)
-	// LastMerge is the newest merge commit reachable from HEAD and its
-	// subject, or "" when there is none.
-	LastMerge(dir string) (sha, subject string, err error)
+	// LastMerge is the newest merge commit reachable from HEAD, its
+	// subject and its commit time, or "" when there is none.
+	LastMerge(dir string) (sha, subject string, at time.Time, err error)
 }
 
 // MergeRequest is what to open on the forge.
@@ -354,13 +354,20 @@ func (g ExecGit) Messages(dir, target string) (string, error) {
 	return gitOut(g.Timeout, dir, "log", "--format=%B", "origin/"+target+"..HEAD")
 }
 
-func (g ExecGit) LastMerge(dir string) (string, string, error) {
-	out, err := gitOut(g.Timeout, dir, "log", "-1", "--merges", "--format=%H%x00%s", "HEAD")
-	if err != nil {
-		return "", "", err
+func (g ExecGit) LastMerge(dir string) (string, string, time.Time, error) {
+	out, err := gitOut(g.Timeout, dir, "log", "-1", "--merges", "--format=%H%x00%cI%x00%s", "HEAD")
+	if err != nil || strings.TrimSpace(out) == "" {
+		return "", "", time.Time{}, err
 	}
-	sha, subject, _ := strings.Cut(strings.TrimSpace(out), "\x00")
-	return sha, subject, nil
+	f := strings.SplitN(strings.TrimSpace(out), "\x00", 3)
+	if len(f) != 3 {
+		return "", "", time.Time{}, fmt.Errorf("git log: unexpected output %q", out)
+	}
+	at, err := time.Parse(time.RFC3339, f[1])
+	if err != nil {
+		return "", "", time.Time{}, err
+	}
+	return f[0], f[2], at, nil
 }
 
 // ExecForge pushes with git and opens with glab or gh, by the repository's

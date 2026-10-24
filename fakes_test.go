@@ -91,6 +91,7 @@ type fakeTmux struct {
 	onPane     func(name string) // runs when Pane is asked, to change the screen under a caller
 	commands   map[string]string
 	newErr     map[string]error // NewSession fails with this
+	replaceErr error            // Replace fails with this
 	calls      []call
 	mutations  int
 }
@@ -194,6 +195,9 @@ func (f *fakeTmux) Replace(name, cwd, command string) error {
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, call{op: "replace", name: name, args: []string{cwd, command}})
 	f.mutations++
+	if f.replaceErr != nil {
+		return f.replaceErr
+	}
 	if !f.alive[name] {
 		return fmt.Errorf("no session %s", name)
 	}
@@ -288,6 +292,7 @@ type fakeGit struct {
 	fetches      int
 	merge        string // the newest merge at HEAD, and its subject
 	mergeSubject string
+	mergeAt      map[string]time.Time // each merge's commit time, zero by default
 }
 
 func (g *fakeGit) Fetch(string) error {
@@ -354,10 +359,10 @@ func (g *fakeGit) FirstSubject(string, string) (string, error) {
 	defer g.mu.Unlock()
 	return g.subject, nil
 }
-func (g *fakeGit) LastMerge(string) (string, string, error) {
+func (g *fakeGit) LastMerge(string) (string, string, time.Time, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.merge, g.mergeSubject, nil
+	return g.merge, g.mergeSubject, g.mergeAt[g.merge], nil
 }
 
 func (g *fakeGit) Messages(string, string) (string, error) {

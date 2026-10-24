@@ -437,14 +437,19 @@ func (s *Supervisor) step(name string, sess Session) {
 			return
 		}
 	}
-	if s.stopForBudget(name, t, ev, now); s.halt != nil {
-		return
-	}
 	state, reason := Classify(t, ev, s.cfg.Policies, now)
 	// The observe event, applied, ends a dialog episode and opens or
 	// closes the Questions escalation: each is a field it compares.
 	if s.logObserve(name, t, ev, state, reason, now); s.halt != nil {
 		return
+	}
+	// After the observation, whose applying marks a live session live: the
+	// stop, applied, marks it not, so its going is no crash.
+	if s.stopForBudget(name, t, ev, now); s.halt != nil {
+		return
+	}
+	if t.Stopped != "" && state != Done && state != Stopped {
+		state, reason = Stopped, "stopped: "+t.Stopped
 	}
 	state = s.actOn(name, sess, t, ev, state, now)
 	if ev.Alive && state != Done && state != CrashLooping {
