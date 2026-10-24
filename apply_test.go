@@ -193,8 +193,15 @@ func TestFailedObserveIsLoggedAgain(t *testing.T) {
 	h := newHarness(t, false, "s1")
 	h.status("s1", working)
 	h.alive("s1", "working")
-	w := &failingWriter{failOn: `"kind":"observe"`}
+	w := &failingWriter{}
 	h.sup = NewSupervisor(h.cfg, NewLogWriter(w), h.clock, h.tmux, h.git, h.forge, h.runner, false)
+	for i := 0; i < 2; i++ {
+		h.sup.Pass()
+		h.clock.advance(5 * time.Minute)
+	}
+	// The first line changes while the log cannot take the observation.
+	h.status("s1", "# Now testing\n")
+	w.failOn = `"kind":"observe"`
 	if err := h.sup.Pass(); err == nil {
 		t.Fatal("the failed append did not stop the pass")
 	}
@@ -205,8 +212,12 @@ func TestFailedObserveIsLoggedAgain(t *testing.T) {
 	}
 	h.buf = &bytes.Buffer{}
 	h.buf.Write(w.Bytes())
-	if h.count(KindObserve, "", "s1") != 1 || !h.sup.Tracks()["s1"].Live {
-		t.Fatalf("observe events = %d, live = %v", h.count(KindObserve, "", "s1"), h.sup.Tracks()["s1"].Live)
+	logged := false
+	for _, e := range h.events() {
+		logged = logged || e.Kind == KindObserve && e.Observe.Head == "# Now testing"
+	}
+	if !logged {
+		t.Fatalf("the new first line was never logged:\n%s", h.buf.String())
 	}
 }
 
