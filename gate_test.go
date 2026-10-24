@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -287,43 +288,241 @@ func TestConfidentialErrorIsWithheld(t *testing.T) {
 	}
 }
 
-// GateFiles names the gate paths whose content at HEAD, or in the working
-// tree, is not the target branch's.
+// A gate none of whose paths the target branch has is pinned by nothing,
+// and is refused until gate_paths names its files.
+func TestUnpinnedGateIsRefused(t *testing.T) {
+	h := newHarness(t, false, "d")
+	doneWithDelivery(t, h, "d")
+	h.git.gateUnpinned = true
+	h.ticks(3, 5*time.Minute)
+	if len(h.runner.gates) != 0 || len(h.forge.pushes) != 0 {
+		t.Fatalf("ran %d gates, pushed %v with an unpinned gate", len(h.runner.gates), h.forge.pushes)
+	}
+	var reason string
+	for _, e := range h.events() {
+		if e.Kind == KindSkip && strings.Contains(e.Skip.Key, ":gate-unpinned") {
+			reason = e.Skip.Reason
+		}
+	}
+	if !strings.Contains(reason, "gate_paths") {
+		t.Fatalf("skip reason %q", reason)
+	}
+}
+
+// A gate file changed while the gate ran, and put back, is still refused:
+// the gate files are checked again after it.
+func TestGateChangedDuringItsRunIsNotPushed(t *testing.T) {
+	h := newHarness(t, false, "d")
+	doneWithDelivery(t, h, "d")
+	h.git.onGateFiles = func(n int) {
+		if n == 2 {
+			h.git.gateChanged = []string{"bin/check"}
+		}
+	}
+	h.ticks(1, 5*time.Minute)
+	if len(h.runner.gates) != 1 || len(h.forge.pushes) != 0 || h.git.gateChecks != 2 {
+		t.Fatalf("ran %d gates, checked %d times, pushed %v", len(h.runner.gates), h.git.gateChecks, h.forge.pushes)
+	}
+}
+
+// What a gate leaves read-only in its HOME, as Go's module cache is, is
+// removed with it; the accounts' files and the agent socket are recorded
+// as reachable.
+func TestGateHomeIsRemovedAndAccountsAreReachable(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	sock := filepath.Join(t.TempDir(), "agent.sock")
+	writeFile(t, sock, "")
+	t.Setenv("SSH_AUTH_SOCK", sock)
+	token := filepath.Join(home, "tokens", "a")
+	writeFile(t, token, "x")
+	h := newHarness(t, false, "d")
+	h.cfg.Accounts = map[string]Account{"a": {TokenFile: token}}
+	doneWithDelivery(t, h, "d")
+	var scratch string
+	h.runner.onGate = func() {
+		for _, kv := range h.runner.gateEnv {
+			if strings.HasPrefix(kv, "HOME=") {
+				scratch = strings.TrimPrefix(kv, "HOME=")
+			}
+		}
+		mod := filepath.Join(scratch, "go", "pkg", "mod")
+		writeFile(t, filepath.Join(mod, "m", "f.go"), "package m\n")
+		for _, d := range []string{filepath.Join(mod, "m"), mod} {
+			if err := os.Chmod(d, 0o555); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	h.ticks(1, 5*time.Minute)
+	if _, err := os.Stat(scratch); scratch == "" || !os.IsNotExist(err) {
+		t.Fatalf("the gate's HOME %q was left behind: %v", scratch, err)
+	}
+	for _, e := range h.events() {
+		if e.Kind == KindAction && actionOf(e) == ActGate {
+			if !reflect.DeepEqual(e.Act.Reachable, []string{"~/tokens/a", "$SSH_AUTH_SOCK"}) {
+				t.Fatalf("reachable %v", e.Act.Reachable)
+			}
+			return
+		}
+	}
+	t.Fatal("no gate event")
+}
+
+// Gate paths are literal: wildcards and pathspec magic are refused.
+func TestGatePathsAreLiteral(t *testing.T) {
+	for _, p := range []string{"bin/*", ":(glob)bin", "bin/ch?ck", "[b]in"} {
+		path := filepath.Join(t.TempDir(), "c.json")
+		writeFile(t, path, `{"repositories": {"r": {"forge": "gitlab", "project": "a/b", "gate": ["make"], "gate_paths": [`+strconv.Quote(p)+`]}}}`)
+		if _, err := LoadConfig(path); err == nil {
+			t.Errorf("gate_paths %q was accepted", p)
+		}
+	}
+}
+
+// What the gate-file check, a gate or the escalation command reports is
+// screened like any other error.
+func TestConfidentialGateErrorIsWithheld(t *testing.T) {
+	h := newHarness(t, false, "d")
+	h.cfg.ConfidentialPatterns = []string{`(?i)project\s+nightingale`}
+	h.restart(false)
+	doneWithDelivery(t, h, "d")
+	h.git.gateErr = errors.New("fatal: could not read from Project Nightingale")
+	h.ticks(2, 5*time.Minute)
+	if strings.Contains(h.buf.String(), "Nightingale") || !strings.Contains(h.buf.String(), "withheld") {
+		t.Fatalf("the gate-file error was not withheld:\n%s", h.buf.String())
+	}
+}
+
+// GateFiles names the gate paths whose content at the head, or on disk,
+// is not the target branch's as the configured URL has it, whatever the
+// session did to its index, its refs or its git config.
 func TestExecGateFiles(t *testing.T) {
-	dir := t.TempDir()
-	run := func(args ...string) {
+	root := t.TempDir()
+	remote, dir := filepath.Join(root, "remote.git"), filepath.Join(root, "wt")
+	run := func(args ...string) string {
 		t.Helper()
-		if _, err := gitOut(10*time.Second, dir, args...); err != nil {
+		out, err := gitOut(10*time.Second, dir, args...)
+		if err != nil {
 			t.Fatal(err)
 		}
+		return strings.TrimSpace(out)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitOut(10*time.Second, root, "init", "-q", "--bare", remote); err != nil {
+		t.Fatal(err)
 	}
 	run("init", "-q")
 	run("config", "user.email", "agent@example.org")
 	run("config", "user.name", "agent")
-	writeFile(t, filepath.Join(dir, "bin", "check"), "#!/bin/sh\ngo test ./...\n")
+	good := "#!/bin/sh\ngo test ./...\n"
+	writeFile(t, filepath.Join(dir, "bin", "check"), good)
 	writeFile(t, filepath.Join(dir, "lib", "a.sh"), "true\n")
 	writeFile(t, filepath.Join(dir, "main.go"), "package main\n")
-	run("add", "bin/check", "lib/a.sh", "main.go")
+	writeFile(t, filepath.Join(dir, ".gitignore"), "*.tmp\n")
+	run("add", "bin/check", "lib/a.sh", "main.go", ".gitignore")
 	run("commit", "-q", "-m", "base")
-	run("update-ref", "refs/remotes/origin/main", "HEAD")
+	run("push", "-q", remote, "HEAD:refs/heads/main")
+	base := run("rev-parse", "HEAD")
 	g := ExecGit{Timeout: 10 * time.Second}
 	paths := []string{"bin/check", "lib", "bin/absent"}
 	check := func(want ...string) {
 		t.Helper()
-		got, err := g.GateFiles(dir, "main", paths)
-		if err != nil || strings.Join(got, ",") != strings.Join(want, ",") {
-			t.Fatalf("changed %v, %v; want %v", got, err, want)
+		got, pinned, err := g.GateFiles(dir, remote, "main", run("rev-parse", "HEAD"), paths)
+		if err != nil || pinned != 2 || strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("changed %v, pinned %d, %v; want %v", got, pinned, err, want)
 		}
 	}
 	check()
 	writeFile(t, filepath.Join(dir, "main.go"), "package main // changed\n")
 	run("commit", "-q", "-am", "work")
 	check()
-	writeFile(t, filepath.Join(dir, "bin", "check"), "#!/bin/sh\nexit 0\n")
+	evil := "#!/bin/sh\nexit 0\n"
+	writeFile(t, filepath.Join(dir, "bin", "check"), evil)
 	check("bin/check")
 	run("commit", "-q", "-am", "pass always")
 	check("bin/check")
-	writeFile(t, filepath.Join(dir, "lib", "b.sh"), "true\n")
+	// A replace ref that makes the head's tree look like the target's.
+	writeFile(t, filepath.Join(dir, "bin", "check"), good)
+	run("replace", run("rev-parse", "HEAD^{tree}"), run("rev-parse", base+"^{tree}"))
+	check("bin/check")
+	run("replace", "-d", run("rev-parse", "HEAD^{tree}"))
+	run("checkout", "-q", base, "--", "bin/check")
+	run("commit", "-q", "-m", "restore the gate")
+	check()
+	// Index flags that hide an edit from git status.
+	for _, flag := range []string{"--skip-worktree", "--assume-unchanged"} {
+		run("update-index", flag, "bin/check")
+		writeFile(t, filepath.Join(dir, "bin", "check"), evil)
+		check("bin/check")
+		writeFile(t, filepath.Join(dir, "bin", "check"), good)
+		run("update-index", "--no"+strings.TrimPrefix(flag, "-"), "bin/check")
+	}
+	// A file mode change, an ignored file and a file the target lacks.
+	if err := os.Chmod(filepath.Join(dir, "lib", "a.sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	check("lib")
+	if err := os.Chmod(filepath.Join(dir, "lib", "a.sh"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "lib", "b.tmp"), "exit 0\n")
 	writeFile(t, filepath.Join(dir, "bin", "absent"), "exit 0\n")
-	check("bin/check", "lib", "bin/absent")
+	check("lib", "bin/absent")
+	os.Remove(filepath.Join(dir, "lib", "b.tmp"))
+	os.Remove(filepath.Join(dir, "bin", "absent"))
+	// A directory swapped for a symbolic link to the same files.
+	copyDir := filepath.Join(root, "lib-copy")
+	writeFile(t, filepath.Join(copyDir, "a.sh"), "true\n")
+	if err := os.Rename(filepath.Join(dir, "lib"), filepath.Join(root, "lib-orig")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(copyDir, filepath.Join(dir, "lib")); err != nil {
+		t.Fatal(err)
+	}
+	check("lib")
+	os.Remove(filepath.Join(dir, "lib"))
+	if err := os.Rename(filepath.Join(root, "lib-orig"), filepath.Join(dir, "lib")); err != nil {
+		t.Fatal(err)
+	}
+	check()
+	// origin/main pointed at the session's own gate, and a fetch refspec
+	// that never moves it, change nothing: the URL answers for the target.
+	run("config", "remote.origin.url", remote)
+	run("config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/x/*")
+	writeFile(t, filepath.Join(dir, "bin", "check"), evil)
+	run("commit", "-q", "-am", "evil base")
+	run("update-ref", "refs/remotes/origin/main", "HEAD")
+	check("bin/check")
+	// A file-system monitor named in the worktree's config never runs.
+	marker := filepath.Join(root, "monitor-ran")
+	writeFile(t, filepath.Join(root, "monitor.sh"), "#!/bin/sh\ntouch "+marker+"\n")
+	if err := os.Chmod(filepath.Join(root, "monitor.sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run("config", "core.fsmonitor", filepath.Join(root, "monitor.sh"))
+	check("bin/check")
+	if _, err := g.Clean(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the worktree's fsmonitor ran")
+	}
+	// A target commit this clone has not fetched is an error, not a pass.
+	other := filepath.Join(root, "other")
+	if _, err := gitOut(10*time.Second, root, "clone", "-q", remote, other); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(other, "c"), "x\n")
+	for _, args := range [][]string{{"-c", "user.email=a@example.org", "-c", "user.name=a", "add", "c"},
+		{"-c", "user.email=a@example.org", "-c", "user.name=a", "commit", "-q", "-m", "new"}, {"push", "-q", "origin", "HEAD:main"}} {
+		if _, err := gitOut(10*time.Second, other, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := g.GateFiles(dir, remote, "main", run("rev-parse", "HEAD"), paths); err == nil || !strings.Contains(err.Error(), "not been fetched") {
+		t.Fatalf("an unfetched target gave %v", err)
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -513,5 +514,23 @@ func TestPollStatusOffAndStopped(t *testing.T) {
 	PrintStatus(&b, nil, meta, h.clock.Now())
 	if strings.Contains(b.String(), "poll gitlab") || !strings.Contains(b.String(), "github: unknown, agentd stopped") {
 		t.Fatalf("status:\n%s", b.String())
+	}
+}
+
+// A poll error that matches a confidential pattern is withheld, and stays
+// one record while it repeats.
+func TestConfidentialPollErrorIsWithheld(t *testing.T) {
+	h, api := pollHarness(t, true, false)
+	h.sup.confidential = []*regexp.Regexp{regexp.MustCompile(`(?i)project\s+nightingale`)}
+	api.set(func() { api.githubErr = errors.New("gh: Project Nightingale is private") })
+	h.ticks(3, 15*time.Minute)
+	if strings.Contains(h.buf.String(), "Nightingale") {
+		t.Fatalf("the log carries the confidential error:\n%s", h.buf.String())
+	}
+	if p := h.sup.st.Polls[SourceGitHub]; p.OK || !strings.Contains(p.Error, "withheld") {
+		t.Fatalf("github poll = %+v", p)
+	}
+	if n := h.count(KindPoll, "", ""); n != 1 {
+		t.Fatalf("%d poll records for one repeating error", n)
 	}
 }

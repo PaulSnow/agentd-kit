@@ -241,7 +241,9 @@ func (s *Supervisor) recordPoll(src string, r pollResult, start time.Time) {
 	s.work.mu.Unlock()
 	p.Source, p.OK = src, r.err == nil
 	if r.err != nil {
-		p.Error = r.err.Error()
+		// Screened here, not in emit, so a withheld error compares equal
+		// from one poll to the next.
+		p.Error = s.withheld(r.err.Error())
 	}
 	for _, it := range r.items {
 		if !s.st.itemChanged(it) || r.err != nil {

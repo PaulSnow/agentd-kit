@@ -295,6 +295,10 @@ type fakeGit struct {
 	mergeAt      map[string]time.Time // each merge's commit time, zero by default
 	gateChanged  []string             // the gate files the session changed
 	gatePaths    []string             // the gate files last asked about
+	gateChecks   int                  // GateFiles calls
+	onGateFiles  func(n int)          // runs, locked, in the nth GateFiles call
+	gateUnpinned bool                 // the target has none of the gate files
+	gateErr      error                // what GateFiles fails with
 }
 
 func (g *fakeGit) Fetch(string) error {
@@ -351,11 +355,21 @@ func (g *fakeGit) Ahead(dir, target string) (int, error) {
 	}
 	return g.ahead, nil
 }
-func (g *fakeGit) GateFiles(dir, target string, paths []string) ([]string, error) {
+func (g *fakeGit) GateFiles(dir, url, target, head string, paths []string) ([]string, int, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.gatePaths = paths
-	return g.gateChanged, nil
+	g.gateChecks++
+	if g.onGateFiles != nil {
+		g.onGateFiles(g.gateChecks)
+	}
+	if g.gateErr != nil {
+		return nil, 0, g.gateErr
+	}
+	if g.gateUnpinned {
+		return nil, 0, nil
+	}
+	return g.gateChanged, len(paths), nil
 }
 
 func (g *fakeGit) Contains(dir, sha, target string) (bool, error) {

@@ -2,12 +2,19 @@ package main
 
 import (
 	"context"
+	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
+	"io/fs"
+	"maps"
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -32,9 +39,10 @@ type Git interface {
 	// under another hash, does not count.
 	Ahead(dir, target string) (int, error)
 	// GateFiles names those of paths, files or directories relative to
-	// the worktree, whose content at HEAD or in the working tree is not
-	// origin/target's. A path neither has is unchanged.
-	GateFiles(dir, target string, paths []string) ([]string, error)
+	// the worktree, whose content at head or on disk is not the target
+	// branch's, as url has it now; a path none has is unchanged. pinned
+	// counts the paths the target has.
+	GateFiles(dir, url, target, head string, paths []string) (changed []string, pinned int, err error)
 	// Contains says whether origin/target contains the commit sha.
 	Contains(dir, sha, target string) (bool, error)
 	FirstSubject(dir, target string) (string, error)
@@ -239,14 +247,26 @@ func (t *tailBuffer) Write(p []byte) (int, error) {
 const GateOutputMax = 64 * 1024
 
 // gitEnv turns off every way git could stop to ask for credentials: an
-// unattended fetch or push must fail, not wait for a human.
-var gitEnv = []string{"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "SSH_ASKPASS=", "GCM_INTERACTIVE=never"}
+// unattended fetch or push must fail, not wait for a human. Replace refs,
+// which would let a session swap one object for another, are not used.
+var gitEnv = []string{"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=", "SSH_ASKPASS=", "GCM_INTERACTIVE=never", "GIT_NO_REPLACE_OBJECTS=1"}
+
+// gitSafe go before every git command agentd runs: the worktree's config,
+// which the session can write, may not start a file-system monitor in
+// agentd's environment or answer for files from a cache, and paths are
+// literal.
+var gitSafe = []string{"-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "--literal-pathspecs"}
+
+// git runs git in dir with gitEnv and gitSafe.
+func git(timeout time.Duration, dir string, args ...string) ([]byte, error) {
+	return runTimed(timeout, dir, gitEnv, false, "git", append(append([]string{}, gitSafe...), args...)...)
+}
 
 // ExecGit runs git in a directory, each call bounded by Timeout.
 type ExecGit struct{ Timeout time.Duration }
 
 func gitOut(timeout time.Duration, dir string, args ...string) (string, error) {
-	out, err := runTimed(timeout, dir, gitEnv, false, "git", args...)
+	out, err := git(timeout, dir, args...)
 	if err != nil {
 		return "", fmt.Errorf("git %s in %s: %s", strings.Join(args, " "), dir, exitMessage(err))
 	}
@@ -267,40 +287,143 @@ func (g ExecGit) Fetch(dir string) error {
 	return err
 }
 
-func (g ExecGit) GateFiles(dir, target string, paths []string) ([]string, error) {
+func (g ExecGit) GateFiles(dir, url, target, head string, paths []string) ([]string, int, error) {
+	// The target's commit is asked of the configured URL: origin/target is
+	// a ref the session can point anywhere, or keep a fetch from moving.
+	ref := "refs/heads/" + target
+	out, err := gitOut(g.Timeout, dir, "ls-remote", "--", url, ref)
+	if err != nil {
+		return nil, 0, err
+	}
+	fields := strings.Fields(out)
+	if len(fields) < 2 || fields[1] != ref {
+		return nil, 0, fmt.Errorf("the target branch %s is not at %s", target, url)
+	}
+	want := fields[0]
+	if _, err := gitOut(g.Timeout, dir, "cat-file", "-e", want+"^{commit}"); err != nil {
+		return nil, 0, fmt.Errorf("the target branch %s's commit %s has not been fetched into %s", target, shortHash(want), dir)
+	}
+	format, err := gitOut(g.Timeout, dir, "rev-parse", "--show-object-format")
+	if err != nil {
+		return nil, 0, err
+	}
 	var changed []string
+	pinned := 0
 	for _, p := range paths {
-		// The object each side names: a blob or a tree, "" when absent.
-		object := func(rev string) (string, error) {
-			out, err := runTimed(g.Timeout, dir, gitEnv, false, "git", "rev-parse", "--verify", "--quiet", rev+":"+p)
-			var exit *exec.ExitError
-			if errors.As(err, &exit) && exit.ExitCode() == 1 {
-				return "", nil
-			}
-			if err != nil {
-				return "", fmt.Errorf("git rev-parse %s:%s in %s: %s", rev, p, dir, exitMessage(err))
-			}
-			return strings.TrimSpace(string(out)), nil
-		}
-		want, err := object("refs/remotes/origin/" + target)
+		target, err := g.treeFiles(dir, want, p)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		have, err := object("HEAD")
+		committed, err := g.treeFiles(dir, head, p)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		// The working tree: any change, staged or not, or a file git does
-		// not track, ignored ones included.
-		status, err := gitOut(g.Timeout, dir, "status", "--porcelain", "--untracked-files=all", "--ignored", "--", p)
+		// The working tree is read from disk, not asked of git status,
+		// which the index's skip-worktree and assume-unchanged flags and
+		// the session's git config can blind.
+		disk, err := diskFiles(dir, p, strings.TrimSpace(format))
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
-		if want != have || strings.TrimSpace(status) != "" {
+		if len(target) > 0 {
+			pinned++
+		}
+		if !maps.Equal(target, committed) || !maps.Equal(target, disk) {
 			changed = append(changed, p)
 		}
 	}
-	return changed, nil
+	return changed, pinned, nil
+}
+
+// treeFiles lists the files at or under p in rev, path to mode and object.
+func (g ExecGit) treeFiles(dir, rev, p string) (map[string]string, error) {
+	out, err := gitOut(g.Timeout, dir, "ls-tree", "-r", "-z", "--full-tree", rev, "--", p)
+	if err != nil {
+		return nil, err
+	}
+	files := map[string]string{}
+	for _, entry := range strings.Split(out, "\x00") {
+		meta, name, ok := strings.Cut(entry, "\t")
+		if f := strings.Fields(meta); ok && len(f) == 3 {
+			files[name] = f[0] + " " + f[2]
+		}
+	}
+	return files, nil
+}
+
+// diskFiles lists the files at or under p in the working tree as git
+// would record them, path to mode and object, symbolic links not
+// followed. A path that crosses a symbolic link, or a file git cannot
+// hold, is listed as such and never matches.
+func diskFiles(dir, p, format string) (map[string]string, error) {
+	files := map[string]string{}
+	parts := strings.Split(p, "/")
+	for i := 1; i < len(parts); i++ {
+		fi, err := os.Lstat(filepath.Join(dir, filepath.Join(parts[:i]...)))
+		if errors.Is(err, os.ErrNotExist) {
+			return files, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !fi.IsDir() {
+			files[p] = "crosses " + strings.Join(parts[:i], "/")
+			return files, nil
+		}
+	}
+	err := filepath.WalkDir(filepath.Join(dir, p), func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		var data []byte
+		mode := "100644"
+		switch t := d.Type(); {
+		case t.IsDir():
+			return nil
+		case t&fs.ModeSymlink != 0:
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			data, mode = []byte(link), "120000"
+		case t.IsRegular():
+			fi, err := d.Info()
+			if err != nil {
+				return err
+			}
+			if fi.Mode()&0o111 != 0 {
+				mode = "100755"
+			}
+			if data, err = os.ReadFile(path); err != nil {
+				return err
+			}
+		default:
+			files[rel] = "not a file: " + t.String()
+			return nil
+		}
+		files[rel] = mode + " " + blobHash(format, data)
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return files, nil
+	}
+	return files, err
+}
+
+// blobHash is the object name git gives a blob holding data.
+func blobHash(format string, data []byte) string {
+	var h hash.Hash = sha1.New()
+	if format == "sha256" {
+		h = sha256.New()
+	}
+	fmt.Fprintf(h, "blob %d\x00", len(data))
+	h.Write(data)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func (g ExecGit) Clean(dir string) (bool, error) {
@@ -334,7 +457,7 @@ func (g ExecGit) RemoteURLs(dir string) ([]string, error) {
 // Rewrites lists the prefixes git config rewrites; git config answers 1
 // when there are none.
 func (g ExecGit) Rewrites(dir string) ([]string, error) {
-	out, err := runTimed(g.Timeout, dir, gitEnv, false, "git", "config", "--get-regexp", `^url\..*\.(insteadof|pushinsteadof)$`)
+	out, err := git(g.Timeout, dir, "config", "--get-regexp", `^url\..*\.(insteadof|pushinsteadof)$`)
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && exit.ExitCode() == 1 {
 		return nil, nil
@@ -370,7 +493,7 @@ func (g ExecGit) Ahead(dir, target string) (int, error) {
 // answers no with status 1, and fails with 128 when sha is unknown here; after
 // the fetch, a commit this clone lacks is not in origin/target either.
 func (g ExecGit) Contains(dir, sha, target string) (bool, error) {
-	_, err := runTimed(g.Timeout, dir, gitEnv, false, "git", "merge-base", "--is-ancestor", sha, "origin/"+target)
+	_, err := git(g.Timeout, dir, "merge-base", "--is-ancestor", sha, "origin/"+target)
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && (exit.ExitCode() == 1 || exit.ExitCode() == 128) {
 		return false, nil

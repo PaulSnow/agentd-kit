@@ -458,8 +458,8 @@ func (c *Config) finish(base string) error {
 			}
 		}
 		for _, p := range repo.GatePaths {
-			if p == "" || filepath.IsAbs(p) || filepath.Clean(p) != p || p == "." || p == ".." || strings.HasPrefix(p, "../") {
-				errs = append(errs, fmt.Errorf("repositories.%s.gate_paths: %q must be a clean path inside the worktree", name, p))
+			if p == "" || filepath.IsAbs(p) || filepath.Clean(p) != p || p == "." || p == ".." || strings.HasPrefix(p, "../") || strings.ContainsAny(p, "*?[\\:") {
+				errs = append(errs, fmt.Errorf("repositories.%s.gate_paths: %q must be a clean path inside the worktree, without wildcards", name, p))
 			}
 		}
 	}
