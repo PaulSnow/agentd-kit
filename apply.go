@@ -44,8 +44,8 @@ func (st *LogState) setItem(id string, change func(*Item)) {
 	}
 }
 
-// itemChanged says whether it is new to st, or holds other text than the
-// item st has under its id.
+// itemChanged says whether it is new to st, or carries another title than
+// the item st has under its id.
 func (st *LogState) itemChanged(it ItemPayload) bool {
 	known, ok := st.Items[it.ID]
 	return !ok || ItemHash(known.ItemPayload) != ItemHash(it)
@@ -98,7 +98,7 @@ func (st *LogState) apply(e Event) {
 		case KindItem:
 			// An item is one however often it is seen: the first sighting's
 			// time stands, and so does the owner's having seen it. A
-			// sighting whose text changed replaces the text, so the item is
+			// sighting under a new title replaces the item's text, so it is
 			// triaged again.
 			if _, ok := st.Items[e.Item.ID]; !ok {
 				st.Items[e.Item.ID] = &Item{ItemPayload: *e.Item, FirstSeen: e.Time}

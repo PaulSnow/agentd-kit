@@ -334,10 +334,12 @@ func triageSchema() []byte {
 	return b
 }
 
-// ItemHash is the hash triage is keyed on: the item's text, so an item
-// whose text changed is triaged again and one seen again is not.
+// ItemHash is the hash triage is keyed on: the item's title, so an item
+// retitled is triaged again and one seen again is not. Only the title: the
+// sources fill the author, link and a mail item's kind differently for one
+// item, and such a difference is no edit.
 func ItemHash(it ItemPayload) string {
-	b, _ := json.Marshal([]string{it.Kind, it.Repository, it.Title, it.Author, it.Link})
+	b, _ := json.Marshal(it.Title)
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:8])
 }

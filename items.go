@@ -141,7 +141,7 @@ func SnapshotItems(inv *Inventory, since time.Time) []ItemPayload {
 // A finding whose summary or subject asks something is a question; any
 // other is a report. Its repository is the manifest repository of the
 // finding's name, or none when no one repository has that name. An item
-// keeps the kind and title it was first seen with.
+// keeps the kind it was first seen with until its subject changes.
 func MailItems(m *MailFindings, inv *Inventory) ([]ItemPayload, error) {
 	var out []ItemPayload
 	for i, f := range m.Findings {
@@ -178,7 +178,7 @@ const (
 
 // RefreshItems reads the tracking files tr names and returns the events
 // that bring st up to date: an item event for each item st does not hold
-// yet or holds with other text, and a cursor for each source read that moved forward. The first
+// yet or holds under another title, and a cursor for each source read that moved forward. The first
 // snapshot read sets the cursor only. A file that cannot be read is an
 // error and yields no events from it, so a bad file never empties or
 // rewrites the list. The mail findings need the inventory, for their

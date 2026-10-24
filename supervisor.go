@@ -340,7 +340,6 @@ func (s *Supervisor) watchOwner(ctx context.Context, off int64) {
 // last pass is applied first.
 func (s *Supervisor) Pass() error {
 	s.halt = nil
-	s.drain()
 	s.ownerRecords()
 	for _, name := range s.cfg.SessionNames() {
 		if s.halt != nil {
@@ -355,19 +354,27 @@ func (s *Supervisor) Pass() error {
 	return s.halt
 }
 
-// ownerRecords applies what the owner wrote to the event log since the last
-// pass: a clear lifts a session's park, and a mark-delivered record settles
-// a delivery, a seen mark takes items off the triage list, and an item
-// another process logged (agentd items) is added, while agentd runs.
+// ownerRecords applies what the workers queued, then what others wrote to
+// the event log since the last pass: a clear lifts a session's park, a
+// mark-delivered record settles a delivery, a seen mark takes items off
+// the triage list, an item another process logged (agentd items) is added
+// or retitled, and another run's triage counts, while agentd runs. The
+// queue is taken and the log read under the workers' lock, so every
+// queued event is in what was read and none is applied after a later one.
 func (s *Supervisor) ownerRecords() {
+	s.work.mu.Lock()
 	events, off, err := s.log.Tail(s.tailOff)
+	s.drainLocked()
+	s.work.mu.Unlock()
 	if err != nil {
 		s.emit("", Event{Kind: KindError, Error: &ErrorPayload{Step: "reading owner records", Error: err.Error()}})
 		return
 	}
 	s.tailOff = off
 	for _, e := range events {
-		if e.Session == "" && (e.Kind == KindSeen || e.Kind == KindItem && s.st.itemChanged(*e.Item)) {
+		shared := e.Kind == KindSeen || e.Kind == KindTriage || e.Kind == KindError && e.Error.Triage != nil ||
+			e.Kind == KindItem && s.st.itemChanged(*e.Item)
+		if e.Session == "" && shared {
 			s.st.apply(e)
 			continue
 		}

@@ -393,6 +393,48 @@ func TestTriageInTheLoop(t *testing.T) {
 	}
 }
 
+// An item another source names with another author, link or kind is the
+// same item: nothing is logged and it is not triaged again.
+func TestItemSourcesDifferIsNoEdit(t *testing.T) {
+	h, dir := triageHarness(t)
+	claudeAnswers(t, dir, 0, claudeResult(goodTriage))
+	h.ticks(1, time.Minute)
+	other := triageItemsFixture()[1]
+	other.Author, other.Link, other.Kind = "someone-else", "https://example.com/t1", ItemMailReport
+	if h.sup.st.itemChanged(other) {
+		t.Fatal("a difference in author, link or kind counts as an edit")
+	}
+	n := len(h.events())
+	if err := h.sup.log.Append(Event{V: EventVersion, Time: h.clock.Now(), Kind: KindItem, Mode: ModeShared, Item: &other}); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(2, time.Minute)
+	if c := claudeCalls(t, dir); c != 1 || h.sup.st.Items["mail:t1"].Kind != ItemMailQuestion || len(h.events()) != n+1 {
+		t.Fatalf("%d calls, item %+v", c, h.sup.st.Items["mail:t1"])
+	}
+}
+
+// Another run's triage, read from the log, counts: the items are not
+// triaged twice.
+func TestTriageFromAnotherRun(t *testing.T) {
+	h, dir := triageHarness(t)
+	h.cfg.Jobs.Triage = false
+	h.ticks(1, time.Minute)
+	res, err := checkTriage([]byte(goodTriage), triageItemsFixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.sup.log.Append(Event{V: EventVersion, Time: h.clock.Now(), Kind: KindTriage, Mode: ModeShared,
+		Triage: &TriagePayload{Results: res, Model: "haiku"}}); err != nil {
+		t.Fatal(err)
+	}
+	h.cfg.Jobs.Triage = true
+	h.ticks(1, time.Minute)
+	if c := claudeCalls(t, dir); c != 0 || h.sup.st.Items["mail:t1"].Triaged() == nil {
+		t.Fatalf("%d calls after another run triaged", c)
+	}
+}
+
 // A batch smaller than the untriaged items leaves the rest for the next
 // pass, oldest first.
 func TestTriageBatches(t *testing.T) {
