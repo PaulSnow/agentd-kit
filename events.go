@@ -45,6 +45,7 @@ type Event struct {
 	Cursor     *CursorPayload     `json:"cursor,omitempty"`
 	Usage      *UsagePayload      `json:"usage,omitempty"`
 	Checkpoint *CheckpointPayload `json:"checkpoint,omitempty"`
+	Poll       *PollPayload       `json:"poll,omitempty"`
 }
 
 // Event kinds.
@@ -66,6 +67,7 @@ const (
 	KindCursor     = "cursor"     // how far a source of items has been read
 	KindUsage      = "usage"      // what a session's transcript has cost so far
 	KindCheckpoint = "checkpoint" // a merge newly at the head of a session's worktree
+	KindPoll       = "poll"       // a poll of a forge that found something, failed, or recovered
 )
 
 // Modes, in the mode every event carries. A run reads only the events of
@@ -272,7 +274,7 @@ func (e Event) check() error {
 		KindStart: e.Start != nil, KindStop: e.Stop != nil, KindObserve: e.Observe != nil, KindTransition: e.Transition != nil,
 		KindSkip: e.Skip != nil, KindCrash: e.Crash != nil, KindClear: e.Clear != nil, KindError: e.Error != nil, KindWarning: e.Warning != nil,
 		KindItem: e.Item != nil, KindSeen: e.Seen != nil, KindCursor: e.Cursor != nil, KindUsage: e.Usage != nil,
-		KindCheckpoint: e.Checkpoint != nil, "act": e.Act != nil,
+		KindCheckpoint: e.Checkpoint != nil, KindPoll: e.Poll != nil, "act": e.Act != nil,
 	}
 	want := e.Kind
 	switch e.Kind {

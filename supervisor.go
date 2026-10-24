@@ -49,6 +49,7 @@ type Supervisor struct {
 	worker bool       // this copy runs one job off the loop
 	work   *workState // shared by the loop and its workers
 	usage  *usageReader
+	api    ForgeAPI // the forges' APIs for the poll, or nil for none
 
 	checkpointRe *regexp.Regexp
 
@@ -126,7 +127,7 @@ func (s *Supervisor) emit(name string, e Event) {
 		s.emitQueued(name, e)
 		return
 	}
-	e.V, e.Time, e.Session, e.Mode = EventVersion, s.clock.Now(), name, s.mode()
+	e.V, e.Time, e.Session, e.Mode = EventVersion, s.clock.Now(), name, eventMode(e, s.mode())
 	if err := s.log.Append(e); err != nil {
 		fmt.Fprintf(os.Stderr, "agentd: event log: %v\n", err)
 		if s.halt == nil {
@@ -137,13 +138,22 @@ func (s *Supervisor) emit(name string, e Event) {
 	s.st.apply(e)
 }
 
+// eventMode is the mode an event is written with: the run's, except for a
+// fact about the world, which is shared.
+func eventMode(e Event, run string) string {
+	if e.Mode == ModeShared {
+		return ModeShared
+	}
+	return run
+}
+
 // emitQueued is emit for a worker: the append and the queueing happen
 // under one lock, so the loop applies the workers' events in the order the
 // log holds them.
 func (s *Supervisor) emitQueued(name string, e Event) {
 	s.work.mu.Lock()
 	defer s.work.mu.Unlock()
-	e.V, e.Time, e.Session, e.Mode = EventVersion, s.clock.Now(), name, s.mode()
+	e.V, e.Time, e.Session, e.Mode = EventVersion, s.clock.Now(), name, eventMode(e, s.mode())
 	if err := s.log.Append(e); err != nil {
 		fmt.Fprintf(os.Stderr, "agentd: event log: %v\n", err)
 		if s.halt == nil {
@@ -333,6 +343,9 @@ func (s *Supervisor) Pass() error {
 			break
 		}
 		s.step(name, s.cfg.Sessions[name])
+	}
+	if s.halt == nil {
+		s.pollForges(s.clock.Now())
 	}
 	return s.halt
 }

@@ -13,6 +13,11 @@
     "forge": "2m",
     "escalate": "2m"
   },
+  "poll": {
+    "every": "15m",
+    "github": false,
+    "gitlab": false
+  },
   "policies": {
     "restart": {
       "enabled": true,

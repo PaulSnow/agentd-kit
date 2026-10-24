@@ -31,6 +31,8 @@ type Config struct {
 	Sessions             map[string]Session    `json:"sessions"`
 	// Tracking names the tracking system's files agentd reads.
 	Tracking Tracking `json:"tracking"`
+	// Poll is agentd's own poll of the forges for new items.
+	Poll PollConfig `json:"poll"`
 }
 
 // Account is a Claude login a session runs under: its config directory,
@@ -255,6 +257,7 @@ func DefaultConfig() Config {
 	return Config{
 		EventLog:      "~/.local/state/agentd-kit/events.jsonl",
 		PollInterval:  Duration{5 * time.Minute},
+		Poll:          PollConfig{Every: Duration{DefaultPollEvery}},
 		TranscriptDir: "~/.claude/projects",
 		Timeouts:      Timeouts{Tmux: Duration{10 * time.Second}, Forge: Duration{2 * time.Minute}, Escalate: Duration{2 * time.Minute}},
 		Policies: Policies{
@@ -336,6 +339,9 @@ func (c *Config) finish(base string) error {
 	c.Tracking.Manifest = path("tracking.manifest", c.Tracking.Manifest)
 	c.Tracking.Snapshot = path("tracking.snapshot", c.Tracking.Snapshot)
 	c.Tracking.Mail = path("tracking.mail", c.Tracking.Mail)
+	if c.Poll.Every.Duration <= 0 {
+		errs = append(errs, errors.New("poll.every must be positive"))
+	}
 	if c.PollInterval.Duration <= 0 {
 		errs = append(errs, errors.New("poll_interval must be positive"))
 	}

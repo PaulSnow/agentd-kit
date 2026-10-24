@@ -19,9 +19,10 @@ type LogState struct {
 	Pending map[string]Event // intents with no outcome yet, by intent id
 	Started time.Time
 	Stopped time.Time
-	Events  int                  // events of this mode, the owner's and the shared ones, applied
-	Items   map[string]*Item     // new items by id, and whether the owner saw them
-	Cursors map[string]time.Time // how far each source of items has been read
+	Events  int                   // events of this mode, the owner's and the shared ones, applied
+	Items   map[string]*Item      // new items by id, and whether the owner saw them
+	Cursors map[string]time.Time  // how far each source of items has been read
+	Polls   map[string]PollRecord // each forge source's latest poll record
 
 	cfg *Config // its policies, read as each event is applied
 }
@@ -29,7 +30,7 @@ type LogState struct {
 // NewLogState is the empty state of mode under the configuration's policies.
 func NewLogState(cfg *Config, mode string) *LogState {
 	return &LogState{Mode: mode, Tracks: map[string]*Track{}, Pending: map[string]Event{}, Items: map[string]*Item{},
-		Cursors: map[string]time.Time{}, cfg: cfg}
+		Cursors: map[string]time.Time{}, Polls: map[string]PollRecord{}, cfg: cfg}
 }
 
 // track returns the session's Track, creating it.
@@ -90,6 +91,8 @@ func (st *LogState) apply(e Event) {
 			}
 		case KindCursor:
 			st.Cursors[e.Cursor.Source] = e.Cursor.AsOf
+		case KindPoll:
+			st.Polls[e.Poll.Source] = PollRecord{PollPayload: *e.Poll, At: e.Time}
 		}
 		return
 	}

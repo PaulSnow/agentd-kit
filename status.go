@@ -45,6 +45,16 @@ func Summarize(cfg *Config, events []Event, mode string) ([]SessionStatus, map[s
 	if !st.Stopped.IsZero() {
 		meta["stopped"] = st.Stopped
 	}
+	// A source no longer polled is left out.
+	for src := range st.Polls {
+		if src == SourceGitHub && !cfg.Poll.GitHub || src == SourceGitLab && !cfg.Poll.GitLab {
+			delete(st.Polls, src)
+		}
+	}
+	if len(st.Polls) > 0 {
+		meta["polls"] = st.Polls
+		meta["poll_stale"] = pollHeartbeat + 2*cfg.Poll.Every.Duration
+	}
 	for _, n := range cfg.SessionNames() {
 		st.track(n)
 	}
@@ -97,6 +107,31 @@ func PrintStatus(w io.Writer, rows []SessionStatus, meta map[string]any, now tim
 			line += ", stopped " + st.Local().Format("2006-01-02 15:04")
 		}
 		fmt.Fprintf(w, "%s; %d events\n", line, meta["events"])
+	}
+	// A quiet poll makes no event, but a source still polled has a record
+	// at least every pollHeartbeat: an older one means no one is polling
+	// it, so it is unknown, never "nothing new".
+	if polls, ok := meta["polls"].(map[string]PollRecord); ok {
+		stale, _ := meta["poll_stale"].(time.Duration)
+		stopped, _ := meta["stopped"].(time.Time)
+		srcs := make([]string, 0, len(polls))
+		for src := range polls {
+			srcs = append(srcs, src)
+		}
+		sort.Strings(srcs)
+		for _, src := range srcs {
+			p := polls[src]
+			switch {
+			case !p.OK:
+				fmt.Fprintf(w, "poll %s: unknown since %s ago (%d calls in %d polls): %s\n", src, ago(now, p.At), p.Calls, p.Polls, p.Error)
+			case !stopped.IsZero():
+				fmt.Fprintf(w, "poll %s: unknown, agentd stopped %s ago\n", src, ago(now, stopped))
+			case stale > 0 && now.Sub(p.At) > stale:
+				fmt.Fprintf(w, "poll %s: unknown, no poll recorded for %s\n", src, ago(now, p.At))
+			default:
+				fmt.Fprintf(w, "poll %s: ok, last record %s ago (%d calls in %d polls, %d new items)\n", src, ago(now, p.At), p.Calls, p.Polls, p.Items)
+			}
+		}
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "SESSION\tSTATE\tFOR\tSEEN\tCONTEXT\tSPEND\tRESTARTS\tROTATED\tNUDGES\tESCALATED\tDELIVERED\tWHY")
