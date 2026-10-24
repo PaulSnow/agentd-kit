@@ -5,7 +5,8 @@
   "tracking": {
     "manifest": "~/tracking/manifest/repositories.json",
     "snapshot": "~/tracking/data/snapshot.json",
-    "mail": "~/tracking/data/mail-findings.json"
+    "mail": "~/tracking/data/mail-findings.json",
+    "priorities": "~/tracking/data/priorities.json"
   },
   "page": {
     "address": "192.0.2.10:8770",
@@ -110,6 +111,7 @@
       "cwd": "~/repos/widgets-wt/17",
       "account": "work",
       "repository": "widgets",
+      "issue": 17,
       "deliver": [
         {
           "repository": "widgets",

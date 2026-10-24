@@ -357,7 +357,8 @@ func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, no
 		return false
 	}
 	id := newSessionID()
-	line, err := s.launchLine(sess, s.launchCommand(sess, t, id, "rotation"))
+	cmd, facts := s.launchCommand(sess, t, id, "rotation")
+	line, err := s.launchLine(sess, cmd)
 	if err != nil {
 		s.skipOnce(name, "account:"+name, "not rotating: "+err.Error(), t, &SkipPayload{Account: sess.Account})
 		return false
@@ -366,6 +367,9 @@ func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, no
 		Context: u.Context, Checkpoint: cp.SHA}, func() error {
 		return s.tmux.Replace(name, sess.Cwd, line)
 	})
+	if err == nil && s.halt == nil && !s.shadow {
+		s.notePack(name, sess, facts)
+	}
 	return err == nil && s.halt == nil && !s.shadow
 }
 
@@ -507,6 +511,12 @@ type restartFacts struct {
 // restartPrompt is the fresh session's prompt: the fixed instruction, then
 // the facts agentd recorded, from the progress file and the last merge.
 func (s *Supervisor) restartPrompt(sess Session, t *Track, why string) string {
+	return s.promptWith(s.packFacts(sess, t, why), why)
+}
+
+// packFacts is the facts document a fresh session is handed, its context
+// pack, as compact JSON.
+func (s *Supervisor) packFacts(sess Session, t *Track, why string) []byte {
 	f := restartFacts{Why: why, Brief: sess.Workdir + "/BRIEF.md", Progress: sess.Workdir + "/STATUS.md"}
 	// Answers the owner gave stay in the file and are named in every
 	// fresh session's facts, since the context that read them is gone.
@@ -524,21 +534,28 @@ func (s *Supervisor) restartPrompt(sess Session, t *Track, why string) string {
 	enc := json.NewEncoder(&b)
 	enc.SetEscapeHTML(false)
 	enc.Encode(f)
+	return []byte(strings.TrimSuffix(b.String(), "\n"))
+}
+
+// promptWith is the prompt that hands a fresh session facts.
+func (s *Supervisor) promptWith(facts []byte, why string) string {
 	prompt := DefaultRestartPrompt + " "
 	if why == "answered" {
 		prompt += s.cfg.Policies.Answers.Pointer + " "
 	}
-	return prompt + strings.TrimSuffix(b.String(), "\n")
+	return prompt + string(facts)
 }
 
 // launchCommand is the restart policy's command for a fresh session, with
-// {brief}, {status}, {session_id} and {prompt} substituted.
-func (s *Supervisor) launchCommand(sess Session, t *Track, id, why string) []string {
+// {brief}, {status}, {session_id} and {prompt} substituted, and the facts
+// the prompt hands it: its case's context pack.
+func (s *Supervisor) launchCommand(sess Session, t *Track, id, why string) ([]string, []byte) {
+	facts := s.packFacts(sess, t, why)
 	r := strings.NewReplacer("{brief}", sess.Workdir+"/BRIEF.md", "{status}", sess.Workdir+"/STATUS.md",
-		"{session_id}", id, "{prompt}", s.restartPrompt(sess, t, why))
+		"{session_id}", id, "{prompt}", s.promptWith(facts, why))
 	cmd := make([]string, len(s.cfg.Policies.Restart.Command))
 	for i, part := range s.cfg.Policies.Restart.Command {
 		cmd[i] = r.Replace(part)
 	}
-	return cmd
+	return cmd, facts
 }

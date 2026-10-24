@@ -11,6 +11,8 @@
 //	agentd report [--config PATH] [--log PATH] [--shadow] [--host NAME] --out PATH
 //	agentd page [--config PATH] [--log PATH] [--shadow]
 //	agentd items [--config PATH] [--log PATH] [--new] [--seen ID,...]
+//	agentd cases [--config PATH] [--log PATH] [--shadow] [--json]
+//	agentd cases [--config PATH] [--log PATH] rule CASE restriction|waiver|close|reopen [TEXT]
 package main
 
 import (
@@ -58,6 +60,8 @@ func main() {
 		err = itemsCmd(os.Args[2:], os.Stdout)
 	case "triage":
 		err = triageCmd(os.Args[2:], os.Stdout)
+	case "cases":
+		err = casesCmd(os.Args[2:], os.Stdout)
 	case "version", "--version":
 		fmt.Println("agentd", version)
 		return
@@ -86,6 +90,8 @@ func usage() {
   agentd page [--config PATH] [--log PATH] [--shadow]
   agentd items [--config PATH] [--log PATH] [--new] [--seen ID,...]
   agentd triage [--config PATH] --items FILE
+  agentd cases [--config PATH] [--log PATH] [--shadow] [--json]
+  agentd cases [--config PATH] [--log PATH] rule CASE restriction|waiver|close|reopen [TEXT]
   agentd version
 
 run supervises the configured sessions; --shadow observes and logs what it
@@ -100,7 +106,11 @@ items lists what is new since the owner last looked: issues, requests and
 discussions from the tracking snapshots, and mail findings; --seen marks
 items seen. page serves the owner's page on page.address, to the owner only;
 its one write marks items seen. triage tries the triage job on the items in
-FILE with one call (retried once on failure) and prints its checked answer and cost; it logs nothing.`)
+FILE with one call (retried once on failure) and prints its checked answer and cost; it logs nothing.
+cases lists the cases, one per issue, ranked: the owner's pins and the
+repositories' order from tracking.priorities when that file exists, then
+what needs the owner, triage urgency and age; rule records the owner's
+one-shot restriction or waiver on a case, or closes or reopens it.`)
 }
 
 func loadConfigFlag(fs *flag.FlagSet, args []string) (*Config, *string, error) {

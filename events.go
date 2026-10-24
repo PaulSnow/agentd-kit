@@ -49,6 +49,7 @@ type Event struct {
 	Triage     *TriagePayload     `json:"triage,omitempty"`
 	Decision   *DecisionPayload   `json:"decision,omitempty"`
 	Answer     *AnswerPayload     `json:"answer,omitempty"`
+	Case       *CasePayload       `json:"case,omitempty"`
 }
 
 // Event kinds.
@@ -74,6 +75,7 @@ const (
 	KindTriage     = "triage"     // the checked answer of a triage job: each item's kind, needs and summary
 	KindDecision   = "decision"   // a session's questions.json changed: the decisions it raises
 	KindAnswer     = "answer"     // the owner answered one of a session's decisions
+	KindCase       = "case"       // a fact about a case: the pack a session was handed, its report, or the owner's ruling
 )
 
 // Modes, in the mode every event carries. A run reads only the events of
@@ -297,7 +299,7 @@ func (e Event) check() error {
 		KindSkip: e.Skip != nil, KindCrash: e.Crash != nil, KindClear: e.Clear != nil, KindError: e.Error != nil, KindWarning: e.Warning != nil,
 		KindItem: e.Item != nil, KindSeen: e.Seen != nil, KindCursor: e.Cursor != nil, KindUsage: e.Usage != nil,
 		KindCheckpoint: e.Checkpoint != nil, KindPoll: e.Poll != nil, KindTriage: e.Triage != nil, KindDecision: e.Decision != nil,
-		KindAnswer: e.Answer != nil, "act": e.Act != nil,
+		KindAnswer: e.Answer != nil, KindCase: e.Case != nil, "act": e.Act != nil,
 	}
 	want := e.Kind
 	switch e.Kind {
@@ -324,6 +326,10 @@ func (e Event) check() error {
 		return errors.New("an answer event is the owner's, for one session")
 	case e.Kind == KindDecision && (e.Mode == ModeOwner || e.Session == ""):
 		return errors.New("a decision event is a run's, for one session")
+	case e.Kind == KindCase && (e.Case.Ruling != nil) != (e.Mode == ModeOwner && e.Session == ""):
+		return errors.New("a ruling is the owner's, for no one session; a pack or report is a run's, for one")
+	case e.Kind == KindCase && (e.Case.Pack != nil) == (e.Case.Report != nil) && (e.Case.Report != nil || e.Case.Ruling == nil):
+		return errors.New("a case event carries one of a pack, a report or a ruling")
 	}
 	switch e.Mode {
 	case ModeLive, ModeShadow, ModeOwner, ModeShared:

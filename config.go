@@ -229,6 +229,9 @@ type Session struct {
 	Repository string    `json:"repository"`
 	Deliver    []Deliver `json:"deliver"`
 	Hold       string    `json:"hold"`
+	// Issue, when set, is the number of the issue the session works in
+	// Repository: the session's case.
+	Issue int `json:"issue"`
 }
 
 // Deliver says what to push and open when the session is DONE.
@@ -357,6 +360,7 @@ func (c *Config) finish(base string) error {
 	c.Tracking.Manifest = path("tracking.manifest", c.Tracking.Manifest)
 	c.Tracking.Snapshot = path("tracking.snapshot", c.Tracking.Snapshot)
 	c.Tracking.Mail = path("tracking.mail", c.Tracking.Mail)
+	c.Tracking.Priorities = path("tracking.priorities", c.Tracking.Priorities)
 	if _, ok := c.Accounts[c.Jobs.Account]; c.Jobs.Account != "" && !ok {
 		errs = append(errs, fmt.Errorf("jobs.account %q is not in accounts", c.Jobs.Account))
 	}
@@ -498,6 +502,9 @@ func (c *Config) finish(base string) error {
 			if _, ok := c.Repositories[s.Repository]; !ok {
 				errs = append(errs, fmt.Errorf("sessions.%s.repository %q is not in repositories", name, s.Repository))
 			}
+		}
+		if s.Issue < 0 || s.Issue > 0 && s.Repository == "" {
+			errs = append(errs, fmt.Errorf("sessions.%s.issue needs a repository and a number of 1 or more", name))
 		}
 		for i := range s.Deliver {
 			d := &s.Deliver[i]

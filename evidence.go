@@ -39,6 +39,7 @@ type StatusEvidence struct {
 	Head      string
 	Done      bool
 	Questions string // the Questions section body when it asks something, else ""
+	Progress  Progress
 }
 
 // TranscriptEvidence is the last turn of the session's Claude Code
@@ -80,7 +81,7 @@ var noQuestions = regexp.MustCompile(`(?i)^[-*\s]*\(?\s*(none(\s+yet)?|n/a)\s*\.
 
 // ParseStatus interprets STATUS.md text.
 func ParseStatus(text string) StatusEvidence {
-	ev := StatusEvidence{Exists: true}
+	ev := StatusEvidence{Exists: true, Progress: ParseProgress(text)}
 	var lines []string
 	for _, l := range strings.Split(text, "\n") {
 		if t := strings.TrimSpace(l); t != "" {

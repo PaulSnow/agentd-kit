@@ -398,7 +398,7 @@ func (s *Supervisor) ownerRecords() {
 	s.tailOff = off
 	for _, e := range events {
 		shared := e.Kind == KindSeen || e.Kind == KindTriage || e.Kind == KindError && e.Error.Triage != nil ||
-			e.Kind == KindItem && s.st.itemChanged(*e.Item)
+			e.Kind == KindItem && s.st.itemChanged(*e.Item) || e.Kind == KindCase && e.Mode == ModeOwner
 		if e.Session == "" && shared {
 			s.st.apply(e)
 			continue
@@ -511,6 +511,9 @@ func (s *Supervisor) step(name string, sess Session) {
 	// The observe event, applied, ends a dialog episode and opens or
 	// closes the Questions escalation: each is a field it compares.
 	if s.logObserve(name, t, ev, state, reason, now); s.halt != nil {
+		return
+	}
+	if s.noteReport(name, sess, ev); s.halt != nil {
 		return
 	}
 	// After the observation, whose applying marks a live session live: the
@@ -659,7 +662,8 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			why = "answered"
 		}
 		id := newSessionID()
-		line, err := s.launchLine(sess, s.launchCommand(sess, t, id, why))
+		cmd, facts := s.launchCommand(sess, t, id, why)
+		line, err := s.launchLine(sess, cmd)
 		if err != nil {
 			// Not final, and not a crash: the owner may fix the account.
 			// There is no fallback to another account.
@@ -690,6 +694,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			return state
 		}
 		if err == nil {
+			s.notePack(name, sess, facts)
 			return Starting
 		}
 		// A restart that fails is a crash, its error the cause: the same
