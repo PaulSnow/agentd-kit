@@ -165,6 +165,14 @@ func (t *Track) clone() *Track {
 	c.Deliveries = append([]DeliveryRecord(nil), t.Deliveries...)
 	c.Gated = append([]string(nil), t.Gated...)
 	c.Escalated = append([]EscalationRecord(nil), t.Escalated...)
+	c.Turns = append([]TurnRecord(nil), t.Turns...)
+	c.TurnLines = copyMap(t.TurnLines)
+	c.Wakes = append([]WakeRecord(nil), t.Wakes...) // a wake's spend is never changed in place
+	c.Woken = copyMap(t.Woken)
+	if t.WakeBase != nil {
+		b := *t.WakeBase
+		c.WakeBase = &b
+	}
 	if t.LastObs != nil {
 		o := *t.LastObs
 		c.LastObs = &o

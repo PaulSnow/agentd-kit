@@ -50,6 +50,8 @@ func main() {
 		err = markDeliveredCmd(os.Args[2:])
 	case "clear":
 		err = clearCmd(os.Args[2:])
+	case "coordinator":
+		err = coordinatorCmd(os.Args[2:])
 	case "inventory":
 		err = inventoryCmd(os.Args[2:], os.Stdout)
 	case "report":
@@ -87,6 +89,7 @@ func usage() {
   agentd config [--config PATH]
   agentd mark-delivered [--config PATH] [--log PATH] SESSION WORKTREE REF
   agentd clear [--config PATH] [--log PATH] SESSION
+  agentd coordinator [--config PATH] [--log PATH] release REPOSITORY
   agentd inventory [--config PATH]
   agentd report [--config PATH] [--log PATH] [--shadow] [--host NAME] --out PATH
   agentd page [--config PATH] [--log PATH] [--shadow]
@@ -103,7 +106,9 @@ would do without acting. status prints the state table from the event log.
 config prints the resolved configuration. mark-delivered records that a
 worktree was already delivered as REF by other means, so run never delivers
 it again. clear lifts a crash-looping session's park, so it may be
-restarted again. inventory lists every repository in the tracking system's
+restarted again. coordinator release lets the session a repository's
+configuration names claim its coordinator, which another session held:
+there is one coordinator per repository. inventory lists every repository in the tracking system's
 manifest with its open work and clones, from the tracking snapshot. report
 writes report.json for the tracking site from the event log, atomically.
 items lists what is new since the owner last looked: issues, requests and
@@ -284,6 +289,25 @@ func markDeliveredCmd(args []string) error {
 	}
 	defer log.Close()
 	return MarkDelivered(cfg, log, time.Now(), rest[0], rest[1], rest[2])
+}
+
+// coordinatorCmd is the command-line face of ReleaseCoordinator.
+func coordinatorCmd(args []string) error {
+	fs := flag.NewFlagSet("coordinator", flag.ContinueOnError)
+	cfg, _, err := loadConfigFlag(fs, args)
+	if err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) != 2 || rest[0] != "release" {
+		return fmt.Errorf("usage: agentd coordinator release REPOSITORY")
+	}
+	log, _, err := openLoaded(cfg.EventLog)
+	if err != nil {
+		return err
+	}
+	defer log.Close()
+	return ReleaseCoordinator(cfg, log, time.Now(), rest[1])
 }
 
 // clearCmd is the command-line face of ClearSession.

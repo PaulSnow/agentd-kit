@@ -31,6 +31,14 @@ type SessionStatus struct {
 	Guessed     bool     // a figure rests on a transcript agentd did not launch
 	Rotations   int
 	Stopped     string // why the budget stopped it
+	// A coordinator: its role and repository, its wakes, its spend per
+	// wake (-1 when unknown), and its latest wake.
+	Role       string
+	Repository string
+	Wakes      int
+	WakeTokens int64
+	LastWake   time.Time
+	WakeReason string
 }
 
 // Summarize folds the event log for mode through the one reader into one
@@ -83,6 +91,15 @@ func SummarizeState(cfg *Config, st *LogState) ([]SessionStatus, map[string]any)
 		}
 		if sp, ok := t.spend(mode == ModeLive); ok {
 			r.Spend = sp
+		}
+		if sess := cfg.Sessions[name]; sess.Role == RoleCoordinator {
+			r.Role, r.Repository, r.Wakes, r.WakeTokens = sess.Role, sess.Repository, t.WakeCount, -1
+			if n, ok := t.wakeTokens(mode == ModeLive); ok {
+				r.WakeTokens = n
+			}
+			if w, ok := t.lastWake(); ok {
+				r.LastWake, r.WakeReason = w.At, w.Reason
+			}
 		}
 		for _, d := range cfg.Sessions[name].Deliver {
 			if why := t.Blocked[d.Worktree]; why != "" && t.Delivered[name+":"+d.Worktree] == "" {
@@ -165,6 +182,16 @@ func PrintStatus(w io.Writer, rows []SessionStatus, meta map[string]any, now tim
 		}
 		if r.Guessed {
 			why += "; tokens from the newest transcript in its directory, a guess"
+		}
+		if r.Role == RoleCoordinator {
+			per := "tokens per wake unknown"
+			if r.WakeTokens >= 0 {
+				per = tokens(r.WakeTokens) + " tokens per wake"
+			}
+			why += fmt.Sprintf("; coordinator of %s: wakes %d, %s", r.Repository, r.Wakes, per)
+			if !r.LastWake.IsZero() {
+				why += fmt.Sprintf(", quiet %s since the last (%s)", ago(now, r.LastWake), r.WakeReason)
+			}
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%s\t%s\n",
 			r.Name, r.State, ago(now, r.Since), ago(now, r.LastSeen), tokens(r.Context), tokens(r.Spend), r.Restarts, r.Rotations,
