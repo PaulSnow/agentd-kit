@@ -114,6 +114,7 @@ func TestInventoryRefusesBadFiles(t *testing.T) {
 		{name: "snapshot unknown platform", file: "snapshot", text: `{"AsOf": "2026-10-23T21:23:04Z", "Host": "host-a", "Repos": [{"Info": {"Name": "w", "Platform": "bitbucket", "FullPath": "o/w"}}]}`, want: `platform "bitbucket"`},
 		{name: "snapshot clone platform", file: "snapshot", text: `{"AsOf": "2026-10-23T21:23:04Z", "Host": "host-a", "Repos": null, "Clones": [{"Host": "host-a", "Path": "/srv/w", "Platform": "svn", "FullPath": "o/w"}]}`, want: `Clones[0]: platform "svn"`},
 		{name: "snapshot unknown issue state", file: "snapshot", text: `{"AsOf": "2026-10-23T21:23:04Z", "Host": "host-a", "Repos": [{"Info": {"Name": "w", "Platform": "gitlab", "FullPath": "o/w"}, "Issues": [{"Number": 1, "State": "reopened"}]}]}`, want: `issue 1 has state "reopened"`},
+		{name: "snapshot unknown request state", file: "snapshot", text: `{"AsOf": "2026-10-23T21:23:04Z", "Host": "host-a", "Repos": [{"Info": {"Name": "w", "Platform": "gitlab", "FullPath": "o/w"}, "MRs": [{"Number": 1, "State": "draft"}]}]}`, want: `request 1 has state "draft"`},
 		{name: "not configured", noConfig: true, want: "tracking.manifest"},
 	}
 	for _, c := range cases {

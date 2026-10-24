@@ -192,15 +192,21 @@ func LoadInventory(tr Tracking) (*Inventory, error) {
 	if manifest == nil {
 		return nil, fmt.Errorf("tracking manifest %s: unknown shape: not a list", tr.Manifest)
 	}
+	// The snapshot is read once and decoded twice, so both decodings see
+	// the same file even when the tracking system replaces it meanwhile.
+	b, err := readFile(tr.Snapshot)
+	if err != nil {
+		return nil, fmt.Errorf("tracking snapshot %w", err)
+	}
 	var snap Snapshot
-	if err := readStrict(tr.Snapshot, &snap); err != nil {
+	if err := decodeStrict(tr.Snapshot, b, &snap); err != nil {
 		return nil, fmt.Errorf("tracking snapshot %w", err)
 	}
 	// Repos may be null, as the tracking system writes an empty list, but
 	// it must be there: a file without it is not a snapshot.
 	var keys map[string]json.RawMessage
-	if err := readStrict(tr.Snapshot, &keys); err != nil {
-		return nil, fmt.Errorf("tracking snapshot %w", err)
+	if err := json.Unmarshal(b, &keys); err != nil {
+		return nil, fmt.Errorf("tracking snapshot %s: unknown shape: %w", tr.Snapshot, err)
 	}
 	if _, ok := keys["Repos"]; !ok || snap.AsOf.IsZero() {
 		return nil, fmt.Errorf("tracking snapshot %s: unknown shape: AsOf and Repos must be present", tr.Snapshot)
@@ -295,13 +301,27 @@ var workStates = map[string]bool{"open": true, "opened": true, "closed": false, 
 // does not have and anything after the value. Its errors start with the
 // path and say which way the file is wrong.
 func readStrict(path string, v any) error {
+	b, err := readFile(path)
+	if err != nil {
+		return err
+	}
+	return decodeStrict(path, b, v)
+}
+
+// readFile reads path, saying plainly when it does not exist.
+func readFile(path string) ([]byte, error) {
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("%s does not exist", path)
+		return nil, fmt.Errorf("%s does not exist", path)
 	}
 	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+	return b, nil
+}
+
+// decodeStrict is readStrict's decoding of b, read from path.
+func decodeStrict(path string, b []byte, v any) error {
 	if !json.Valid(b) {
 		// json.Valid also fails on a second value after the first, which
 		// Decode below would accept; say which it is.
