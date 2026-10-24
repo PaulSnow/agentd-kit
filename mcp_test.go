@@ -288,6 +288,9 @@ func TestReportProgressRefusals(t *testing.T) {
 		{"line past the end", func(r map[string]any, _ string) {
 			r["items"] = []any{map[string]any{"id": "A1", "status": "met", "evidence": []any{map[string]any{"kind": "file", "path": "spin.go", "line": 40}}}}
 		}, []string{"spin.go", "3 lines"}},
+		{"file without a line", func(r map[string]any, _ string) {
+			r["items"] = []any{map[string]any{"id": "A1", "status": "met", "evidence": []any{map[string]any{"kind": "file", "path": "spin.go"}}}}
+		}, []string{"spin.go", "needs the line"}},
 		{"gate never run", func(r map[string]any, head string) {
 			r["items"] = []any{map[string]any{"id": "A1", "status": "met", "evidence": []any{map[string]any{"kind": "gate", "sha": head}}}}
 		}, []string{"no passing gate"}},
@@ -512,5 +515,90 @@ func TestMCPCommand(t *testing.T) {
 	}
 	if err := mcpCmd([]string{"--config", cfgPath, "--session", "nobody"}, strings.NewReader(""), io.Discard); err == nil {
 		t.Fatal("a server for no session")
+	}
+}
+
+// A message over the limit is answered as unreadable and the server goes
+// on with the next.
+func TestMCPOversizedMessage(t *testing.T) {
+	h, _ := mcpHarness(t)
+	rs := session(t, h.mcpServerFor("s1"), `{"jsonrpc":"2.0","id":1,"method":"ping","params":{"pad":"`+strings.Repeat("x", mcpMaxLine)+`"}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"ping"}`)
+	if len(rs) != 2 || rs[0].Error == nil || rs[0].Error.Code != -32700 || rs[1].Error != nil || string(rs[1].ID) != "2" {
+		t.Fatalf("replies %+v", rs)
+	}
+}
+
+// A refusal tells the session what it sent; the log keeps only the
+// wording, so nothing the session wrote reaches it unscreened.
+func TestRefusalLogsNoArguments(t *testing.T) {
+	h, head := mcpHarness(t)
+	r := validReport(head)
+	r["items"] = []any{map[string]any{"id": "SECRET-abc123", "status": "in_progress", "evidence": []any{}},
+		map[string]any{"id": "A1", "status": "met", "evidence": []any{"secret prose here"}}}
+	text, refused := callOne(t, h.mcpServerFor("s1"), "report_progress", r)
+	if !refused || !strings.Contains(text, "SECRET-abc123") {
+		t.Fatalf("reply %s", text)
+	}
+	for _, e := range h.events() {
+		if e.Kind == KindCase && e.Case.Call != nil {
+			if got := e.Case.Call.Refused; got == "" || strings.Contains(got, "SECRET") || strings.Contains(got, "secret prose") || !strings.Contains(got, "is not one of the case's") {
+				t.Fatalf("logged refusal %q", got)
+			}
+		}
+	}
+}
+
+// A call the session's server logged while agentd runs is folded into the
+// running state as replay folds it: the next fresh session is not asked to
+// acknowledge again.
+func TestRunningAgentdFoldsCalls(t *testing.T) {
+	h, head := mcpHarness(t)
+	restrict(t, h, "Do not touch the gears.")
+	h.alive("s1", "working")
+	h.ticks(1, time.Minute)
+	if _, refused := callOne(t, h.mcpServerFor("s1"), "report_progress", validReport(head)); refused {
+		t.Fatal("refused")
+	}
+	h.ticks(1, time.Minute)
+	if c := h.sup.st.Cases[widgetsCase]; c == nil || c.Progress == nil || !reflect.DeepEqual(c.Acked["s1"], []string{"R1"}) {
+		t.Fatalf("running case %+v", c)
+	}
+	_, facts := h.sup.launchCommand("s1", h.cfg.Sessions["s1"], h.sup.Tracks()["s1"], "id-2", "restart")
+	if strings.Contains(string(facts), `"acknowledge"`) {
+		t.Fatalf("facts ask again: %s", facts)
+	}
+}
+
+// Recording the goal again after one item is dropped and another edited
+// supersedes the edited one by its new wording and marks the dropped one
+// removed.
+func TestGoalDropAndEdit(t *testing.T) {
+	h, _ := mcpHarness(t)
+	body := "## Done when\n- the gears turn\n- the lid opens\n- the bell rings once\n"
+	if err := RecordGoal(NewLogWriter(h.buf), h.cfg, h.logState(), h.clock.Now(), "gitlab/example-org/widgets#8", body); err != nil {
+		t.Fatal(err)
+	}
+	body = "## Done when\n- the gears turn\n- the bell rings twice\n"
+	if err := RecordGoal(NewLogWriter(h.buf), h.cfg, h.logState(), h.clock.Now(), "gitlab/example-org/widgets#8", body); err != nil {
+		t.Fatal(err)
+	}
+	want := []GoalItem{{ID: "A1", Text: "the gears turn", Kind: GoalOwner}, {ID: "A2", Text: "the lid opens", Kind: GoalOwner, SupersededBy: "removed"},
+		{ID: "A3", Text: "the bell rings once", Kind: GoalOwner, SupersededBy: "A4"}, {ID: "A4", Text: "the bell rings twice", Kind: GoalOwner}}
+	if got := caseByID(t, h, "gitlab/example-org/widgets#8").Goal; !reflect.DeepEqual(got, want) {
+		t.Fatalf("goal %+v, want %+v", got, want)
+	}
+}
+
+// A nested item belongs to the item above it, and a section headed in bold
+// ends at the next line in bold.
+func TestDoneWhenNestedAndBold(t *testing.T) {
+	got := DoneWhen("## Done when\n- a\n  - sub a\n- b\n")
+	if !reflect.DeepEqual(got, []string{"a - sub a", "b"}) {
+		t.Fatalf("nested %q", got)
+	}
+	got = DoneWhen("**Done when**\n- a\n\n**Notes**\n- not an item\n")
+	if !reflect.DeepEqual(got, []string{"a"}) {
+		t.Fatalf("bold %q", got)
 	}
 }

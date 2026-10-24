@@ -227,9 +227,14 @@ func (c *Case) unacknowledged(session string) []string {
 var doneWhenHeading = regexp.MustCompile(`(?i)^\s*(#+\s*|\*\*)done when\b`)
 var listItem = regexp.MustCompile(`^\s*([-*+]|\d+[.)])\s+(\[[ xX]\]\s+)?(.*)$`)
 
+// boldHeading is a line wholly in bold, such as "**Notes**", which ends a
+// section that began with one.
+var boldHeading = regexp.MustCompile(`^\s*\*\*[^*]+\*\*\s*:?\s*$`)
+
 // DoneWhen is the list items under the body's "Done when" heading, to the
-// next heading. A line indented under an item continues it; a line that
-// is not an item before the first one, such as "Tests show:", is not one.
+// next heading or line in bold. A line indented under an item, a nested
+// item too, continues it; a line that is not an item before the first one,
+// such as "Tests show:", is not one.
 func DoneWhen(body string) []string {
 	var items []string
 	in := false
@@ -241,12 +246,13 @@ func DoneWhen(body string) []string {
 		if !in {
 			continue
 		}
-		if anyHeading.MatchString(line) {
+		if anyHeading.MatchString(line) || boldHeading.MatchString(line) {
 			break
 		}
-		if m := listItem.FindStringSubmatch(line); m != nil {
+		indented := line != strings.TrimLeft(line, " \t")
+		if m := listItem.FindStringSubmatch(line); m != nil && !(indented && len(items) > 0) {
 			items = append(items, strings.TrimSpace(m[3]))
-		} else if t := strings.TrimSpace(line); t != "" && len(items) > 0 && line != strings.TrimLeft(line, " \t") {
+		} else if t := strings.TrimSpace(line); t != "" && len(items) > 0 && indented {
 			items[len(items)-1] += " " + t
 		}
 	}
@@ -265,8 +271,9 @@ const maxGoalItem = 500
 // RecordGoal records the issue body's done-when items as the case's goal,
 // the owner's record. An item whose text the case already has keeps its
 // id; a new or edited one takes the next id of the case's life, and an
-// item no longer in the list is superseded by the one in its place, or by
-// "removed". Like RecordRuling, the ids are read from st.
+// item no longer in the list is superseded by the new item most like it,
+// or by "removed" when none shares half its words. Like RecordRuling, the
+// ids are read from st.
 func RecordGoal(log *Log, cfg *Config, st *LogState, now time.Time, id, body string) error {
 	id = strings.ToLower(id)
 	known := st.Cases[id] != nil
@@ -308,23 +315,55 @@ func RecordGoal(log *Log, cfg *Config, st *LogState, now time.Time, id, body str
 		}
 		kept = append(kept, found)
 	}
-	// What the list no longer has is superseded by the new item at its
-	// place, or removed when the list has no new item to take it.
-	fresh := kept[:0:0]
-	for _, k := range kept {
-		if !hasGoal(old, k) {
-			fresh = append(fresh, k)
+	// What the list no longer has is superseded by the new item most like
+	// it, each new item taking at most one, or else removed.
+	var fresh []GoalItem
+	for _, it := range goal {
+		if contains(kept, it.ID) && !hasGoal(old, it.ID) {
+			fresh = append(fresh, it)
 		}
 	}
 	for i := range goal {
 		if it := goal[i]; it.SupersededBy == "" && !contains(kept, it.ID) {
 			goal[i].SupersededBy = "removed"
-			if len(fresh) > 0 {
-				goal[i].SupersededBy, fresh = fresh[0], fresh[1:]
+			best, score := -1, 0.5
+			for j, f := range fresh {
+				if s := wordOverlap(it.Text, f.Text); s >= score {
+					best, score = j, s
+				}
+			}
+			if best >= 0 {
+				goal[i].SupersededBy = fresh[best].ID
+				fresh = append(fresh[:best:best], fresh[best+1:]...)
 			}
 		}
 	}
 	return log.Append(Event{V: EventVersion, Time: now, Kind: KindCase, Mode: ModeOwner, Case: &CasePayload{Case: id, Goal: &CaseGoal{Items: goal}}})
+}
+
+// wordOverlap is the share of the longer text's words the two have in
+// common, case and punctuation aside.
+func wordOverlap(a, b string) float64 {
+	words := func(s string) map[string]bool {
+		m := map[string]bool{}
+		for _, w := range strings.Fields(strings.ToLower(s)) {
+			if w = strings.Trim(w, ".,;:!?`*()[]\"'"); w != "" {
+				m[w] = true
+			}
+		}
+		return m
+	}
+	wa, wb := words(a), words(b)
+	n := 0
+	for w := range wa {
+		if wb[w] {
+			n++
+		}
+	}
+	if d := max(len(wa), len(wb)); d > 0 {
+		return float64(n) / float64(d)
+	}
+	return 0
 }
 
 func hasGoal(goal []GoalItem, id string) bool {
@@ -401,39 +440,63 @@ type MCPTool struct {
 const mcpMaxLine = 1 << 20
 
 // Serve reads one JSON-RPC message per line from r and writes each reply
-// as one line to w, until r ends.
+// as one line to w, until r ends. A line over mcpMaxLine is answered as
+// unreadable and skipped; the server goes on.
 func (srv *MCPServer) Serve(r io.Reader, w io.Writer) error {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 64*1024), mcpMaxLine)
+	br := bufio.NewReaderSize(r, 64*1024)
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
-	for sc.Scan() {
-		line := bytes.TrimSpace(sc.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-		var req rpcRequest
-		if err := json.Unmarshal(line, &req); err != nil || req.Method == "" {
-			if err := enc.Encode(map[string]any{"jsonrpc": "2.0", "id": nil, "error": rpcError{rpcParseError, "not a JSON-RPC message"}}); err != nil {
-				return err
-			}
-			continue
-		}
-		result, rerr := srv.handle(req)
-		if len(req.ID) == 0 {
-			continue // a notification has no reply
-		}
-		reply := map[string]any{"jsonrpc": "2.0", "id": req.ID}
-		if rerr != nil {
-			reply["error"] = rerr
-		} else {
-			reply["result"] = result
-		}
-		if err := enc.Encode(reply); err != nil {
+	unreadable := func() error {
+		return enc.Encode(map[string]any{"jsonrpc": "2.0", "id": nil, "error": rpcError{rpcParseError, "not a JSON-RPC message of at most 1 MiB"}})
+	}
+	for {
+		line, long, err := readLine(br, mcpMaxLine)
+		if err != nil && err != io.EOF {
 			return err
 		}
+		if long {
+			if werr := unreadable(); werr != nil {
+				return werr
+			}
+		} else if line = bytes.TrimSpace(line); len(line) > 0 {
+			var req rpcRequest
+			if jerr := json.Unmarshal(line, &req); jerr != nil || req.Method == "" {
+				if werr := unreadable(); werr != nil {
+					return werr
+				}
+			} else if result, rerr := srv.handle(req); len(req.ID) > 0 { // a notification has no reply
+				reply := map[string]any{"jsonrpc": "2.0", "id": req.ID}
+				if rerr != nil {
+					reply["error"] = rerr
+				} else {
+					reply["result"] = result
+				}
+				if werr := enc.Encode(reply); werr != nil {
+					return werr
+				}
+			}
+		}
+		if err == io.EOF {
+			return nil
+		}
 	}
-	return sc.Err()
+}
+
+// readLine reads one line, without its newline. A line over max is read
+// to its end and dropped, and long says so.
+func readLine(br *bufio.Reader, max int) (line []byte, long bool, err error) {
+	for {
+		chunk, err := br.ReadSlice('\n')
+		if !long {
+			line = append(line, chunk...)
+			if len(line) > max {
+				line, long = nil, true
+			}
+		}
+		if err != bufio.ErrBufferFull {
+			return bytes.TrimSuffix(line, []byte("\n")), long, err
+		}
+	}
 }
 
 func (srv *MCPServer) handle(req rpcRequest) (any, *rpcError) {
@@ -463,6 +526,8 @@ func (srv *MCPServer) handle(req rpcRequest) (any, *rpcError) {
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, &rpcError{rpcInvalidParams, "params: " + err.Error()}
 		}
+		// A tool the server does not have is a protocol error, answered
+		// and not logged: nothing reached the case.
 		if p.Name != ToolReportProgress && p.Name != ToolRequestStep {
 			return nil, &rpcError{rpcInvalidParams, fmt.Sprintf("no tool %q: report_progress or request_step", p.Name)}
 		}
@@ -488,9 +553,9 @@ func (srv *MCPServer) call(tool string, args json.RawMessage) (string, bool) {
 	}
 	rec := &CaseCall{Tool: tool, Hash: shortHash(HashPane(string(args)))}
 	var reply map[string]any
-	var problems []string
+	var problems []problem
 	if c.Closed {
-		problems = []string{"case " + srv.caseID + " is closed"}
+		problems = []problem{{format: "case %s is closed", args: []any{srv.caseID}}}
 	} else if tool == ToolReportProgress {
 		rec.Progress, rec.Drift, problems = srv.checkProgress(args, c, st.Tracks[srv.name])
 		reply = map[string]any{"accepted": true, "case": srv.caseID, "drift": rec.Drift}
@@ -503,8 +568,15 @@ func (srv *MCPServer) call(tool string, args json.RawMessage) (string, bool) {
 		reply = map[string]any{"recorded": true, "moved": false, "case": srv.caseID, "facts": facts}
 	}
 	if len(problems) > 0 {
-		rec = &CaseCall{Tool: tool, Hash: rec.Hash, Refused: cutUTF8(strings.Join(problems, "; "), 2000)}
-		reply = map[string]any{"refused": rec.Refused, "case": srv.caseID}
+		var logged, said []string
+		for _, p := range problems {
+			if l := p.logged(); !contains(logged, l) {
+				logged = append(logged, l)
+			}
+			said = append(said, p.reply())
+		}
+		rec = &CaseCall{Tool: tool, Hash: rec.Hash, Refused: cutUTF8(strings.Join(logged, "; "), 2000)}
+		reply = map[string]any{"refused": cutUTF8(strings.Join(said, "; "), 4000), "case": srv.caseID}
 	}
 	err = srv.log.Append(Event{V: EventVersion, Time: srv.now(), Session: srv.name, Kind: KindCase, Mode: ModeShared,
 		Case: &CasePayload{Case: srv.caseID, Call: rec}})
@@ -524,7 +596,7 @@ func compact(v any) string {
 
 // decodeArgs decodes a call's arguments strictly: an argument the tool
 // does not take, such as a case, is refused.
-func (srv *MCPServer) decodeArgs(args json.RawMessage, v any) string {
+func (srv *MCPServer) decodeArgs(args json.RawMessage, v any) []problem {
 	if len(args) == 0 {
 		args = []byte("{}")
 	}
@@ -533,12 +605,28 @@ func (srv *MCPServer) decodeArgs(args json.RawMessage, v any) string {
 	if err := dec.Decode(v); err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, `unknown field "case"`) {
-			return `the arguments name a "case": a call never names one; this server reports on ` + srv.caseID + " only"
+			return []problem{{format: `the arguments name a "case": a call never names one; this server reports on %s only`, args: []any{srv.caseID}}}
 		}
-		return "the arguments are not the tool's: " + strings.TrimPrefix(msg, "json: ")
+		return []problem{{format: "the arguments are not the tool's: %s", args: []any{strings.TrimPrefix(msg, "json: ")}}}
 	}
-	return ""
+	return nil
 }
+
+// problem is what to fix in a call: the session is told it whole, and
+// the log keeps only its wording, the session's values left out, so no
+// argument reaches the log unscreened.
+type problem struct {
+	format string
+	args   []any
+}
+
+func problemOf(format string, args ...any) *problem { return &problem{format, args} }
+
+func (p problem) reply() string { return fmt.Sprintf(p.format, p.args...) }
+
+var formatVerb = regexp.MustCompile(`%[-+# 0-9.]*[a-zA-Z]`)
+
+func (p problem) logged() string { return formatVerb.ReplaceAllString(p.format, "…") }
 
 // Report limits.
 const (
@@ -556,7 +644,7 @@ var sentenceEnd = regexp.MustCompile(`[.!?](\s|$)`)
 // checkProgress checks a report_progress against the case and the facts.
 // It returns the progress to record, the drift its restatement shows, and
 // what to fix, if anything.
-func (srv *MCPServer) checkProgress(args json.RawMessage, c *Case, t *Track) (*CaseProgress, []DriftFlag, []string) {
+func (srv *MCPServer) checkProgress(args json.RawMessage, c *Case, t *Track) (*CaseProgress, []DriftFlag, []problem) {
 	var a struct {
 		Summary  string `json:"summary"`
 		Approach string `json:"approach"`
@@ -573,11 +661,11 @@ func (srv *MCPServer) checkProgress(args json.RawMessage, c *Case, t *Track) (*C
 			Text string `json:"text"`
 		} `json:"goal_restatement"`
 	}
-	if msg := srv.decodeArgs(args, &a); msg != "" {
-		return nil, nil, []string{msg}
+	if p := srv.decodeArgs(args, &a); p != nil {
+		return nil, nil, p
 	}
-	var problems []string
-	bad := func(format string, v ...any) { problems = append(problems, fmt.Sprintf(format, v...)) }
+	var problems []problem
+	bad := func(format string, v ...any) { problems = append(problems, problem{format, v}) }
 	text := func(field, s string, max int) {
 		if !utf8.ValidString(s) || utf8.RuneCountInString(s) > max {
 			bad("%s is over %d characters", field, max)
@@ -636,9 +724,9 @@ func (srv *MCPServer) checkProgress(args json.RawMessage, c *Case, t *Track) (*C
 		}
 		ip := ItemProgress{ID: it.ID, Status: it.Status}
 		for _, raw := range it.Evidence {
-			ref, msg := srv.checkEvidence(raw, t)
-			if msg != "" {
-				bad("item %s: %s", it.ID, msg)
+			ref, p := srv.checkEvidence(raw, t)
+			if p != nil {
+				bad("item %s: "+p.format, append([]any{it.ID}, p.args...)...)
 				continue
 			}
 			ip.Evidence = append(ip.Evidence, ref)
@@ -714,21 +802,21 @@ var shaRef = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
 
 // checkEvidence checks one piece of evidence against the facts: it is a
 // typed reference, and what it names is so.
-func (srv *MCPServer) checkEvidence(raw json.RawMessage, t *Track) (EvidenceRef, string) {
+func (srv *MCPServer) checkEvidence(raw json.RawMessage, t *Track) (EvidenceRef, *problem) {
 	var ref EvidenceRef
 	if s := bytes.TrimSpace(raw); len(s) > 0 && s[0] == '"' {
-		return ref, fmt.Sprintf(`evidence %s is prose; give a typed reference such as {"kind":"commit","sha":"…"}`, cutUTF8(string(s), 80))
+		return ref, problemOf(`evidence %s is prose; give a typed reference such as {"kind":"commit","sha":"…"}`, cutUTF8(string(s), 80))
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&ref); err != nil {
-		return ref, "evidence is not a typed reference: " + strings.TrimPrefix(err.Error(), "json: ")
+		return ref, problemOf("evidence is not a typed reference: %s", strings.TrimPrefix(err.Error(), "json: "))
 	}
 	wt := srv.sess.Cwd
 	switch ref.Kind {
 	case EvidenceCommit, EvidenceGate, EvidenceCI:
 		if !shaRef.MatchString(ref.SHA) {
-			return ref, fmt.Sprintf("%s evidence needs the commit's sha, 7 to 40 lowercase hex digits, not %q", ref.Kind, cutUTF8(ref.SHA, 60))
+			return ref, problemOf("%s evidence needs the commit's sha, 7 to 40 lowercase hex digits, not %q", ref.Kind, cutUTF8(ref.SHA, 60))
 		}
 	}
 	switch ref.Kind {
@@ -736,10 +824,10 @@ func (srv *MCPServer) checkEvidence(raw json.RawMessage, t *Track) (EvidenceRef,
 		full, err := gitOut(srv.cfg.Timeouts.Forge.Duration, wt, "rev-parse", "--verify", "--quiet", ref.SHA+"^{commit}")
 		full = strings.TrimSpace(full)
 		if err != nil {
-			return ref, fmt.Sprintf("commit %s is not a commit in the session's worktree", ref.SHA)
+			return ref, problemOf("commit %s is not a commit in the session's worktree", ref.SHA)
 		}
 		if _, err := git(srv.cfg.Timeouts.Forge.Duration, wt, "merge-base", "--is-ancestor", full, "HEAD"); err != nil {
-			return ref, fmt.Sprintf("commit %s is not on the session's branch (not an ancestor of HEAD)", ref.SHA)
+			return ref, problemOf("commit %s is not on the session's branch (not an ancestor of HEAD)", ref.SHA)
 		}
 	case EvidenceGate:
 		passed := false
@@ -749,52 +837,55 @@ func (srv *MCPServer) checkEvidence(raw json.RawMessage, t *Track) (EvidenceRef,
 			}
 		}
 		if !passed {
-			return ref, fmt.Sprintf("agentd has no passing gate on %s for this session; the gate is agentd's to run", ref.SHA)
+			return ref, problemOf("agentd has no passing gate on %s for this session; the gate is agentd's to run", ref.SHA)
 		}
 	case EvidenceFile:
 		if ref.Path == "" || !filepath.IsLocal(ref.Path) {
-			return ref, fmt.Sprintf("file %q must be a path inside the worktree, relative to it", ref.Path)
+			return ref, problemOf("file %q must be a path inside the worktree, relative to it", ref.Path)
 		}
 		root, err := filepath.EvalSymlinks(wt)
 		if err != nil {
-			return ref, "the session's worktree cannot be read: " + err.Error()
+			return ref, problemOf("the session's worktree cannot be read: %s", err.Error())
 		}
 		path, err := filepath.EvalSymlinks(filepath.Join(root, ref.Path))
 		if err != nil {
-			return ref, fmt.Sprintf("file %s does not exist in the worktree", ref.Path)
+			return ref, problemOf("file %s does not exist in the worktree", ref.Path)
 		}
 		if rel, err := filepath.Rel(root, path); err != nil || !filepath.IsLocal(rel) {
-			return ref, fmt.Sprintf("file %q must be a path inside the worktree", ref.Path)
+			return ref, problemOf("file %q must be a path inside the worktree", ref.Path)
 		}
 		b, err := os.ReadFile(path)
 		if err != nil {
-			return ref, fmt.Sprintf("file %s cannot be read: it must be a file", ref.Path)
+			return ref, problemOf("file %s cannot be read: it must be a file", ref.Path)
 		}
 		n := bytes.Count(b, []byte("\n"))
 		if len(b) > 0 && b[len(b)-1] != '\n' {
 			n++
 		}
-		if ref.Line < 0 || ref.Line > n {
-			return ref, fmt.Sprintf("file %s has %d lines, not line %d", ref.Path, n, ref.Line)
+		if ref.Line < 1 {
+			return ref, problemOf("file %s evidence needs the line it shows, 1 or more", ref.Path)
+		}
+		if ref.Line > n {
+			return ref, problemOf("file %s has %d lines, not line %d", ref.Path, n, ref.Line)
 		}
 	case EvidenceCI:
-		return ref, "agentd records no CI results yet; CI evidence cannot be checked"
+		return ref, problemOf("agentd records no CI results yet; CI evidence cannot be checked")
 	case EvidenceFinding:
-		return ref, "agentd records no review findings yet; finding evidence cannot be checked"
+		return ref, problemOf("agentd records no review findings yet; finding evidence cannot be checked")
 	default:
-		return ref, fmt.Sprintf("evidence kind %q is not commit, gate, file, ci or finding", cutUTF8(ref.Kind, 40))
+		return ref, problemOf("evidence kind %q is not commit, gate, file, ci or finding", cutUTF8(ref.Kind, 40))
 	}
-	return ref, ""
+	return ref, nil
 }
 
 // checkStep records a requested step with the facts as they stand. The
 // case is not moved: delivery happens when a gate agentd runs passes.
-func (srv *MCPServer) checkStep(args json.RawMessage, t *Track) (*CaseStep, string, []string) {
+func (srv *MCPServer) checkStep(args json.RawMessage, t *Track) (*CaseStep, string, []problem) {
 	var a struct {
 		Kind string `json:"kind"`
 	}
-	if msg := srv.decodeArgs(args, &a); msg != "" {
-		return nil, "", []string{msg}
+	if p := srv.decodeArgs(args, &a); p != nil {
+		return nil, "", p
 	}
 	step := &CaseStep{Kind: a.Kind}
 	switch a.Kind {
@@ -817,7 +908,7 @@ func (srv *MCPServer) checkStep(args json.RawMessage, t *Track) (*CaseStep, stri
 		}
 		return step, "recorded; no passing gate on HEAD " + shortHash(head) + "; agentd delivers only after its gate passes", nil
 	}
-	return nil, "", []string{fmt.Sprintf("step %q is not review, delivery or stop", cutUTF8(a.Kind, 40))}
+	return nil, "", []problem{{format: "step %q is not review, delivery or stop", args: []any{cutUTF8(a.Kind, 40)}}}
 }
 
 func (srv *MCPServer) withheld(text string) string {
@@ -831,7 +922,7 @@ func (srv *MCPServer) withheld(text string) string {
 
 // toolList is the tools the server offers, with their input schemas.
 func toolList() []MCPTool {
-	evidence := `{"type":"object","properties":{"kind":{"enum":["commit","gate","file","ci","finding"]},"sha":{"type":"string"},"path":{"type":"string"},"line":{"type":"integer"},"job":{"type":"string"},"id":{"type":"string"}},"required":["kind"],"additionalProperties":false}`
+	evidence := `{"type":"object","properties":{"kind":{"enum":["commit","gate","file","ci","finding"]},"sha":{"type":"string"},"path":{"type":"string"},"line":{"type":"integer","minimum":1,"description":"for a file, the line it shows"},"job":{"type":"string"},"id":{"type":"string"}},"required":["kind"],"additionalProperties":false}`
 	report := `{"type":"object","properties":{` +
 		`"summary":{"type":"string","description":"where the work stands, at most 3 sentences"},` +
 		`"approach":{"type":"string"},` +

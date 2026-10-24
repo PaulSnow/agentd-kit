@@ -293,7 +293,7 @@ func DefaultConfig() Config {
 				Window:         Duration{time.Hour},
 				BackoffInitial: Duration{time.Minute},
 				BackoffMax:     Duration{30 * time.Minute},
-				Command:        []string{"bash", "-lic", `exec claude --session-id "$1" --mcp-config "$2" "$3"`, "agentd", "{session_id}", "{mcp}", "{prompt}"},
+				Command:        []string{"bash", "-lic", `exec claude --session-id "$1" --mcp-config="$2" "$3"`, "agentd", "{session_id}", "{mcp}", "{prompt}"},
 				Width:          220,
 				Height:         50,
 			},
