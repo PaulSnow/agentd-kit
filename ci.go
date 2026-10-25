@@ -87,7 +87,7 @@ type CIPayload struct {
 	Error       string   `json:"error,omitempty"`
 	// The request's author, screened, whether it is a draft or has an
 	// open discussion, the run that judged its head, and the target's
-	// tip when that run was first seen green on it (#36).
+	// tip when that run was first seen on it (#36).
 	Author     string `json:"author,omitempty"`
 	Draft      bool   `json:"draft,omitempty"`
 	Unresolved bool   `json:"unresolved,omitempty"`
@@ -101,6 +101,12 @@ type CIRecord struct {
 	CIPayload
 	Session string
 	At      time.Time
+	// FailedAt is when the request first failed at its head with its
+	// cause, FailedFor, kept across records in between, so a failure is
+	// one failure however often a forge error or a new discussion
+	// changes the record.
+	FailedAt  time.Time
+	FailedFor string
 }
 
 // CIFixRecord is one fix session started for a request's failure, or
@@ -150,7 +156,13 @@ func (st *LogState) applyCI(e Event) {
 	if st.CI == nil {
 		st.CI = map[string]CIRecord{}
 	}
-	st.CI[ciKey(e.CI.Repository, e.CI.Ref)] = CIRecord{CIPayload: *e.CI, Session: e.Session, At: e.Time}
+	key := ciKey(e.CI.Repository, e.CI.Ref)
+	old := st.CI[key]
+	r := CIRecord{CIPayload: *e.CI, Session: e.Session, At: e.Time, FailedAt: old.FailedAt, FailedFor: old.FailedFor}
+	if r.State == CIFailed && r.FailedFor != r.Head+" "+r.Cause {
+		r.FailedAt, r.FailedFor = e.Time, r.Head+" "+r.Cause
+	}
+	st.CI[key] = r
 	if t := st.Tracks[e.Session]; t != nil {
 		st.ciSeenBy(t, e.CI.Repository, e.CI.Ref, true)
 	}
@@ -365,22 +377,24 @@ func (s *Supervisor) askCI(r ciWatched, prev CIRecord) CIPayload {
 		c, err = gitlabCI(api, repo.Project, r.Ref)
 	}
 	if err != nil {
-		p.State, p.Error = CIUnknown, s.withheld(err.Error())
+		// The run and its base are kept, so a forge that failed once does
+		// not lose the base the run started on.
+		p.State, p.Error, p.Run, p.Base = CIUnknown, s.withheld(err.Error()), prev.Run, prev.Base
 		return p
 	}
 	p.URL, p.Head, p.Target, p.State = c.url, c.head, c.target, c.state
 	p.Author, p.Draft, p.Unresolved, p.Run = s.withheld(c.author), c.draft, c.unresolved, c.run
-	if c.state == CISuccess {
-		// The base a green run tested against: the target's tip when
-		// the run was first seen green on the head.
-		if prev.State == CISuccess && prev.Head == p.Head && prev.Run == p.Run && prev.Base != "" {
-			p.Base = prev.Base
-		} else if c.tip != nil {
-			// A tip that cannot be asked leaves the base unknown, which
-			// no retest is judged by; the state stands.
-			if tip, err := c.tip(); err == nil {
-				p.Base = tip
-			}
+	// The base a run tests against: the target's tip when the run was
+	// first seen, running or settled. A run first seen settled took its
+	// base from a tip that may have moved since it started, so one that
+	// moved while it ran is not caught.
+	if p.Run != "" && prev.Run == p.Run && prev.Base != "" {
+		p.Base = prev.Base
+	} else if p.Run != "" && c.tip != nil {
+		// A tip that cannot be asked leaves the base unknown, which no
+		// retest is judged by; the state stands.
+		if tip, err := c.tip(); err == nil {
+			p.Base = tip
 		}
 	}
 	if c.state != CIFailed {
@@ -521,7 +535,6 @@ func gitlabCI(api ForgeAPI, project, ref string) (ciCheck, error) {
 		Author       struct {
 			Username string `json:"username"`
 		} `json:"author"`
-		// Absent on old GitLab: nothing then says a discussion is open.
 		BlockingDiscussionsResolved *bool `json:"blocking_discussions_resolved"`
 		HeadPipeline                *struct {
 			ID     int    `json:"id"`
@@ -534,7 +547,13 @@ func gitlabCI(api ForgeAPI, project, ref string) (ciCheck, error) {
 		return ciCheck{}, err
 	}
 	c := ciCheck{url: mr.WebURL, head: mr.SHA, target: mr.TargetBranch, text: mr.Title + "\n" + mr.Description,
-		author: mr.Author.Username, draft: mr.Draft, unresolved: mr.BlockingDiscussionsResolved != nil && !*mr.BlockingDiscussionsResolved}
+		author: mr.Author.Username, draft: mr.Draft}
+	if mr.State == "opened" {
+		var err error
+		if c.unresolved, err = gitlabUnresolved(get, base, ref[1:], mr.BlockingDiscussionsResolved); err != nil {
+			return ciCheck{}, err
+		}
+	}
 	c.tip = func() (string, error) {
 		var b struct {
 			Commit struct {
@@ -743,25 +762,9 @@ func githubCI(api ForgeAPI, project, ref string) (ciCheck, error) {
 	if err := checks(&c, pr.Head.SHA, false); err != nil {
 		return ciCheck{}, err
 	}
-	// REST has no thread state: a reviewer whose latest say requests
-	// changes is the open discussion.
-	var reviews []struct {
-		State string `json:"state"`
-		User  struct {
-			Login string `json:"login"`
-		} `json:"user"`
-	}
-	if err := get(base+"/pulls/"+ref[1:]+"/reviews?per_page=100", &reviews); err != nil {
+	var err error
+	if c.unresolved, err = githubUnresolved(get, base, ref[1:]); err != nil {
 		return ciCheck{}, err
-	}
-	latest := map[string]string{}
-	for _, r := range reviews {
-		if r.State != "COMMENTED" && r.State != "PENDING" {
-			latest[r.User.Login] = r.State
-		}
-	}
-	for _, st := range latest {
-		c.unresolved = c.unresolved || st == "CHANGES_REQUESTED"
 	}
 	c.targetCI = func() (ciCheck, error) {
 		var t ciCheck

@@ -273,10 +273,16 @@ func TestMergeGitHubView(t *testing.T) {
 		"/repos/example-org/gadgets/git/ref/heads/main":                          `{"object":{"sha":"0123456789"}}`,
 		"/repos/example-org/gadgets/contents/.agentd/policy.json?ref=0123456789": `{"merge":"fast-forward"}`,
 		"/repos/example-org/gadgets/compare/0123456789...abc1234def":             `{"status":"ahead","behind_by":0}`,
+		// A request for changes its reviewer's dismissal took back.
+		"/repos/example-org/gadgets/pulls/4/reviews?per_page=100": `[{"state":"CHANGES_REQUESTED","user":{"login":"lead"}},{"state":"COMMENTED","user":{"login":"lead"}},{"state":"DISMISSED","user":{"login":"lead"}}]`,
 	}}
 	v, err := githubMergeView(api, "example-org/gadgets", "#4")
-	if err != nil || !v.open || v.head != "abc1234def" || v.target != "main" {
+	if err != nil || !v.open || v.head != "abc1234def" || v.target != "main" || v.unresolved {
 		t.Fatalf("view = %+v, %v", v, err)
+	}
+	api.github["/repos/example-org/gadgets/pulls/4/reviews?per_page=100"] = `[{"state":"APPROVED","user":{"login":"lead"}},{"state":"CHANGES_REQUESTED","user":{"login":"other"}},{"state":"COMMENTED","user":{"login":"other"}}]`
+	if again, err := githubMergeView(api, "example-org/gadgets", "#4"); err != nil || !again.unresolved {
+		t.Fatalf("changes requested: unresolved %v, %v", again.unresolved, err)
 	}
 	tip, err := v.tip("main")
 	if err != nil || tip != "0123456789" {

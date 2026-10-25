@@ -182,6 +182,7 @@ type mergeView struct {
 	held              string // why the forge itself holds it, a draft, or ""
 	author            string
 	labels            []string
+	unresolved        bool // an open discussion, read as the CI watcher reads it
 	// tip is the target branch's commit, policy the repository's policy
 	// file at a commit (nil when there is none), fastForward why head is
 	// not a fast-forward of tip, or "", and approvers who approved the
@@ -219,6 +220,10 @@ func (s *Supervisor) mergeRequest(name string, t *Track, w ciWatched, r CIRecord
 	}
 	if v.held != "" {
 		skip("held", v.held)
+		return
+	}
+	if v.unresolved {
+		skip("unresolved", "it has an open discussion")
 		return
 	}
 	// A target outside the owner's is not merged into, and its file is
@@ -287,8 +292,14 @@ func (s *Supervisor) mergeRequest(name string, t *Track, w ciWatched, r CIRecord
 			return
 		}
 		rkey := mergeKey(w.Repository, w.Ref) + ":retest:" + v.head + ":" + tip
-		if t.Retests[rkey] {
+		switch {
+		case t.Retests[rkey]:
 			return // retested: the watcher records the new run
+		case s.failed(t, rkey):
+			skip("retest-gave-up", fmt.Sprintf("%s; asking for a new pipeline failed %d times, not retrying", moved, len(t.Failures[rkey])))
+			return
+		case !s.retryDue(t, rkey, s.clock.Now()):
+			return
 		}
 		s.act(name, ActRetest, &ActPayload{Key: rkey, Repository: w.Repository, Ref: w.Ref, URL: v.url, Head: v.head, Target: v.target, SHA: tip}, func() error {
 			return s.forge.RetestAllowed(w.Repository, w.Ref)
@@ -314,7 +325,7 @@ func (s *Supervisor) mergeRequest(name string, t *Track, w ciWatched, r CIRecord
 		unknown(err)
 		return
 	}
-	if !again.open || again.head != v.head || again.target != v.target || again.held != "" {
+	if !again.open || again.head != v.head || again.target != v.target || again.held != "" || again.unresolved {
 		skip("request-changed", "the request changed during the check")
 		return
 	}
@@ -353,11 +364,18 @@ func gitlabMergeView(api ForgeAPI, project, ref string) (mergeView, error) {
 		Author       struct {
 			Username string `json:"username"`
 		} `json:"author"`
+		BlockingDiscussionsResolved *bool `json:"blocking_discussions_resolved"`
 	}
 	if err := get(base+"/merge_requests/"+ref[1:], &mr); err != nil {
 		return mergeView{}, err
 	}
 	v := mergeView{head: mr.SHA, target: mr.TargetBranch, url: mr.WebURL, open: mr.State == "opened", author: mr.Author.Username, labels: mr.Labels}
+	if v.open {
+		var err error
+		if v.unresolved, err = gitlabUnresolved(get, base, ref[1:], mr.BlockingDiscussionsResolved); err != nil {
+			return mergeView{}, err
+		}
+	}
 	// GitLab keeps an approval across a push unless the project resets
 	// approvals, so its approval is not tied to the head.
 	v.approvers = func(string) ([]string, error) {
@@ -458,6 +476,12 @@ func githubMergeView(api ForgeAPI, project, ref string) (mergeView, error) {
 		return mergeView{}, err
 	}
 	v := mergeView{head: pr.Head.SHA, target: pr.Base.Ref, url: pr.HTMLURL, open: pr.State == "open" && !pr.Merged, author: pr.User.Login}
+	if v.open {
+		var err error
+		if v.unresolved, err = githubUnresolved(get, base, ref[1:]); err != nil {
+			return mergeView{}, err
+		}
+	}
 	for _, l := range pr.Labels {
 		v.labels = append(v.labels, l.Name)
 	}

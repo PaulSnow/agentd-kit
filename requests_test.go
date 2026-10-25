@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strconv"
 	"strings"
@@ -54,6 +55,7 @@ func outsideMR(api *fakeForgeAPI, s outsideMRState) {
 			`","target_branch":"main","author":{"username":"` + s.author + `"},"blocking_discussions_resolved":` + strconv.FormatBool(!s.unresolved) +
 			`,"head_pipeline":{"id":` + id + `,"status":"` + s.status + `","sha":"` + s.head + `"}}`
 		api.gitlab[ciProject+"/pipelines/"+id+"/jobs"] = gitlabJobs(s.pipeline*10, s.jobs)
+		api.gitlab[ciProject+"/merge_requests/2/discussions"] = `[]`
 		api.gitlab[ciProject+"/jobs/"+strconv.Itoa(s.pipeline*10+1)+"/trace"] = "2026-10-22T00:00:02.000Z --- FAIL: TestSqueak (0.01s)\n2026-10-22T00:00:02.100Z FAIL\n"
 	})
 }
@@ -95,6 +97,13 @@ func TestOutsideRedPipelineWakesCoordinator(t *testing.T) {
 		t.Fatalf("ci fixes on the coordinator = %d", n)
 	}
 	h.transcriptOf("c", "t1", summaryLine("c1", "m1", "Started a fix.", h.clock.Now(), 100))
+	h.ticks(3, 5*time.Minute)
+	// The same failure, though a forge error and a new thread changed
+	// its record in between, is not due again.
+	api.set(func() { api.gitlabErr = errors.New("connection refused") })
+	h.ticks(2, 5*time.Minute)
+	api.set(func() { api.gitlabErr = nil })
+	outsideMR(api, outsideMRState{head: "5eed0101", pipeline: 60, status: "failed", jobs: []string{"test:failed", "lint:success"}, unresolved: true})
 	h.ticks(3, 5*time.Minute)
 	if n := len(h.wakes()); n != 1 {
 		t.Fatalf("woke again for the same failure: %d", n)
@@ -269,6 +278,127 @@ func TestCIRequiredAddsCIToRequire(t *testing.T) {
 		t.Fatalf("merged without green CI: %+v", h.forge.merges)
 	}
 	if s := h.mergeSkips(); len(s) != 1 || !strings.Contains(s[0], "not green") {
+		t.Fatalf("skips = %q", s)
+	}
+}
+
+// On GitLab a resolvable thread not resolved is an open discussion where
+// the project does not require threads resolved; one opened after the
+// watcher's round is read again just before the merge.
+func TestOutsideUnresolvedThreadReadAtMerge(t *testing.T) {
+	h, api := requestsHarness(t)
+	h.ticks(2, 5*time.Minute)
+	h.approve("!2", "5eed0101")
+	api.set(func() {
+		api.gitlab[ciProject+"/merge_requests/2/discussions"] = `[{"notes":[{"resolvable":false},{"resolvable":true,"resolved":false}]}]`
+	})
+	r := h.sup.st.CI[ciKey("widgets", "!2")]
+	if r.Unresolved {
+		t.Fatal("recorded unresolved before the thread")
+	}
+	h.sup.mergeRequest("c", h.sup.track("c"), ciWatched{Session: "c", Repository: "widgets", Ref: "!2"}, r, true, true)
+	if len(h.forge.merges) != 0 {
+		t.Fatalf("merged with an open thread: %+v", h.forge.merges)
+	}
+	if s := h.mergeSkips(); len(s) == 0 || !strings.Contains(s[len(s)-1], "open discussion") {
+		t.Fatalf("skips = %q", s)
+	}
+	h.ticks(1, 5*time.Minute)
+	if r := h.sup.st.CI[ciKey("widgets", "!2")]; !r.Unresolved {
+		t.Fatalf("record = %+v", r)
+	}
+}
+
+// A run's base is the tip when the run was first seen, running, and a
+// forge error in between keeps it: a target that moved while the run ran
+// is retested.
+func TestOutsideBaseIsTipWhenRunFirstSeen(t *testing.T) {
+	h, api := requestsHarness(t)
+	repo := h.cfg.Repositories["widgets"]
+	repo.Policy.CI.RetestOnBaseMove = true
+	h.cfg.Repositories["widgets"] = repo
+	outsideMR(api, outsideMRState{head: "5eed0101", pipeline: 60, status: "running"})
+	h.ticks(2, 5*time.Minute)
+	const moved = "abad1dea"
+	api.set(func() {
+		api.gitlab[ciProject+"/repository/branches/main"] = `{"name":"main","commit":{"id":"` + moved + `"}}`
+		api.gitlab[ciProject+"/repository/merge_base"] = `{"id":"` + moved + `"}`
+		api.gitlabErr = errors.New("connection refused")
+	})
+	h.ticks(1, 5*time.Minute)
+	if r := h.sup.st.CI[ciKey("widgets", "!2")]; r.State != CIUnknown || r.Base != mergeTip {
+		t.Fatalf("record = %+v", r)
+	}
+	api.set(func() { api.gitlabErr = nil })
+	outsideMR(api, outsideMRState{head: "5eed0101", pipeline: 60, status: "success"})
+	h.ticks(1, 5*time.Minute)
+	if r := h.sup.st.CI[ciKey("widgets", "!2")]; r.State != CISuccess || r.Base != mergeTip {
+		t.Fatalf("record = %+v", r)
+	}
+	h.approve("!2", "5eed0101")
+	h.ticks(2, 5*time.Minute)
+	if len(h.forge.merges) != 0 || len(h.forge.retests) != 1 {
+		t.Fatalf("merges %+v, retests %v", h.forge.merges, h.forge.retests)
+	}
+}
+
+// A retest that keeps failing is tried with the restart policy's backoff
+// and then given up, with a skip.
+func TestOutsideFailingRetestGivesUp(t *testing.T) {
+	h, api := requestsHarness(t)
+	repo := h.cfg.Repositories["widgets"]
+	repo.Policy.CI.RetestOnBaseMove = true
+	h.cfg.Repositories["widgets"] = repo
+	h.forge.retestErr = errors.New("403 Forbidden")
+	h.ticks(2, 5*time.Minute)
+	h.approve("!2", "5eed0101")
+	api.set(func() {
+		api.gitlab[ciProject+"/repository/branches/main"] = `{"name":"main","commit":{"id":"abad1dea"}}`
+	})
+	h.ticks(12, time.Hour)
+	if n, max := len(h.forge.retests), h.cfg.Policies.Restart.MaxRestarts; n != max {
+		t.Fatalf("retests = %d, want %d", n, max)
+	}
+	if s := h.mergeSkips(); len(s) == 0 || !strings.Contains(s[len(s)-1], "not retrying") {
+		t.Fatalf("skips = %q", s)
+	}
+	if len(h.forge.merges) != 0 {
+		t.Fatalf("merges = %+v", h.forge.merges)
+	}
+}
+
+// GitHub cannot test a pull request's merge result again: one green on a
+// base the target moved from is skipped with that reason, not merged.
+func TestOutsideGitHubMovedBaseSkipped(t *testing.T) {
+	h := coordHarness(t)
+	h.cfg.Poll.CI = true
+	repo := h.cfg.Repositories["widgets"]
+	repo.Forge = "github"
+	repo.Policy.CI.RetestOnBaseMove = true
+	h.cfg.Repositories["widgets"] = repo
+	setMerge(t, h, func(m *MergeRules) {})
+	const base = "/repos/example-org/widgets"
+	api := &fakeForgeAPI{github: map[string]string{
+		base + "/pulls?state=open&per_page=100":            `[{"number":2}]`,
+		base + "/pulls/2":                                  `{"state":"open","mergeable_state":"clean","user":{"login":"widget-bot"},"head":{"sha":"5eed0101"},"base":{"ref":"main"}}`,
+		base + "/pulls/2/reviews?per_page=100":             `[]`,
+		base + "/commits/5eed0101/check-runs?per_page=100": `{"check_runs":[{"id":21,"name":"test","status":"completed","conclusion":"success"}]}`,
+		base + "/git/ref/heads/main":                       `{"object":{"sha":"` + mergeTip + `"}}`,
+		base + "/compare/" + mergeTip + "...5eed0101":      `{"status":"ahead","behind_by":0}`,
+		base + "/compare/abad1dea...5eed0101":              `{"status":"diverged","behind_by":1}`,
+	}}
+	h.sup.api = api
+	h.ticks(2, 5*time.Minute)
+	if r := h.sup.st.CI[ciKey("widgets", "#2")]; r.Session != "c" || r.State != CISuccess || r.Base != mergeTip || r.Run != "21" {
+		t.Fatalf("record = %+v", r)
+	}
+	h.approve("#2", "5eed0101")
+	api.set(func() { api.github[base+"/git/ref/heads/main"] = `{"object":{"sha":"abad1dea"}}` })
+	h.ticks(3, 5*time.Minute)
+	if len(h.forge.merges) != 0 || len(h.forge.retests) != 0 {
+		t.Fatalf("merges %+v, retests %v", h.forge.merges, h.forge.retests)
+	}
+	if s := h.mergeSkips(); len(s) == 0 || !strings.Contains(s[len(s)-1], "GitHub has no call") {
 		t.Fatalf("skips = %q", s)
 	}
 }

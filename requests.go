@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -58,6 +59,9 @@ func (srv *MCPServer) callApprove(st *LogState, args json.RawMessage) (string, b
 		return refuse("%s", ps[0].reply())
 	}
 	own := srv.sess.Repository
+	if co := srv.cfg.Repositories[own].Coordinator; co == nil || co.Session != srv.name {
+		return refuse("session %s does not coordinate %s; only its coordinator approves its requests", srv.name, own)
+	}
 	if !requestRef.MatchString(a.Request) {
 		return refuse("request %q is not a reference such as !12 or #12", a.Request)
 	}
@@ -129,4 +133,70 @@ func (s *Supervisor) packRequests(repo string) []PackRequest {
 // ciReason is the due reason of a red request no session delivered.
 func ciReason(r CIRecord) string {
 	return "ci: " + r.Ref + " failed at " + shortHash(r.Head)
+}
+
+// discussionsPage is how many reviews or discussions are read: one page.
+// A full page may hide more, and holds the request as if one were open.
+const discussionsPage = 100
+
+// githubUnresolved says whether pull request n has an open discussion.
+// REST has no thread state: a reviewer whose latest review that says
+// something requests changes is the open discussion; a dismissal or a
+// later approval takes it back. Branch protection's conversation
+// resolution shows as mergeable_state blocked, which holds a merge too.
+func githubUnresolved(get func(string, any) error, base, n string) (bool, error) {
+	var reviews []struct {
+		State string `json:"state"`
+		User  struct {
+			Login string `json:"login"`
+		} `json:"user"`
+	}
+	if err := get(base+"/pulls/"+n+"/reviews?per_page="+strconv.Itoa(discussionsPage), &reviews); err != nil {
+		return false, err
+	}
+	if len(reviews) >= discussionsPage {
+		return true, nil
+	}
+	latest := map[string]string{}
+	for _, r := range reviews {
+		if r.State != "COMMENTED" && r.State != "PENDING" {
+			latest[r.User.Login] = r.State
+		}
+	}
+	for _, st := range latest {
+		if st == "CHANGES_REQUESTED" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// gitlabUnresolved says whether merge request iid has an open discussion:
+// GitLab says its blocking discussions are not resolved, which it says
+// only where the project requires threads resolved, or one of its
+// resolvable threads is not resolved.
+func gitlabUnresolved(get func(string, any) error, base, iid string, blocking *bool) (bool, error) {
+	if blocking != nil && !*blocking {
+		return true, nil
+	}
+	var ds []struct {
+		Notes []struct {
+			Resolvable bool `json:"resolvable"`
+			Resolved   bool `json:"resolved"`
+		} `json:"notes"`
+	}
+	if err := get(base+"/merge_requests/"+iid+"/discussions?per_page="+strconv.Itoa(discussionsPage), &ds); err != nil {
+		return false, err
+	}
+	if len(ds) >= discussionsPage {
+		return true, nil
+	}
+	for _, d := range ds {
+		for _, n := range d.Notes {
+			if n.Resolvable && !n.Resolved {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }

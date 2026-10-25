@@ -473,7 +473,8 @@ type fakeForge struct {
 	pushErr        error // what a push returns, after recording it
 	merges         []mergedRequest
 	retests        []string // the requests whose pipeline was run again
-	mergeErr       error    // what a merge returns, after recording it
+	retestErr      error
+	mergeErr       error // what a merge returns, after recording it
 }
 
 type mergedRequest struct {
@@ -514,7 +515,7 @@ func (f *fakeForge) Retest(repo Repository, ref string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.retests = append(f.retests, ref)
-	return nil
+	return f.retestErr
 }
 
 func (f *fakeForge) result(n int) MergeResult {

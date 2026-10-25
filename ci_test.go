@@ -32,6 +32,7 @@ func (f *fakeForgeAPI) pipelines(head, state string, jobs []string, target strin
 		f.gitlab[ciProject+"/merge_requests/1"] = `{"iid":1,"state":"opened","title":"Add the feature","description":"The MR description.","web_url":"https://gitlab.example.com/example-org/widgets/-/merge_requests/1","sha":"` + head +
 			`","target_branch":"main","author":{"username":"widget-bot"},"labels":["agentd"],"head_pipeline":{"id":50,"status":"` + state + `","sha":"` + head + `","web_url":"https://gitlab.example.com/example-org/widgets/-/pipelines/50"}}`
 		f.gitlab[ciProject+"/pipelines/50/jobs"] = gitlabJobs(500, jobs)
+		f.gitlab[ciProject+"/merge_requests/1/discussions"] = `[]`
 		f.gitlab[ciProject+"/pipelines|ref=main"] = `[{"id":40,"status":"` + target + `","sha":"badbeef1234","web_url":"https://gitlab.example.com/example-org/widgets/-/pipelines/40"}]`
 		f.gitlab[ciProject+"/pipelines/40/jobs"] = gitlabJobs(400, targetJobs)
 		f.gitlab[ciProject+"/jobs/501/trace"] = "2026-10-22T00:00:01.000Z $ go test ./...\n2026-10-22T00:00:02.000Z --- FAIL: TestWidgets (0.01s)\n2026-10-22T00:00:02.100Z FAIL\n"
