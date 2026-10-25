@@ -44,8 +44,10 @@ type Config struct {
 }
 
 // Account is a Claude login a session runs under: its config directory,
-// its OAuth token file, or both. The token file holds the token; agentd
-// never holds it, and the file must be readable by its owner only.
+// its OAuth token file, or both. The token file holds the token, and must
+// be readable by its owner only. A launch never puts it in agentd's
+// memory; a usage reading (#39) reads it for that reading and drops it,
+// and never logs or prints it.
 type Account struct {
 	ConfigDir string `json:"config_dir"`
 	TokenFile string `json:"token_file"`
@@ -440,8 +442,8 @@ func (c *Config) finish(base string) error {
 	if c.Poll.Every.Duration <= 0 || c.Poll.CIEvery.Duration <= 0 {
 		errs = append(errs, errors.New("poll.every and poll.ci_every must be positive"))
 	}
-	if u := c.Usage; u.Every.Duration <= 0 || u.Limit <= 0 || u.Limit > 100 || u.Model == "" || !strings.HasPrefix(u.API, "https://") && !strings.HasPrefix(u.API, "http://") {
-		errs = append(errs, errors.New("usage: every must be positive, limit a percent above 0 and at most 100, api an http(s) URL and model set"))
+	if u := c.Usage; u.Every.Duration <= 0 || u.Limit <= 0 || u.Limit > 100 || u.Model == "" || !usageAPIOK(u.API) {
+		errs = append(errs, errors.New("usage: every must be positive, limit a percent above 0 and at most 100, api an https URL (http only to this machine) and model set"))
 	}
 	if c.PollInterval.Duration <= 0 {
 		errs = append(errs, errors.New("poll_interval must be positive"))

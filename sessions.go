@@ -63,6 +63,8 @@ type RuntimePayload struct {
 	Branch     string `json:"branch,omitempty"`
 	Issue      int    `json:"issue,omitempty"`
 	Account    string `json:"account,omitempty"`
+	// Place marks a start agentd places on an account by usage (#39).
+	Place bool `json:"place,omitempty"`
 	// Max is the repository's max when the start was made: the fold
 	// judges the start by it, so a replay under another max agrees.
 	Max int    `json:"max,omitempty"`
@@ -99,6 +101,10 @@ func (st *LogState) applySession(e Event) {
 		}
 		st.Runtime[e.Session] = *p
 		delete(st.Tracks, e.Session)
+		if st.StartedAt == nil {
+			st.StartedAt = map[string]time.Time{}
+		}
+		st.StartedAt[e.Session] = e.Time
 	case SessionPlace:
 		// Only the start it names, and only once: a session never moves
 		// to another account.
@@ -460,7 +466,7 @@ func (srv *MCPServer) callSessions(tool string, args json.RawMessage) (string, b
 		return refuse("%s runs %d started sessions, its max; end one first", own, n)
 	}
 	id := newIntentID()
-	p := RuntimePayload{ID: id, Action: SessionStart, Repository: own, Kind: a.Kind, Branch: a.Branch, Issue: a.Issue, Account: a.Account, Max: rules.Sessions.Max, By: srv.name}
+	p := RuntimePayload{ID: id, Action: SessionStart, Repository: own, Kind: a.Kind, Branch: a.Branch, Issue: a.Issue, Account: a.Account, Place: placed, Max: rules.Sessions.Max, By: srv.name}
 	if err := srv.log.Append(Event{V: EventVersion, Time: srv.now(), Session: name, Kind: KindSession, Mode: ModeShared, Runtime: &p}); err != nil {
 		return refuse("agentd could not record the start: %v", err)
 	}

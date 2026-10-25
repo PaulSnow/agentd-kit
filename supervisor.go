@@ -169,6 +169,9 @@ func (s *Supervisor) screen(e *Event) {
 		}
 		e.Turn.Text = cutUTF8(e.Turn.Text, turnText)
 	}
+	if e.Account != nil {
+		e.Account.Error = s.withheld(e.Account.Error)
+	}
 }
 
 // withheld is text, or what the log says instead when it matches a
@@ -576,7 +579,7 @@ func (s *Supervisor) step(name string, sess Session) {
 	if sess.Runtime && s.st.Ended[name] != "" {
 		return // the end of an earlier session of the name stops it first
 	}
-	if p := s.st.Runtime[name]; sess.Runtime && unplaced(s.cfg, s.st, p) && t.Provisioned != provisionKey(name, p) {
+	if p := s.st.Runtime[name]; sess.Runtime && unplaced(p) && t.Provisioned != provisionKey(name, p) {
 		if s.place(name, t, now); s.st.Runtime[name].Account == "" {
 			return
 		}

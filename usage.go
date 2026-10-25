@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -55,8 +57,35 @@ const (
 // older one is unknown.
 const usageStale = 3
 
-// usageRelog is how long a reading that says the same is not logged again.
+// usageRelog is how long a reading that says the same is not logged
+// again, at most: never so long that the logged reading goes stale.
 const usageRelog = time.Hour
+
+// relogAfter is how long a reading that says the same waits to be logged
+// again under u.
+func relogAfter(u UsageConfig) time.Duration {
+	if half := usageStale * u.Every.Duration / 2; half < usageRelog {
+		return half
+	}
+	return usageRelog
+}
+
+// usageAPIOK says whether api is a URL a token may be sent to: https, or
+// http to this machine only.
+func usageAPIOK(api string) bool {
+	u, err := url.Parse(api)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	switch h := u.Hostname(); {
+	case u.Scheme == "https":
+		return true
+	case u.Scheme == "http":
+		ip := net.ParseIP(h)
+		return h == "localhost" || ip != nil && ip.IsLoopback()
+	}
+	return false
+}
 
 // AccountPayload is one reading of an account's usage: the numbers only,
 // utilization in percent. Error is why the reading failed, with the token
@@ -105,14 +134,11 @@ func (p AccountPayload) usageHigh() (float64, bool) {
 	return math.Max(*p.FiveHour, *p.Weekly), true
 }
 
-// sameReading says whether a reading says what the record does, to the
-// whole percent.
+// sameReading says whether a reading says what the record does: each
+// utilization within a percent of it, the same resets, overage and method.
 func (r AccountRecord) sameReading(p AccountPayload) bool {
-	pct := func(v *float64) string {
-		if v == nil {
-			return "-"
-		}
-		return strconv.Itoa(int(math.Floor(*v)))
+	near := func(a, b *float64) bool {
+		return a == nil && b == nil || a != nil && b != nil && math.Abs(*a-*b) < 1
 	}
 	tm := func(t *time.Time) string {
 		if t == nil {
@@ -130,9 +156,8 @@ func (r AccountRecord) sameReading(p AccountPayload) bool {
 		return r.Error == p.Error
 	}
 	// After an error, a reading is news.
-	return r.Error == "" && !r.At.IsZero() &&
-		pct(r.FiveHour)+tm(r.FiveHourReset)+pct(r.Weekly)+tm(r.WeeklyReset)+b(r.Overage)+r.Method ==
-			pct(p.FiveHour)+tm(p.FiveHourReset)+pct(p.Weekly)+tm(p.WeeklyReset)+b(p.Overage)+p.Method
+	return r.Error == "" && !r.At.IsZero() && near(r.FiveHour, p.FiveHour) && near(r.Weekly, p.Weekly) &&
+		tm(r.FiveHourReset)+tm(r.WeeklyReset)+b(r.Overage)+r.Method == tm(p.FiveHourReset)+tm(p.WeeklyReset)+b(p.Overage)+p.Method
 }
 
 // errNoUsageScope is the endpoint refusing the token: a token without
@@ -146,7 +171,8 @@ func accountToken(a Account) (string, error) {
 	if a.TokenFile != "" {
 		b, err := readRegular(a.TokenFile, 1<<16)
 		if err != nil {
-			return "", fmt.Errorf("reading the token file: %w", err)
+			// Not the error itself: it names the file's whole path.
+			return "", fmt.Errorf("the token file %s cannot be read as a regular file", filepath.Base(a.TokenFile))
 		}
 		if tok := strings.TrimSpace(string(b)); tok != "" {
 			return tok, nil
@@ -163,10 +189,16 @@ func accountToken(a Account) (string, error) {
 	var creds struct {
 		ClaudeAiOauth struct {
 			AccessToken string `json:"accessToken"`
+			ExpiresAt   int64  `json:"expiresAt"` // milliseconds
 		} `json:"claudeAiOauth"`
 	}
 	if err := json.Unmarshal(b, &creds); err != nil || strings.TrimSpace(creds.ClaudeAiOauth.AccessToken) == "" {
 		return "", errors.New("the account's .credentials.json holds no OAuth access token")
+	}
+	// Claude Code refreshes the token only while it runs under the
+	// account; agentd never refreshes it.
+	if exp := creds.ClaudeAiOauth.ExpiresAt; exp > 0 && time.Now().After(time.UnixMilli(exp)) {
+		return "", fmt.Errorf("the access token in .credentials.json expired at %s; Claude Code refreshes it when it next runs under the account", time.UnixMilli(exp).UTC().Format(time.RFC3339))
 	}
 	return strings.TrimSpace(creds.ClaudeAiOauth.AccessToken), nil
 }
@@ -252,7 +284,7 @@ func (u planReader) endpoint(tok string, p *AccountPayload) error {
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		return fmt.Errorf("%w (HTTP %d)", errNoUsageScope, resp.StatusCode)
 	case resp.StatusCode != http.StatusOK:
-		return fmt.Errorf("usage endpoint: HTTP %d: %s", resp.StatusCode, oneLine(string(body), 200))
+		return fmt.Errorf("usage endpoint: HTTP %d: %s", resp.StatusCode, oneLine(scrubToken(string(body), tok), 200))
 	}
 	var doc struct {
 		FiveHour *struct {
@@ -349,7 +381,7 @@ func (u planReader) headers(tok string, p *AccountPayload) error {
 	// A refused request (429, the limit reached) still carries the
 	// headers; without them the reading failed.
 	if p.FiveHour == nil || p.Weekly == nil {
-		return fmt.Errorf("messages: HTTP %d without the rate-limit headers: %s", resp.StatusCode, oneLine(string(answer), 200))
+		return fmt.Errorf("messages: HTTP %d without the rate-limit headers: %s", resp.StatusCode, oneLine(scrubToken(string(answer), tok), 200))
 	}
 	return nil
 }
@@ -384,7 +416,7 @@ func (s *Supervisor) readAccounts(now time.Time) {
 			if last.ErrorAt.After(latest) {
 				latest = last.ErrorAt
 			}
-			if last.sameReading(p) && now.Sub(latest) < usageRelog {
+			if last.sameReading(p) && now.Sub(latest) < relogAfter(u) {
 				return
 			}
 			w.emit("", Event{Kind: KindAccount, Mode: ModeShared, Account: &p})
@@ -395,29 +427,35 @@ func (s *Supervisor) readAccounts(now time.Time) {
 // placeAccount is the account a started session of repo goes on: the
 // first of the repository's sessions.fallback whose latest reading is
 // fresh and under the limit on both windows, or, with the readings off,
-// the first. When none is, it is "" and why says each account's state.
-func placeAccount(cfg *Config, st *LogState, repo string, now time.Time) (account, why string) {
+// the first; an account whose usage is off counts as having room. When
+// none is, it is "" and why says each account's state; full says every
+// account was read and is at or over the limit, rather than unread.
+func placeAccount(cfg *Config, st *LogState, repo string, now time.Time) (account, why string, full bool) {
 	rules, _ := effectivePolicy(cfg, st, repo)
 	u := cfg.Usage
 	var states []string
+	full = len(rules.Sessions.Fallback) > 0
 	for _, a := range rules.Sessions.Fallback {
 		if !u.Enabled || cfg.Accounts[a].Usage == UsageOff {
-			return a, ""
+			return a, "", false
 		}
 		r, ok := st.Accounts[a]
-		high, full := r.usageHigh()
+		high, both := r.usageHigh()
 		switch {
-		case !ok || !full:
-			states = append(states, a+": no reading yet")
+		case !ok || !both:
+			states, full = append(states, a+": no reading yet"), false
 		case now.Sub(r.At) > usageStale*u.Every.Duration:
-			states = append(states, fmt.Sprintf("%s: no reading since %s", a, r.At.UTC().Format(time.RFC3339)))
+			states, full = append(states, fmt.Sprintf("%s: no reading since %s", a, r.At.UTC().Format(time.RFC3339))), false
 		case high >= u.Limit:
 			states = append(states, fmt.Sprintf("%s: %s", a, usageText(r.AccountPayload)))
 		default:
-			return a, ""
+			return a, "", false
 		}
 	}
-	return "", strings.Join(states, "; ")
+	if len(states) == 0 {
+		return "", "the repository's policy has no sessions.fallback", false
+	}
+	return "", strings.Join(states, "; "), full
 }
 
 // usageText is a reading in words.
@@ -443,14 +481,11 @@ func usageText(p AccountPayload) string {
 	return s
 }
 
-// unplaced says whether a start waits for agentd to place it: it names
-// no account, and its repository's policy has a fallback order.
-func unplaced(cfg *Config, st *LogState, p RuntimePayload) bool {
-	if p.Account != "" {
-		return false
-	}
-	rules, _ := effectivePolicy(cfg, st, p.Repository)
-	return len(rules.Sessions.Fallback) > 0
+// unplaced says whether a start waits for agentd to place it: it was
+// recorded for placement, and has no account yet. The start says so, not
+// today's policy, so a session never starts on the default login.
+func unplaced(p RuntimePayload) bool {
+	return p.Place && p.Account == ""
 }
 
 // place puts a started session with no account on one before it is
@@ -460,7 +495,7 @@ func unplaced(cfg *Config, st *LogState, p RuntimePayload) bool {
 // live run's placement.
 func (s *Supervisor) place(name string, t *Track, now time.Time) {
 	p := s.st.Runtime[name]
-	account, why := placeAccount(s.cfg, s.st, p.Repository, now)
+	account, why, full := placeAccount(s.cfg, s.st, p.Repository, now)
 	if s.shadow {
 		if account != "" {
 			why = "the live run places it; it would go on " + account
@@ -471,8 +506,18 @@ func (s *Supervisor) place(name string, t *Track, now time.Time) {
 	if account == "" {
 		key := "placement:" + name + ":" + p.ID
 		s.skipOnce(name, key, "waiting for an account with room: "+why, t, nil)
-		s.escalate(name, key, fmt.Sprintf("%s, started for branch %s of %s, waits for an account: every account of its fallback is at or over %.0f%% or unread (%s). It starts on the first with room.",
-			name, p.Branch, p.Repository, s.cfg.Usage.Limit, why), t, now)
+		// The owner is told once: when every account was read and is
+		// full, or when the readings have not come for as long as a
+		// reading stands, never only because the first is not in yet.
+		waited := now.Sub(s.st.StartedAt[name])
+		switch {
+		case full:
+			s.escalate(name, key, fmt.Sprintf("%s, started for branch %s of %s, waits for an account: every account of its fallback is at or over %.0f%% (%s). It starts on the first with room.",
+				name, p.Branch, p.Repository, s.cfg.Usage.Limit, why), t, now)
+		case waited >= usageStale*s.cfg.Usage.Every.Duration:
+			s.escalate(name, key, fmt.Sprintf("%s, started for branch %s of %s, has waited %s for an account: %s. It starts on the first fallback account with room once it is read.",
+				name, p.Branch, p.Repository, waited.Round(time.Minute), why), t, now)
+		}
 		return
 	}
 	s.emit(name, Event{Kind: KindSession, Mode: ModeShared, Runtime: &RuntimePayload{ID: p.ID, Action: SessionPlace, Repository: p.Repository, Account: account, By: "agentd"}})
@@ -532,7 +577,7 @@ func withheldText(cfg *Config, text string) string {
 // carries it: when the numbers were read, and the latest error since.
 type PackAccount struct {
 	AccountPayload
-	At time.Time `json:"at,omitempty"`
+	At *time.Time `json:"at,omitempty"`
 }
 
 // packAccounts are the readings of the accounts rules let the sessions
@@ -546,7 +591,10 @@ func packAccounts(st *LogState, rules SessionRules) []PackAccount {
 			continue
 		}
 		seen[a] = true
-		out = append(out, PackAccount{AccountPayload: r.AccountPayload, At: r.At})
+		out = append(out, PackAccount{AccountPayload: r.AccountPayload})
+		if at := r.At; !at.IsZero() {
+			out[len(out)-1].At = &at
+		}
 		if r.ErrorAt.After(r.At) {
 			out[len(out)-1].Error = r.Error
 		} else {

@@ -196,8 +196,8 @@ func accountEvents(h *harness) []AccountPayload {
 }
 
 // agentd run reads each account when due and logs the numbers as shared
-// account events, only when they move or an hour has passed; no token is
-// ever in the log.
+// account events, only when they move or the logged reading grows old
+// (TestUsageSteadyAccountStaysFresh); no token is ever in the log.
 func TestUsageReadingsLogged(t *testing.T) {
 	h, f := usageHarness(t)
 	h.ticks(2, time.Minute)
@@ -225,8 +225,8 @@ func TestUsageReadingsLogged(t *testing.T) {
 	// A move of a whole percent is logged.
 	f.set(tokenA, 30, 40)
 	h.ticks(16, time.Minute)
-	if ev := accountEvents(h); len(ev) != 4 || ev[3].Account != "a" || *ev[3].FiveHour != 30 {
-		t.Fatalf("after a's move: %+v", ev)
+	if r := h.logState().Accounts["a"]; *r.FiveHour != 30 {
+		t.Fatalf("after a's move: %+v", r)
 	}
 	noToken(t, "the event log", h.buf.String())
 	// The coordinator's pack carries the readings of the accounts its
@@ -371,5 +371,152 @@ func TestAccountFold(t *testing.T) {
 		if err := bad.check(); err == nil {
 			t.Errorf("%+v accepted", bad)
 		}
+	}
+}
+
+// placementNotices are the placement escalations posted.
+func placementNotices(h *harness) []string {
+	var out []string
+	for _, e := range h.events() {
+		if e.Kind == KindAction && e.Act.Action == ActEscalate && strings.HasPrefix(e.Act.Key, "placement:") {
+			out = append(out, e.Act.Message)
+		}
+	}
+	return out
+}
+
+// A steady account is logged again before its reading goes stale, so a
+// start an hour on is placed at once.
+func TestUsageSteadyAccountStaysFresh(t *testing.T) {
+	h, _ := usageHarness(t)
+	h.ticks(61, time.Minute)
+	n := 0
+	for _, e := range accountEvents(h) {
+		if e.Account == "a" {
+			n++
+		}
+	}
+	if n < 3 {
+		t.Fatalf("a logged %d times in an hour, want a reading at least every %s", n, relogAfter(h.cfg.Usage))
+	}
+	if a, why, _ := placeAccount(h.cfg, h.logState(), "widgets", h.clock.Now()); a != "a" {
+		t.Fatalf("placed on %q: %s", a, why)
+	}
+}
+
+// A start made before the first readings are in waits for them without
+// telling the owner, then is placed.
+func TestPlacementNoNoticeBeforeReadings(t *testing.T) {
+	h, _ := usageHarness(t)
+	reply, _ := h.startSession(map[string]any{"branch": "fix/spin", "issue": 7})
+	name, _ := reply["name"].(string)
+	h.ticks(3, time.Minute)
+	if n := placementNotices(h); len(n) != 0 {
+		t.Fatalf("notices before the readings: %q", n)
+	}
+	if acct := projected(h.cfg, h.events()).Sessions[name].Account; acct != "a" {
+		t.Fatalf("placed on %q", acct)
+	}
+}
+
+// Readings that never come are told to the owner once, after three
+// intervals; a start recorded for placement never starts on the default
+// login, even when the fallback order is taken out while it waits.
+func TestPlacementNeverOnTheDefaultLogin(t *testing.T) {
+	h, f := usageHarness(t)
+	f.set(tokenA, 95, 95)
+	f.set(tokenB, 95, 95)
+	h.ticks(1, time.Minute)
+	reply, _ := h.startSession(map[string]any{"branch": "fix/spin", "issue": 7})
+	name, _ := reply["name"].(string)
+	w := h.cfg.Repositories["widgets"]
+	w.Policy.Sessions.Fallback = nil
+	h.cfg.Repositories["widgets"] = w
+	h.restart(false)
+	h.ticks(50, time.Minute)
+	if n := h.count(KindAction, ActProvision, name); n != 0 {
+		t.Fatalf("provisioned %d times with no account", n)
+	}
+	if n := placementNotices(h); len(n) != 1 || !strings.Contains(n[0], "no sessions.fallback") {
+		t.Fatalf("notices %q", n)
+	}
+}
+
+// A placed session keeps its account across a restart of agentd: the
+// replay gives the same account, and its launch is under it. A shadow
+// run reads the live run's placement and places nothing itself.
+func TestPlacementSurvivesRestart(t *testing.T) {
+	h, f := usageHarness(t)
+	f.set(tokenA, 95, 40)
+	h.ticks(1, time.Minute)
+	reply, _ := h.startSession(map[string]any{"branch": "fix/spin", "issue": 7})
+	name, _ := reply["name"].(string)
+	h.ticks(3, time.Minute)
+	f.set(tokenA, 1, 1)
+	h.restart(false)
+	h.ticks(3, time.Minute)
+	var accounts []string
+	for _, e := range h.events() {
+		if e.Session == name && e.Kind == KindAction && e.Act.Action == ActRestart {
+			accounts = append(accounts, e.Act.Account)
+		}
+	}
+	if len(accounts) == 0 || strings.Join(accounts, ",") != strings.Repeat("b,", len(accounts)-1)+"b" {
+		t.Fatalf("launches under %v", accounts)
+	}
+	places := 0
+	for _, p := range h.sessionEvents() {
+		if p.Action == SessionPlace {
+			places++
+		}
+	}
+	h.restart(true)
+	h.ticks(3, time.Minute)
+	n := 0
+	for _, p := range h.sessionEvents() {
+		if p.Action == SessionPlace {
+			n++
+		}
+	}
+	if places != 1 || n != 1 {
+		t.Fatalf("placements: %d live, %d after the shadow", places, n)
+	}
+	if acct := NewLogState(h.cfg, ModeShadow).Fold(h.events()).Runtime[name].Account; acct != "b" {
+		t.Fatalf("the shadow reads %q", acct)
+	}
+}
+
+// An account reading's error is screened before it is logged.
+func TestUsageErrorScreened(t *testing.T) {
+	h, _ := usageHarness(t)
+	h.cfg.ConfidentialPatterns = []string{"internal error"}
+	if err := h.cfg.finish(h.dir); err != nil {
+		t.Fatal(err)
+	}
+	h.restart(false)
+	h.ticks(2, time.Minute)
+	if strings.Contains(h.buf.String(), "internal error") || h.logState().Accounts["c"].Error == "" {
+		t.Fatalf("c's error: %q", h.logState().Accounts["c"].Error)
+	}
+}
+
+// A token is sent only over https, or http to this machine; an expired
+// .credentials.json token is not sent at all.
+func TestUsageAPIAndExpiry(t *testing.T) {
+	for api, ok := range map[string]bool{"https://api.anthropic.com": true, "http://127.0.0.1:8080": true, "http://localhost:1": true,
+		"http://api.example.com": false, "ftp://x": false, "https://": false} {
+		if usageAPIOK(api) != ok {
+			t.Errorf("%s: %v", api, !ok)
+		}
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".credentials.json"), []byte(`{"claudeAiOauth":{"accessToken":"`+tokenB+`","expiresAt":1000}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := accountToken(Account{ConfigDir: dir}); err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("expired token: %v", err)
+	}
+	if _, err := accountToken(Account{TokenFile: filepath.Join(dir, "missing", "x.token")}); err == nil || strings.Contains(err.Error(), dir) {
+		t.Fatalf("a missing token file: %v", err)
 	}
 }
