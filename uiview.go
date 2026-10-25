@@ -317,6 +317,14 @@ type uiAccount struct {
 	Error string // the latest error since the numbers, screened
 }
 
+// uiOtherConsole is a console without a repository (#42), merged across
+// the sources: its title and its latest message.
+type uiOtherConsole struct {
+	Name  string
+	Title string
+	Last  time.Time
+}
+
 // uiIndex is the index view.
 type uiIndex struct {
 	uiPage
@@ -324,6 +332,7 @@ type uiIndex struct {
 	Accounts []uiAccount
 	Needs    []uiNeed
 	Repos    []*uiRepo
+	Consoles []*uiOtherConsole // listed after the repositories, by name
 }
 
 // view brings src up to date and reads what every view needs from it:
@@ -369,11 +378,17 @@ func (u *UI) indexView(now time.Time) (*uiIndex, error) {
 		}
 		return r
 	}
+	consoles := map[string]*uiOtherConsole{}
 	for _, src := range u.sources {
 		if err := src.addIndex(v, get, now); err != nil {
 			return nil, err
 		}
+		src.addConsoles(consoles)
 	}
+	for _, c := range consoles {
+		v.Consoles = append(v.Consoles, c)
+	}
+	sort.Slice(v.Consoles, func(i, j int) bool { return v.Consoles[i].Name < v.Consoles[j].Name })
 	for _, n := range v.Needs {
 		get(n.Repository).NeedsYou++
 	}
@@ -396,6 +411,26 @@ func (u *UI) indexView(now time.Time) (*uiIndex, error) {
 		return a.Name < b.Name
 	})
 	return v, nil
+}
+
+// addConsoles adds src's consoles without a repository to consoles, by
+// name: the first title given, and the latest message.
+func (src *uiSource) addConsoles(consoles map[string]*uiOtherConsole) {
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	for name, con := range src.cfg.Consoles {
+		c := consoles[name]
+		if c == nil {
+			c = &uiOtherConsole{Name: name}
+			consoles[name] = c
+		}
+		if c.Title == "" {
+			c.Title = con.Title
+		}
+		if ms := src.messages[name]; len(ms) > 0 && ms[len(ms)-1].At.After(c.Last) {
+			c.Last = ms[len(ms)-1].At
+		}
+	}
 }
 
 // sortNeeds puts blocking decisions and stuck sessions first, then the
@@ -513,11 +548,13 @@ type uiMessageView struct {
 	Body template.HTML
 }
 
-// uiConsole is a repository's console view: its messages newest last,
-// its open decisions, and the reply box.
+// uiConsole is a repository's console view, or a console's without a
+// repository (Other): its messages newest last, its open decisions, and
+// the reply box.
 type uiConsole struct {
 	uiPage
 	Repository string
+	Other      bool
 	Messages   []uiMessageView
 	Needs      []uiNeed
 	ReplySrc   string // the source a reply is recorded in, or "" when none configures the repository
@@ -539,7 +576,15 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 			if err != nil {
 				return err
 			}
-			if _, ok := cfg.Repositories[repo]; ok {
+			if con, ok := cfg.Consoles[repo]; ok {
+				known, v.Other = true, true
+				if con.Title != "" {
+					v.Title = con.Title + " console"
+				}
+				if src.st.Mode == ModeLive && v.ReplySrc == "" {
+					v.ReplySrc = src.Name
+				}
+			} else if _, ok := cfg.Repositories[repo]; ok {
 				known = true
 				// The reply goes to the run of the repository's
 				// coordinator, which is the run that reads it, else to

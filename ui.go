@@ -98,12 +98,13 @@ const (
 	uiKeptEvents   = 40
 )
 
-// uiMessage is one line of a repository's console: a feed post, an
-// escalation of one of its sessions, an instruction of the owner's, or a
-// line of the old console's history.
+// uiMessage is one line of a repository's console, or of a console
+// without a repository: a feed post, an escalation of one of its
+// sessions, an instruction of the owner's, a line of the old console's
+// history, or a post (#42) of its kind.
 type uiMessage struct {
 	At      time.Time
-	Kind    string // feed, escalation, instruction, imported
+	Kind    string // feed, escalation, instruction, imported, or a post's kind
 	From    string
 	Session string
 	Text    string
@@ -123,7 +124,7 @@ type uiSource struct {
 	off      int64
 	st       *LogState
 	host     string
-	messages map[string][]uiMessage // by repository, oldest first
+	messages map[string][]uiMessage // by repository or console without one, oldest first
 	events   map[string][]Event     // by session, oldest first
 	askedAt  map[string]time.Time   // when each decision was first seen, by session and id
 	// echo marks a shadow source over a live source's log: the owner's
@@ -191,12 +192,37 @@ func (src *uiSource) catchUp() error {
 			if e.Feed.At != nil {
 				at = *e.Feed.At
 			}
-			add(e.Feed.Repository, uiMessage{At: at, Kind: "imported", From: e.Feed.From, Text: e.Feed.Text})
+			kind := "imported"
+			if e.Feed.Kind != "" {
+				kind = "imported-" + e.Feed.Kind
+			}
+			add(e.Feed.Repository, uiMessage{At: at, Kind: kind, From: e.Feed.From, Text: e.Feed.Text})
 		case e.Act != nil && (e.Kind == KindAction || e.Kind == KindWould) && (e.Act.Action == ActEscalate || e.Act.Action == ActUpdate):
-			add(repoOf(e.Session), uiMessage{At: e.Time, Kind: "escalation", From: "agentd", Session: e.Session, Text: e.Act.Message})
+			m := uiMessage{At: e.Time, Kind: "escalation", From: "agentd", Session: e.Session, Text: e.Act.Message}
+			// A session's repository has it; one that names none, its
+			// console's repositories or the console without one it went to.
+			if repo := repoOf(e.Session); repo != "" {
+				add(repo, m)
+			} else if _, ok := cfg.Consoles[e.Act.Console]; ok {
+				add(e.Act.Console, m)
+			} else {
+				for _, r := range cfg.consoleRepos(e.Act.Console) {
+					add(r, m)
+				}
+			}
 		case e.Kind == KindInstruction && e.Instruction != nil:
+			m := uiMessage{At: e.Time, Kind: "instruction", From: e.Instruction.From, Text: e.Instruction.Text}
 			for _, r := range e.Instruction.Repositories {
-				add(r, uiMessage{At: e.Time, Kind: "instruction", From: e.Instruction.From, Text: e.Instruction.Text})
+				add(r, m)
+			}
+			add(e.Instruction.Console, m)
+		case e.Kind == KindMessage && e.Message != nil:
+			m := uiMessage{At: e.Time, Kind: e.Message.Kind, From: e.Message.From, Text: e.Message.Text}
+			if _, ok := cfg.Consoles[e.Message.Console]; ok {
+				add(e.Message.Console, m)
+			}
+			for _, r := range cfg.consoleRepos(e.Message.Console) {
+				add(r, m)
 			}
 		}
 	}

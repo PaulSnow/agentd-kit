@@ -12,7 +12,8 @@ import (
 )
 
 // The consoles' feed (#27, #1 "What remains", item 2). Each repository's
-// console receives, through the escalation command, a plain line for each
+// console receives, through the escalation command if there is one, and
+// in the UI in any case, a plain line for each
 // thing the page shows of that repository: a decision waiting on the
 // owner, a settled CI result, a delivery, a merge, a new item. The lines
 // are listed from the folded state, each under a key that stays the same
@@ -55,9 +56,11 @@ type FeedPayload struct {
 	Text         string   `json:"text,omitempty"`
 	Withheld     int      `json:"withheld,omitempty"`
 	Error        string   `json:"error,omitempty"`
-	// An imported line: when it was written, and by whom.
+	// An imported line: when it was written, by whom, and its kind
+	// when the outside console program's line gave one.
 	At   *time.Time `json:"at,omitempty"`
 	From string     `json:"from,omitempty"`
+	Kind string     `json:"kind,omitempty"`
 }
 
 // FeedState is what the feed events fold to: the repositories the feed
@@ -320,7 +323,7 @@ func (s *Supervisor) feedConsoles(now time.Time) {
 }
 
 // feedPost posts one line to its repository's console through the
-// escalation command, screened first: a line that matches a confidential
+// escalation command, when there is one, screened first: a line that matches a confidential
 // pattern is replaced by one naming only the repository, and the event
 // records the pattern, not the text. failed is how often it failed before.
 func (s *Supervisor) feedPost(e feedEntry, failed int) {
@@ -341,11 +344,15 @@ func (s *Supervisor) feedPost(e feedEntry, failed int) {
 	if s.emit("", Event{Kind: KindFeed, Feed: &p}); s.halt != nil {
 		return
 	}
-	argv := make([]string, len(s.cfg.Policies.Escalate.Command))
-	for i, part := range s.cfg.Policies.Escalate.Command {
-		argv[i] = strings.NewReplacer("{console}", console, "{message}", p.Text).Replace(part)
+	// Without a command the intent is the post: the UI shows it (#42).
+	var err error
+	if tmpl := s.cfg.Policies.Escalate.Command; len(tmpl) > 0 {
+		argv := make([]string, len(tmpl))
+		for i, part := range tmpl {
+			argv[i] = strings.NewReplacer("{console}", console, "{message}", p.Text).Replace(part)
+		}
+		err = s.runner.Run(argv)
 	}
-	err := s.runner.Run(argv)
 	out := FeedPayload{Phase: FeedPosted, Key: e.Key, Repository: e.Repository, Console: console}
 	if err != nil {
 		out.Phase, out.Error = FeedFailed, s.withheld(err.Error())
