@@ -30,6 +30,7 @@ type CasePayload struct {
 	Ruling *CaseRuling `json:"ruling,omitempty"`
 	Goal   *CaseGoal   `json:"goal,omitempty"`
 	Call   *CaseCall   `json:"call,omitempty"`
+	Rounds *CaseRounds `json:"rounds,omitempty"`
 }
 
 // CasePack is the context pack a launch handed the session: the facts
@@ -56,6 +57,9 @@ type CaseRuling struct {
 	ID   string `json:"id,omitempty"` // R1, R2… for a restriction or waiver
 	Text string `json:"text,omitempty"`
 	By   string `json:"by,omitempty"`
+	// Close is a close's record (rounds.go); a close logged before
+	// closes had records has none.
+	Close *CloseRecord `json:"close,omitempty"`
 }
 
 // Ruling kinds.
@@ -67,18 +71,22 @@ const (
 )
 
 // check refuses a case payload that names no case, carries other than
-// exactly one of a pack, a report, a ruling, a goal or a call, a ruling of
-// an unknown kind or without the id a restriction or waiver has, or a call
-// of an unknown tool.
+// exactly one of a pack, a report, a ruling, a goal, a call or the owner's
+// rounds, a ruling of an unknown kind or without the id a restriction or
+// waiver has, a close record without its demo or N/A, or a call of an
+// unknown tool.
 func (p *CasePayload) check() error {
 	n := 0
-	for _, set := range []bool{p.Pack != nil, p.Report != nil, p.Ruling != nil, p.Goal != nil, p.Call != nil} {
+	for _, set := range []bool{p.Pack != nil, p.Report != nil, p.Ruling != nil, p.Goal != nil, p.Call != nil, p.Rounds != nil} {
 		if set {
 			n++
 		}
 	}
 	if _, _, ok := splitCase(p.Case); !ok || n != 1 || p.Case != strings.ToLower(p.Case) {
-		return errors.New("a case event names its case and carries exactly one of a pack, a report, a ruling, a goal or a call")
+		return errors.New("a case event names its case and carries exactly one of a pack, a report, a ruling, a goal, a call or the owner's rounds")
+	}
+	if r := p.Rounds; r != nil && (r.Max < 1 || r.Max > maxRounds) {
+		return fmt.Errorf("a backstop is 1 to %d rounds", maxRounds)
 	}
 	if p.Call != nil {
 		return p.Call.check()
@@ -95,6 +103,12 @@ func (p *CasePayload) check() error {
 			}
 		default:
 			return fmt.Errorf("unknown ruling %q", r.Kind)
+		}
+		if r.Close != nil && r.Kind != RulingClose {
+			return errors.New("only a close carries a close record")
+		}
+		if r.Close != nil {
+			return r.Close.check()
 		}
 	}
 	return nil
@@ -137,6 +151,14 @@ type Case struct {
 	// Decisions is every decision its sessions raised through their
 	// tools, the superseded too, in order.
 	Decisions []RaisedRecord
+	// Rounds is every review round, in order (rounds.go). RoundStop is
+	// the stop in force, Stops every stop; RoundMax is the owner's
+	// backstop, 0 for the policy's, counted from round RoundBase.
+	Rounds    []RoundRecord
+	RoundStop *RoundStop
+	Stops     []RoundStop
+	RoundMax  int
+	RoundBase int
 }
 
 // RulingRecord is a ruling and when it was made.
@@ -193,6 +215,8 @@ func (st *LogState) applyCase(e Event) {
 		}
 	case p.Goal != nil:
 		c.applyGoal(p.Goal)
+	case p.Rounds != nil:
+		c.applyRounds(p.Rounds)
 	case p.Call != nil:
 		c.applyCall(e)
 		if d := p.Call.Raised; d != nil && e.Session != "" {
@@ -273,10 +297,11 @@ func (s *Supervisor) noteReport(name string, sess Session, ev Evidence) {
 
 // RecordRuling logs the owner's ruling on a case: a known case (one the
 // log, a configured session or an issue item names), a known kind, the
-// text a restriction or waiver needs, and nothing a closed case cannot
-// take. A restriction or waiver gets the next id of the case's life. The
-// id is read from st, folded before the append without a lock held across
-// both, so two rulings recorded at the same moment could share an id.
+// text a restriction or waiver needs, the demo line or "N/A: reason" a
+// close needs, with its record, and nothing a closed case cannot take. A
+// restriction or waiver gets the next id of the case's life. The id is
+// read from st, folded before the append without a lock held across both,
+// so two rulings recorded at the same moment could share an id.
 func RecordRuling(log *Log, cfg *Config, st *LogState, now time.Time, id, kind, text, by string) error {
 	id = strings.ToLower(id)
 	known := st.Cases[id] != nil
@@ -310,14 +335,20 @@ func RecordRuling(log *Log, cfg *Config, st *LogState, now time.Time, id, kind, 
 			}
 		}
 		r.ID, r.Text = "R"+strconv.Itoa(n), text
-	case RulingClose, RulingReopen:
+	case RulingClose:
+		if c.Closed {
+			return fmt.Errorf("case %s is already closed", id)
+		}
+		rec, err := closeRecord(c, text)
+		if err != nil {
+			return err
+		}
+		r.Close = rec
+	case RulingReopen:
 		if text != "" {
 			return fmt.Errorf("a %s takes no text", kind)
 		}
-		if c.Closed && kind == RulingClose {
-			return fmt.Errorf("case %s is already closed", id)
-		}
-		if !c.Closed && kind == RulingReopen {
+		if !c.Closed {
 			return fmt.Errorf("case %s is open", id)
 		}
 	default:
@@ -327,12 +358,16 @@ func RecordRuling(log *Log, cfg *Config, st *LogState, now time.Time, id, kind, 
 }
 
 // caseState is what the facts say of a case: closed by the owner; waiting
-// on the owner when any of its sessions is; stopped by policy; delivered
+// on the owner when its review rounds parked or any of its sessions waits;
+// stopped by policy; delivered
 // when a session's work went out; working while a session runs or is done
 // and not yet delivered; else not started.
 func caseState(c *Case, ts []*Track) string {
 	if c != nil && c.Closed {
 		return CaseClosed
+	}
+	if c != nil && c.roundsParked() {
+		return CaseNeedsYou
 	}
 	var stopped, delivered, working bool
 	for _, t := range ts {
@@ -388,6 +423,9 @@ type CaseView struct {
 	// CI is the pipeline of each request its sessions delivered, as the
 	// watcher last saw it.
 	CI []CIRecord `json:"ci,omitempty"`
+	// Rounds is its review rounds: the count, the backstop, the findings
+	// awaiting the judge, the stop and the lessons proposed.
+	Rounds *RoundsView `json:"rounds,omitempty"`
 }
 
 // CasesFrom is every case the state knows, sorted by id: the cases of the
@@ -431,6 +469,7 @@ func CasesFrom(cfg *Config, st *LogState) []CaseView {
 			v.Goal, v.Progress, v.Drift, v.Steps, v.Refused = c.Goal, c.Progress, c.Drift, c.Steps, c.Refused
 			v.Pack, v.Packs = c.Pack.Hash, c.Packs
 			v.Active = c.Active
+			v.Rounds = roundsView(c, cfg.Policies.Rounds)
 		}
 		if it := st.Items[id]; it != nil {
 			v.Title = it.Title
@@ -474,6 +513,13 @@ func CasesFrom(cfg *Config, st *LogState) []CaseView {
 				}
 				if !at.IsZero() && (since.IsZero() || at.Before(since)) {
 					since = at
+				}
+			}
+			if c != nil && c.roundsParked() {
+				for _, r := range c.Rounds {
+					if r.N == c.RoundStop.Round && (since.IsZero() || r.At.Before(since)) {
+						since = r.At
+					}
 				}
 			}
 			if !since.IsZero() {
@@ -619,8 +665,9 @@ func casesCmd(args []string, w io.Writer) error {
 	}
 	if fs.NArg() > 0 {
 		goal := fs.Arg(0) == "goal" && fs.NArg() == 3
-		if !goal && (fs.Arg(0) != "rule" || fs.NArg() < 3 || fs.NArg() > 4) {
-			return errors.New("usage: agentd cases rule CASE restriction|waiver|close|reopen [TEXT], or agentd cases goal CASE FILE|-")
+		rounds := fs.Arg(0) == "rounds" && fs.NArg() == 3
+		if !goal && !rounds && (fs.Arg(0) != "rule" || fs.NArg() < 3 || fs.NArg() > 4) {
+			return errors.New("usage: agentd cases rule CASE restriction|waiver|close|reopen [TEXT], agentd cases goal CASE FILE|-, or agentd cases rounds CASE N")
 		}
 		var body []byte
 		if goal {
@@ -641,6 +688,13 @@ func casesCmd(args []string, w io.Writer) error {
 		st := NewLogState(cfg, mode).Fold(events)
 		if goal {
 			return RecordGoal(log, cfg, st, time.Now(), fs.Arg(1), string(body))
+		}
+		if rounds {
+			n, err := strconv.Atoi(fs.Arg(2))
+			if err != nil {
+				return fmt.Errorf("rounds %q is not a number", fs.Arg(2))
+			}
+			return RecordRounds(log, cfg, st, time.Now(), fs.Arg(1), n)
 		}
 		return RecordRuling(log, cfg, st, time.Now(), fs.Arg(1), fs.Arg(2), fs.Arg(3), "owner")
 	}
@@ -695,6 +749,17 @@ func casesCmd(args []string, w io.Writer) error {
 			report = fmt.Sprintf("%d/%d met", met, len(current(c.Goal)))
 			if len(c.Drift) > 0 {
 				report += fmt.Sprintf(", drift %d", len(c.Drift))
+			}
+		}
+		if r := c.Rounds; r != nil {
+			if report != "" {
+				report += ", "
+			}
+			report += fmt.Sprintf("round %d/%d", r.Since, r.Max)
+			if r.Stop != nil {
+				report += " " + r.Stop.Reason
+			} else if len(r.Open) > 0 {
+				report += fmt.Sprintf(", %d to judge", len(r.Open))
 			}
 		}
 		since := ""

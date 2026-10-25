@@ -543,6 +543,9 @@ type restartFacts struct {
 	Tools       []string     `json:"tools,omitempty"`
 	Items       []GoalItem   `json:"items,omitempty"`
 	Acknowledge []FactRuling `json:"acknowledge,omitempty"`
+	// The case's review rounds: the findings by id with their
+	// dispositions, and the latest plan.
+	Rounds *RoundsFact `json:"rounds,omitempty"`
 	// A coordinator: its repository, and the pack it starts from, written
 	// as it is launched.
 	Repository string `json:"repository,omitempty"`
@@ -580,7 +583,8 @@ func (s *Supervisor) packFactsWith(name string, sess Session, t *Track, why stri
 		f.Repository, f.Pack = sess.Repository, sess.Workdir+"/"+PackFile
 	}
 	if id := s.cfg.caseOf(sess); id != "" && s.passesMCP() {
-		f.Tools, f.Items, f.Acknowledge = mcpFacts(s.st, id)
+		f.Tools, f.Items, f.Acknowledge = mcpFacts(s.st, id, sess.Role)
+		f.Rounds = roundsFact(s.st.Cases[id])
 	}
 	var b strings.Builder
 	enc := json.NewEncoder(&b)
