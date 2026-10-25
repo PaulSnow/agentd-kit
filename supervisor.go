@@ -462,6 +462,9 @@ func (s *Supervisor) answerTrust(name string, sess Session, t *Track, ev Evidenc
 	keys, why := trustKeys(m, s.cfg.Policies.Trust.Keys)
 	if keys == nil {
 		s.skipOnce(name, "trust-menu:"+name+":"+ev.PaneHash, why+"; not answering it", t, &SkipPayload{Action: ActTrust})
+		if !now.After(t.HashSince) {
+			return // a screen first seen this pass may be mid-redraw
+		}
 		s.escalate(name, "trust-unanswered:"+name+":"+ev.PaneHash, fmt.Sprintf("%s shows Claude Code's folder-trust prompt, but %s, so agentd does not answer it. Attach and answer it yourself.",
 			name, why), t, now)
 		return
@@ -796,7 +799,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 		switch {
 		case ev.TrustPrompt && ev.PaneHash != t.TrustHash:
 			s.answerTrust(name, sess, t, ev, now)
-		case ev.TrustPrompt && !s.shadow && pol.Nudge.Enabled && now.Sub(t.HashSince) >= pol.Nudge.Stall.Duration:
+		case ev.TrustPrompt && !s.shadow && pol.Nudge.Stall.Duration > 0 && now.Sub(t.HashSince) >= pol.Nudge.Stall.Duration:
 			s.escalate(name, "trust-stuck:"+name+":"+ev.PaneHash, fmt.Sprintf("%s still shows Claude Code's folder-trust prompt %s after agentd sent it keys; they did not take, and agentd does not send them twice. Attach and answer it yourself.",
 				name, now.Sub(t.HashSince).Round(time.Minute)), t, now)
 		}

@@ -280,14 +280,24 @@ func TestTrustParentTrusted(t *testing.T) {
 // act on top of the option agentd selected.
 func TestTrustKeysOnlyConfirm(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agentd.json")
-	for _, keys := range []string{`["Down", "Enter"]`, `["2"]`, `["Up"]`} {
+	for _, keys := range []string{`["Down", "Enter"]`, `["2"]`, `["Up"]`, `["Escape"]`, `["j"]`, `["C-c"]`} {
 		writeFile(t, path, `{"policies": {"trust_prompt": {"enabled": true, "pattern": "trust this folder", "keys": `+keys+`}}}`)
 		if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "trust_prompt.keys") {
 			t.Errorf("%s: %v", keys, err)
 		}
 	}
-	writeFile(t, path, `{"policies": {"trust_prompt": {"enabled": true, "pattern": "trust this folder", "keys": ["Enter"]}}}`)
+	writeFile(t, path, `{"policies": {"trust_prompt": {"enabled": true, "pattern": "trust this folder", "keys": ["C-m"]}}}`)
 	if _, err := LoadConfig(path); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A session relaunched after the arrow, before the confirm, draws the
+// same prompt on the same screen: it is answered afresh.
+func TestTrustAnsweredAgainAfterRelaunch(t *testing.T) {
+	tr := &Track{TrustHash: "h1"}
+	tr.launched("", time.Now())
+	if tr.TrustHash != "" {
+		t.Fatalf("trust hash kept over a launch: %q", tr.TrustHash)
 	}
 }

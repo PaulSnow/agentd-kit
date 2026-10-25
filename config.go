@@ -177,8 +177,9 @@ type UsageLimitPolicy struct {
 	Pattern string `json:"pattern"`
 }
 
-// confirmKeyRe is a key that moves a menu's cursor or picks an option.
-var confirmKeyRe = regexp.MustCompile(`(?i)^(up|down|left|right|tab|btab|home|end|ppage|npage|pageup|pagedown|[0-9]+|.*-(up|down))$`)
+// confirmKeyRe is a key that only confirms the selected option: any other
+// could move the cursor, pick an option, or cancel and exit.
+var confirmKeyRe = regexp.MustCompile(`(?i)^(enter|c-m|kpenter)$`)
 
 // TrustPolicy answers the folder-trust prompt a fresh Claude Code session
 // shows (trust.go). Pattern, a regular expression, must match a whole line
@@ -485,10 +486,8 @@ func (c *Config) finish(base string) error {
 		errs = append(errs, errors.New("policies.trust_prompt needs a pattern and keys"))
 	}
 	for _, k := range c.Policies.Trust.Keys {
-		// The keys confirm the option agentd has selected; one that moves
-		// or picks could choose "No, exit".
-		if confirmKeyRe.MatchString(k) {
-			errs = append(errs, fmt.Errorf("policies.trust_prompt.keys: %q moves or picks an option; the keys only confirm the one agentd selects", k))
+		if !confirmKeyRe.MatchString(k) {
+			errs = append(errs, fmt.Errorf("policies.trust_prompt.keys: %q is not Enter, C-m or KPEnter; the keys only confirm the option agentd selects", k))
 		}
 	}
 	if _, err := regexp.Compile(c.Policies.Trust.Pattern); err != nil {

@@ -178,6 +178,9 @@ func (s *Supervisor) noteTrust(name string, sess Session, t *Track) {
 	if a := s.cfg.Accounts[sess.Account]; s.home == "" && (sess.Account == "" || a.ConfigDir == "") {
 		return
 	}
+	if _, err := s.launchLine(sess, nil); err != nil {
+		return // the launch is skipped for its account, and says why
+	}
 	if trusted, known := claudeTrusts(s.claudeStateFile(sess), sess.Cwd); trusted || !known {
 		return
 	}
