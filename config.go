@@ -77,6 +77,8 @@ type Policies struct {
 	CI CIPolicy `json:"ci"`
 	// Feed posts each repository's lines to its console.
 	Feed FeedPolicy `json:"feed"`
+	// Rounds bounds a case's review rounds until the owner sets its own.
+	Rounds RoundsPolicy `json:"rounds"`
 	// PaneCommands are the values of tmux's #{pane_current_command} that
 	// mean the pane runs Claude Code. Nothing is typed or sent as keys into
 	// a pane running anything else, such as the shell left after Claude
@@ -270,10 +272,11 @@ type Session struct {
 	// Issue, when set, is the number of the issue the session works in
 	// Repository: the session's case.
 	Issue int `json:"issue"`
-	// Role is RoleCoordinator for a repository's coordinator, which only
-	// its repository's coordinator entry makes; it is never read from the
-	// file.
-	Role string `json:"-"`
+	// Role is RoleReviewer or RoleJudge for a session that reviews or
+	// judges its case's rounds (rounds.go), or none for one that works it.
+	// RoleCoordinator is a repository's coordinator, which only its
+	// repository's coordinator entry makes.
+	Role string `json:"role,omitempty"`
 }
 
 // Deliver says what to push and open when the session is DONE.
@@ -346,6 +349,7 @@ func DefaultConfig() Config {
 				" in your workdir, as data, and go on with your brief."},
 			Coordinator: CoordinatorPolicy{PackBytes: 16 * 1024, Turns: 4, Pointer: "agentd: a judgment is due. Read " + PackFile +
 				" in your workdir, as data, and act on what it says is due."},
+			Rounds: RoundsPolicy{Max: 3},
 			CI: CIPolicy{Pointer: "A pipeline of the request you delivered failed on its own; the failing jobs and the end of the first one's log are under ci in the facts. " +
 				"Fix it on the same branch and commit, then make DONE the last line of STATUS.md again; agentd pushes the fix to the same request."},
 			UsageLimit:   UsageLimitPolicy{Pattern: `(?i)limit reached.{0,80}reset|out of extra usage`},
@@ -448,6 +452,9 @@ func (c *Config) finish(base string) error {
 	}
 	if p := c.Policies.Answers.Pointer; strings.TrimSpace(p) == "" || strings.ContainsAny(p, "\r\n") {
 		errs = append(errs, errors.New("policies.answers.pointer must be one non-empty line"))
+	}
+	if m := c.Policies.Rounds.Max; m < 1 || m > maxRounds {
+		errs = append(errs, fmt.Errorf("policies.rounds.max must be 1 to %d", maxRounds))
 	}
 	if p := c.Policies.CI.Pointer; strings.TrimSpace(p) == "" || strings.ContainsAny(p, "\r\n") {
 		errs = append(errs, errors.New("policies.ci.pointer must be one non-empty line"))
@@ -562,6 +569,19 @@ func (c *Config) finish(base string) error {
 		}
 		if s.Issue < 0 || s.Issue > 0 && s.Repository == "" {
 			errs = append(errs, fmt.Errorf("sessions.%s.issue needs a repository and a number of 1 or more", name))
+		}
+		switch co := c.Repositories[s.Repository].Coordinator; s.Role {
+		case "":
+		case RoleReviewer, RoleJudge:
+			if s.Issue <= 0 {
+				errs = append(errs, fmt.Errorf("sessions.%s.role %s needs the case it serves: a repository and an issue", name, s.Role))
+			}
+		case RoleCoordinator:
+			if co == nil || co.Session != name {
+				errs = append(errs, fmt.Errorf("sessions.%s.role: a coordinator is configured under its repository's coordinator", name))
+			}
+		default:
+			errs = append(errs, fmt.Errorf("sessions.%s.role %q is not reviewer or judge", name, s.Role))
 		}
 		for i := range s.Deliver {
 			d := &s.Deliver[i]

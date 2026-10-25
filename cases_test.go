@@ -151,7 +151,7 @@ func TestCaseRulings(t *testing.T) {
 	if len(cs[0].Active) != 2 || cs[0].Active[1].ID != "R2" || cs[0].Active[1].Kind != RulingWaiver {
 		t.Fatalf("active %+v", cs[0].Active)
 	}
-	if err := rule(RulingClose, ""); err != nil {
+	if err := rule(RulingClose, "Spin a widget."); err != nil {
 		t.Fatal(err)
 	}
 	if cs := casesOf(h, ModeLive); cs[0].State != CaseClosed || len(cs[0].Active) != 0 {
@@ -160,7 +160,7 @@ func TestCaseRulings(t *testing.T) {
 	if err := rule(RulingRestriction, "Late."); err == nil {
 		t.Fatal("a restriction on a closed case was accepted")
 	}
-	if err := rule(RulingClose, ""); err == nil {
+	if err := rule(RulingClose, "Spin a widget."); err == nil {
 		t.Fatal("a closed case was closed again")
 	}
 	if err := rule(RulingReopen, ""); err != nil {
@@ -488,7 +488,7 @@ func TestRulingOnAnItemCase(t *testing.T) {
 	NewLogWriter(h.buf).Append(Event{V: EventVersion, Time: h.clock.Now(), Kind: KindItem, Mode: ModeShared,
 		Item: &ItemPayload{ID: "gitlab/example-org/widgets#9", Kind: ItemIssue, Repository: "gitlab/example-org/widgets", Title: "Wobble"}})
 	st := NewLogState(h.cfg, ModeLive).Fold(h.events())
-	if err := RecordRuling(NewLogWriter(h.buf), h.cfg, st, h.clock.Now(), "gitlab/example-org/widgets#9", RulingClose, "", "owner"); err != nil {
+	if err := RecordRuling(NewLogWriter(h.buf), h.cfg, st, h.clock.Now(), "gitlab/example-org/widgets#9", RulingClose, "N/A: nothing to see.", "owner"); err != nil {
 		t.Fatal(err)
 	}
 	found := false

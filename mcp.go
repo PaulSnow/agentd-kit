@@ -59,6 +59,9 @@ type CaseCall struct {
 	Drift    []DriftFlag   `json:"drift,omitempty"`
 	Step     *CaseStep     `json:"step,omitempty"`
 	Raised   *Decision     `json:"raised,omitempty"`
+	// Findings and Dispositions are a review round's (rounds.go).
+	Findings     *CaseFindings     `json:"findings,omitempty"`
+	Dispositions *CaseDispositions `json:"dispositions,omitempty"`
 }
 
 // Tool names.
@@ -67,8 +70,25 @@ const (
 	ToolRequestStep    = "request_step"
 )
 
-// mcpTools are the tools a session's facts name, in the order they list.
+// mcpTools are the tools a working session's facts name, in the order
+// they list; a reviewer and a judge have their own (toolsFor).
 var mcpTools = []string{ToolReportProgress, ToolRaiseDecision, ToolRequestStep}
+
+// allTools is every tool a call event may name.
+var allTools = []string{ToolReportProgress, ToolRaiseDecision, ToolRequestStep, ToolReviewFindings, ToolJudgeDispositions}
+
+// toolsFor is the tools a session of the role is offered: a reviewer
+// only reports findings, since reviewers advise and ask no one; a judge
+// disposes them and asks the owner what is the owner's.
+func toolsFor(role string) []string {
+	switch role {
+	case RoleReviewer:
+		return []string{ToolReviewFindings}
+	case RoleJudge:
+		return []string{ToolJudgeDispositions, ToolRaiseDecision}
+	}
+	return mcpTools
+}
 
 // CaseProgress is an accepted report_progress, its text screened.
 type CaseProgress struct {
@@ -163,17 +183,31 @@ type StepRecord struct {
 // its refusal, or else what its tool records.
 func (c *CaseCall) check() error {
 	refused := c.Refused != ""
+	n := 0
+	for _, set := range []bool{c.Progress != nil, c.Step != nil, c.Raised != nil, c.Findings != nil, c.Dispositions != nil} {
+		if set {
+			n++
+		}
+	}
 	switch {
-	case c.Tool == ToolReportProgress && !refused && (c.Progress == nil || c.Step != nil || c.Raised != nil):
-		return errors.New("an accepted report_progress carries its progress")
-	case c.Tool == ToolRequestStep && !refused && (c.Step == nil || c.Progress != nil || c.Drift != nil || c.Raised != nil):
-		return errors.New("an accepted request_step carries its step")
-	case c.Tool == ToolRaiseDecision && !refused && (c.Raised == nil || !raisedID.MatchString(c.Raised.ID) || c.Progress != nil || c.Step != nil || c.Drift != nil):
-		return errors.New("an accepted raise_decision carries its decision, numbered D1 on")
-	case !contains(mcpTools, c.Tool):
+	case !contains(allTools, c.Tool):
 		return fmt.Errorf("unknown tool %q", c.Tool)
-	case refused && (c.Progress != nil || c.Step != nil || c.Drift != nil || c.Raised != nil):
+	case refused && (n > 0 || c.Drift != nil):
 		return errors.New("a refused call carries only why")
+	case refused:
+		return nil
+	case n != 1 || c.Drift != nil && c.Progress == nil:
+		return fmt.Errorf("an accepted %s carries what it records and nothing else", c.Tool)
+	case c.Tool == ToolReportProgress && c.Progress == nil:
+		return errors.New("an accepted report_progress carries its progress")
+	case c.Tool == ToolRequestStep && c.Step == nil:
+		return errors.New("an accepted request_step carries its step")
+	case c.Tool == ToolRaiseDecision && (c.Raised == nil || !raisedID.MatchString(c.Raised.ID)):
+		return errors.New("an accepted raise_decision carries its decision, numbered D1 on")
+	case c.Tool == ToolReviewFindings && (c.Findings == nil || c.Findings.Round < 1):
+		return errors.New("an accepted review_findings carries its round's findings")
+	case c.Tool == ToolJudgeDispositions && (c.Dispositions == nil || c.Dispositions.Round < 1):
+		return errors.New("an accepted judge_dispositions carries its round's dispositions")
 	}
 	return nil
 }
@@ -203,6 +237,10 @@ func (c *Case) applyCall(e Event) {
 		c.Steps = append(c.Steps[:len(c.Steps):len(c.Steps)], StepRecord{CaseStep: *call.Step, Session: e.Session, At: e.Time})
 	case call.Raised != nil && e.Session != "":
 		c.raiseOnCase(e, *call.Raised)
+	case call.Findings != nil:
+		c.applyFindings(e, call.Findings)
+	case call.Dispositions != nil:
+		c.applyDispositions(e, call.Dispositions)
 	}
 }
 
@@ -287,14 +325,7 @@ const maxGoalItem = 500
 // ids are read from st.
 func RecordGoal(log *Log, cfg *Config, st *LogState, now time.Time, id, body string) error {
 	id = strings.ToLower(id)
-	known := st.Cases[id] != nil
-	for _, sess := range cfg.Sessions {
-		known = known || cfg.caseOf(sess) == id
-	}
-	if it := st.Items[id]; it != nil && it.Kind == ItemIssue && !it.OwnerOnly {
-		known = true
-	}
-	if !known {
+	if !knownCase(cfg, st, id) {
 		return fmt.Errorf("no case %q", id)
 	}
 	texts := DoneWhen(body)
@@ -531,13 +562,20 @@ func (srv *MCPServer) handle(req rpcRequest) (any, *rpcError) {
 			version = p.ProtocolVersion
 		}
 		return map[string]any{"protocolVersion": version, "capabilities": map[string]any{"tools": map[string]any{}},
-			"serverInfo": map[string]any{"name": "agentd", "version": version},
-			"instructions": "Report progress on case " + srv.caseID + " with report_progress, ask the owner with raise_decision, and ask for review, delivery or stop with request_step. " +
-				"Arguments are JSON data; evidence is a typed reference agentd checks, never prose. The owner's answers arrive in " + AnswersFile + " in your workdir."}, nil
+			"serverInfo":   map[string]any{"name": "agentd", "version": version},
+			"instructions": srv.instructions()}, nil
 	case "ping":
 		return map[string]any{}, nil
 	case "tools/list":
-		return map[string]any{"tools": toolList()}, nil
+		var tools []MCPTool
+		for _, name := range toolsFor(srv.sess.Role) {
+			for _, t := range toolList() {
+				if t.Name == name {
+					tools = append(tools, t)
+				}
+			}
+		}
+		return map[string]any{"tools": tools}, nil
 	case "tools/call":
 		var p struct {
 			Name      string          `json:"name"`
@@ -548,8 +586,8 @@ func (srv *MCPServer) handle(req rpcRequest) (any, *rpcError) {
 		}
 		// A tool the server does not have is a protocol error, answered
 		// and not logged: nothing reached the case.
-		if !contains(mcpTools, p.Name) {
-			return nil, &rpcError{rpcInvalidParams, fmt.Sprintf("no tool %q: report_progress, raise_decision or request_step", p.Name)}
+		if tools := toolsFor(srv.sess.Role); !contains(tools, p.Name) {
+			return nil, &rpcError{rpcInvalidParams, fmt.Sprintf("no tool %q: %s", p.Name, strings.Join(tools, ", "))}
 		}
 		reply, refused := srv.call(p.Name, p.Arguments)
 		return map[string]any{"content": []map[string]string{{"type": "text", "text": reply}}, "isError": refused}, nil
@@ -582,6 +620,23 @@ func (srv *MCPServer) call(tool string, args json.RawMessage) (string, bool) {
 		if len(rec.Drift) == 0 {
 			delete(reply, "drift")
 		}
+	} else if tool == ToolReviewFindings {
+		rec.Findings, problems = srv.checkFindings(args, c)
+		if f := rec.Findings; f != nil {
+			ids := []string{}
+			for _, x := range f.Findings {
+				ids = append(ids, x.ID)
+			}
+			reply = map[string]any{"accepted": true, "case": srv.caseID, "round": f.Round, "ids": ids, "new": f.New}
+			if f.Stop != nil {
+				reply["stopped"] = f.Stop.Reason
+			}
+		}
+	} else if tool == ToolJudgeDispositions {
+		rec.Dispositions, problems = srv.checkDispositions(args, c)
+		if d := rec.Dispositions; d != nil {
+			reply = map[string]any{"accepted": true, "case": srv.caseID, "round": d.Round}
+		}
 	} else if tool == ToolRaiseDecision {
 		var withheld bool
 		rec.Raised, withheld, problems = srv.checkRaise(args, st.Tracks[srv.name])
@@ -612,7 +667,38 @@ func (srv *MCPServer) call(tool string, args json.RawMessage) (string, bool) {
 	if err != nil {
 		return compact(map[string]any{"refused": "agentd could not record the call: " + err.Error()}), true
 	}
+	// A round call checked against the state another session's call
+	// changed before this one was appended is not folded (rounds.go).
+	if (rec.Findings != nil || rec.Dispositions != nil) && rec.Refused == "" {
+		round := 0
+		if rec.Findings != nil {
+			round = rec.Findings.Round
+		} else {
+			round = rec.Dispositions.Round
+		}
+		events, err := srv.read()
+		if err != nil {
+			return compact(map[string]any{"refused": "the call was logged, but agentd could not read its log back to confirm the round took it: " + err.Error() + "; check the case before calling again", "case": srv.caseID}), true
+		}
+		if c := NewLogState(srv.cfg, ModeLive).Fold(events).Cases[srv.caseID]; c == nil || !c.recorded(tool, round, rec.Hash) {
+			return compact(map[string]any{"refused": "another call, or the owner, changed the case first; nothing of this call was recorded; read the case again and call again", "case": srv.caseID}), true
+		}
+	}
 	return compact(reply), rec.Refused != ""
+}
+
+// instructions is what the server tells the session of its tools.
+func (srv *MCPServer) instructions() string {
+	switch srv.sess.Role {
+	case RoleReviewer:
+		return "Review the work on case " + srv.caseID + " and report every finding with review_findings, once a round. You advise; the judge decides. " +
+			"Repeat an earlier finding by its id, F1…, from your facts; name the done-when items each bears on, or set widens_scope."
+	case RoleJudge:
+		return "Dispose every finding of case " + srv.caseID + "'s latest round with judge_dispositions: adopt, decline or defer, each with a reason, and a plan by id. " +
+			"A finding that widens the scope is deferred and asked of the owner with raise_decision. The owner's answers arrive in " + AnswersFile + " in your workdir."
+	}
+	return "Report progress on case " + srv.caseID + " with report_progress, ask the owner with raise_decision, and ask for review, delivery or stop with request_step. " +
+		"Arguments are JSON data; evidence is a typed reference agentd checks, never prose. The owner's answers arrive in " + AnswersFile + " in your workdir."
 }
 
 func compact(v any) string {
@@ -760,7 +846,7 @@ func (srv *MCPServer) checkProgress(args json.RawMessage, c *Case, t *Track) (*C
 		}
 		ip := ItemProgress{ID: it.ID, Status: it.Status}
 		for _, raw := range it.Evidence {
-			ref, p := srv.checkEvidence(raw, t)
+			ref, p := srv.checkEvidence(raw, t, c)
 			if p != nil {
 				bad("item %s: "+p.format, append([]any{it.ID}, p.args...)...)
 				continue
@@ -838,7 +924,7 @@ var shaRef = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
 
 // checkEvidence checks one piece of evidence against the facts: it is a
 // typed reference, and what it names is so.
-func (srv *MCPServer) checkEvidence(raw json.RawMessage, t *Track) (EvidenceRef, *problem) {
+func (srv *MCPServer) checkEvidence(raw json.RawMessage, t *Track, c *Case) (EvidenceRef, *problem) {
 	var ref EvidenceRef
 	if s := bytes.TrimSpace(raw); len(s) > 0 && s[0] == '"' {
 		return ref, problemOf(`evidence %s is prose; give a typed reference such as {"kind":"commit","sha":"…"}`, cutUTF8(string(s), 80))
@@ -922,7 +1008,16 @@ func (srv *MCPServer) checkEvidence(raw json.RawMessage, t *Track) (EvidenceRef,
 	case EvidenceCI:
 		return ref, problemOf("agentd records no CI results yet; CI evidence cannot be checked")
 	case EvidenceFinding:
-		return ref, problemOf("agentd records no review findings yet; finding evidence cannot be checked")
+		found := false
+		for _, f := range c.findings() {
+			found = found || f.ID == ref.ID
+		}
+		if !found {
+			return ref, problemOf("finding %s is not one of the case's review findings", cutUTF8(ref.ID, 40))
+		}
+		if c.Disposition(ref.ID) == nil {
+			return ref, problemOf("finding %s has no disposition yet; cite it once the judge disposed it", ref.ID)
+		}
 	default:
 		return ref, problemOf("evidence kind %q is not commit, gate, file, ci or finding", cutUTF8(ref.Kind, 40))
 	}
@@ -999,10 +1094,27 @@ func toolList() []MCPTool {
 		`"blocking":{"type":"boolean"},` +
 		`"supersedes":{"type":"string","description":"the open decision this replaces, after the owner answered it in their own words"}},` +
 		`"required":["type","question","context","why","if_wrong","recommendation","blocking"],"additionalProperties":false}`
+	finding := `{"type":"object","properties":{` +
+		`"id":{"type":"string","description":"an earlier finding's id, F1…, when it comes back; leave out for a new one"},` +
+		`"title":{"type":"string","description":"at most 200 characters"},` +
+		`"severity":{"enum":["high","medium","low"]},` +
+		`"items":{"type":"array","items":{"type":"string"},"description":"the done-when item ids, A1…, it bears on"},` +
+		`"widens_scope":{"type":"boolean","description":"true when it bears on no done-when item"},` +
+		`"paths":{"type":"array","items":{"type":"string"},"description":"affected paths in the worktree"},` +
+		`"consequence":{"type":"string"},"suggestion":{"type":"string"}},` +
+		`"required":["title","severity","items","paths","consequence"],"additionalProperties":false}`
+	findings := `{"type":"object","properties":{"findings":{"type":"array","items":` + finding + `}},"required":["findings"],"additionalProperties":false}`
+	dispositions := `{"type":"object","properties":{` +
+		`"dispositions":{"type":"array","items":{"type":"object","properties":{"finding_id":{"type":"string"},"disposition":{"enum":["adopt","decline","defer"]},"reason":{"type":"string"}},"required":["finding_id","disposition","reason"],"additionalProperties":false}},` +
+		`"plan":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"step":{"type":"string"}},"required":["id","step"],"additionalProperties":false}},` +
+		`"lessons":{"type":"array","items":{"type":"string"},"description":"what went wrong or was surprising, proposed to the owner"}},` +
+		`"required":["dispositions","plan"],"additionalProperties":false}`
 	return []MCPTool{
 		{Name: ToolReportProgress, Description: "Report progress on this session's case. Item ids and restriction ids are the case's; evidence is a typed reference agentd checks, never prose. Restate each done-when item in the issue's words.", InputSchema: json.RawMessage(report)},
 		{Name: ToolRaiseDecision, Description: "Ask the owner a decision, with its whole form. agentd gives it an id, D1 on; the answer arrives in answers.json as JSON of its type. An answer in the owner's own words (other) does not settle it: raise it again with options drawn from it, superseding it.", InputSchema: json.RawMessage(raise)},
 		{Name: ToolRequestStep, Description: "Ask for review, delivery or stop. A request is recorded, never evidence; agentd moves the case only on the facts.", InputSchema: json.RawMessage(step)},
+		{Name: ToolReviewFindings, Description: "Report this round's findings, all of them in one call. agentd numbers new ones F1 on and keeps an id across rounds; a round with nothing new stops the loop.", InputSchema: json.RawMessage(findings)},
+		{Name: ToolJudgeDispositions, Description: "Dispose every finding of the latest round exactly once: adopt, decline or defer, with a reason. A finding that widens the scope cannot be adopted.", InputSchema: json.RawMessage(dispositions)},
 	}
 }
 
@@ -1038,16 +1150,16 @@ type FactRuling struct {
 // every active ruling, each of which the launch's first report
 // acknowledges, since the launch's pack clears what an earlier context
 // acknowledged.
-func mcpFacts(st *LogState, id string) ([]string, []GoalItem, []FactRuling) {
+func mcpFacts(st *LogState, id, role string) ([]string, []GoalItem, []FactRuling) {
 	c := st.Cases[id]
 	if c == nil {
-		return mcpTools, nil, nil
+		return toolsFor(role), nil, nil
 	}
 	var rs []FactRuling
 	for _, r := range c.Active {
 		rs = append(rs, FactRuling{ID: r.ID, Kind: r.Kind, Text: r.Text})
 	}
-	return mcpTools, current(c.Goal), rs
+	return toolsFor(role), current(c.Goal), rs
 }
 
 // mcpCmd is agentd mcp --session NAME: the session's server on stdio.

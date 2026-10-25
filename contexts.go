@@ -543,6 +543,12 @@ type restartFacts struct {
 	Tools       []string     `json:"tools,omitempty"`
 	Items       []GoalItem   `json:"items,omitempty"`
 	Acknowledge []FactRuling `json:"acknowledge,omitempty"`
+	// A reviewer's or judge's: the active rulings, which it keeps but
+	// has no report to acknowledge in.
+	Rulings []FactRuling `json:"rulings,omitempty"`
+	// The case's review rounds: the findings by id with their
+	// dispositions, and the latest plan.
+	Rounds *RoundsFact `json:"rounds,omitempty"`
 	// A coordinator: its repository, and the pack it starts from, written
 	// as it is launched.
 	Repository string `json:"repository,omitempty"`
@@ -580,7 +586,13 @@ func (s *Supervisor) packFactsWith(name string, sess Session, t *Track, why stri
 		f.Repository, f.Pack = sess.Repository, sess.Workdir+"/"+PackFile
 	}
 	if id := s.cfg.caseOf(sess); id != "" && s.passesMCP() {
-		f.Tools, f.Items, f.Acknowledge = mcpFacts(s.st, id)
+		f.Tools, f.Items, f.Acknowledge = mcpFacts(s.st, id, sess.Role)
+		if sess.Role == RoleReviewer || sess.Role == RoleJudge {
+			// Only a report acknowledges; these sessions keep the
+			// rulings without one.
+			f.Rulings, f.Acknowledge = f.Acknowledge, nil
+		}
+		f.Rounds = roundsFact(s.st.Cases[id])
 	}
 	var b strings.Builder
 	enc := json.NewEncoder(&b)

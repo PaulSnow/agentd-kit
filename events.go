@@ -371,8 +371,8 @@ func (e Event) check() error {
 		run := (e.Mode == ModeLive || e.Mode == ModeShadow) && e.Session != ""
 		shared := e.Mode == ModeShared && e.Session != ""
 		switch c := e.Case; {
-		case (c.Ruling != nil || c.Goal != nil) && !owner, (c.Pack != nil || c.Report != nil) && !run, c.Call != nil && !shared:
-			return errors.New("a ruling or goal is the owner's, for no one session; a pack or report is a run's, for one; a call is a shared fact of one session")
+		case (c.Ruling != nil || c.Goal != nil || c.Rounds != nil) && !owner, (c.Pack != nil || c.Report != nil) && !run, c.Call != nil && !shared:
+			return errors.New("a ruling, goal or rounds record is the owner's, for no one session; a pack or report is a run's, for one; a call is a shared fact of one session")
 		}
 	}
 	switch e.Mode {
