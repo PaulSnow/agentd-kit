@@ -51,7 +51,11 @@ func (s *Supervisor) mergeGreen(now time.Time) {
 		return
 	}
 	for _, w := range s.watchedRequests() {
-		pol, _ := effectivePolicy(s.cfg, s.st, w.Repository)
+		// The owner's policy decides what is worth asking the forge; the
+		// repository's file, which may narrow it, is read at the target's
+		// tip in the worker, every time, so a file that narrowed it once
+		// does not hold it after it changes.
+		pol := s.cfg.Repositories[w.Repository].Policy
 		if !pol.Merge.Enabled {
 			continue
 		}
@@ -406,7 +410,10 @@ func githubMergeView(api ForgeAPI, project, ref string) (mergeView, error) {
 	for _, l := range pr.Labels {
 		v.labels = append(v.labels, l.Name)
 	}
-	// An approval counts at the commit it was given on.
+	// An approval counts at the commit it was given on, while it is its
+	// reviewer's latest say: a later request for changes, or a dismissal,
+	// takes it back. More reviews than a page holds is an error, not a
+	// silent miss.
 	v.approvers = func(head string) ([]string, error) {
 		var reviews []struct {
 			State    string `json:"state"`
@@ -418,10 +425,19 @@ func githubMergeView(api ForgeAPI, project, ref string) (mergeView, error) {
 		if err := get(base+"/pulls/"+ref[1:]+"/reviews?per_page=100", &reviews); err != nil {
 			return nil, err
 		}
+		if len(reviews) >= 100 {
+			return nil, fmt.Errorf("gh api: pull request %s has 100 reviews or more; agentd reads one page", ref)
+		}
+		latest := map[string]int{} // each reviewer's latest review that says something
+		for i, r := range reviews {
+			if r.State != "COMMENTED" && r.State != "PENDING" {
+				latest[r.User.Login] = i
+			}
+		}
 		var out []string
-		for _, r := range reviews {
-			if r.State == "APPROVED" && r.CommitID == head {
-				out = append(out, r.User.Login)
+		for _, login := range sortedKeys(latest) {
+			if r := reviews[latest[login]]; r.State == "APPROVED" && r.CommitID == head {
+				out = append(out, login)
 			}
 		}
 		return out, nil

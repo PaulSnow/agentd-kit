@@ -716,7 +716,7 @@ func mergeByCommand(timeout time.Duration, repo Repository, ref, head, target st
 	for i, a := range repo.Policy.Merge.Command {
 		argv[i] = r.Replace(a)
 	}
-	if _, err := runTimed(timeout, "", forgeEnv, true, argv[0], argv[1:]...); err != nil {
+	if _, err := runTimed(timeout, "", forgeEnv, false, argv[0], argv[1:]...); err != nil {
 		return fmt.Errorf("%s: %s", argv[0], exitMessage(err))
 	}
 	return nil

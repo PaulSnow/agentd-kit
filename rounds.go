@@ -477,7 +477,7 @@ func (srv *MCPServer) stopAt(c *Case, f *CaseFindings) *RoundStop {
 		}
 	}
 	repo, _, _ := splitCase(c.ID)
-	switch limit := c.backstop(srv.cfg.roundsFor(repo)); {
+	switch limit := c.backstop(srv.cfg.roundsFor(srv.st, repo)); {
 	case len(f.Findings) == 0:
 		s = &RoundStop{Reason: RoundsConverged}
 	case len(f.New) == 0:

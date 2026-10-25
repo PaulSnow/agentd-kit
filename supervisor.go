@@ -1009,8 +1009,21 @@ func (s *Supervisor) typeInto(name, action string, a *ActPayload, t *Track, seen
 // confidentialMatch returns the number, from 1, of the first confidential
 // pattern that matches any of texts, or 0.
 func (s *Supervisor) confidentialMatch(texts ...string) int {
-	res := append(s.confidential, filePatterns(s.st)...)
+	res := append(append([]*regexp.Regexp(nil), s.confidential...), filePatterns(s.st)...)
 	for i, re := range res {
+		for _, text := range texts {
+			if re.MatchString(text) {
+				return i + 1
+			}
+		}
+	}
+	return 0
+}
+
+// configMatch is confidentialMatch with the configuration's patterns
+// alone, every repository's included, and none a repository's file added.
+func (s *Supervisor) configMatch(texts ...string) int {
+	for i, re := range s.confidential {
 		for _, text := range texts {
 			if re.MatchString(text) {
 				return i + 1

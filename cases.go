@@ -476,7 +476,7 @@ func CasesFrom(cfg *Config, st *LogState) []CaseView {
 			v.Goal, v.Progress, v.Drift, v.Steps, v.Refused = c.Goal, c.Progress, c.Drift, c.Steps, c.Refused
 			v.Pack, v.Packs = c.Pack.Hash, c.Packs
 			v.Active = c.Active
-			v.Rounds = roundsView(c, cfg.roundsFor(repo))
+			v.Rounds = roundsView(c, cfg.roundsFor(st, repo))
 		}
 		if it := st.Items[id]; it != nil {
 			v.Title = it.Title

@@ -215,8 +215,7 @@ func TestNarrowPolicy(t *testing.T) {
 		Sessions: SessionRules{Accounts: []string{"a", "b"}, Max: 4, Budget: BudgetRules{SessionTokens: 1000}},
 	}
 	for file, want := range map[string]bool{
-		`{"delivery": {"allow": ["open"]}}`:                                     true,
-		`{"delivery": {"allow": ["open", "merge"]}}`:                            false,
+		`{"delivery": {"allow": ["open"]}}`:                                     false,
 		`{"merge": {"enabled": false}}`:                                         true,
 		`{"merge": {"targets": ["main"]}}`:                                      true,
 		`{"merge": {"targets": ["main", "other"]}}`:                             false,
@@ -228,6 +227,10 @@ func TestNarrowPolicy(t *testing.T) {
 		`{"merge": {"unknown": 1}}`:                                             false,
 		`{"review": {"rounds": {"max": 2}}}`:                                    true,
 		`{"review": {"rounds": {"max": 5}}}`:                                    false,
+		`{"review": {"rounds": {"max": 50}}}`:                                   false,
+		`{"MERGE": {"enabled": false}}`:                                         false,
+		`{"merge": {"Enabled": false}}`:                                         false,
+		`{"gate": {"env": []}}`:                                                 true,
 		`{"review": {"others": "review-only"}}`:                                 true,
 		`{"ci": {"required": true}}`:                                            true,
 		`{"scope": {"reserved": {"numbers": [9]}}}`:                             true,
@@ -281,7 +284,7 @@ func TestPackCarriesPolicy(t *testing.T) {
 	w.Policy.Merge = MergeRules{Enabled: true, Method: MergeSquash, Targets: []string{"main"}, Authors: []string{"widget-bot"}}
 	w.Policy.ConfidentialPatterns = []string{"secret-[0-9]+"}
 	h.cfg.Repositories["widgets"] = w
-	h.sup.st.Policies["widgets"] = PolicyPayload{Repository: "widgets", Target: "main", Tip: "feed1234", File: json.RawMessage(`{"merge":{"exclude":{"numbers":[12]}}}`), Applied: []string{"merge.exclude"}}
+	h.sup.st.applyPolicy(Event{Policy: &PolicyPayload{Repository: "widgets", Target: "main", Tip: "feed1234", File: json.RawMessage(`{"merge":{"exclude":{"numbers":[12]}}}`), Applied: []string{"merge.exclude"}}})
 	p, b := h.sup.buildPack("widgets", nil, h.clock.Now(), false)
 	if p.Policy.Merge.Method != MergeSquash || !reflect.DeepEqual(p.Policy.Merge.Exclude.Numbers, []int{12}) {
 		t.Fatalf("pack policy = %+v", p.Policy.Merge)
@@ -326,14 +329,14 @@ func TestPolicyShowAttributesEachKey(t *testing.T) {
 	}
 	for key, want := range map[string]string{
 		"merge.authors": "owner", "gate.argv": "owner", "merge.method": "default", "gate.timeout": "default",
-		"merge.targets": "repository .agentd/policy.json at feed1234",
+		"merge.targets": "repository .agentd/policy.json on main at feed1234",
 	} {
 		if !strings.HasPrefix(src[key], want) {
 			t.Errorf("%s from %q, want %q", key, src[key], want)
 		}
 	}
-	if v.File == nil || v.File.Tip != "feed1234abcd" {
-		t.Fatalf("file = %+v", v.File)
+	if len(v.Files) != 1 || v.Files[0].Tip != "feed1234abcd" {
+		t.Fatalf("files = %+v", v.Files)
 	}
 	if err := policyCmd([]string{"--config", path, "show", "nowhere"}, &out); err == nil {
 		t.Fatal("an unknown repository was shown")
@@ -391,14 +394,110 @@ func TestRepositoryPatternsAndRounds(t *testing.T) {
 	if got := h.sup.withheld("a sekrit-12 b"); strings.Contains(got, "withheld") {
 		t.Fatalf("withheld before the file: %q", got)
 	}
-	h.sup.st.Policies["widgets"] = PolicyPayload{Repository: "widgets", Tip: "t", File: json.RawMessage(`{"confidential_patterns":["sekrit-[0-9]+"]}`), Applied: []string{"confidential_patterns"}}
+	h.sup.st.applyPolicy(Event{Policy: &PolicyPayload{Repository: "widgets", Target: "main", Tip: "t", File: json.RawMessage(`{"confidential_patterns":["sekrit-[0-9]+"],"review":{"rounds":{"max":2}}}`), Applied: []string{"confidential_patterns", "review.rounds"}}})
 	if got := h.sup.withheld("a sekrit-12 b"); !strings.Contains(got, "withheld") {
 		t.Fatalf("the file's pattern: %q", got)
 	}
-	if got := h.cfg.roundsFor(repoKey("gitlab", "example-org/readonly")).Max; got != 7 {
+	if got := h.cfg.roundsFor(h.sup.st, repoKey("gitlab", "example-org/readonly")).Max; got != 7 {
 		t.Fatalf("readonly rounds = %d", got)
 	}
-	if got := h.cfg.roundsFor(repoKey("gitlab", "example-org/widgets")).Max; got != h.cfg.Policies.Rounds.Max {
+	// The file lowers widgets' rounds below policies.rounds.max.
+	if got := h.cfg.roundsFor(h.sup.st, repoKey("gitlab", "example-org/widgets")).Max; got != 2 {
 		t.Fatalf("widgets rounds = %d", got)
+	}
+}
+
+// A file that turned merge off, or required more, is read again at every
+// round, so once it changes the merge goes ahead.
+func TestPolicyFileLiftedIsReadAgain(t *testing.T) {
+	for name, body := range map[string]string{"off": `{"merge":{"enabled":false}}`, "review": `{"merge":{"require":["review"]}}`} {
+		t.Run(name, func(t *testing.T) {
+			h, api := mergeHarness(t)
+			api.set(func() { api.gitlab[mergePolicyPath+"|ref="+mergeTip] = body })
+			h.ticks(4, 5*time.Minute)
+			if len(h.forge.merges) != 0 {
+				t.Fatalf("merged under %s", body)
+			}
+			api.set(func() { api.gitlab[mergePolicyPath+"|ref="+mergeTip] = `{}` })
+			h.ticks(4, 5*time.Minute)
+			if len(h.forge.merges) != 1 || len(h.policyEvents()) != 2 {
+				t.Fatalf("merges = %+v, policy events %+v, skips %q", h.forge.merges, h.policyEvents(), h.mergeSkips())
+			}
+		})
+	}
+}
+
+// A file that matches a confidential pattern cannot be read: merges into
+// its target are off, the owner hears once, and nothing of the file is
+// logged. A pattern the file itself adds never withholds it.
+func TestPolicyFileWithheld(t *testing.T) {
+	h, api := mergeHarness(t)
+	h.cfg.ConfidentialPatterns = []string{"hush-[0-9]+"}
+	h.sup = NewSupervisor(h.cfg, NewLogWriter(h.buf), h.clock, h.tmux, h.git, h.forge, h.runner, false)
+	h.sup.home = h.dir
+	h.sup.api = api
+	api.set(func() { api.gitlab[mergePolicyPath+"|ref="+mergeTip] = `{"merge":{"exclude":{"labels":["hush-1"]}}}` })
+	h.ticks(6, 5*time.Minute)
+	ps := h.policyEvents()
+	if len(h.forge.merges) != 0 || len(ps) != 1 || ps[0].Withheld != 1 || ps[0].File != nil || strings.Contains(h.buf.String(), "hush-1") {
+		t.Fatalf("merges %+v, policy events %+v", h.forge.merges, ps)
+	}
+	if s := h.mergeSkips(); len(s) != 1 || !strings.Contains(s[0], "turns merge off") {
+		t.Fatalf("skips = %q", s)
+	}
+	if n := h.count(KindAction, ActEscalate, ""); n != 1 {
+		t.Fatalf("escalations = %d", n)
+	}
+
+	h, api = mergeHarness(t)
+	api.set(func() {
+		api.gitlab[mergePolicyPath+"|ref="+mergeTip] = `{"merge":{"exclude":{"labels":["agentd"]}},"confidential_patterns":["agentd"]}`
+	})
+	h.ticks(8, 5*time.Minute)
+	if len(h.forge.merges) != 0 || len(h.policyEvents()) != 1 || h.policyEvents()[0].Withheld != 0 {
+		t.Fatalf("a file withheld itself: merges %+v, policy events %+v", h.forge.merges, h.policyEvents())
+	}
+}
+
+// Requests into two targets each read their own target's file, once per
+// file: no event for each round, and one target's file does not hold the
+// other's merges.
+func TestPolicyFilePerTarget(t *testing.T) {
+	h, api := mergeHarness(t)
+	setMerge(t, h, func(m *MergeRules) { m.Targets = []string{"main", "release"} })
+	api.set(func() { api.gitlab[mergePolicyPath+"|ref=0ther"] = `{"merge":{"enabled":false}}` })
+	h.sup.notePolicy("d", h.sup.track("d"), "widgets", "release", "0ther", []byte(`{"merge":{"enabled":false}}`))
+	h.ticks(6, 5*time.Minute)
+	h.sup.notePolicy("d", h.sup.track("d"), "widgets", "release", "0ther", []byte(`{"merge":{"enabled":false}}`))
+	if len(h.forge.merges) != 1 || len(h.policyEvents()) != 2 {
+		t.Fatalf("merges %+v, policy events %+v", h.forge.merges, h.policyEvents())
+	}
+	if effectiveFor(h.cfg, h.sup.st, "widgets", "release").Merge.Enabled || !effectiveFor(h.cfg, h.sup.st, "widgets", "main").Merge.Enabled {
+		t.Fatal("per-target policies mixed")
+	}
+	// What sessions read is narrowed by every file.
+	if eff, files := effectivePolicy(h.cfg, h.sup.st, "widgets"); eff.Merge.Enabled || len(files) != 2 {
+		t.Fatalf("effective = %+v, files %d", eff.Merge, len(files))
+	}
+}
+
+// GitHub: an approval counts on the head, while it is its reviewer's
+// latest say.
+func TestMergeGitHubApprovals(t *testing.T) {
+	reviews := "/repos/example-org/gadgets/pulls/4/reviews?per_page=100"
+	api := &fakeForgeAPI{github: map[string]string{
+		"/repos/example-org/gadgets/pulls/4": `{"state":"open","mergeable_state":"clean","user":{"login":"widget-bot"},"labels":[{"name":"agentd"}],"head":{"sha":"abc1234def"},"base":{"ref":"main"}}`,
+		reviews: `[{"state":"APPROVED","commit_id":"abc1234def","user":{"login":"lead"}},
+			{"state":"APPROVED","commit_id":"0ld","user":{"login":"stale"}},
+			{"state":"APPROVED","commit_id":"abc1234def","user":{"login":"fickle"}},
+			{"state":"CHANGES_REQUESTED","commit_id":"abc1234def","user":{"login":"fickle"}},
+			{"state":"COMMENTED","commit_id":"abc1234def","user":{"login":"lead"}}]`,
+	}}
+	v, err := githubMergeView(api, "example-org/gadgets", "#4")
+	if err != nil || v.author != "widget-bot" || !reflect.DeepEqual(v.labels, []string{"agentd"}) {
+		t.Fatalf("view = %+v, %v", v, err)
+	}
+	if got, err := v.approvers(v.head); err != nil || !reflect.DeepEqual(got, []string{"lead"}) {
+		t.Fatalf("approvers = %v, %v", got, err)
 	}
 }

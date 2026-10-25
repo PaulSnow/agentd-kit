@@ -355,6 +355,7 @@ func TestMergeConfig(t *testing.T) {
 		`"gate": {"argv": ["make"]}, "merge": {"enabled": true, "authors": ["widget-bot"]}`:                                          "needs targets and authors",
 		`"gate": {"argv": ["make"]}, "merge": {"enabled": true, "targets": ["main"], "authors": ["widget-bot"], "method": "rebase"}`: "is not fast-forward",
 		`"gate": {"argv": ["make"]}, "merge": {"method": "command"}`:                                                                 "needs merge.command",
+		`"gate": {"argv": ["make"]}, "merge": {"enabled": true, "targets": ["main"], "authors": ["widget-bot"], "require": ["ci"]}`:  "must name gate",
 		`"gate": {"argv": ["make"]}, "merge": {"require": ["ci", "luck"]}`:                                                           "not gate, ci or review",
 		`"gate": {"argv": ["make"]}, "merge": {"exclude": {"numbers": [0]}}`:                                                         "1 or more",
 		`"gate": {"argv": ["make"]}, "merge": {"targets": ["main..x"]}`:                                                              "plain branch",

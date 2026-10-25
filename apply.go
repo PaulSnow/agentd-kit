@@ -1,6 +1,7 @@
 package main
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -38,8 +39,11 @@ type LogState struct {
 	// with their repository.
 	Runtime map[string]RuntimePayload
 	Ended   map[string]string
-	// Policies are each repository's own policy file, as last read.
+	// Policies are each repository's own policy file on each target
+	// branch, as last read, by policyKey; filePats the confidential
+	// patterns each adds, compiled.
 	Policies map[string]PolicyPayload
+	filePats map[string][]*regexp.Regexp
 
 	cfg *Config // its policies, read as each event is applied
 }

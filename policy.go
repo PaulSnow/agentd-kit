@@ -216,6 +216,9 @@ func (c *Config) checkPolicy(name string, repo *Repository, errs *[]error) {
 		if len(p.Gate.Argv) == 0 {
 			bad("merge.enabled but gate.argv is empty: nothing is merged without a gate")
 		}
+		if !contains(m.Require, RequireGate) {
+			bad("merge.require must name gate: nothing is merged that agentd's gate did not pass")
+		}
 		if len(m.Targets) == 0 || len(m.Authors) == 0 {
 			bad("merge.enabled needs targets and authors: merge never means any target or any author")
 		}
@@ -268,13 +271,19 @@ func (c *Config) checkPolicy(name string, repo *Repository, errs *[]error) {
 }
 
 // roundsFor is the review rounds policy for the repository with key
-// repo, as cases name it: policies.rounds, its max the repository's when
-// its policy sets one.
-func (c *Config) roundsFor(repo string) RoundsPolicy {
+// repo, as cases name it: policies.rounds, its max the owner's policy's
+// when it sets one, lowered by the repository's own files.
+func (c *Config) roundsFor(st *LogState, repo string) RoundsPolicy {
 	p := c.Policies.Rounds
-	for _, r := range c.Repositories {
-		if repoKey(r.Forge, r.Project) == repo && r.Policy.Review.Rounds.Max > 0 {
+	for name, r := range c.Repositories {
+		if repoKey(r.Forge, r.Project) != repo {
+			continue
+		}
+		if r.Policy.Review.Rounds.Max > 0 {
 			p.Max = r.Policy.Review.Rounds.Max
+		}
+		if eff, _ := effectivePolicy(c, st, name); eff.Review.Rounds.Max > 0 && eff.Review.Rounds.Max < p.Max {
+			p.Max = eff.Review.Rounds.Max
 		}
 	}
 	return p
@@ -297,23 +306,21 @@ func screenPatterns(cfg *Config) []string {
 }
 
 // filePatterns are the confidential patterns repositories' own files
-// added, as last read, in the order of their repositories' names: they
-// screen after the configuration's.
+// added, compiled once as each file's read is applied, in the order of
+// their keys: they screen after the configuration's.
 func filePatterns(st *LogState) []*regexp.Regexp {
-	if st == nil || st.cfg == nil || len(st.Policies) == 0 {
+	if st == nil || len(st.filePats) == 0 {
 		return nil
 	}
 	var out []*regexp.Regexp
-	for _, repo := range sortedKeys(st.Policies) {
-		eff, _, _ := narrowPolicy(st.cfg.Repositories[repo].Policy, st.Policies[repo].File)
-		for _, p := range eff.ConfidentialPatterns {
-			if re, err := regexp.Compile(p); err == nil && !contains(st.cfg.Repositories[repo].Policy.ConfidentialPatterns, p) {
-				out = append(out, re)
-			}
-		}
+	for _, k := range sortedKeys(st.filePats) {
+		out = append(out, st.filePats[k]...)
 	}
 	return out
 }
+
+// policyKey keys a repository's file on one target branch.
+func policyKey(repo, target string) string { return repo + "\x00" + target }
 
 // PolicyPayload is a repository's own policy file as read at its target's
 // tip: the file, compact, its hash, and the keys of it that applied and
@@ -423,13 +430,19 @@ func narrowKey(eff *RepoPolicy, key string, raw json.RawMessage) bool {
 		*have = n
 		return true
 	}
+	// An empty list is the same as none.
 	same := func(have any) bool {
 		v := reflect.New(reflect.TypeOf(have).Elem())
-		return strictJSON(raw, v.Interface()) == nil && reflect.DeepEqual(v.Elem().Interface(), reflect.ValueOf(have).Elem().Interface())
+		got, want := v.Elem(), reflect.ValueOf(have).Elem()
+		if strictJSON(raw, v.Interface()) != nil {
+			return false
+		}
+		if got.Kind() == reflect.Slice && got.Len() == 0 && want.Len() == 0 {
+			return true
+		}
+		return reflect.DeepEqual(got.Interface(), want.Interface())
 	}
 	switch key {
-	case "delivery.allow":
-		return subset(&eff.Delivery.Allow)
 	case "gate.argv":
 		return same(&eff.Gate.Argv)
 	case "gate.timeout":
@@ -473,7 +486,9 @@ func narrowKey(eff *RepoPolicy, key string, raw json.RawMessage) bool {
 		return same(&eff.Review.JudgeModel)
 	case "review.rounds":
 		var r RoundsRules
-		if strictJSON(raw, &r) != nil || r.Max <= 0 || eff.Review.Rounds.Max > 0 && r.Max > eff.Review.Rounds.Max {
+		// Under an owner's 0, policies.rounds.max holds, which roundsFor
+		// takes when it is lower.
+		if strictJSON(raw, &r) != nil || r.Max <= 0 || r.Max > maxRounds || eff.Review.Rounds.Max > 0 && r.Max > eff.Review.Rounds.Max {
 			return false
 		}
 		eff.Review.Rounds = r
@@ -606,68 +621,115 @@ func containsInt(xs []int, x int) bool {
 }
 
 // effectivePolicy is a repository's policy as it stands: the owner's,
-// narrowed by the repository's own file last read, and that read.
-func effectivePolicy(cfg *Config, st *LogState, repo string) (RepoPolicy, *PolicyPayload) {
-	owner := cfg.Repositories[repo].Policy
+// narrowed by each of the repository's own files last read, one per
+// target branch, and those reads. What a session may start, spend and
+// see reads it; a merge reads its own target's file alone (effectiveFor).
+func effectivePolicy(cfg *Config, st *LogState, repo string) (RepoPolicy, []PolicyPayload) {
+	eff := cfg.Repositories[repo].Policy
 	if st == nil {
-		return owner, nil
+		return eff, nil
 	}
-	f, ok := st.Policies[repo]
-	if !ok {
-		return owner, nil
+	var files []PolicyPayload
+	for _, k := range sortedKeys(st.Policies) {
+		if f := st.Policies[k]; f.Repository == repo {
+			eff = narrowBy(eff, f)
+			files = append(files, f)
+		}
 	}
-	if len(f.File) == 0 {
-		return owner, &f
-	}
-	eff, _, _ := narrowPolicy(owner, f.File)
-	return eff, &f
+	return eff, files
 }
 
-// applyPolicy folds a repository file's read.
+// effectiveFor is the policy for a merge into target: the owner's
+// narrowed by target's own file as last read.
+func effectiveFor(cfg *Config, st *LogState, repo, target string) RepoPolicy {
+	eff := cfg.Repositories[repo].Policy
+	if f, ok := st.Policies[policyKey(repo, target)]; ok {
+		eff = narrowBy(eff, f)
+	}
+	return eff
+}
+
+// narrowBy narrows p by a file's read. A file withheld for matching a
+// confidential pattern cannot be read, so it turns merge off: what it
+// says is unknown, and it may narrow.
+func narrowBy(p RepoPolicy, f PolicyPayload) RepoPolicy {
+	if f.Withheld > 0 {
+		p = clonePolicy(p)
+		p.Merge.Enabled = false
+		return p
+	}
+	if len(f.File) == 0 {
+		return p
+	}
+	eff, _, _ := narrowPolicy(p, f.File)
+	return eff
+}
+
+// applyPolicy folds a repository file's read, and compiles the
+// confidential patterns it adds.
 func (st *LogState) applyPolicy(e Event) {
 	if st.Policies == nil {
 		st.Policies = map[string]PolicyPayload{}
 	}
-	st.Policies[e.Policy.Repository] = *e.Policy
+	if st.filePats == nil {
+		st.filePats = map[string][]*regexp.Regexp{}
+	}
+	p := *e.Policy
+	key := policyKey(p.Repository, p.Target)
+	st.Policies[key] = p
+	delete(st.filePats, key)
+	if st.cfg == nil || len(p.File) == 0 {
+		return
+	}
+	owner := st.cfg.Repositories[p.Repository].Policy
+	eff, _, _ := narrowPolicy(owner, p.File)
+	for _, pat := range eff.ConfidentialPatterns {
+		if re, err := regexp.Compile(pat); err == nil && !contains(owner.ConfidentialPatterns, pat) {
+			st.filePats[key] = append(st.filePats[key], re)
+		}
+	}
 }
 
-// notePolicy records what the repository's own file at tip says, once per
-// file: the keys applied and refused, and, for a refused key, one
-// escalation to the owner. It returns the effective policy.
+// notePolicy records what the repository's own file on target at tip
+// says, once per file and target: the keys applied and refused. A read
+// that refused keys, or a file withheld, goes to the owner once, as the
+// read is recorded. It returns the policy for a merge into target.
 func (s *Supervisor) notePolicy(name string, t *Track, repo, target, tip string, file []byte) RepoPolicy {
-	owner := s.cfg.Repositories[repo].Policy
 	hash := ""
 	if file != nil {
 		hash = shortHash(HashPane(string(file)))
 	}
-	eff, applied, refused := owner, []string(nil), []string(nil)
+	p := PolicyPayload{Repository: repo, Target: target, Tip: tip, Hash: hash}
 	if file != nil {
-		eff, applied, refused = narrowPolicy(owner, file)
-	}
-	p := PolicyPayload{Repository: repo, Target: target, Tip: tip, Hash: hash, Applied: applied, Refused: refused}
-	if file != nil {
-		// The file is kept, compact, so any process narrows by it the
-		// same way; one that is no JSON, or too long, is refused whole.
-		var buf bytes.Buffer
-		if len(file) <= policyFileMax && json.Compact(&buf, file) == nil {
-			p.File = buf.Bytes()
+		// The file is screened with the configuration's patterns alone,
+		// never with those a file added, so a file cannot withhold
+		// itself. The file is kept, compact, so any process narrows by it
+		// the same way; one that is no JSON, or too long, is refused whole.
+		if n := s.configMatch(string(file)); n > 0 {
+			p.Refused, p.Withheld = []string{"file"}, n
+		} else {
+			_, p.Applied, p.Refused = narrowPolicy(s.cfg.Repositories[repo].Policy, file)
+			var buf bytes.Buffer
+			if len(file) <= policyFileMax && json.Compact(&buf, file) == nil {
+				p.File = buf.Bytes()
+			}
 		}
-		if n := s.confidentialMatch(string(file)); n > 0 {
-			eff, p.File, p.Applied, p.Refused, p.Withheld = owner, nil, nil, []string{"file"}, n
-			refused = p.Refused
-		}
 	}
-	if prev, ok := s.st.Policies[repo]; !ok || prev.Hash != p.Hash || prev.Target != p.Target {
+	if prev, ok := s.st.Policies[policyKey(repo, target)]; !ok || prev.Hash != p.Hash {
 		if s.emit("", Event{Kind: KindPolicy, Mode: ModeShared, Policy: &p}); s.halt != nil {
-			return eff
+			return effectiveFor(s.cfg, s.st, repo, target)
+		}
+		switch {
+		case p.Withheld > 0:
+			s.escalate(name, "policy:"+repo+":"+target+":"+hash, fmt.Sprintf("%s's own %s on %s at %s matches confidential pattern %d, so agentd cannot read it, and merges into %s are off until it changes. Change the file, or the patterns.",
+				repo, MergePolicyFile, target, shortHash(tip), p.Withheld, target), t, s.clock.Now())
+		case len(p.Refused) > 0:
+			s.escalate(name, "policy:"+repo+":"+target+":"+hash, fmt.Sprintf("%s's own %s on %s at %s would widen your policy for it, so these keys are refused: %s. "+
+				"A repository's file may only narrow the policy in your configuration; the keys that narrow it apply. Change the file, or your configuration.",
+				repo, MergePolicyFile, target, shortHash(tip), strings.Join(p.Refused, ", ")), t, s.clock.Now())
 		}
 	}
-	if len(refused) > 0 {
-		s.escalate(name, "policy:"+repo+":"+hash, fmt.Sprintf("%s's own %s on %s at %s would widen your policy for it, so these keys are refused: %s. "+
-			"A repository's file may only narrow the policy in your configuration; the keys that narrow it apply. Change the file, or your configuration.",
-			repo, MergePolicyFile, target, shortHash(tip), strings.Join(refused, ", ")), t, s.clock.Now())
-	}
-	return eff
+	return effectiveFor(s.cfg, s.st, repo, target)
 }
 
 // policyKeys are the keys of a policy, section.key, as JSON names them.
@@ -699,39 +761,51 @@ type PolicyKey struct {
 	Source string `json:"source"`
 }
 
-// PolicyView is what agentd policy show prints.
+// PolicyView is what agentd policy show prints: each key, and each of
+// the repository's own files as last read.
 type PolicyView struct {
-	Repository string      `json:"repository"`
-	Keys       []PolicyKey `json:"keys"`
-	File       *struct {
-		Target  string   `json:"target"`
-		Tip     string   `json:"tip"`
-		Refused []string `json:"refused,omitempty"`
-	} `json:"file,omitempty"`
+	Repository string       `json:"repository"`
+	Keys       []PolicyKey  `json:"keys"`
+	Files      []PolicyFile `json:"files,omitempty"`
 }
 
-// showPolicy attributes each key of repo's effective policy.
+// PolicyFile is a repository's own file as policy show reports it.
+type PolicyFile struct {
+	Target   string   `json:"target"`
+	Tip      string   `json:"tip"`
+	Refused  []string `json:"refused,omitempty"`
+	Withheld bool     `json:"withheld,omitempty"`
+}
+
+// showPolicy attributes each key of repo's effective policy. Which keys a
+// file applied is worked out again against the configuration as it is.
 func showPolicy(cfg *Config, st *LogState, repo string) PolicyView {
-	eff, f := effectivePolicy(cfg, st, repo)
 	r := cfg.Repositories[repo]
-	applied := map[string]bool{}
+	eff := r.Policy
+	source := map[string]string{}
 	v := PolicyView{Repository: repo}
-	if f != nil {
-		for _, k := range f.Applied {
-			applied[k] = true
+	_, files := effectivePolicy(cfg, st, repo)
+	for _, f := range files {
+		v.Files = append(v.Files, PolicyFile{Target: f.Target, Tip: f.Tip, Refused: f.Refused, Withheld: f.Withheld > 0})
+		from := "repository " + MergePolicyFile + " on " + f.Target + " at " + shortHash(f.Tip)
+		if f.Withheld > 0 {
+			source["merge.enabled"] = from + " (withheld)"
+		} else if len(f.File) > 0 {
+			var applied []string
+			eff, applied, _ = narrowPolicy(eff, f.File)
+			for _, k := range applied {
+				source[k] = from
+			}
+			continue
 		}
-		v.File = &struct {
-			Target  string   `json:"target"`
-			Tip     string   `json:"tip"`
-			Refused []string `json:"refused,omitempty"`
-		}{f.Target, f.Tip, f.Refused}
+		eff = narrowBy(eff, f)
 	}
 	keys := policyKeys(eff)
 	for _, k := range sortedKeys(keys) {
 		src := "owner"
-		switch sec, _, _ := strings.Cut(k, "."); {
-		case applied[k] || applied[sec] && sec == k:
-			src = "repository " + MergePolicyFile + " at " + shortHash(f.Tip)
+		switch {
+		case source[k] != "":
+			src = source[k]
 		case contains(r.defaulted, k):
 			src = "default"
 		}
