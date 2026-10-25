@@ -70,6 +70,23 @@ func ReadStatus(path string) (StatusEvidence, error) {
 	return ParseStatus(string(b)), nil
 }
 
+// statusLimit is the most of a STATUS.md the UI reads.
+const statusLimit = 1 << 18
+
+// readStatusRegular is ReadStatus for the UI (#41): the file is read only
+// as a regular file, never through a link or from a FIFO, which would
+// hold a request, and at most statusLimit bytes of it.
+func readStatusRegular(path string) (StatusEvidence, error) {
+	b, err := readRegular(path, statusLimit)
+	if errors.Is(err, os.ErrNotExist) {
+		return StatusEvidence{}, nil
+	}
+	if err != nil {
+		return StatusEvidence{}, err
+	}
+	return ParseStatus(string(b)), nil
+}
+
 // A STATUS.md may hold several Questions sections (one per issue the session
 // works through). Each is judged on its own: a section that says "none" asks
 // nothing, a section ends only at a heading of its own level or higher (a

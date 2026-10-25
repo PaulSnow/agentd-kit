@@ -571,6 +571,11 @@ func TestUIMethodsAndAssets(t *testing.T) {
 			t.Errorf("CSP %q lacks %q", csp, want)
 		}
 	}
+	// A browser sends a form's POST with Origin null under no-referrer,
+	// which checkPost would refuse.
+	if rp := w.Header().Get("Referrer-Policy"); rp != "same-origin" {
+		t.Fatalf("Referrer-Policy %q", rp)
+	}
 	if strings.Contains(csp, "unsafe") {
 		t.Fatalf("CSP allows unsafe sources: %q", csp)
 	}
@@ -887,7 +892,8 @@ func TestUIShadowEcho(t *testing.T) {
 }
 
 // A STATUS.md that is a FIFO or a link is not read: the session view
-// says so, and nothing hangs.
+// says so, and nothing hangs, the index neither, where a session's
+// Questions are read again.
 func TestUISessionStatusNotRegular(t *testing.T) {
 	u, f := fixtureUI(t)
 	wd := f.night.Sessions["w17"].Workdir
@@ -911,5 +917,43 @@ func TestUISessionStatusNotRegular(t *testing.T) {
 	}
 	if body := owner(t, u, "/session/night/w17"); strings.Contains(body, "Not the session") || !strings.Contains(body, "STATUS.md could not be read.") {
 		t.Fatalf("a link:\n%s", body)
+	}
+}
+
+// The index reads STATUS.md's Questions as a regular file only: a FIFO
+// holds no request, and the decision is shown as changed.
+func TestUIQuestionsNotRegular(t *testing.T) {
+	u, f := fixtureUI(t)
+	status := filepath.Join(f.night.Sessions["txt1"].Workdir, "STATUS.md")
+	if err := os.Remove(status); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(status, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan string, 1)
+	go func() { done <- get(u, "GET", "/", pageAddr, "192.0.2.20:51000").Body.String() }()
+	select {
+	case body := <-done:
+		if !strings.Contains(body, "changed since agentd last read them") {
+			t.Fatalf("index:\n%s", body)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a FIFO for STATUS.md holds the index")
+	}
+}
+
+// A session at a dialog with a decision open that does not block is
+// listed twice: by its decision, and as blocked.
+func TestUIDialogBesideNonBlockingDecision(t *testing.T) {
+	u, f := fixtureUI(t)
+	dialog := Event{V: EventVersion, Time: pageAt, Session: "g1", Kind: KindTransition, Mode: ModeLive,
+		Transition: &TransitionPayload{From: string(Working), To: string(BlockedOnOwner), Reason: "screen shows a permission or confirmation dialog"}}
+	if err := NewLogWriter(f.coordBuf).Append(dialog); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(needKeys(t, u), ",")
+	if !strings.Contains(got, "coord/g1/blocked") || !strings.Contains(got, "coord/g1/decision:Q1") {
+		t.Fatalf("needs %s", got)
 	}
 }

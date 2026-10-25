@@ -47,11 +47,11 @@
 {{else if eq .Type "date"}}<div class="inline"><input type="date" name="value" aria-label="Your answer"{{with .Limits}}{{with .MinText}} min="{{.}}"{{end}}{{with .MaxText}} max="{{.}}"{{end}}{{end}} required><button type="submit">Answer</button></div>
 {{else}}<textarea name="text" rows="3" maxlength="2000" aria-label="Your answer" required></textarea><div class="choices"><button type="submit">Answer</button></div>{{end}}
 </form>
-{{if ne .Type "text"}}<details class="own-words"><summary>Answer in your own words</summary>
+{{if ne .Type "text"}}<details class="own-words" data-key="{{$n.Src}}-{{.Session}}-{{.ID}}-own"><summary>Answer in your own words</summary>
 <form class="answer" method="post" action="/answer">{{template "hidden" (ctx $p $n)}}<input type="hidden" name="session" value="{{.Session}}"><input type="hidden" name="id" value="{{.ID}}">
 <textarea name="other" rows="2" maxlength="2000" aria-label="Your own words" required></textarea>
 <p class="muted">Your own words reach the session but do not settle the decision.</p><div class="choices"><button type="submit">Send</button></div></form></details>{{end}}
-{{with .Default}}<details class="own-words"><summary>Default: {{.}}</summary>
+{{with .Default}}<details class="own-words" data-key="{{$n.Src}}-{{$n.Session}}-{{$n.Decision.ID}}-default"><summary>Default: {{.}}</summary>
 <form class="answer" method="post" action="/deadline">{{template "hidden" (ctx $p $n)}}<input type="hidden" name="session" value="{{$n.Session}}"><input type="hidden" name="id" value="{{$n.Decision.ID}}">
 <p class="muted">Applied only if you set a deadline and it passes unanswered.{{with $n.Decision.Deadline}} The session suggests {{.}}.{{end}}{{with $n.Decision.OwnerDeadline}} Your deadline: {{$p.When .At}}.{{end}}</p>
 <div class="inline"><input type="datetime-local" name="deadline" aria-label="Deadline" required><button type="submit">Apply the default after</button></div></form></details>{{end}}

@@ -119,7 +119,7 @@ func DecisionsFrom(cfg *Config, st *LogState, rep Report) []UIDecision {
 		sess, configured := cfg.Sessions[n]
 		if t.StatusQuestions != "" && configured {
 			d := UIDecision{Decision: statusDecisionFor(t.StatusQuestions)}
-			sts, err := ReadStatus(filepath.Join(sess.Workdir, "STATUS.md"))
+			sts, err := readStatusRegular(filepath.Join(sess.Workdir, "STATUS.md"))
 			switch q := sts.Questions; {
 			case err == nil && (q == "" || sts.Done):
 				d.ID = "" // it asks nothing now
@@ -182,15 +182,20 @@ type uiNeed struct {
 // needs lists what waits on the owner in src: every open decision, and
 // every session of the report blocked on the owner, usage-limited,
 // crash-looping, stopped or failed. A done session is never listed, and
-// a session blocked on its Questions or with a decision open is listed
-// by its decisions alone.
+// a session blocked on its Questions or with a blocking decision open is
+// listed by its decisions alone.
 func (src *uiSource) needs(cfg *Config, rep Report, asked map[string]time.Time) []uiNeed {
 	secret := confidentialMatcher(cfg)
 	var out []uiNeed
 	decided := map[string]bool{}
 	for _, d := range DecisionsFrom(cfg, src.st, rep) {
 		d := d
-		decided[d.Session] = true
+		// A blocking decision, or STATUS.md's Questions, is what the
+		// session waits on; one that does not block leaves a dialog
+		// its own card.
+		if d.Blocking || strings.HasPrefix(d.ID, statusDecision) {
+			decided[d.Session] = true
+		}
 		t := src.st.Tracks[d.Session]
 		since, ok := asked[d.Session+" "+d.ID]
 		if !ok {
@@ -625,7 +630,7 @@ func (u *UI) sessionView(src *uiSource, name string, now time.Time) (*uiSessionP
 		v.Turns = append(v.Turns, uiTurn{Role: tr.Role, At: tr.At, Body: body})
 	}
 	if sess, ok := cfg.Sessions[name]; ok && sess.Workdir != "" {
-		b, err := readRegular(filepath.Join(sess.Workdir, "STATUS.md"), 1<<18)
+		b, err := readRegular(filepath.Join(sess.Workdir, "STATUS.md"), statusLimit)
 		switch {
 		case errors.Is(err, os.ErrNotExist):
 			v.StatusNote = "No STATUS.md."

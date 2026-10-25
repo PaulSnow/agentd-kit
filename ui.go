@@ -174,7 +174,7 @@ func (src *uiSource) catchUp() error {
 			continue
 		}
 		src.noteAsked(e)
-		owners := e.Mode == ModeOwner || e.Mode == ModeShared
+		owners := e.Mode == ModeOwner || e.Mode == ModeShared || e.Mode == ""
 		if e.Session != "" {
 			es := append(src.events[e.Session], e)
 			if len(es) > uiKeptEvents {
@@ -362,7 +362,10 @@ func (u *UI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.Set("Content-Security-Policy", "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Cache-Control", "no-store")
-	h.Set("Referrer-Policy", "no-referrer")
+	// same-origin, not no-referrer: under no-referrer a browser sends a
+	// form's POST with Origin null, and checkPost refuses it. Other sites
+	// still get no referrer, and links out carry rel=noreferrer.
+	h.Set("Referrer-Policy", "same-origin")
 	if !u.hostAllowed(r.Host) {
 		http.Error(w, "unknown host", http.StatusForbidden)
 		return
