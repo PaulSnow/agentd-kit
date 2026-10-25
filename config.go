@@ -75,6 +75,8 @@ type Policies struct {
 	Coordinator CoordinatorPolicy `json:"coordinator"`
 	// CI is how a session relaunched to fix its request's CI hears why.
 	CI CIPolicy `json:"ci"`
+	// Feed posts each repository's lines to its console.
+	Feed FeedPolicy `json:"feed"`
 	// PaneCommands are the values of tmux's #{pane_current_command} that
 	// mean the pane runs Claude Code. Nothing is typed or sent as keys into
 	// a pane running anything else, such as the shell left after Claude
@@ -578,6 +580,10 @@ func (c *Config) finish(base string) error {
 	// session would wait unseen.
 	if len(c.Sessions) > 0 && len(c.Policies.Escalate.Command) == 0 {
 		errs = append(errs, errors.New("policies.escalate.command must be set when sessions are configured"))
+	}
+	// The consoles' feed posts through the same command.
+	if c.Policies.Feed.Enabled && len(c.Policies.Escalate.Command) == 0 {
+		errs = append(errs, errors.New("policies.escalate.command must be set when policies.feed.enabled is"))
 	}
 	// A bare command name is left for PATH to find; a path is expanded.
 	if cmd := c.Policies.Escalate.Command; len(cmd) > 0 && (strings.HasPrefix(cmd[0], "~") || strings.Contains(cmd[0], "/")) {

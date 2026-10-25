@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Only one agentd run may supervise an event log: a second exits with an
@@ -83,6 +84,34 @@ func TestClearCommand(t *testing.T) {
 	}
 	events, _, err := ReadLog(logPath)
 	if err != nil || len(events) != 1 || events[0].Kind != KindClear || events[0].Session != "s1" || events[0].Mode != ModeOwner {
+		t.Fatalf("events = %+v, %v", events, err)
+	}
+}
+
+// agentd console reply applies a reply as its console's tool hands it on,
+// and refuses one without a console and text.
+func TestConsoleCommand(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "events.jsonl")
+	cfgPath := filepath.Join(dir, "agentd.json")
+	writeFile(t, cfgPath, `{"event_log": "`+logPath+`", "transcript_dir": "", "repositories": {"widgets": {"forge": "gitlab", "host": "gitlab.example.com", "project": "example-org/widgets"}}}`)
+	log, _, err := openLoaded(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	it := ItemPayload{ID: "gitlab/example-org/widgets#4", Kind: "issue", Repository: "gitlab/example-org/widgets", Title: "Widgets wobble", SourceTime: time.Now()}
+	if err := log.Append(Event{V: EventVersion, Time: time.Now(), Kind: KindItem, Mode: ModeShared, Item: &it}); err != nil {
+		t.Fatal(err)
+	}
+	log.Close()
+	if err := consoleCmd([]string{"--config", cfgPath, "reply", "widgets"}); err == nil {
+		t.Fatal("a reply with no text was applied")
+	}
+	if err := consoleCmd([]string{"--config", cfgPath, "reply", "widgets", "seen", it.ID}); err != nil {
+		t.Fatal(err)
+	}
+	events, _, err := ReadLog(logPath)
+	if err != nil || len(events) != 2 || events[1].Kind != KindSeen || events[1].Seen.From != "console:widgets" {
 		t.Fatalf("events = %+v, %v", events, err)
 	}
 }
