@@ -1,0 +1,265 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"strings"
+	"testing"
+	"time"
+)
+
+// feedHarness is a harness with the consoles' feed on.
+func feedHarness(t *testing.T, shadow bool, names ...string) *harness {
+	h := newHarness(t, shadow, names...)
+	h.cfg.Policies.Feed.Enabled = true
+	return h
+}
+
+// feedPosts are the escalation command's calls that are feed lines, by
+// their text, to the console each went to.
+func feedPosts(h *harness) [][2]string {
+	var posted []string
+	for _, e := range h.events() {
+		if e.Kind == KindFeed && e.Feed.Phase == FeedIntent {
+			posted = append(posted, e.Feed.Text)
+		}
+	}
+	var out [][2]string
+	for _, c := range h.runner.calls {
+		for _, p := range posted {
+			if c[4] == p {
+				out = append(out, [2]string{c[1], c[4]})
+				break
+			}
+		}
+	}
+	return out
+}
+
+// newItem logs a new item of a repository, as a poll does.
+func newItem(t *testing.T, h *harness, id, repository, title string) {
+	t.Helper()
+	it := ItemPayload{ID: id, Kind: "issue", Repository: repository, Title: title, SourceTime: h.clock.Now()}
+	if err := NewLogWriter(h.buf).Append(Event{V: EventVersion, Time: h.clock.Now(), Kind: KindItem, Mode: ModeShared, Item: &it}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The first pass with the feed on records what is there as its baseline
+// and posts none of it; a delivery after that is posted once to its
+// repository's console, in the text the page shows, and not again after
+// agentd restarts.
+func TestFeedPostsOnceAcrossRestarts(t *testing.T) {
+	h := newHarness(t, false, "d", "e")
+	doneWithDelivery(t, h, "d")
+	h.alive("d", "waiting")
+	h.ticks(2, 5*time.Minute)
+	if len(h.forge.pushes) != 1 {
+		t.Fatalf("setup: pushes %v", h.forge.pushes)
+	}
+	// The feed begins after d's delivery: its baseline holds it.
+	h.cfg.Policies.Feed.Enabled = true
+	h.ticks(2, 5*time.Minute)
+	if got := feedPosts(h); len(got) != 0 {
+		t.Fatalf("history was posted: %v", got)
+	}
+	doneWithDelivery(t, h, "e")
+	h.alive("e", "waiting")
+	h.ticks(3, 5*time.Minute)
+	got := feedPosts(h)
+	if len(got) != 1 || got[0][0] != "widgets" || !strings.HasPrefix(got[0][1], "e delivered") {
+		t.Fatalf("feed posts = %v, want e's delivery once to widgets", got)
+	}
+	h.restart(false)
+	h.ticks(4, 5*time.Minute)
+	if got := feedPosts(h); len(got) != 1 {
+		t.Fatalf("feed posts after a restart = %v, want still 1", got)
+	}
+}
+
+// A decision that does not block is fed once, with the exact reply to
+// type; a blocking one is in the session's escalation to the same
+// console, and is not fed again.
+func TestFeedDecisionsCarryTheReply(t *testing.T) {
+	h := feedHarness(t, false, "s1", "s2")
+	h.alive("s1", "waiting")
+	h.alive("s2", "waiting")
+	h.ticks(1, 5*time.Minute)
+	writeQuestions(t, h, "s1", strings.Replace(chooseColour, `"blocking":true`, `"blocking":false`, 1))
+	writeQuestions(t, h, "s2", chooseColour)
+	h.ticks(3, 5*time.Minute)
+	got := feedPosts(h)
+	if len(got) != 1 || got[0][0] != "widgets" || !strings.HasPrefix(got[0][1], "s1 asks Q1") || !strings.HasSuffix(got[0][1], "Reply: s1 Q1 <answer>") {
+		t.Fatalf("feed posts = %v, want s1's decision once with its reply", got)
+	}
+	if n := h.count(KindAction, ActEscalate, "s2"); n != 1 || len(h.runner.calls) != 2 {
+		t.Fatalf("s2 escalations %d, posts %v: want one escalation and one feed line", n, h.runner.calls)
+	}
+}
+
+// A console reply is applied as the owner's answer, through the same path
+// as the page's POST, and wakes the running loop: the answer reaches the
+// session long before the next poll. A reply from another repository's
+// console is refused, and so is an answer the decision cannot take.
+func TestConsoleReplyWakesTheLoopAndAnswers(t *testing.T) {
+	h := feedHarness(t, false, "s1")
+	h.cfg.PollInterval = Duration{time.Hour}
+	h.alive("s1", "waiting")
+	writeQuestions(t, h, "s1", chooseColour)
+	buf := &lockedBuffer{}
+	h.sup = NewSupervisor(h.cfg, NewLogWriter(buf), h.clock, h.tmux, h.git, h.forge, h.runner, false)
+	h.sup.Pass()
+	h.sup.Wait()
+	if h.state("s1") != BlockedOnOwner {
+		t.Fatalf("setup: state %s", h.state("s1"))
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- h.sup.Run(ctx, false) }()
+	waitFor(t, "the loop to wait for the poll and the wake check", func() bool { return h.clock.waiting() == 2 })
+
+	fold := func() *LogState {
+		events, bad, err := ReadEvents(bytes.NewReader(buf.Bytes()))
+		if err != nil || bad != 0 {
+			t.Fatalf("log unreadable: %v, %d bad", err, bad)
+		}
+		return NewLogState(h.cfg, ModeLive).Fold(events)
+	}
+	if err := ConsoleReply(h.cfg, NewLogWriter(buf), fold(), h.clock.Now(), "elsewhere", "s1 Q1 b"); err == nil {
+		t.Fatal("a reply from another console was applied")
+	}
+	if err := ConsoleReply(h.cfg, NewLogWriter(buf), fold(), h.clock.Now(), "widgets", "s1 Q1 c"); err == nil {
+		t.Fatal("an answer that is no option was applied")
+	}
+	if err := ConsoleReply(h.cfg, NewLogWriter(buf), fold(), h.clock.Now(), "widgets", "s1 Q1 b"); err != nil {
+		t.Fatal(err)
+	}
+	start := h.clock.Now()
+	waitFor(t, "the answer to reach the session", func() bool {
+		if doc, ok := readAnswers(t, h, "s1"); ok && len(doc.Answers) == 1 {
+			return true
+		}
+		h.clock.advance(time.Second)
+		return false
+	})
+	if waited := h.clock.Now().Sub(start); waited > 2*WakeCheck {
+		t.Fatalf("the answer came %s after the reply, want within %s", waited, 2*WakeCheck)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	doc, _ := readAnswers(t, h, "s1")
+	if a := doc.Answers[0]; a.ID != "Q1" || a.Choice != "b" {
+		t.Fatalf("answers.json = %+v", doc)
+	}
+	var from string
+	for _, e := range fold().Tracks["s1"].Answers {
+		from = e.From
+	}
+	if from != "console:widgets" {
+		t.Fatalf("answer from %q, want console:widgets", from)
+	}
+}
+
+// "seen ID..." marks a repository's items seen from its console, and only
+// from its console.
+func TestConsoleReplyMarksItemsSeen(t *testing.T) {
+	h := feedHarness(t, false)
+	at := h.clock.Now()
+	log := NewLogWriter(h.buf)
+	for _, it := range []ItemPayload{
+		{ID: "gitlab/example-org/widgets#4", Kind: "issue", Repository: "gitlab/example-org/widgets", Title: "Widgets wobble", SourceTime: at},
+		{ID: "gitlab/example-org/readonly#2", Kind: "issue", Repository: "gitlab/example-org/readonly", Title: "Read only", SourceTime: at},
+	} {
+		it := it
+		if err := log.Append(Event{V: EventVersion, Time: at, Kind: KindItem, Mode: ModeShared, Item: &it}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st := NewLogState(h.cfg, ModeLive).Fold(h.events())
+	if err := ConsoleReply(h.cfg, log, st, at, "widgets", "seen gitlab/example-org/readonly#2"); err == nil {
+		t.Fatal("another repository's item was marked from this console")
+	}
+	if err := ConsoleReply(h.cfg, log, st, at, "widgets", "seen gitlab/example-org/widgets#4"); err != nil {
+		t.Fatal(err)
+	}
+	st = NewLogState(h.cfg, ModeLive).Fold(h.events())
+	if !st.Items["gitlab/example-org/widgets#4"].Seen || st.Items["gitlab/example-org/readonly#2"].Seen {
+		t.Fatalf("seen: %+v, %+v", st.Items["gitlab/example-org/widgets#4"], st.Items["gitlab/example-org/readonly#2"])
+	}
+}
+
+// A line that matches a confidential pattern is never posted, nor logged
+// by the feed: a line naming only the repository goes in its place, and
+// the feed event records the pattern's number.
+func TestFeedNeverPostsAConfidentialTerm(t *testing.T) {
+	h := feedHarness(t, false)
+	h.cfg.ConfidentialPatterns = []string{`(?i)project\s+nightingale`}
+	h.restart(false)
+	h.ticks(1, 5*time.Minute)
+	newItem(t, h, "gitlab/example-org/widgets#5", "gitlab/example-org/widgets", "Ship Project Nightingale first")
+	h.ticks(2, 5*time.Minute)
+	got := feedPosts(h)
+	if len(got) != 1 || !strings.Contains(got[0][1], "withheld") || !strings.Contains(got[0][1], "widgets") {
+		t.Fatalf("feed posts = %v, want one withheld line", got)
+	}
+	for _, c := range h.runner.calls {
+		if strings.Contains(strings.ToLower(strings.Join(c, " ")), "nightingale") {
+			t.Fatalf("posted a confidential term: %q", c)
+		}
+	}
+	withheld := 0
+	for _, e := range h.events() {
+		if e.Kind != KindFeed {
+			continue
+		}
+		if strings.Contains(strings.ToLower(e.Feed.Text), "nightingale") {
+			t.Fatalf("the feed logged a confidential term: %+v", e.Feed)
+		}
+		if e.Feed.Withheld == 1 {
+			withheld++
+		}
+	}
+	if withheld != 1 {
+		t.Fatalf("withheld records = %d, want 1", withheld)
+	}
+}
+
+// A post that fails is retried on the restart policy's backoff and given
+// up after max_restarts tries; shadow mode posts nothing and logs what it
+// would post, once, across a restart.
+func TestFeedRetriesThenGivesUpAndShadowWould(t *testing.T) {
+	h := feedHarness(t, false, "e")
+	h.ticks(1, 5*time.Minute)
+	h.runner.failing = 100
+	doneWithDelivery(t, h, "e")
+	h.alive("e", "waiting")
+	h.ticks(40, 30*time.Minute)
+	phases := map[string]int{}
+	for _, e := range h.events() {
+		if e.Kind == KindFeed {
+			phases[e.Feed.Phase]++
+		}
+	}
+	max := h.cfg.Policies.Restart.MaxRestarts
+	if phases[FeedFailed] != max || phases[FeedGaveUp] != 1 || phases[FeedIntent] != max {
+		t.Fatalf("phases = %v, want %d failures then one give-up", phases, max)
+	}
+
+	s := feedHarness(t, true)
+	s.ticks(1, 5*time.Minute)
+	newItem(t, s, "gitlab/example-org/widgets#4", "gitlab/example-org/widgets", "Widgets wobble")
+	s.ticks(3, 5*time.Minute)
+	s.restart(true)
+	s.ticks(3, 5*time.Minute)
+	would := 0
+	for _, e := range s.events() {
+		if e.Kind == KindFeed && e.Feed.Phase == FeedWould && strings.HasPrefix(e.Feed.Text, "New issue in widgets: Widgets wobble") {
+			would++
+		}
+	}
+	if would != 1 || len(s.runner.calls) != 0 {
+		t.Fatalf("shadow: would %d, posts %v; want one would and no post", would, s.runner.calls)
+	}
+}

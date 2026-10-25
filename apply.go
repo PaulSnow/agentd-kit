@@ -29,6 +29,8 @@ type LogState struct {
 	Coordinators map[string]string
 	// CI is each watched request's latest CI, by repository and request.
 	CI map[string]CIRecord
+	// Feed is what the consoles' feed has posted.
+	Feed FeedState
 
 	cfg *Config // its policies, read as each event is applied
 }
@@ -117,6 +119,8 @@ func (st *LogState) apply(e Event) {
 	}
 	if e.Session == "" {
 		switch e.Kind {
+		case KindFeed:
+			st.applyFeed(e)
 		case KindStart:
 			st.Started, st.Stopped = e.Time, time.Time{}
 		case KindStop:

@@ -75,6 +75,8 @@ type Policies struct {
 	Coordinator CoordinatorPolicy `json:"coordinator"`
 	// CI is how a session relaunched to fix its request's CI hears why.
 	CI CIPolicy `json:"ci"`
+	// Feed posts each repository's lines to its console.
+	Feed FeedPolicy `json:"feed"`
 	// PaneCommands are the values of tmux's #{pane_current_command} that
 	// mean the pane runs Claude Code. Nothing is typed or sent as keys into
 	// a pane running anything else, such as the shell left after Claude

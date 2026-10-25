@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -52,6 +53,8 @@ func main() {
 		err = clearCmd(os.Args[2:])
 	case "coordinator":
 		err = coordinatorCmd(os.Args[2:])
+	case "console":
+		err = consoleCmd(os.Args[2:])
 	case "inventory":
 		err = inventoryCmd(os.Args[2:], os.Stdout)
 	case "report":
@@ -90,6 +93,7 @@ func usage() {
   agentd mark-delivered [--config PATH] [--log PATH] SESSION WORKTREE REF
   agentd clear [--config PATH] [--log PATH] SESSION
   agentd coordinator [--config PATH] [--log PATH] release REPOSITORY
+  agentd console [--config PATH] [--log PATH] reply CONSOLE TEXT...
   agentd inventory [--config PATH]
   agentd report [--config PATH] [--log PATH] [--shadow] [--host NAME] --out PATH
   agentd page [--config PATH] [--log PATH] [--shadow]
@@ -108,7 +112,9 @@ worktree was already delivered as REF by other means, so run never delivers
 it again. clear lifts a crash-looping session's park, so it may be
 restarted again. coordinator release lets the session a repository's
 configuration names claim its coordinator, which another session held:
-there is one coordinator per repository. inventory lists every repository in the tracking system's
+there is one coordinator per repository. console reply applies the owner's
+reply in a console, as its tool hands it on: "SESSION ID ANSWER" answers a
+decision, "seen ID..." marks items seen. inventory lists every repository in the tracking system's
 manifest with its open work and clones, from the tracking snapshot. report
 writes report.json for the tracking site from the event log, atomically.
 items lists what is new since the owner last looked: issues, requests and
@@ -308,6 +314,27 @@ func coordinatorCmd(args []string) error {
 	}
 	defer log.Close()
 	return ReleaseCoordinator(cfg, log, time.Now(), rest[1])
+}
+
+// consoleCmd is the command-line face of ConsoleReply. The decisions are
+// read as a live run holds them, as the page reads them.
+func consoleCmd(args []string) error {
+	fs := flag.NewFlagSet("console", flag.ContinueOnError)
+	cfg, _, err := loadConfigFlag(fs, args)
+	if err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) < 3 || rest[0] != "reply" {
+		return fmt.Errorf("usage: agentd console reply CONSOLE TEXT...")
+	}
+	log, events, err := openLoaded(cfg.EventLog)
+	if err != nil {
+		return err
+	}
+	defer log.Close()
+	st := NewLogState(cfg, ModeLive).Fold(events)
+	return ConsoleReply(cfg, log, st, time.Now(), rest[1], strings.Join(rest[2:], " "))
 }
 
 // clearCmd is the command-line face of ClearSession.
