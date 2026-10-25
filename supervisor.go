@@ -169,6 +169,9 @@ func (s *Supervisor) screen(e *Event) {
 		}
 		e.Turn.Text = cutUTF8(e.Turn.Text, turnText)
 	}
+	if e.Account != nil {
+		e.Account.Error = s.withheld(e.Account.Error)
+	}
 }
 
 // withheld is text, or what the log says instead when it matches a
@@ -394,6 +397,7 @@ func (s *Supervisor) Pass() error {
 		s.mergeGreen(s.clock.Now())
 		s.feedConsoles(s.clock.Now())
 		s.triageItems(s.clock.Now())
+		s.readAccounts(s.clock.Now())
 	}
 	return s.halt
 }
@@ -423,7 +427,7 @@ func (s *Supervisor) ownerRecords() {
 			s.st.apply(e)
 			continue
 		}
-		shared := e.Kind == KindSeen || e.Kind == KindInstruction || e.Kind == KindTriage || e.Kind == KindError && e.Error.Triage != nil ||
+		shared := e.Kind == KindSeen || e.Kind == KindInstruction || e.Kind == KindAccount || e.Kind == KindTriage || e.Kind == KindError && e.Error.Triage != nil ||
 			e.Kind == KindItem && s.st.itemChanged(*e.Item) || e.Kind == KindCase && e.Mode == ModeOwner || e.Kind == KindCoordinator
 		if e.Session == "" && shared {
 			s.st.apply(e)
@@ -574,6 +578,11 @@ func (s *Supervisor) step(name string, sess Session) {
 	// A started session is supervised once its workdir and worktree are made.
 	if sess.Runtime && s.st.Ended[name] != "" {
 		return // the end of an earlier session of the name stops it first
+	}
+	if p := s.st.Runtime[name]; sess.Runtime && unplaced(p) && t.Provisioned != provisionKey(name, p) {
+		if s.place(name, t, now); s.st.Runtime[name].Account == "" {
+			return
+		}
 	}
 	if sess.Runtime && t.Provisioned != provisionKey(name, s.st.Runtime[name]) {
 		s.provision(name, sess, t, now)

@@ -29,6 +29,11 @@
     "ci": false,
     "ci_every": "5m"
   },
+  "usage": {
+    "enabled": false,
+    "every": "15m",
+    "limit": 90
+  },
   "jobs": {
     "triage": false,
     "model": "haiku",
@@ -99,7 +104,7 @@
         },
         "review": {"rounds": {"max": 3}},
         "scope": {"reserved": {"labels": ["owner-only"]}},
-        "sessions": {"accounts": ["work"], "max": 2, "budget": {"session_tokens": 2000000}}
+        "sessions": {"accounts": ["work"], "max": 2, "budget": {"session_tokens": 2000000}, "fallback": ["work", "spare"]}
       }
     },
     "gadgets": {
@@ -120,7 +125,8 @@
     },
     "spare": {
       "config_dir": "~/.claude-spare",
-      "token_file": "~/.config/agentd-kit/spare.token"
+      "token_file": "~/.config/agentd-kit/spare.token",
+      "usage": "headers"
     }
   },
   "sessions": {

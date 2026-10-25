@@ -70,6 +70,9 @@
 <ul class="chips">{{range .Runs}}<li class="chip">
 <strong>{{.Src}}</strong> <span class="badge mode-{{.Mode}}">{{.Mode}}</span>
 <span class="meta">{{if not .Stopped.IsZero}}stopped {{$.Ago .Stopped}}{{else if not .Started.IsZero}}started {{$.Ago .Started}}{{else}}not started{{end}}{{if .SpendKnown}} · spent {{$.Tokens .Spend}}{{if .Cap}} of {{$.Tokens .Cap}}{{end}}{{end}}{{with .StopAt}} · stops {{$.When .}}{{end}}</span>
+</li>{{end}}{{range .Accounts}}<li class="chip{{if .Over}} chip-over{{end}}">
+<strong>{{.Name}}</strong> <span class="badge{{if .Over}} alert{{else if .Stale}} kind-stopped{{else}} state-working{{end}}">{{if .Stale}}stale{{else if .Over}}over limit{{else}}room{{end}}</span>
+<span class="meta">{{if .FiveHour}}5h {{pct .FiveHour}}{{with .FiveHourReset}} until {{$.When .}}{{end}}{{end}}{{if .Weekly}} · week {{pct .Weekly}}{{with .WeeklyReset}} until {{$.When .}}{{end}}{{end}}{{if .Overage}} · overage {{if yes .Overage}}on{{else}}off{{end}}{{end}}{{if not .At.IsZero}} · read {{$.Ago .At}}{{end}}{{with .Error}} · {{.}}{{end}}</span>
 </li>{{end}}</ul>
 </section>
 <section id="needs" data-refresh aria-labelledby="needs-h">

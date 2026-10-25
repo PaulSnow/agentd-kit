@@ -47,6 +47,10 @@ type LogState struct {
 	// Approvals are each request's latest approval by its coordinator,
 	// by ciKey (#36).
 	Approvals map[string]ApprovalRecord
+	// Accounts are each account's latest usage reading (#39), and
+	// StartedAt when each started session was started.
+	Accounts  map[string]AccountRecord
+	StartedAt map[string]time.Time
 
 	cfg *Config // its policies, read as each event is applied
 }
@@ -154,6 +158,8 @@ func (st *LogState) apply(e Event) {
 	}
 	if e.Session == "" {
 		switch e.Kind {
+		case KindAccount:
+			st.applyAccount(e)
 		case KindFeed:
 			st.applyFeed(e)
 		case KindStart:

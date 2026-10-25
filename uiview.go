@@ -24,6 +24,8 @@ var uiHTML string
 // parts for a template the part is rendered by.
 var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
 	"markdown": markdown,
+	"pct":      func(v *float64) string { return fmt.Sprintf("%.0f%%", *v) },
+	"yes":      func(b *bool) bool { return b != nil && *b },
 	"ctx":      func(p, v any) map[string]any { return map[string]any{"P": p, "V": v} },
 }).Parse(uiHTML))
 
@@ -304,12 +306,24 @@ type uiRepo struct {
 	Console      bool // a source configures it, so it has a console view
 }
 
+// uiAccount is an account's latest usage reading across the sources
+// (#39): Over says a utilization is at or over the limit, Stale that the
+// reading is too old to place a session by.
+type uiAccount struct {
+	AccountRecord
+	Name  string
+	Over  bool
+	Stale bool
+	Error string // the latest error since the numbers, screened
+}
+
 // uiIndex is the index view.
 type uiIndex struct {
 	uiPage
-	Runs  []uiRun
-	Needs []uiNeed
-	Repos []*uiRepo
+	Runs     []uiRun
+	Accounts []uiAccount
+	Needs    []uiNeed
+	Repos    []*uiRepo
 }
 
 // view brings src up to date and reads what every view needs from it:
@@ -363,6 +377,7 @@ func (u *UI) indexView(now time.Time) (*uiIndex, error) {
 	for _, n := range v.Needs {
 		get(n.Repository).NeedsYou++
 	}
+	sort.Slice(v.Accounts, func(i, j int) bool { return v.Accounts[i].Name < v.Accounts[j].Name })
 	sortNeeds(v.Needs)
 	for _, r := range repos {
 		for _, rows := range [][]uiRow{r.Coordinators, r.Working, r.Finished} {
@@ -412,6 +427,7 @@ func (src *uiSource) addIndex(v *uiIndex, get func(string) *uiRepo, now time.Tim
 		}
 	}
 	v.Runs = append(v.Runs, run)
+	src.addAccounts(v, cfg, now)
 	v.Needs = append(v.Needs, src.needs(cfg, rep, src.askedAt)...)
 	for _, rr := range rep.Repositories {
 		r := get(uiRepoName(rr))
@@ -706,4 +722,30 @@ func shortSHA(sha string) string {
 		return sha[:12]
 	}
 	return sha
+}
+
+// addAccounts merges src's account readings into the index: the newest
+// reading of each account stands.
+func (src *uiSource) addAccounts(v *uiIndex, cfg *Config, now time.Time) {
+	secret := confidentialMatcher(cfg)
+	for name, r := range src.st.Accounts {
+		a := uiAccount{AccountRecord: r, Name: name}
+		if r.ErrorAt.After(r.At) && !secret(r.Error) {
+			a.Error = r.Error
+		}
+		if high, ok := r.usageHigh(); ok && cfg.Usage.Limit > 0 && high >= cfg.Usage.Limit {
+			a.Over = true
+		}
+		a.Stale = r.At.IsZero() || cfg.Usage.Every.Duration > 0 && now.Sub(r.At) > usageStale*cfg.Usage.Every.Duration
+		i := 0
+		for i < len(v.Accounts) && v.Accounts[i].Name != name {
+			i++
+		}
+		switch {
+		case i == len(v.Accounts):
+			v.Accounts = append(v.Accounts, a)
+		case r.At.After(v.Accounts[i].At):
+			v.Accounts[i] = a
+		}
+	}
 }

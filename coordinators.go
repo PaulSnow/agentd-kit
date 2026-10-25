@@ -431,7 +431,10 @@ type Pack struct {
 	OwnerInstructions []PackInstruction `json:"owner_instructions,omitempty"`
 	// Requests are the repository's open requests no session delivered,
 	// as the CI watcher last recorded them (#36).
-	Requests   []PackRequest `json:"requests,omitempty"`
+	Requests []PackRequest `json:"requests,omitempty"`
+	// Accounts are the latest usage readings of the accounts the
+	// repository's sessions may use and fall back to (#39).
+	Accounts   []PackAccount `json:"accounts,omitempty"`
 	Summarized PackCounts    `json:"summarized"`
 }
 
@@ -545,6 +548,7 @@ func (s *Supervisor) buildPack(repo string, due []string, now time.Time, handled
 	p.Items = s.packItems(repo)
 	p.OwnerInstructions = s.packInstructions(repo, handled)
 	p.Requests = s.packRequests(repo)
+	p.Accounts = packAccounts(s.st, p.Policy.Sessions)
 	for {
 		b := compactJSON(p)
 		if len(b) <= pol.PackBytes {
