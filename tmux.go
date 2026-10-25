@@ -182,13 +182,14 @@ func (t ExecTmux) Stop(name string) error {
 
 // Type sends the text literally, waits, then sends Return. A Return that
 // arrives in the same instant as the text is read as part of a paste and
-// becomes a newline inside the prompt instead of submitting it.
+// becomes a newline inside the prompt instead of submitting it. The text
+// follows --, so one that begins with - is never read as a flag.
 func (t ExecTmux) Type(name, text string) error {
 	tg, err := target(name)
 	if err != nil {
 		return err
 	}
-	if out, err := t.run("send-keys", "-t", tg, "-l", text); err != nil {
+	if out, err := t.run("send-keys", "-t", tg, "-l", "--", text); err != nil {
 		return fmt.Errorf("send-keys %s: %w: %s", name, err, strings.TrimSpace(out))
 	}
 	time.Sleep(time.Second)

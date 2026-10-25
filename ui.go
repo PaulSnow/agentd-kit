@@ -194,7 +194,7 @@ func (src *uiSource) catchUp() error {
 			}
 			kind := "imported"
 			if e.Feed.Kind != "" {
-				kind = "imported " + e.Feed.Kind
+				kind = "imported-" + e.Feed.Kind
 			}
 			add(e.Feed.Repository, uiMessage{At: at, Kind: kind, From: e.Feed.From, Text: e.Feed.Text})
 		case e.Act != nil && (e.Kind == KindAction || e.Kind == KindWould) && (e.Act.Action == ActEscalate || e.Act.Action == ActUpdate):

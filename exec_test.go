@@ -316,3 +316,32 @@ func TestLastMergeFindsTheNewestMerge(t *testing.T) {
 		t.Fatalf("LastMerge = %q %q %v, want %q", sha, subject, err, merge)
 	}
 }
+
+// The real client types text after --, so a post that begins with - is
+// typed, not read as a flag.
+func TestExecTmuxTypesTextAfterDashes(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "args")
+	shim(t, "tmux", `echo "$*" >> `+log)
+	if err := (ExecTmux{Timeout: 10 * time.Second}).Type("s1", "- done - next"); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(log)
+	if lines := strings.Split(strings.TrimSpace(string(b)), "\n"); len(lines) != 2 || lines[0] != "send-keys -t =s1: -l -- - done - next" {
+		t.Fatalf("tmux calls:\n%s", b)
+	}
+}
+
+// A post's author by default is the tmux session of the caller's own
+// pane, and none outside tmux.
+func TestTmuxSessionNameOfTheCallersPane(t *testing.T) {
+	shim(t, "tmux", `echo "$*" | sed 's/display-message -p -t %7 #S/night-1/'`)
+	t.Setenv("TMUX", "/tmp/tmux-sock,1,0")
+	t.Setenv("TMUX_PANE", "%7")
+	if got := tmuxSessionName(); got != "night-1" {
+		t.Fatalf("session name %q", got)
+	}
+	t.Setenv("TMUX", "")
+	if got := tmuxSessionName(); got != "" {
+		t.Fatalf("outside tmux: %q", got)
+	}
+}

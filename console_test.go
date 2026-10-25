@@ -414,3 +414,46 @@ func TestConsolePostAndInboxCommands(t *testing.T) {
 		t.Fatalf("events = %+v, %v", events, err)
 	}
 }
+
+// post and inbox refuse the flags of reply and import, and a post on
+// standard input over 1 MiB.
+func TestConsolePostRefusesMistakes(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "agentd.json")
+	writeFile(t, cfgPath, `{"event_log": "`+filepath.Join(dir, "events.jsonl")+`", "transcript_dir": "", "consoles": {"chat": {"title": "General chat"}}}`)
+	for _, args := range [][]string{
+		{"--config", cfgPath, "--shadow", "post", "chat", "hello"},
+		{"--config", cfgPath, "--repository", "chat", "inbox", "chat"},
+	} {
+		if err := consoleCmd(args); err == nil || !strings.Contains(err.Error(), "neither --shadow nor --repository") {
+			t.Errorf("%v: %v", args, err)
+		}
+	}
+	big := strings.NewReader(strings.Repeat("x", 1<<20+1))
+	if err := consolePostCmd("post", []string{"--config", cfgPath, "--from", "a", "chat", "-"}, big, io.Discard); err == nil || !strings.Contains(err.Error(), "1 MiB") {
+		t.Errorf("a post over 1 MiB: %v", err)
+	}
+	if events, _, err := ReadLog(filepath.Join(dir, "events.jsonl")); err != nil || len(events) != 0 {
+		t.Fatalf("events = %+v, %v", events, err)
+	}
+}
+
+// An escalation of a session with no repository whose default console is
+// a repository's shows in that repository's console, and an imported
+// line shows its kind.
+func TestConsoleShowsDefaultConsoleEscalationAndImportedKind(t *testing.T) {
+	u, f := fixtureUI(t)
+	esc := Event{V: EventVersion, Time: pageAt.Add(-time.Minute), Session: "ops-1", Kind: KindAction, Mode: ModeLive,
+		Act: &ActPayload{Action: ActEscalate, Key: "k", Console: "widgets-console", Message: "ops-1 needs a disk"}}
+	if err := NewLogWriter(f.nightBuf).Append(esc); err != nil {
+		t.Fatal(err)
+	}
+	events, _, _ := NewLogWriter(f.nightBuf).Tail(0)
+	if _, _, err := ImportConsole(f.night, NewLogWriter(f.nightBuf), events, pageAt, "widgets", strings.NewReader(`{"ts": 1761350400, "from": "w17", "kind": "decision", "text": "Use the blue paint"}`)); err != nil {
+		t.Fatal(err)
+	}
+	body := owner(t, u, "/console/widgets")
+	if !strings.Contains(body, "ops-1 needs a disk") || !strings.Contains(body, `<span class="badge">imported-decision</span>`) {
+		t.Fatalf("the console lacks the escalation or the imported kind:\n%s", body)
+	}
+}
