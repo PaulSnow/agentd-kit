@@ -44,8 +44,11 @@ type Supervisor struct {
 	// home is the home directory whose .claude.json says which
 	// directories Claude Code trusts, for a session with no account; run
 	// sets it, and without it such a session's directory is not looked up.
-	home   string
+	home string
+	// cfg is base with the sessions coordinators started (sessions.go),
+	// swapped for a new copy whenever one starts or ends.
 	cfg    *Config
+	base   *Config
 	log    *Log
 	clock  Clock
 	tmux   Tmux
@@ -89,6 +92,7 @@ func NewSupervisor(cfg *Config, log *Log, clock Clock, tmux Tmux, git Git, forge
 	}
 	return &Supervisor{
 		cfg:    cfg,
+		base:   cfg,
 		log:    log,
 		clock:  clock,
 		tmux:   tmux,
@@ -290,6 +294,7 @@ func (s *Supervisor) skipOnce(name, key, reason string, t *Track, facts *SkipPay
 // mode, plus the owner's records: live and shadow never share state.
 func (s *Supervisor) Replay(events []Event) {
 	s.st.Fold(events)
+	s.refreshRuntime()
 }
 
 // surfaceCutShort logs a warning for each intent the log holds with no
@@ -376,6 +381,7 @@ func (s *Supervisor) watchOwner(ctx context.Context, off int64) {
 func (s *Supervisor) Pass() error {
 	s.halt = nil
 	s.ownerRecords()
+	s.endSessions(s.clock.Now())
 	for _, name := range s.cfg.SessionNames() {
 		if s.halt != nil {
 			break
@@ -410,7 +416,13 @@ func (s *Supervisor) ownerRecords() {
 		return
 	}
 	s.tailOff = off
+	defer s.refreshRuntime()
 	for _, e := range events {
+		// A coordinator started or ended a session, or the owner ended one.
+		if e.Kind == KindSession {
+			s.st.apply(e)
+			continue
+		}
 		shared := e.Kind == KindSeen || e.Kind == KindInstruction || e.Kind == KindTriage || e.Kind == KindError && e.Error.Triage != nil ||
 			e.Kind == KindItem && s.st.itemChanged(*e.Item) || e.Kind == KindCase && e.Mode == ModeOwner || e.Kind == KindCoordinator
 		if e.Session == "" && shared {
@@ -553,6 +565,11 @@ func (s *Supervisor) observe(name string, sess Session) (Evidence, error) {
 func (s *Supervisor) step(name string, sess Session) {
 	now := s.clock.Now()
 	t := s.track(name)
+	// A started session is supervised once its workdir and worktree are made.
+	if sess.Runtime && !t.Provisioned {
+		s.provision(name, sess, t, now)
+		return
+	}
 	ev, err := s.observe(name, sess)
 	if err != nil {
 		s.emit(name, Event{Kind: KindError, Error: &ErrorPayload{Step: "observe", Error: err.Error()}})

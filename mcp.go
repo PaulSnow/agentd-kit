@@ -86,6 +86,8 @@ func toolsFor(role string) []string {
 		return []string{ToolReviewFindings}
 	case RoleJudge:
 		return []string{ToolJudgeDispositions, ToolRaiseDecision}
+	case RoleCoordinator:
+		return []string{ToolStartSession, ToolEndSession}
 	}
 	return mcpTools
 }
@@ -438,14 +440,19 @@ type MCPServer struct {
 }
 
 // NewMCPServer is the server for the named session, which must work a
-// case.
+// case, or coordinate a repository whose coordinator starts sessions.
 func NewMCPServer(cfg *Config, name string, log *Log, read func() ([]Event, error), now func() time.Time) (*MCPServer, error) {
 	sess, ok := cfg.Sessions[name]
 	if !ok {
 		return nil, fmt.Errorf("no session %q", name)
 	}
 	id := cfg.caseOf(sess)
-	if id == "" {
+	if sess.Role == RoleCoordinator {
+		if cfg.Repositories[sess.Repository].Sessions == nil {
+			return nil, fmt.Errorf("session %s coordinates %s, which has no sessions entry: it has no tools", name, sess.Repository)
+		}
+		id = ""
+	} else if id == "" {
 		return nil, fmt.Errorf("session %s works no case: it needs a repository and an issue", name)
 	}
 	srv := &MCPServer{cfg: cfg, name: name, sess: sess, caseID: id, log: log, read: read, now: now}
@@ -600,6 +607,9 @@ func (srv *MCPServer) handle(req rpcRequest) (any, *rpcError) {
 // call checks and records one tool call. It returns the reply, compact
 // JSON, and whether the call was refused.
 func (srv *MCPServer) call(tool string, args json.RawMessage) (string, bool) {
+	if srv.sess.Role == RoleCoordinator {
+		return srv.callSessions(tool, args)
+	}
 	events, err := srv.read()
 	if err != nil {
 		return compact(map[string]any{"refused": "agentd could not read its log: " + err.Error()}), true
@@ -690,6 +700,9 @@ func (srv *MCPServer) call(tool string, args json.RawMessage) (string, bool) {
 // instructions is what the server tells the session of its tools.
 func (srv *MCPServer) instructions() string {
 	switch srv.sess.Role {
+	case RoleCoordinator:
+		return "Start a session on a branch of " + srv.sess.Repository + " with start_session, and end one with end_session. " +
+			"agentd makes its workdir, brief and worktree and supervises it; its DONE is due for you."
 	case RoleReviewer:
 		return "Review the work on case " + srv.caseID + " and report every finding with review_findings, once a round. You advise; the judge decides. " +
 			"Repeat an earlier finding by its id, F1…, from your facts; name the done-when items each bears on, or set widens_scope."
@@ -719,7 +732,7 @@ func (srv *MCPServer) decodeArgs(args json.RawMessage, v any) []problem {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		msg := err.Error()
-		if strings.Contains(msg, `unknown field "case"`) {
+		if strings.Contains(msg, `unknown field "case"`) && srv.caseID != "" {
 			return []problem{{format: `the arguments name a "case": a call never names one; this server reports on %s only`, args: []any{srv.caseID}}}
 		}
 		return []problem{{format: "the arguments are not the tool's: %s", args: []any{strings.TrimPrefix(msg, "json: ")}}}
@@ -1109,7 +1122,17 @@ func toolList() []MCPTool {
 		`"plan":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"step":{"type":"string"}},"required":["id","step"],"additionalProperties":false}},` +
 		`"lessons":{"type":"array","items":{"type":"string"},"description":"what went wrong or was surprising, proposed to the owner"}},` +
 		`"required":["dispositions","plan"],"additionalProperties":false}`
+	start := `{"type":"object","properties":{` +
+		`"kind":{"enum":["work","reviewer","judge"],"description":"work by default; a reviewer or judge serves the issue's review rounds"},` +
+		`"branch":{"type":"string","description":"a plain branch name; checked out as origin has it, else cut from the target"},` +
+		`"issue":{"type":"integer","minimum":1,"description":"the issue the session works; needed for a reviewer or judge"},` +
+		`"account":{"type":"string","description":"one of the accounts the repository's sessions may use; by default yours"},` +
+		`"repository":{"type":"string","description":"your own repository; any other is refused"}},` +
+		`"required":["branch"],"additionalProperties":false}`
+	end := `{"type":"object","properties":{"name":{"type":"string","description":"the name start_session gave"}},"required":["name"],"additionalProperties":false}`
 	return []MCPTool{
+		{Name: ToolStartSession, Description: "Start a session agentd supervises, on a branch of your repository: one per branch and kind. agentd names it, makes its workdir and worktree, launches and restarts it, and wakes you when it is DONE.", InputSchema: json.RawMessage(start)},
+		{Name: ToolEndSession, Description: "End a session you started: agentd stops it and keeps its workdir and worktree.", InputSchema: json.RawMessage(end)},
 		{Name: ToolReportProgress, Description: "Report progress on this session's case. Item ids and restriction ids are the case's; evidence is a typed reference agentd checks, never prose. Restate each done-when item in the issue's words.", InputSchema: json.RawMessage(report)},
 		{Name: ToolRaiseDecision, Description: "Ask the owner a decision, with its whole form. agentd gives it an id, D1 on; the answer arrives in answers.json as JSON of its type. An answer in the owner's own words (other) does not settle it: raise it again with options drawn from it, superseding it.", InputSchema: json.RawMessage(raise)},
 		{Name: ToolRequestStep, Description: "Ask for review, delivery or stop. A request is recorded, never evidence; agentd moves the case only on the facts.", InputSchema: json.RawMessage(step)},
@@ -1120,9 +1143,9 @@ func toolList() []MCPTool {
 
 // mcpLaunchConfig is the --mcp-config document that starts the session's
 // server: agentd mcp for its session, over this configuration and log.
-// A session that works no case gets an empty one.
+// A session servesTools refuses gets an empty one.
 func mcpLaunchConfig(cfg *Config, name string, sess Session) string {
-	if cfg.caseOf(sess) == "" {
+	if !servesTools(cfg, sess) {
 		return emptyMCP
 	}
 	exe, err := os.Executable()
@@ -1135,6 +1158,15 @@ func mcpLaunchConfig(cfg *Config, name string, sess Session) string {
 	}
 	args = append(args, "--log", cfg.EventLog, "--session", name)
 	return compact(map[string]any{"mcpServers": map[string]any{"agentd": map[string]any{"type": "stdio", "command": exe, "args": args}}})
+}
+
+// servesTools says whether the session gets a server: one that works a
+// case, and a coordinator whose repository lets it start sessions.
+func servesTools(cfg *Config, sess Session) bool {
+	if sess.Role == RoleCoordinator {
+		return cfg.Repositories[sess.Repository].Sessions != nil
+	}
+	return cfg.caseOf(sess) != ""
 }
 
 // FactRuling is an active restriction or waiver as a fresh session's
@@ -1182,7 +1214,12 @@ func mcpCmd(args []string, r io.Reader, w io.Writer) error {
 		events, _, err := log.Load()
 		return events, err
 	}
-	srv, err := NewMCPServer(cfg, *session, log, read, time.Now)
+	// A session a coordinator started is the log's, not the configuration's.
+	events, err := read()
+	if err != nil {
+		return err
+	}
+	srv, err := NewMCPServer(projected(cfg, events), *session, log, read, time.Now)
 	if err != nil {
 		return err
 	}

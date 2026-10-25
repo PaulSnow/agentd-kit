@@ -33,6 +33,10 @@ type LogState struct {
 	CI map[string]CIRecord
 	// Feed is what the consoles' feed has posted.
 	Feed FeedState
+	// Runtime are the sessions coordinators started and nobody ended, by
+	// name; Ended are those ended whose tmux session is not yet stopped.
+	Runtime map[string]RuntimePayload
+	Ended   map[string]bool
 
 	cfg *Config // its policies, read as each event is applied
 }
@@ -41,7 +45,7 @@ type LogState struct {
 func NewLogState(cfg *Config, mode string) *LogState {
 	return &LogState{Mode: mode, Tracks: map[string]*Track{}, Pending: map[string]Event{}, Items: map[string]*Item{}, Instructions: map[string]*Instruction{},
 		Cursors: map[string]time.Time{}, Polls: map[string]PollRecord{}, Cases: map[string]*Case{},
-		Coordinators: map[string]string{}, CI: map[string]CIRecord{}, cfg: cfg}
+		Coordinators: map[string]string{}, CI: map[string]CIRecord{}, Runtime: map[string]RuntimePayload{}, Ended: map[string]bool{}, cfg: cfg}
 }
 
 // setItem changes a copy of the item and puts the copy in its place: a
@@ -106,6 +110,10 @@ func (st *LogState) apply(e Event) {
 	}
 	if e.Kind == KindCI {
 		st.applyCI(e)
+		return
+	}
+	if e.Kind == KindSession {
+		st.applySession(e)
 		return
 	}
 	if e.Kind == KindCoordinator {
@@ -296,6 +304,9 @@ func (st *LogState) apply(e Event) {
 		}
 		t.applyAction(e.Act, e.Kind == KindAction, true, e.Time)
 		st.ciSeen(t)
+		if e.Act.Action == ActEnd {
+			delete(st.Ended, e.Session)
+		}
 		if a := e.Act; e.Kind == KindAction && a.Action == ActGate && a.Exit != nil && *a.Exit == 0 && a.SHA != "" && !contains(t.Gated, a.SHA) {
 			t.Gated = append(t.Gated[:len(t.Gated):len(t.Gated)], a.SHA)
 		}
@@ -409,6 +420,8 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 				t.Raised = append(t.Raised[:len(t.Raised):len(t.Raised)], *a.Raised)
 			}
 		}
+	case ActProvision:
+		t.Provisioned = true
 	case ActStop:
 		t.Stopped = a.Reason
 		if taken { // its session is gone by the owner's policy, not a crash

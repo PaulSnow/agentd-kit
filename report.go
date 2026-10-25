@@ -157,7 +157,8 @@ func questionText(session, message string) string {
 // first line is left out, and any other entry with matching text, its
 // session's name or its repository's, is left out whole.
 func BuildReport(cfg *Config, events []Event, mode, host string, now time.Time) Report {
-	return ReportFrom(cfg, NewLogState(cfg, mode).Fold(events), host, now)
+	st := NewLogState(cfg, mode).Fold(events)
+	return ReportFrom(withRuntime(cfg, st.Runtime), st, host, now)
 }
 
 // confidentialMatcher says whether any of the texts matches one of the

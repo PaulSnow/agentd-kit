@@ -584,6 +584,9 @@ func (s *Supervisor) packFactsWith(name string, sess Session, t *Track, why stri
 	}
 	if sess.Role == RoleCoordinator {
 		f.Repository, f.Pack = sess.Repository, sess.Workdir+"/"+PackFile
+		if servesTools(s.cfg, sess) && s.passesMCP() {
+			f.Tools = toolsFor(RoleCoordinator)
+		}
 	}
 	if id := s.cfg.caseOf(sess); id != "" && s.passesMCP() {
 		f.Tools, f.Items, f.Acknowledge = mcpFacts(s.st, id, sess.Role)

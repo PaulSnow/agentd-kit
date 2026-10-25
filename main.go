@@ -53,6 +53,8 @@ func main() {
 		err = clearCmd(os.Args[2:])
 	case "coordinator":
 		err = coordinatorCmd(os.Args[2:])
+	case "sessions":
+		err = sessionsCmd(os.Args[2:])
 	case "console":
 		err = consoleCmd(os.Args[2:])
 	case "inventory":
@@ -93,6 +95,7 @@ func usage() {
   agentd mark-delivered [--config PATH] [--log PATH] SESSION WORKTREE REF
   agentd clear [--config PATH] [--log PATH] SESSION
   agentd coordinator [--config PATH] [--log PATH] release REPOSITORY
+  agentd sessions [--config PATH] [--log PATH] end NAME
   agentd console [--config PATH] [--log PATH] [--shadow] reply CONSOLE TEXT...
   agentd inventory [--config PATH]
   agentd report [--config PATH] [--log PATH] [--shadow] [--host NAME] --out PATH
@@ -112,7 +115,9 @@ worktree was already delivered as REF by other means, so run never delivers
 it again. clear lifts a crash-looping session's park, so it may be
 restarted again. coordinator release lets the session a repository's
 configuration names claim its coordinator, which another session held:
-there is one coordinator per repository. console reply applies the owner's
+there is one coordinator per repository. sessions end stops a session a
+coordinator started and takes it off the supervised sessions, keeping its
+files. console reply applies the owner's
 reply in a console, as its tool hands it on: "SESSION ID ANSWER" answers a
 decision, "seen ID..." marks items seen. inventory lists every repository in the tracking system's
 manifest with its open work and clones, from the tracking snapshot. report
@@ -290,12 +295,12 @@ func markDeliveredCmd(args []string) error {
 	if len(rest) != 3 {
 		return fmt.Errorf("usage: agentd mark-delivered SESSION WORKTREE REF")
 	}
-	log, _, err := openLoaded(cfg.EventLog)
+	log, events, err := openLoaded(cfg.EventLog)
 	if err != nil {
 		return err
 	}
 	defer log.Close()
-	return MarkDelivered(cfg, log, time.Now(), rest[0], rest[1], rest[2])
+	return MarkDelivered(projected(cfg, events), log, time.Now(), rest[0], rest[1], rest[2])
 }
 
 // coordinatorCmd is the command-line face of ReleaseCoordinator.
@@ -315,6 +320,25 @@ func coordinatorCmd(args []string) error {
 	}
 	defer log.Close()
 	return ReleaseCoordinator(cfg, log, time.Now(), rest[1])
+}
+
+// sessionsCmd is the command-line face of EndSession.
+func sessionsCmd(args []string) error {
+	fs := flag.NewFlagSet("sessions", flag.ContinueOnError)
+	cfg, _, err := loadConfigFlag(fs, args)
+	if err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) != 2 || rest[0] != "end" {
+		return fmt.Errorf("usage: agentd sessions end NAME")
+	}
+	log, events, err := openLoaded(cfg.EventLog)
+	if err != nil {
+		return err
+	}
+	defer log.Close()
+	return EndSession(cfg, log, events, time.Now(), rest[1])
 }
 
 // consoleCmd is the command-line face of ConsoleReply. The decisions are
@@ -355,10 +379,10 @@ func clearCmd(args []string) error {
 	if len(rest) != 1 {
 		return fmt.Errorf("usage: agentd clear SESSION")
 	}
-	log, _, err := openLoaded(cfg.EventLog)
+	log, events, err := openLoaded(cfg.EventLog)
 	if err != nil {
 		return err
 	}
 	defer log.Close()
-	return ClearSession(cfg, log, time.Now(), rest[0])
+	return ClearSession(projected(cfg, events), log, time.Now(), rest[0])
 }

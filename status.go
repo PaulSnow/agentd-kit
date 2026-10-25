@@ -45,7 +45,8 @@ type SessionStatus struct {
 // row per session: every configured session, whether or not it has events
 // yet, and any other session the log names.
 func Summarize(cfg *Config, events []Event, mode string) ([]SessionStatus, map[string]any) {
-	return SummarizeState(cfg, NewLogState(cfg, mode).Fold(events))
+	st := NewLogState(cfg, mode).Fold(events)
+	return SummarizeState(withRuntime(cfg, st.Runtime), st)
 }
 
 // SummarizeState is Summarize over a state already folded, which it reads

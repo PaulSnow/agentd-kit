@@ -341,6 +341,19 @@ type fakeGit struct {
 	onGateFiles  func(n int)          // runs, locked, in the nth GateFiles call
 	gateUnpinned bool                 // the target has none of the gate files
 	gateErr      error                // what GateFiles fails with
+	worktrees    []string             // the worktrees added: clone, dir, branch, target
+	worktreeErr  error                // what AddWorktree fails with
+}
+
+// AddWorktree makes dir and records the worktree it would have added.
+func (g *fakeGit) AddWorktree(clone, dir, branch, target string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.worktreeErr != nil {
+		return g.worktreeErr
+	}
+	g.worktrees = append(g.worktrees, clone+" "+dir+" "+branch+" "+target)
+	return os.MkdirAll(dir, 0o755)
 }
 
 func (g *fakeGit) Fetch(string) error {

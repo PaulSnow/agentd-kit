@@ -52,6 +52,9 @@ type Git interface {
 	// LastMerge is the newest merge commit reachable from HEAD, its
 	// subject and its commit time, or "" when there is none.
 	LastMerge(dir string) (sha, subject string, at time.Time, err error)
+	// AddWorktree adds a worktree at dir from the clone for branch: as
+	// origin has it when it is there, else cut from origin/target.
+	AddWorktree(clone, dir, branch, target string) error
 }
 
 // MergeRequest is what to open on the forge.
@@ -511,6 +514,29 @@ func blobHash(format string, data []byte) string {
 	fmt.Fprintf(h, "blob %d\x00", len(data))
 	h.Write(data)
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (g ExecGit) AddWorktree(clone, dir, branch, target string) error {
+	if _, err := gitOut(g.Timeout, clone, "fetch", "-q", "origin"); err != nil {
+		return err
+	}
+	var args []string
+	switch {
+	case gitOK(g.Timeout, clone, "show-ref", "--verify", "-q", "refs/heads/"+branch):
+		args = []string{"worktree", "add", "-q", dir, branch}
+	case gitOK(g.Timeout, clone, "show-ref", "--verify", "-q", "refs/remotes/origin/"+branch):
+		args = []string{"worktree", "add", "-q", "--track", "-b", branch, dir, "origin/" + branch}
+	default:
+		args = []string{"worktree", "add", "-q", "--no-track", "-b", branch, dir, "origin/" + target}
+	}
+	_, err := gitOut(g.Timeout, clone, args...)
+	return err
+}
+
+// gitOK says whether a git command exits 0.
+func gitOK(timeout time.Duration, dir string, args ...string) bool {
+	_, err := git(timeout, dir, args...)
+	return err == nil
 }
 
 func (g ExecGit) Clean(dir string) (bool, error) {
