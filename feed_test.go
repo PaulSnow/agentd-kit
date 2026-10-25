@@ -96,6 +96,14 @@ func TestFeedDecisionsCarryTheReply(t *testing.T) {
 	if n := h.count(KindAction, ActEscalate, "s2"); n != 1 || len(h.runner.calls) != 2 {
 		t.Fatalf("s2 escalations %d, posts %v: want one escalation and one feed line", n, h.runner.calls)
 	}
+	// A fed decision is answered with the version its line names.
+	st := NewLogState(h.cfg, ModeLive).Fold(h.events())
+	if err := ConsoleReply(h.cfg, NewLogWriter(h.buf), st, h.clock.Now(), "widgets", "s1 Q1 b"); err == nil {
+		t.Fatal("a reply to a fed decision without its version was applied")
+	}
+	if err := ConsoleReply(h.cfg, NewLogWriter(h.buf), st, h.clock.Now(), "widgets", "s1 Q1@"+decisionHash(st.Tracks["s1"].Decisions[0])+" b"); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // A console reply is applied as the owner's answer, through the same path
@@ -288,6 +296,15 @@ func TestFeedBaselinesEachBeginning(t *testing.T) {
 	// A repository configured later begins with its own baseline.
 	h.cfg.Repositories["gadgets"] = Repository{Forge: "gitlab", Host: "gitlab.example.com", Project: "example-org/gadgets"}
 	h.ticks(2, 5*time.Minute)
+	// A repository taken out of the configuration and put back begins
+	// again with a baseline too.
+	gadgets := h.cfg.Repositories["gadgets"]
+	delete(h.cfg.Repositories, "gadgets")
+	h.ticks(1, 5*time.Minute)
+	newItem(t, h, "gitlab/example-org/gadgets#3", "gitlab/example-org/gadgets", "Gadgets drip")
+	h.ticks(1, 5*time.Minute)
+	h.cfg.Repositories["gadgets"] = gadgets
+	h.ticks(2, 5*time.Minute)
 	// Off, then on again: what came meanwhile is history too.
 	h.cfg.Policies.Feed.Enabled = false
 	h.ticks(2, 5*time.Minute)
@@ -304,8 +321,8 @@ func TestFeedBaselinesEachBeginning(t *testing.T) {
 			paused++
 		}
 	}
-	if paused != 1 {
-		t.Fatalf("paused events = %d, want 1", paused)
+	if paused != 2 {
+		t.Fatalf("paused events = %d, want 2", paused)
 	}
 	// An intent with no outcome: agentd crashed mid-post.
 	newItem(t, h, "gitlab/example-org/widgets#6", "gitlab/example-org/widgets", "Widgets rattle")
@@ -338,8 +355,8 @@ func TestFeedPostsABurstOverPasses(t *testing.T) {
 		t.Fatalf("posts = %d, want %d", n, FeedPerPass+5)
 	}
 	for _, c := range h.runner.calls {
-		if len(c[4]) > FeedTextLimit+len("…") {
-			t.Fatalf("a line of %d bytes was posted", len(c[4]))
+		if len(c[4]) > FeedTextLimit || !strings.Contains(c[4], "…") || !strings.Contains(c[4], "… (reply: seen gitlab/example-org/widgets#") {
+			t.Fatalf("a line of %d bytes, cut or its reply lost, was posted: %q", len(c[4]), c[4][len(c[4])-60:])
 		}
 	}
 }
@@ -362,5 +379,16 @@ func TestFeedMergeLines(t *testing.T) {
 	want := []string{"agentd merged !1 in widgets at " + shortHash("c0ffee") + ", d's delivery.", "!3 in widgets: CI merged on " + shortHash("f00d") + "."}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("lines = %q, want %q", got, want)
+	}
+}
+
+// The feed posts through the escalation command, so turning it on without
+// one is refused at load.
+func TestFeedNeedsTheEscalationCommand(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.TranscriptDir = ""
+	cfg.Policies.Feed.Enabled = true
+	if err := cfg.finish(t.TempDir()); err == nil || !strings.Contains(err.Error(), "policies.feed.enabled") {
+		t.Fatalf("finish = %v, want the feed refused without a command", err)
 	}
 }

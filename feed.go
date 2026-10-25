@@ -30,7 +30,7 @@ type FeedPolicy struct {
 // Feed phases.
 const (
 	FeedBaseline = "baseline" // the entries there when the feed began for its repositories: never posted
-	FeedPaused   = "paused"   // the feed was off: each repository begins again with a baseline
+	FeedPaused   = "paused"   // the feed was off, or the repositories it names left the configuration: they begin again with a baseline
 	FeedIntent   = "intent"   // a post is about to be made
 	FeedPosted   = "posted"
 	FeedFailed   = "failed"
@@ -82,7 +82,12 @@ func (st *LogState) applyFeed(e Event) {
 	p := e.Feed
 	switch p.Phase {
 	case FeedPaused:
-		f.Begun = map[string]bool{}
+		if len(p.Repositories) == 0 {
+			f.Begun = map[string]bool{}
+		}
+		for _, r := range p.Repositories {
+			delete(f.Begun, r)
+		}
 	case FeedBaseline:
 		for _, r := range p.Repositories {
 			f.Begun[r] = true
@@ -98,9 +103,10 @@ func (st *LogState) applyFeed(e Event) {
 	}
 }
 
-// feedEntry is one line for a repository's console.
+// feedEntry is one line for a repository's console: its text, and the
+// reply to type, which a cut never shortens.
 type feedEntry struct {
-	Key, Repository, Text string
+	Key, Repository, Text, Reply string
 }
 
 // feedEntries lists every line the state holds for the configured
@@ -108,9 +114,9 @@ type feedEntry struct {
 func (s *Supervisor) feedEntries() []feedEntry {
 	var out []feedEntry
 	merged := map[string]bool{} // the requests agentd merged, by key and head
-	add := func(repo, key, text string) {
+	add := func(repo, key, text, reply string) {
 		if _, ok := s.cfg.Repositories[repo]; ok {
-			out = append(out, feedEntry{Key: key, Repository: repo, Text: text})
+			out = append(out, feedEntry{Key: key, Repository: repo, Text: text, Reply: reply})
 		}
 	}
 	for _, name := range s.cfg.SessionNames() {
@@ -134,15 +140,15 @@ func (s *Supervisor) feedEntries() []feedEntry {
 			}
 			// The reply names the decision as it was posted, so a late
 			// reply cannot answer a question reworded since.
-			text += fmt.Sprintf(" Reply: %s %s@%s <answer>", name, d.ID, decisionHash(d))
-			add(sess.Repository, "decision:"+name+":"+d.ID+":"+decisionHash(d), text)
+			add(sess.Repository, "decision:"+name+":"+d.ID+":"+decisionHash(d), text,
+				fmt.Sprintf(" Reply: %s %s@%s <answer>", name, d.ID, decisionHash(d)))
 		}
 		for _, d := range t.Deliveries {
 			repo := s.deliveryRepository(name, d)
 			if d.Ref == "" || d.Ref == "would-open" {
 				continue
 			}
-			add(repo, "delivery:"+d.Delivered+":"+d.Ref, fmt.Sprintf("%s delivered %s to %s.", name, d.Ref, repo))
+			add(repo, "delivery:"+d.Delivered+":"+d.Ref, fmt.Sprintf("%s delivered %s to %s.", name, d.Ref, repo), "")
 		}
 		// Only a merge made: one cut short may not have been.
 		keys := make([]string, 0, len(t.Merged))
@@ -153,7 +159,7 @@ func (s *Supervisor) feedEntries() []feedEntry {
 		for _, k := range keys {
 			repo, ref, _ := strings.Cut(k, " ")
 			merged[k+" "+t.Merged[k]] = true
-			add(repo, "merge:"+k+":"+t.Merged[k], fmt.Sprintf("agentd merged %s in %s at %s, %s's delivery.", ref, repo, shortHash(t.Merged[k]), name))
+			add(repo, "merge:"+k+":"+t.Merged[k], fmt.Sprintf("agentd merged %s in %s at %s, %s's delivery.", ref, repo, shortHash(t.Merged[k]), name), "")
 		}
 	}
 	keys := make([]string, 0, len(s.st.CI))
@@ -175,7 +181,7 @@ func (s *Supervisor) feedEntries() []feedEntry {
 		if r.State == CIFailed {
 			text = fmt.Sprintf("%s in %s: CI failed on %s (%s; failing: %s).", r.Ref, r.Repository, shortHash(r.Head), r.Verdict, strings.Join(r.Jobs, ", "))
 		}
-		add(r.Repository, "ci:"+k+":"+r.Head+":"+r.State, text)
+		add(r.Repository, "ci:"+k+":"+r.Head+":"+r.State, text, "")
 	}
 	for _, it := range s.st.SortedItems(true) {
 		repo := s.cfg.ItemRepository(it.Repository)
@@ -183,7 +189,7 @@ func (s *Supervisor) feedEntries() []feedEntry {
 		if it.Link != "" {
 			text += " " + it.Link
 		}
-		add(repo, "item:"+it.ID, text+fmt.Sprintf(" (reply: seen %s)", it.ID))
+		add(repo, "item:"+it.ID, text, fmt.Sprintf(" (reply: seen %s)", it.ID))
 	}
 	return out
 }
@@ -250,6 +256,18 @@ func (s *Supervisor) feedConsoles(now time.Time) {
 		}
 		return
 	}
+	// A repository no longer configured is paused, so it begins again
+	// with a baseline if it comes back.
+	var gone []string
+	for repo := range f.Begun {
+		if _, ok := s.cfg.Repositories[repo]; !ok {
+			gone = append(gone, repo)
+		}
+	}
+	if len(gone) > 0 {
+		sort.Strings(gone)
+		s.emit("", Event{Kind: KindFeed, Feed: &FeedPayload{Phase: FeedPaused, Repositories: gone}})
+	}
 	entries := s.feedEntries()
 	var begin []string
 	for repo := range s.cfg.Repositories {
@@ -301,11 +319,13 @@ func (s *Supervisor) feedConsoles(now time.Time) {
 // records the pattern, not the text. failed is how often it failed before.
 func (s *Supervisor) feedPost(e feedEntry, failed int) {
 	console := s.cfg.RepositoryConsole(e.Repository)
-	p := FeedPayload{Key: e.Key, Repository: e.Repository, Console: console, Text: e.Text}
-	if i := s.confidentialMatch(e.Text); i > 0 {
+	// The text is cut, never the reply, and the line with its mark of the
+	// cut stays within FeedTextLimit.
+	p := FeedPayload{Key: e.Key, Repository: e.Repository, Console: console,
+		Text: cutUTF8(e.Text, max(0, FeedTextLimit-len(e.Reply)-len("…"))) + e.Reply}
+	if i := s.confidentialMatch(e.Text, e.Reply); i > 0 {
 		p.Text, p.Withheld = fmt.Sprintf("Something new in %s; the details were withheld because they matched a confidential pattern. Look at the page.", e.Repository), i
 	}
-	p.Text = cutUTF8(p.Text, FeedTextLimit)
 	if s.shadow {
 		p.Phase = FeedWould
 		s.emit("", Event{Kind: KindFeed, Feed: &p})
@@ -377,6 +397,11 @@ func ConsoleReply(cfg *Config, log *Log, st *LogState, now time.Time, console, r
 	d, ok := t.decision(id)
 	if !ok {
 		return fmt.Errorf("%s has no open decision %q", session, id)
+	}
+	// A fed decision's line names its version, and a reply must too; a
+	// blocking one's escalation shows none.
+	if !versioned && !d.Blocking {
+		return fmt.Errorf("reply to %s's %s as its line says, %s@VERSION", session, id, id)
 	}
 	if versioned && asked != decisionHash(d) {
 		return fmt.Errorf("%s's %s changed since that line was posted; reply to its new line", session, id)

@@ -581,6 +581,10 @@ func (c *Config) finish(base string) error {
 	if len(c.Sessions) > 0 && len(c.Policies.Escalate.Command) == 0 {
 		errs = append(errs, errors.New("policies.escalate.command must be set when sessions are configured"))
 	}
+	// The consoles' feed posts through the same command.
+	if c.Policies.Feed.Enabled && len(c.Policies.Escalate.Command) == 0 {
+		errs = append(errs, errors.New("policies.escalate.command must be set when policies.feed.enabled is"))
+	}
 	// A bare command name is left for PATH to find; a path is expanded.
 	if cmd := c.Policies.Escalate.Command; len(cmd) > 0 && (strings.HasPrefix(cmd[0], "~") || strings.Contains(cmd[0], "/")) {
 		cmd[0] = path("policies.escalate.command", cmd[0])
