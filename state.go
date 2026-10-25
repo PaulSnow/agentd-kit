@@ -108,6 +108,7 @@ type Track struct {
 	WakeCount int
 	WakeBase  *int64
 	Woken     map[string]bool // the due keys the wakes within the margin covered
+	Carried   map[string]int  // the owner instructions a wake carried, by id, and that wake's number
 	// CI: the fix sessions started for the requests the session delivered,
 	// oldest first, and the decisions raised on a repeated failure, by
 	// request and cause.

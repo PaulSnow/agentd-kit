@@ -411,7 +411,7 @@ func (s *Supervisor) ownerRecords() {
 	}
 	s.tailOff = off
 	for _, e := range events {
-		shared := e.Kind == KindSeen || e.Kind == KindTriage || e.Kind == KindError && e.Error.Triage != nil ||
+		shared := e.Kind == KindSeen || e.Kind == KindInstruction || e.Kind == KindTriage || e.Kind == KindError && e.Error.Triage != nil ||
 			e.Kind == KindItem && s.st.itemChanged(*e.Item) || e.Kind == KindCase && e.Mode == ModeOwner || e.Kind == KindCoordinator
 		if e.Session == "" && shared {
 			s.st.apply(e)
