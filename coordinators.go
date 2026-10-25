@@ -192,8 +192,12 @@ func (t *Track) applyWake(a *ActPayload, taken, counted bool, at time.Time) {
 		t.Woken = map[string]bool{}
 	}
 	for _, k := range a.Covered {
-		t.Woken[k] = true
-		if id, ok := instructionKey(k); ok && counted {
+		id, ok := instructionKey(k)
+		switch {
+		case !ok:
+			t.Woken[k] = true
+		case counted:
+			// A wake cut short leaves the instruction due.
 			if t.Carried == nil {
 				t.Carried = map[string]int{}
 			}
@@ -304,10 +308,11 @@ func (s *Supervisor) claimed(name string, sess Session, t *Track) bool {
 // keys that settle them: a session of the repository that finished or
 // waits on the owner, a new item for it, an owner answer to one of its
 // sessions, an owner instruction for it, each once. A fact counts from
-// the margin before the latest wake, less what that wake and those
-// before it covered, so one another
-// process logged during a wake's pass, at its time, is not lost. The
-// coordinator's own answers reach it by their pointer.
+// the margin before the latest wake, less what that wake and those before
+// it covered, so one another process logged during a wake's pass, at its
+// time, is not lost. An instruction counts until a wake carried it, so
+// one a wake cut short covered is due again. The coordinator's own
+// answers reach it by their pointer.
 func (s *Supervisor) due(repo string, t *Track) (reasons, keys []string) {
 	since := time.Time{}
 	if w, ok := t.lastWake(); ok {
@@ -348,7 +353,11 @@ func (s *Supervisor) due(repo string, t *Track) (reasons, keys []string) {
 		}
 	}
 	for _, in := range s.st.instructionsFor(repo) {
-		add(instructionReason+in.ID, in.At)
+		if _, carried := t.Carried[in.ID]; !carried {
+			if k := instructionReason + in.ID + "@" + in.At.UTC().Format(time.RFC3339Nano); !t.Woken[k] {
+				reasons, keys = append(reasons, instructionReason+in.ID), append(keys, k)
+			}
+		}
 	}
 	return reasons, keys
 }

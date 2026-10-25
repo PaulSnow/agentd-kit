@@ -17,13 +17,13 @@ import (
 // InstructionPayload is an owner instruction: its id, the repositories it
 // is for, and its text, left out when it matches a confidential pattern
 // (Withheld, from 1, says which). Hash is the text's, so the same words
-// sent twice are recorded once.
+// sent twice are recorded once; a withheld text has none.
 type InstructionPayload struct {
 	ID           string   `json:"id"`
 	Repositories []string `json:"repositories"`
 	Text         string   `json:"text,omitempty"`
 	Withheld     int      `json:"withheld,omitempty"`
-	Hash         string   `json:"hash"`
+	Hash         string   `json:"hash,omitempty"`
 	From         string   `json:"from"`
 }
 
@@ -126,23 +126,26 @@ func RecordInstruction(cfg *Config, log *Log, st *LogState, now time.Time, conso
 		return errors.New("an empty instruction")
 	}
 	from := "console:" + console
-	hash := shortHash(HashPane(text))
-	for _, in := range st.Instructions {
-		if in.Hash != hash || in.From != from || strings.Join(in.Repositories, ",") != strings.Join(repos, ",") {
-			continue
-		}
-		for _, r := range repos {
-			if !st.instructionHandled(cfg, r, in.ID, false) {
-				return nil // still waiting: recorded once
-			}
-		}
-	}
-	p := &InstructionPayload{ID: "I" + shortHash(HashPane(now.UTC().Format(time.RFC3339Nano) + "\n" + from + "\n" + text))[:8],
-		Repositories: repos, Text: text, Hash: hash, From: from}
+	p := &InstructionPayload{Repositories: repos, Text: text, Hash: shortHash(HashPane(text)), From: from}
 	for i, pat := range cfg.ConfidentialPatterns {
 		if regexp.MustCompile(pat).MatchString(text) {
-			p.Text, p.Withheld = "", i+1
+			// Nothing of a withheld text is logged, not even its hash,
+			// so it is never taken for a copy.
+			p.Text, p.Hash, p.Withheld = "", "", i+1
 			break
+		}
+	}
+	p.ID = "I" + shortHash(HashPane(now.UTC().Format(time.RFC3339Nano) + "\n" + from + "\n" + p.Hash))[:8]
+	for _, in := range st.Instructions {
+		if p.Hash == "" || in.Hash != p.Hash || in.From != from || strings.Join(in.Repositories, ",") != strings.Join(repos, ",") {
+			continue
+		}
+		// A repository with no coordinator never handles it, so it
+		// does not keep a copy waiting.
+		for _, r := range repos {
+			if cfg.Repositories[r].Coordinator != nil && !st.instructionHandled(cfg, r, in.ID, false) {
+				return nil // still waiting: recorded once
+			}
 		}
 	}
 	return log.Append(Event{V: EventVersion, Time: now, Kind: KindInstruction, Mode: ModeOwner, Instruction: p})

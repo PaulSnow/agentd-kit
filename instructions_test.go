@@ -124,7 +124,7 @@ func TestConsoleReplyKinds(t *testing.T) {
 	h.ticks(1, time.Minute)
 	it := ItemPayload{ID: "gitlab:example-org/widgets#4", Kind: "issue", Repository: "gitlab/example-org/widgets", Title: "Widget squeaks"}
 	h.sup.emit("", Event{Kind: KindItem, Mode: ModeShared, Item: &it})
-	for _, bad := range []string{"a D9 yes", "a Q1@0123abcd yes", "seen gitlab:example-org/widgets#4 gitlab:example-org/widgets#99"} {
+	for _, bad := range []string{"a D9 yes", "a Q1@0123abcd yes", "a D3", "a D3@abcd1234", "seen", "seen gitlab:example-org/widgets#4 gitlab:example-org/widgets#99"} {
 		if err := reply(h, "widgets", bad); err == nil {
 			t.Errorf("%q was taken", bad)
 		}
@@ -162,11 +162,83 @@ func TestInstructionScreened(t *testing.T) {
 	if len(ins) != 1 || ins[0].Text != "" || ins[0].Withheld != 1 {
 		t.Fatalf("instructions = %+v", ins)
 	}
-	if strings.Contains(h.buf.String(), "secret-project") {
-		t.Fatal("the log holds the confidential text")
+	if strings.Contains(h.buf.String(), "secret-project") || ins[0].Hash != "" {
+		t.Fatalf("the log holds the confidential text or its hash: %+v", ins[0])
 	}
 	h.ticks(3, time.Minute)
 	if p := h.pack(t); len(p.OwnerInstructions) != 1 || !p.OwnerInstructions[0].Withheld {
 		t.Fatalf("pack = %+v", p.OwnerInstructions)
+	}
+}
+
+// An instruction a wake cut short covered is still due: the next wake
+// carries it, and that wake's handling retires it.
+func TestInstructionCutShortWakeLeavesItDue(t *testing.T) {
+	h := instrHarness(t)
+	h.ticks(2, time.Minute)
+	if err := reply(h, "widgets", "Hold the release."); err != nil {
+		t.Fatal(err)
+	}
+	var at time.Time
+	for _, e := range h.events() {
+		if e.Kind == KindInstruction {
+			at = e.Time
+		}
+	}
+	id := instructions(h)[0].ID
+	key := instructionReason + id + "@" + at.UTC().Format(time.RFC3339Nano)
+	intent := Event{V: EventVersion, Time: h.clock.Now(), Session: "c", Kind: KindIntent, Mode: ModeLive,
+		Act: &ActPayload{Action: ActWake, Intent: "cut", Key: "wake:widgets:1", Reason: instructionReason + id, Covered: []string{key}}}
+	if err := NewLogWriter(h.buf).Append(intent); err != nil {
+		t.Fatal(err)
+	}
+	h.restart(false)
+	h.sup.surfaceCutShort()
+	h.clock.advance(time.Minute)
+	h.ticks(3, time.Minute)
+	if w := h.wakes(); len(w) != 1 || w[0].Reason != instructionReason+id {
+		t.Fatalf("after a cut-short wake: %+v", w)
+	}
+	if p := h.pack(t); len(p.OwnerInstructions) != 1 {
+		t.Fatalf("pack = %+v", p.OwnerInstructions)
+	}
+	h.transcriptOf("c", "t3", summaryLine("c1", "m1", "Held.", h.clock.Now(), 100))
+	h.status("a", "# a\n\nDONE\n")
+	h.ticks(3, time.Minute)
+	if p := h.pack(t); len(h.wakes()) != 2 || len(p.OwnerInstructions) != 0 {
+		t.Fatalf("wakes %+v, pack %+v", h.wakes(), p.OwnerInstructions)
+	}
+}
+
+// A repository the console feeds that has no coordinator never handles an
+// instruction, so it does not hold back the same words sent again once
+// the coordinators have handled the first.
+func TestInstructionRepeatedPastARepositoryWithoutCoordinator(t *testing.T) {
+	h := instrHarness(t)
+	r := h.cfg.Repositories["readonly"]
+	r.Coordinator, r.Console = nil, "widgets"
+	h.cfg.Repositories["readonly"] = r
+	delete(h.cfg.Sessions, "e")
+	h.restart(false)
+	h.ticks(2, time.Minute)
+	const text = "Hold the release."
+	if err := reply(h, "widgets", text); err != nil {
+		t.Fatal(err)
+	}
+	if ins := instructions(h); len(ins) != 1 || strings.Join(ins[0].Repositories, ",") != "readonly,widgets" {
+		t.Fatalf("instructions = %+v", ins)
+	}
+	h.ticks(3, time.Minute)
+	h.transcriptOf("c", "t3", summaryLine("c1", "m1", "Held.", h.clock.Now(), 100))
+	h.status("a", "# a\n\nDONE\n")
+	h.ticks(3, time.Minute)
+	if n := len(h.wakes()); n != 2 {
+		t.Fatalf("%d wakes", n)
+	}
+	if err := reply(h, "widgets", text); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(instructions(h)); n != 2 {
+		t.Fatalf("%d instructions", n)
 	}
 }

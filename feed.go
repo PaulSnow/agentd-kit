@@ -369,6 +369,9 @@ func ConsoleReply(cfg *Config, log *Log, st *LogState, now time.Time, console, r
 		return RecordInstruction(cfg, log, st, now, console, reply)
 	}
 	if strings.EqualFold(f[0], "seen") {
+		if len(f) == 1 {
+			return errors.New(`reply "SESSION ID ANSWER" or "seen ID..."`)
+		}
 		var ids []string
 		for _, id := range f[1:] {
 			id = strings.Trim(id, ",")
@@ -456,6 +459,9 @@ func ConsoleReply(cfg *Config, log *Log, st *LogState, now time.Time, console, r
 // does is applied as one, or refused, and never taken as an instruction.
 func replyForm(st *LogState, cfg *Config, f []string) bool {
 	if strings.EqualFold(f[0], "seen") {
+		if len(f) == 1 {
+			return true // names nothing: refused
+		}
 		for _, id := range f[1:] {
 			if _, ok := st.Items[strings.Trim(id, ",")]; ok {
 				return true
@@ -463,7 +469,7 @@ func replyForm(st *LogState, cfg *Config, f []string) bool {
 		}
 		return false
 	}
-	if _, ok := cfg.Sessions[f[0]]; !ok || len(f) < 3 {
+	if _, ok := cfg.Sessions[f[0]]; !ok || len(f) < 2 {
 		return false
 	}
 	id, _, _ := strings.Cut(f[1], "@")

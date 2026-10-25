@@ -27,7 +27,8 @@ type LogState struct {
 	// Coordinators are the claims on each repository's coordinator: the
 	// session that holds it, by repository.
 	Coordinators map[string]string
-	Instructions map[string]*Instruction // the owner's console instructions by id
+	// Instructions are the owner's console instructions, by id.
+	Instructions map[string]*Instruction
 	// CI is each watched request's latest CI, by repository and request.
 	CI map[string]CIRecord
 	// Feed is what the consoles' feed has posted.
