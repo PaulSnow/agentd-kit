@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,19 +19,15 @@ func newTrustScreen(dir string) string {
 // The older wording: "Yes, proceed" first and selected.
 const oldTrustScreen = "Do you trust the files in this folder?\n\n❯ 1. Yes, proceed\n  2. No, exit\n\nEnter to confirm · Esc to exit"
 
-// noEnterOnReject fails when Enter was sent in a send made while the
-// screen had a rejecting option selected: each send's screen is the one
-// recorded with its action.
+// noEnterOnReject fails when Enter reached the menu while an option
+// other than one saying Yes was selected, as the fake tmux saw it.
 func noEnterOnReject(t *testing.T, h *harness, name string) {
 	t.Helper()
-	for _, e := range h.events() {
-		if e.Kind != KindAction || actionOf(e) != ActTrust || e.Session != name {
-			continue
-		}
-		for _, k := range e.Act.Keys {
-			if k == "Enter" && e.Act.Reason != "" && strings.Contains(e.Act.Reason, "No") {
-				t.Fatalf("Enter sent with a rejecting option selected: %+v", e.Act)
-			}
+	h.tmux.mu.Lock()
+	defer h.tmux.mu.Unlock()
+	for _, opt := range h.tmux.enterOn[name] {
+		if !strings.Contains(opt, "Yes") {
+			t.Fatalf("Enter sent with %q selected", opt)
 		}
 	}
 }
@@ -122,6 +119,7 @@ func TestTrustNeverEnterOnRejectingOption(t *testing.T) {
 	h.alive("oldno", "Do you trust the files in this folder?\n\n  1. Yes, proceed\n❯ 2. No, exit\n\nEnter to confirm · Esc to exit")
 	h.ticks(8, 5*time.Minute)
 	for _, n := range []string{"sticky", "noyes", "nocursor"} {
+		noEnterOnReject(t, h, n)
 		for _, keys := range keysSent(h, n) {
 			for _, k := range keys {
 				if k == "Enter" {
@@ -186,5 +184,110 @@ func TestTrustCheckedBeforeLaunch(t *testing.T) {
 		if strings.Contains(strings.Join(c, " "), "trust") {
 			t.Fatalf("escalated without a state file: %v", c)
 		}
+	}
+}
+
+// Claude Code's screen as it prints the new dialog: the question opens a
+// paragraph on one line, the path sits under "Accessing workspace:", and a
+// menu an earlier dialog left higher on the screen is not read as its own.
+func TestTrustRealScreenAnswered(t *testing.T) {
+	h := newHarness(t, false, "s1", "ascii")
+	for _, n := range []string{"s1", "ascii"} {
+		h.status(n, working)
+	}
+	cwd := h.cfg.Sessions["s1"].Cwd
+	h.alive("s1", "╭──────╮\n│ ❯ 1. Yes, proceed │\n│   2. No, exit │\n╰──────╯\n"+
+		"│ Accessing workspace:\n│\n│ "+cwd+"\n│\n"+
+		"│ Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.\n│\n"+
+		"│ ❯ 1. No, exit\n│   2. Yes, I trust this folder\n│\n│ Enter to confirm · Esc to cancel")
+	h.alive("ascii", "Is this a project you created or one you trust?\n\n> 1. No, exit\n  2. Yes, I trust this folder\n\nEnter to confirm · Esc to cancel")
+	h.ticks(3, 5*time.Minute)
+	if sent := keysSent(h, "s1"); len(sent) != 2 || strings.Join(sent[0], " ") != "Down" || strings.Join(sent[1], " ") != "Enter" {
+		t.Fatalf("s1: keys %v", sent)
+	}
+	noEnterOnReject(t, h, "s1")
+	if !h.tmux.alive["s1"] {
+		t.Fatal("s1 exited")
+	}
+	if sent := keysSent(h, "ascii"); len(sent) != 2 || strings.Join(sent[0], " ") != "Down" || h.tmux.chosen["ascii"] != 2 {
+		t.Fatalf("ascii: keys %v", sent)
+	}
+	noEnterOnReject(t, h, "ascii")
+}
+
+// A configured directory reached through a symbolic link is the
+// directory tmux reports the pane in, resolved.
+func TestTrustSymlinkedDirectory(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.status("s1", working)
+	real := h.cfg.Sessions["s1"].Cwd
+	link := filepath.Join(h.dir, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	sess := h.cfg.Sessions["s1"]
+	sess.Cwd = link
+	h.cfg.Sessions["s1"] = sess
+	h.alive("s1", newTrustScreen(real))
+	h.ticks(3, 5*time.Minute)
+	if sent := keysSent(h, "s1"); len(sent) != 2 {
+		t.Fatalf("keys %v", sent)
+	}
+}
+
+// A prompt agentd will not answer, and keys that did not take, go to the
+// owner once each, rather than leaving the session starting in silence.
+func TestTrustUnansweredIsEscalated(t *testing.T) {
+	h := newHarness(t, false, "nocursor", "sticky")
+	for _, n := range []string{"nocursor", "sticky"} {
+		h.status(n, working)
+	}
+	h.alive("nocursor", "Is this a project you created or one you trust?\n\n  1. No, exit\n  2. Yes, I trust this folder\n\nEnter to confirm · Esc to cancel")
+	h.alive("sticky", newTrustScreen(h.cfg.Sessions["sticky"].Cwd))
+	h.tmux.sticky["sticky"] = true
+	h.ticks(12, 5*time.Minute)
+	for _, n := range []string{"nocursor", "sticky"} {
+		said := 0
+		for _, c := range h.runner.calls {
+			if line := strings.Join(c, " "); strings.Contains(line, n+" ") && strings.Contains(line, "folder-trust") {
+				said++
+			}
+		}
+		if said != 1 {
+			t.Fatalf("%s: %d escalations: %v", n, said, h.runner.calls)
+		}
+	}
+}
+
+// A directory under one Claude Code trusts is trusted.
+func TestTrustParentTrusted(t *testing.T) {
+	dir := t.TempDir()
+	state := filepath.Join(dir, ".claude.json")
+	writeFile(t, state, `{"projects": {"`+dir+`": {"hasTrustDialogAccepted": true}, "`+dir+`/b": {"hasTrustDialogAccepted": false}}}`)
+	if trusted, known := claudeTrusts(state, filepath.Join(dir, "a", "wt")); !trusted || !known {
+		t.Fatalf("under a trusted parent: %v %v", trusted, known)
+	}
+	writeFile(t, state, `{"projects": {"`+dir+`/b": {"hasTrustDialogAccepted": false}}}`)
+	if trusted, known := claudeTrusts(state, filepath.Join(dir, "b")); trusted || !known {
+		t.Fatalf("untrusted: %v %v", trusted, known)
+	}
+	if _, known := claudeTrusts(filepath.Join(dir, "none.json"), dir); known {
+		t.Fatal("a missing file is known")
+	}
+}
+
+// Keys that move the cursor or pick an option are refused: they would
+// act on top of the option agentd selected.
+func TestTrustKeysOnlyConfirm(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agentd.json")
+	for _, keys := range []string{`["Down", "Enter"]`, `["2"]`, `["Up"]`} {
+		writeFile(t, path, `{"policies": {"trust_prompt": {"enabled": true, "pattern": "trust this folder", "keys": `+keys+`}}}`)
+		if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "trust_prompt.keys") {
+			t.Errorf("%s: %v", keys, err)
+		}
+	}
+	writeFile(t, path, `{"policies": {"trust_prompt": {"enabled": true, "pattern": "trust this folder", "keys": ["Enter"]}}}`)
+	if _, err := LoadConfig(path); err != nil {
+		t.Fatal(err)
 	}
 }

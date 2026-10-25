@@ -452,6 +452,9 @@ func (s *Supervisor) answerTrust(name string, sess Session, t *Track, ev Evidenc
 		if len(m.Dirs) > 0 {
 			dir = strings.Join(m.Dirs, ", ")
 		}
+		if dir == "" {
+			dir = "a directory tmux does not report"
+		}
 		s.escalate(name, "trust-elsewhere:"+name+":"+dir, fmt.Sprintf("%s shows Claude Code's folder-trust dialog for %s, not %s where agentd launches it; agentd does not answer it. Attach and answer it yourself.",
 			name, dir, sess.Cwd), t, now)
 		return
@@ -459,6 +462,8 @@ func (s *Supervisor) answerTrust(name string, sess Session, t *Track, ev Evidenc
 	keys, why := trustKeys(m, s.cfg.Policies.Trust.Keys)
 	if keys == nil {
 		s.skipOnce(name, "trust-menu:"+name+":"+ev.PaneHash, why+"; not answering it", t, &SkipPayload{Action: ActTrust})
+		s.escalate(name, "trust-unanswered:"+name+":"+ev.PaneHash, fmt.Sprintf("%s shows Claude Code's folder-trust prompt, but %s, so agentd does not answer it. Attach and answer it yourself.",
+			name, why), t, now)
 		return
 	}
 	s.typeInto(name, ActTrust, &ActPayload{Keys: keys, PaneHash: ev.PaneHash, Cwd: sess.Cwd, Reason: "selected: " + m.Options[m.Selected]}, t, ev.PaneHash, func() error {
@@ -524,7 +529,7 @@ func (s *Supervisor) observe(name string, sess Session) (Evidence, error) {
 		ev.Limited = s.limitRe.MatchString(screen)
 		ev.TrustPrompt = s.cfg.Policies.Trust.Enabled && questionLine(s.trustRe, screen)
 		if ev.TrustPrompt {
-			ev.TrustMenu = trustMenu(screen)
+			ev.TrustMenu = trustMenu(screen, s.trustRe, s.home)
 		}
 		for _, re := range s.dialogs {
 			if re.MatchString(screen) {
@@ -786,9 +791,14 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 	case Starting:
 		// Once per screen: a prompt still showing the same screen after the
 		// keys did not take them, and sending them again could answer
-		// whatever replaced it.
-		if ev.TrustPrompt && ev.PaneHash != t.TrustHash {
+		// whatever replaced it. Still showing after stall, it goes to the
+		// owner; in shadow no keys went, so nothing failed to take.
+		switch {
+		case ev.TrustPrompt && ev.PaneHash != t.TrustHash:
 			s.answerTrust(name, sess, t, ev, now)
+		case ev.TrustPrompt && !s.shadow && pol.Nudge.Enabled && now.Sub(t.HashSince) >= pol.Nudge.Stall.Duration:
+			s.escalate(name, "trust-stuck:"+name+":"+ev.PaneHash, fmt.Sprintf("%s still shows Claude Code's folder-trust prompt %s after agentd sent it keys; they did not take, and agentd does not send them twice. Attach and answer it yourself.",
+				name, now.Sub(t.HashSince).Round(time.Minute)), t, now)
 		}
 	case BlockedOnOwner:
 		switch {

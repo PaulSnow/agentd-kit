@@ -89,8 +89,9 @@ type fakeTmux struct {
 	exit       map[string]int
 	deadScreen map[string]func() string
 	sticky     map[string]bool
-	chosen     map[string]int    // the trust-menu option Enter chose
-	onPane     func(name string) // runs when Pane is asked, to change the screen under a caller
+	chosen     map[string]int      // the trust-menu option Enter chose
+	enterOn    map[string][]string // the selected option's text at each Enter
+	onPane     func(name string)   // runs when Pane is asked, to change the screen under a caller
 	commands   map[string]string
 	paths      map[string]string // #{pane_current_path}
 	newErr     map[string]error  // NewSession fails with this
@@ -102,7 +103,7 @@ type fakeTmux struct {
 func newFakeTmux() *fakeTmux {
 	return &fakeTmux{alive: map[string]bool{}, panes: map[string]string{}, history: map[string]string{}, crash: map[string]bool{},
 		remain: map[string]bool{}, dead: map[string]bool{}, exit: map[string]int{}, deadScreen: map[string]func() string{},
-		sticky: map[string]bool{}, chosen: map[string]int{}, commands: map[string]string{}, paths: map[string]string{}, newErr: map[string]error{}}
+		sticky: map[string]bool{}, chosen: map[string]int{}, enterOn: map[string][]string{}, commands: map[string]string{}, paths: map[string]string{}, newErr: map[string]error{}}
 }
 
 func (f *fakeTmux) HasSession(name string) (bool, error) {
@@ -239,15 +240,15 @@ func (f *fakeTmux) Keys(name string, keys ...string) error {
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, call{op: "keys", name: name, args: keys})
 	f.mutations++
-	if f.sticky[name] {
-		return nil
-	}
 	lines := strings.Split(f.panes[name], "\n")
 	var opts []int // the lines of the options, in order
 	sel := 0
 	for i, l := range lines {
-		t := strings.TrimSpace(l)
-		if m := regexp.MustCompile(`^(❯\s*)?(\d)\.\s+(.*)$`).FindStringSubmatch(t); m != nil {
+		t := strings.Trim(l, " │")
+		if m := regexp.MustCompile(`^([❯>]\s*)?(\d)\.\s+(.*)$`).FindStringSubmatch(t); m != nil {
+			if m[2] == "1" { // a later menu is the live one
+				opts, sel = nil, 0
+			}
 			if m[1] != "" {
 				sel = len(opts)
 			}
@@ -255,7 +256,15 @@ func (f *fakeTmux) Keys(name string, keys ...string) error {
 		}
 	}
 	text := func(i int) string {
-		return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(lines[opts[i]]), "❯"))
+		return strings.TrimSpace(strings.TrimLeft(strings.Trim(lines[opts[i]], " │"), "❯> "))
+	}
+	if f.sticky[name] {
+		for _, k := range keys {
+			if k == "Enter" && len(opts) > sel {
+				f.enterOn[name] = append(f.enterOn[name], text(sel))
+			}
+		}
+		return nil
 	}
 	draw := func() {
 		for i, at := range opts {
@@ -281,6 +290,9 @@ func (f *fakeTmux) Keys(name string, keys ...string) error {
 			}
 		case "Enter":
 			f.chosen[name] = sel + 1
+			if len(opts) > sel {
+				f.enterOn[name] = append(f.enterOn[name], text(sel))
+			}
 			if len(opts) > sel && strings.HasPrefix(text(sel)[3:], "No") {
 				f.alive[name] = false
 				return nil

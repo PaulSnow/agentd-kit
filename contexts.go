@@ -635,9 +635,7 @@ func (s *Supervisor) launchCommand(name string, sess Session, t *Track, id, why 
 // failure in its facts.
 func (s *Supervisor) launchCommandWith(name string, sess Session, t *Track, id, why string, ci *CIFact) ([]string, []byte) {
 	facts := s.packFactsWith(name, sess, t, why, ci)
-	if !s.shadow {
-		s.noteTrust(name, sess, t)
-	}
+	s.noteTrust(name, sess, t)
 	if sess.Role == RoleCoordinator && !s.shadow {
 		// A pack that cannot be written leaves the last one; the
 		// launch goes on.

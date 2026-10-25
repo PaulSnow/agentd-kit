@@ -26,21 +26,50 @@ type TrustMenu struct {
 }
 
 var (
-	trustOption = regexp.MustCompile(`^(❯\s*)?(\d)\.\s+(\S.*)$`)
+	// The cursor is ❯, or > on a terminal without Unicode.
+	trustOption = regexp.MustCompile(`^([❯›>]\s*)?(\d)\.\s+(\S.*)$`)
 	trustFooter = regexp.MustCompile(`(?i)enter to confirm`)
 	trustYes    = regexp.MustCompile(`(?i)^yes\b`)
 )
 
 // trustMenu reads the dialog's frame from screen: the options below the
-// question, a cursor on one of them, and the footer. It is nil when the
-// screen does not show all three.
-func trustMenu(screen string) *TrustMenu {
+// last line question matches, a cursor on one of them, and the footer, so
+// a menu left above it on the screen is not read as its. It is nil when
+// the screen does not show all three. The directories are the absolute
+// paths, a whole line each, anywhere on the screen (~ under home): one
+// left over from before only makes agentd refuse.
+func trustMenu(screen string, question *regexp.Regexp, home string) *TrustMenu {
+	lines := strings.Split(screen, "\n")
+	from := -1
+	for i, line := range lines {
+		line = strings.Trim(line, " \t│┃|")
+		if question.MatchString(line) {
+			from = i
+		}
+	}
+	if from < 0 {
+		return nil
+	}
 	m := &TrustMenu{Selected: -1, Accept: -1}
+	for _, line := range lines {
+		line = strings.Trim(line, " \t│┃|")
+		if strings.HasPrefix(line, "~/") && home != "" {
+			line = filepath.Join(home, line[2:])
+		}
+		if strings.HasPrefix(line, "/") && !strings.ContainsAny(line, " \t") {
+			m.Dirs = append(m.Dirs, filepath.Clean(line))
+		}
+	}
 	footer := false
 	var accepts []int
-	for _, line := range strings.Split(screen, "\n") {
+	for _, line := range lines[from+1:] {
 		line = strings.Trim(line, " \t│┃|")
-		if o := trustOption.FindStringSubmatch(line); o != nil && o[2] == fmt.Sprint(len(m.Options)+1) {
+		o := trustOption.FindStringSubmatch(line)
+		if o != nil && o[2] == "1" && !footer {
+			// A new run of options: only the last before the footer counts.
+			m.Options, m.Selected, accepts = nil, -1, nil
+		}
+		if o != nil && o[2] == fmt.Sprint(len(m.Options)+1) && !footer {
 			if o[1] != "" {
 				m.Selected = len(m.Options)
 			}
@@ -48,8 +77,6 @@ func trustMenu(screen string) *TrustMenu {
 				accepts = append(accepts, len(m.Options))
 			}
 			m.Options = append(m.Options, o[3])
-		} else if strings.HasPrefix(line, "/") && !strings.ContainsAny(line, " \t") {
-			m.Dirs = append(m.Dirs, filepath.Clean(line))
 		}
 		footer = footer || trustFooter.MatchString(line)
 	}
@@ -87,23 +114,24 @@ func trustKeys(m *TrustMenu, confirm []string) (keys []string, why string) {
 
 // trustDirOK says whether the dialog is for the directory agentd launches
 // the session in: the pane runs there, and any directory the dialog prints
-// is that one.
+// is that one. Paths compare with symbolic links resolved, as tmux and
+// Claude Code report them (realPath).
 func trustDirOK(sess Session, path string, m *TrustMenu) bool {
-	cwd := filepath.Clean(sess.Cwd)
-	if path == "" || filepath.Clean(path) != cwd {
+	cwd := realPath(sess.Cwd)
+	if path == "" || realPath(path) != cwd {
 		return false
 	}
 	for _, d := range m.Dirs {
-		if d != cwd {
+		if realPath(d) != cwd {
 			return false
 		}
 	}
 	return true
 }
 
-// claudeTrusts reads Claude Code's state file for whether it trusts dir:
-// yes or no, and known false when the file is missing, unreadable or does
-// not name the directory's choice.
+// claudeTrusts reads Claude Code's state file for whether it trusts dir,
+// which it does when dir or a directory above it was accepted. Known is
+// false when the file is missing or unreadable, which says nothing.
 func claudeTrusts(stateFile, dir string) (trusted, known bool) {
 	b, err := os.ReadFile(stateFile)
 	if err != nil {
@@ -111,20 +139,25 @@ func claudeTrusts(stateFile, dir string) (trusted, known bool) {
 	}
 	var st struct {
 		Projects map[string]struct {
-			HasTrustDialogAccepted *bool `json:"hasTrustDialogAccepted"`
+			HasTrustDialogAccepted bool `json:"hasTrustDialogAccepted"`
 		} `json:"projects"`
 	}
 	if json.Unmarshal(b, &st) != nil {
 		return false, false
 	}
-	p, ok := st.Projects[filepath.Clean(dir)]
-	if !ok {
-		return false, true
+	for _, d := range []string{filepath.Clean(dir), realPath(dir)} {
+		for {
+			if st.Projects[d].HasTrustDialogAccepted {
+				return true, true
+			}
+			up := filepath.Dir(d)
+			if up == d {
+				break
+			}
+			d = up
+		}
 	}
-	if p.HasTrustDialogAccepted == nil {
-		return false, true
-	}
-	return *p.HasTrustDialogAccepted, true
+	return false, true
 }
 
 // claudeStateFile is the state file of the login a session runs under:
@@ -138,7 +171,9 @@ func (s *Supervisor) claudeStateFile(sess Session) string {
 
 // noteTrust tells the owner, once per directory, that Claude Code does not
 // trust the directory a session is being launched in, and how to trust it
-// ahead. The launch goes on, and the dialog is answered when it shows.
+// ahead. The launch goes on, and the dialog is answered when it shows. The
+// note is once per session and directory: two sessions sharing one each
+// say it.
 func (s *Supervisor) noteTrust(name string, sess Session, t *Track) {
 	if a := s.cfg.Accounts[sess.Account]; s.home == "" && (sess.Account == "" || a.ConfigDir == "") {
 		return

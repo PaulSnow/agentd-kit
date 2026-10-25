@@ -177,6 +177,9 @@ type UsageLimitPolicy struct {
 	Pattern string `json:"pattern"`
 }
 
+// confirmKeyRe is a key that moves a menu's cursor or picks an option.
+var confirmKeyRe = regexp.MustCompile(`(?i)^(up|down|left|right|tab|btab|home|end|ppage|npage|pageup|pagedown|[0-9]+|.*-(up|down))$`)
+
 // TrustPolicy answers the folder-trust prompt a fresh Claude Code session
 // shows (trust.go). Pattern, a regular expression, must match a whole line
 // of the visible screen, less indent and box border: the prompt's own
@@ -353,7 +356,7 @@ func DefaultConfig() Config {
 			CI: CIPolicy{Pointer: "A pipeline of the request you delivered failed on its own; the failing jobs and the end of the first one's log are under ci in the facts. " +
 				"Fix it on the same branch and commit, then make DONE the last line of STATUS.md again; agentd pushes the fix to the same request."},
 			UsageLimit:   UsageLimitPolicy{Pattern: `(?i)limit reached.{0,80}reset|out of extra usage`},
-			Trust:        TrustPolicy{Enabled: true, Pattern: `(?i)(quick safety check: )?(do you )?trust (the files in )?this folder\??|(quick safety check: )?is this a project you created or one you trust\??`, Keys: []string{"Enter"}},
+			Trust:        TrustPolicy{Enabled: true, Pattern: `(?i)(quick safety check: )?(do you )?trust (the files in )?this folder\??|(quick safety check: )?is this a project you created or one you trust\?( .*)?`, Keys: []string{"Enter"}},
 			Escalate:     EscalatePolicy{},
 			Dialog:       DialogPolicy{Patterns: []string{`Do you want to`, `❯\s*1\.`, `(?i)enter to confirm`}},
 			PaneCommands: []string{"claude"},
@@ -480,6 +483,13 @@ func (c *Config) finish(base string) error {
 	}
 	if c.Policies.Trust.Enabled && (c.Policies.Trust.Pattern == "" || len(c.Policies.Trust.Keys) == 0) {
 		errs = append(errs, errors.New("policies.trust_prompt needs a pattern and keys"))
+	}
+	for _, k := range c.Policies.Trust.Keys {
+		// The keys confirm the option agentd has selected; one that moves
+		// or picks could choose "No, exit".
+		if confirmKeyRe.MatchString(k) {
+			errs = append(errs, fmt.Errorf("policies.trust_prompt.keys: %q moves or picks an option; the keys only confirm the one agentd selects", k))
+		}
 	}
 	if _, err := regexp.Compile(c.Policies.Trust.Pattern); err != nil {
 		errs = append(errs, fmt.Errorf("policies.trust_prompt.pattern: %w", err))
