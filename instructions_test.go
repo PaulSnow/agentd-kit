@@ -242,3 +242,32 @@ func TestInstructionRepeatedPastARepositoryWithoutCoordinator(t *testing.T) {
 		t.Fatalf("%d instructions", n)
 	}
 }
+
+// The same words sent again after a wake carried the first copy are the
+// owner's again: recorded, and due, even before another wake.
+func TestInstructionRepeatedAfterItsWake(t *testing.T) {
+	h := instrHarness(t)
+	h.ticks(2, time.Minute)
+	const text = "Hold the release."
+	if err := reply(h, "widgets", text); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(3, time.Minute)
+	h.transcriptOf("c", "t3", summaryLine("c1", "m1", "Held.", h.clock.Now(), 100))
+	h.ticks(1, time.Minute)
+	if err := reply(h, "widgets", text); err != nil {
+		t.Fatal(err)
+	}
+	ins := instructions(h)
+	if len(ins) != 2 {
+		t.Fatalf("%d instructions", len(ins))
+	}
+	h.ticks(3, time.Minute)
+	w := h.wakes()
+	if len(w) != 2 || w[1].Reason != instructionReason+ins[1].ID {
+		t.Fatalf("wakes = %+v", w)
+	}
+	if p := h.pack(t); len(p.OwnerInstructions) != 1 || p.OwnerInstructions[0].ID != ins[1].ID {
+		t.Fatalf("pack = %+v", p.OwnerInstructions)
+	}
+}

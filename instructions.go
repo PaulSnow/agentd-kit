@@ -95,6 +95,17 @@ func (st *LogState) instructionHandled(cfg *Config, repo, id string, handled boo
 	return ok && (n < t.WakeCount || handled)
 }
 
+// instructionCarried says whether a wake of coordinator session carried
+// the instruction.
+func (st *LogState) instructionCarried(session, id string) bool {
+	t := st.Tracks[session]
+	if t == nil {
+		return false
+	}
+	_, ok := t.Carried[id]
+	return ok
+}
+
 // packInstructions is repo's instructions its coordinator has not handled.
 func (s *Supervisor) packInstructions(repo string, handled bool) []PackInstruction {
 	var out []PackInstruction
@@ -108,8 +119,8 @@ func (s *Supervisor) packInstructions(repo string, handled bool) []PackInstructi
 
 // RecordInstruction records text as the owner's instruction from console,
 // for every repository that console feeds, screened. The same words from
-// the same console, while an earlier copy is not yet handled by every
-// coordinator it is for, are not recorded again.
+// the same console, while a coordinator it is for has not yet been woken
+// with an earlier copy, are not recorded again.
 func RecordInstruction(cfg *Config, log *Log, st *LogState, now time.Time, console, text string) error {
 	var repos []string
 	for name := range cfg.Repositories {
@@ -140,10 +151,11 @@ func RecordInstruction(cfg *Config, log *Log, st *LogState, now time.Time, conso
 		if p.Hash == "" || in.Hash != p.Hash || in.From != from || strings.Join(in.Repositories, ",") != strings.Join(repos, ",") {
 			continue
 		}
-		// A repository with no coordinator never handles it, so it
-		// does not keep a copy waiting.
+		// A copy no wake has carried yet is still waiting. A repository
+		// with no coordinator never carries it, so it keeps none waiting;
+		// once a wake carried it, the same words are the owner's again.
 		for _, r := range repos {
-			if cfg.Repositories[r].Coordinator != nil && !st.instructionHandled(cfg, r, in.ID, false) {
+			if co := cfg.Repositories[r].Coordinator; co != nil && !st.instructionCarried(co.Session, in.ID) {
 				return nil // still waiting: recorded once
 			}
 		}

@@ -354,9 +354,8 @@ func (s *Supervisor) due(repo string, t *Track) (reasons, keys []string) {
 	}
 	for _, in := range s.st.instructionsFor(repo) {
 		if _, carried := t.Carried[in.ID]; !carried {
-			if k := instructionReason + in.ID + "@" + in.At.UTC().Format(time.RFC3339Nano); !t.Woken[k] {
-				reasons, keys = append(reasons, instructionReason+in.ID), append(keys, k)
-			}
+			reasons = append(reasons, instructionReason+in.ID)
+			keys = append(keys, instructionReason+in.ID+"@"+in.At.UTC().Format(time.RFC3339Nano))
 		}
 	}
 	return reasons, keys
