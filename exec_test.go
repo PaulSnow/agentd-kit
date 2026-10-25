@@ -280,6 +280,9 @@ func TestExecTmuxKeepsDeadPanes(t *testing.T) {
 	if got := parsePaneInfo("claude\t1\t137\n"); got != (PaneInfo{Command: "claude", Dead: true, Status: 137, HasStatus: true}) {
 		t.Fatalf("dead pane = %+v", got)
 	}
+	if got := parsePaneInfo("claude\t0\t\t/srv/widgets\n"); got != (PaneInfo{Command: "claude", Path: "/srv/widgets"}) {
+		t.Fatalf("pane info with its path %+v", got)
+	}
 	if got := parsePaneInfo("node\t0\t\n"); got != (PaneInfo{Command: "node"}) {
 		t.Fatalf("live pane = %+v", got)
 	}

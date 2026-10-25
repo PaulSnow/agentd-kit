@@ -372,7 +372,7 @@ func TestShadowNeverActs(t *testing.T) {
 	h.alive("done", "bye")
 	h.deliver("done", Deliver{Repository: "widgets", Worktree: h.dir, Target: "main", MRFile: h.dir + "/done/STATUS.md"})
 	h.status("trust", working)
-	h.alive("trust", "Do you trust this folder?")
+	h.alive("trust", oldTrustScreen)
 	h.ticks(12*12, 5*time.Minute)
 	h.restart(true)
 	h.ticks(12, 5*time.Minute)
@@ -441,7 +441,7 @@ func TestUsageLimitWaitsThenResumes(t *testing.T) {
 func TestTrustPromptIsAnswered(t *testing.T) {
 	h := newHarness(t, false, "s1")
 	h.status("s1", working)
-	h.alive("s1", "Do you trust this folder?")
+	h.alive("s1", oldTrustScreen)
 	h.ticks(3, 5*time.Minute)
 	if got := h.tmux.count("keys", "s1"); got != 1 {
 		t.Fatalf("key sends = %d, want 1", got)

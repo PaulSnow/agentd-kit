@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -87,11 +89,13 @@ type fakeTmux struct {
 	exit       map[string]int
 	deadScreen map[string]func() string
 	sticky     map[string]bool
-	chosen     map[string]int    // the trust-menu option Enter chose
-	onPane     func(name string) // runs when Pane is asked, to change the screen under a caller
+	chosen     map[string]int      // the trust-menu option Enter chose
+	enterOn    map[string][]string // the selected option's text at each Enter
+	onPane     func(name string)   // runs when Pane is asked, to change the screen under a caller
 	commands   map[string]string
-	newErr     map[string]error // NewSession fails with this
-	replaceErr error            // Replace fails with this
+	paths      map[string]string // #{pane_current_path}
+	newErr     map[string]error  // NewSession fails with this
+	replaceErr error             // Replace fails with this
 	calls      []call
 	mutations  int
 }
@@ -99,7 +103,7 @@ type fakeTmux struct {
 func newFakeTmux() *fakeTmux {
 	return &fakeTmux{alive: map[string]bool{}, panes: map[string]string{}, history: map[string]string{}, crash: map[string]bool{},
 		remain: map[string]bool{}, dead: map[string]bool{}, exit: map[string]int{}, deadScreen: map[string]func() string{},
-		sticky: map[string]bool{}, chosen: map[string]int{}, commands: map[string]string{}, newErr: map[string]error{}}
+		sticky: map[string]bool{}, chosen: map[string]int{}, enterOn: map[string][]string{}, commands: map[string]string{}, paths: map[string]string{}, newErr: map[string]error{}}
 }
 
 func (f *fakeTmux) HasSession(name string) (bool, error) {
@@ -137,9 +141,9 @@ func (f *fakeTmux) Pane(name string) (PaneInfo, error) {
 		cmd = "claude"
 	}
 	if f.dead[name] {
-		return PaneInfo{Command: cmd, Dead: true, Status: f.exit[name], HasStatus: true}, nil
+		return PaneInfo{Command: cmd, Dead: true, Status: f.exit[name], HasStatus: true, Path: f.paths[name]}, nil
 	}
-	return PaneInfo{Command: cmd}, nil
+	return PaneInfo{Command: cmd, Path: f.paths[name]}, nil
 }
 
 // start runs a session's command: it comes up, or it crashes, leaving a
@@ -226,32 +230,70 @@ func (f *fakeTmux) Type(name, text string) error {
 	return nil
 }
 
-// Keys works the trust prompt's menu as Claude Code does: option 1 is
-// preselected, Down and Up move, Enter chooses. Choosing 1 trusts the
-// folder; choosing 2 ("No, exit") ends the session. A sticky prompt
-// ignores the keys.
+// Keys works the trust prompt's menu on the screen as Claude Code does:
+// the option marked ❯ is selected (option 1 when none is), Down and Up
+// move the mark and redraw the screen, Enter chooses. Choosing an option
+// that says No ends the session; any other trusts the folder. A sticky
+// prompt ignores the keys.
 func (f *fakeTmux) Keys(name string, keys ...string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, call{op: "keys", name: name, args: keys})
 	f.mutations++
+	lines := strings.Split(f.panes[name], "\n")
+	var opts []int // the lines of the options, in order
+	sel := 0
+	for i, l := range lines {
+		t := strings.Trim(l, " │")
+		if m := regexp.MustCompile(`^([❯>]\s*)?(\d)\.\s+(.*)$`).FindStringSubmatch(t); m != nil {
+			if m[2] == "1" { // a later menu is the live one
+				opts, sel = nil, 0
+			}
+			if m[1] != "" {
+				sel = len(opts)
+			}
+			opts = append(opts, i)
+		}
+	}
+	text := func(i int) string {
+		return strings.TrimSpace(strings.TrimLeft(strings.Trim(lines[opts[i]], " │"), "❯> "))
+	}
 	if f.sticky[name] {
+		for _, k := range keys {
+			if k == "Enter" && len(opts) > sel {
+				f.enterOn[name] = append(f.enterOn[name], text(sel))
+			}
+		}
 		return nil
 	}
-	sel := 1
+	draw := func() {
+		for i, at := range opts {
+			mark := "  "
+			if i == sel {
+				mark = "❯ "
+			}
+			lines[at] = mark + text(i)
+		}
+		f.panes[name] = strings.Join(lines, "\n")
+	}
 	for _, k := range keys {
 		switch k {
 		case "Down":
-			if sel < 2 {
+			if sel < len(opts)-1 {
 				sel++
+				draw()
 			}
 		case "Up":
-			if sel > 1 {
+			if sel > 0 {
 				sel--
+				draw()
 			}
 		case "Enter":
-			f.chosen[name] = sel
-			if sel == 2 {
+			f.chosen[name] = sel + 1
+			if len(opts) > sel {
+				f.enterOn[name] = append(f.enterOn[name], text(sel))
+			}
+			if len(opts) > sel && strings.HasPrefix(text(sel)[3:], "No") {
 				f.alive[name] = false
 				return nil
 			}
@@ -567,8 +609,10 @@ func newHarness(t *testing.T, shadow bool, names ...string) *harness {
 		"readonly": {Forge: "gitlab", Host: "gitlab.example.com", Project: "example-org/readonly", Allow: nil},
 	}
 	cfg.Sessions = map[string]Session{}
+	tmux := newFakeTmux()
 	for _, n := range names {
 		cfg.Sessions[n] = Session{Workdir: filepath.Join(dir, n), Cwd: filepath.Join(dir, n, "wt"), Repository: "widgets"}
+		tmux.paths[n] = filepath.Join(dir, n, "wt")
 		if err := os.MkdirAll(filepath.Join(dir, n, "wt"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -577,10 +621,11 @@ func newHarness(t *testing.T, shadow bool, names ...string) *harness {
 		t.Fatal(err)
 	}
 	h := &harness{t: t, dir: dir, cfg: &cfg, clock: &fakeClock{now: time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC)},
-		tmux: newFakeTmux(), git: &fakeGit{clean: true, branch: "feature", ahead: 2, subject: "Add the feature", head: "c0ffee",
+		tmux: tmux, git: &fakeGit{clean: true, branch: "feature", ahead: 2, subject: "Add the feature", head: "c0ffee",
 			remote: "git@gitlab.example.com:example-org/widgets.git"},
 		forge: &fakeForge{}, runner: &fakeRunner{}, buf: &bytes.Buffer{}}
 	h.sup = NewSupervisor(h.cfg, NewLogWriter(h.buf), h.clock, h.tmux, h.git, h.forge, h.runner, shadow)
+	h.sup.home = dir
 	return h
 }
 
@@ -591,6 +636,7 @@ func (h *harness) restart(shadow bool) {
 		h.t.Fatalf("log unreadable: %v, %d bad", err, bad)
 	}
 	h.sup = NewSupervisor(h.cfg, NewLogWriter(h.buf), h.clock, h.tmux, h.git, h.forge, h.runner, shadow)
+	h.sup.home = h.dir
 	h.sup.Replay(events)
 }
 

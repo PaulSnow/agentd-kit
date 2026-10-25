@@ -176,6 +176,7 @@ func runCmd(args []string) error {
 	if cfg.Poll.GitHub || cfg.Poll.GitLab {
 		sup.api = ExecForgeAPI{Timeout: to.Forge.Duration}
 	}
+	sup.home, _ = os.UserHomeDir()
 	sup.Replay(events)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

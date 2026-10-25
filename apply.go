@@ -493,7 +493,9 @@ func (t *Track) settleDialog(n, episode int, at time.Time) {
 // launched records the transcript a restart or rotation started: the
 // session is measured under it from now on, unknown until its first call.
 func (t *Track) launched(transcript string, at time.Time) {
-	t.Launched = at
+	// A new Claude can draw the same trust prompt, the same screen: it
+	// has not had the keys.
+	t.Launched, t.TrustHash = at, ""
 	if transcript != "" {
 		t.Transcript, t.Measured = transcript, ""
 	}
