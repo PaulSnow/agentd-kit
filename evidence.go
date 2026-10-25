@@ -45,7 +45,6 @@ type StatusEvidence struct {
 	Done      bool
 	Questions string // the Questions section body when it asks something, else ""
 	Progress  Progress
-	Hash      string // the short hash of the whole file
 }
 
 // TranscriptEvidence is the last turn of the session's Claude Code
@@ -87,7 +86,7 @@ var noQuestions = regexp.MustCompile(`(?i)^[-*\s]*\(?\s*(none(\s+yet)?|n/a)\s*\.
 
 // ParseStatus interprets STATUS.md text.
 func ParseStatus(text string) StatusEvidence {
-	ev := StatusEvidence{Exists: true, Progress: ParseProgress(text), Hash: shortHash(HashPane(text))}
+	ev := StatusEvidence{Exists: true, Progress: ParseProgress(text)}
 	var lines []string
 	for _, l := range strings.Split(text, "\n") {
 		if t := strings.TrimSpace(l); t != "" {
@@ -252,21 +251,28 @@ var (
 )
 
 // promptLines is how far from the screen's last line the prompt may be:
-// the box's border and the mode line below it.
-const promptLines = 6
+// the box's border and the mode line below it. A running turn's line is
+// looked for promptAbove lines further up, where it shows above the box,
+// so session output quoting it higher up does not hide the prompt.
+const (
+	promptLines = 6
+	promptAbove = 4
+)
 
 // idlePrompt says whether the screen ends at the input prompt with no
 // turn running: a prompt line among its last few lines, and no running
-// turn's line anywhere on it. A quoted prompt higher up, in the
+// turn's line near it. A quoted prompt higher up, in the
 // scrollback, is not the prompt.
 func idlePrompt(screen string) bool {
-	if promptRunning.MatchString(screen) {
-		return false
-	}
 	var lines []string
 	for _, l := range strings.Split(screen, "\n") {
 		if l = strings.Trim(l, " \t│┃|"); l != "" {
 			lines = append(lines, l)
+		}
+	}
+	for i := len(lines) - 1; i >= 0 && i >= len(lines)-promptLines-promptAbove; i-- {
+		if promptRunning.MatchString(lines[i]) {
+			return false
 		}
 	}
 	for i := len(lines) - 1; i >= 0 && i >= len(lines)-promptLines; i-- {

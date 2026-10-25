@@ -171,6 +171,50 @@ func TestEndedTurnContinuedAtMostMax(t *testing.T) {
 	if typed := h.typed("s1"); len(typed) != 4 || typed[3] != h.cfg.Policies.Nudge.Message {
 		t.Fatalf("typed %d lines, want the stall nudge after the continues", len(typed))
 	}
+	// New progress in STATUS.md is new facts: the next ended turn is
+	// continued again.
+	h.status("s1", moreWork)
+	at := h.clock.Now()
+	h.transcriptOf("s1", "t1", promptLine("pz", "go on", at)+summaryLine("sz", "m", "Moved on.", at, 100))
+	h.tmux.panes["s1"] = idleScreen + "\n\n"
+	h.ticks(8, time.Minute)
+	if typed := h.typed("s1"); len(typed) != 5 || !strings.HasPrefix(typed[4], h.cfg.Policies.Nudge.ContinueMessage) {
+		t.Fatalf("typed %d lines, want a continue for the new facts", len(typed))
+	}
+}
+
+// A continue answered within settle, the session back at the prompt at
+// once, is answered: the nudge count and the idle clock start again, so a
+// later hang gets its stall nudge.
+func TestQuicklyAnsweredContinueIsProgress(t *testing.T) {
+	h := endedHarness(t, idleScreen)
+	at := h.clock.Now()
+	h.transcriptOf("s1", "t1", promptLine("u1", "Build the widget.", at)+summaryLine("u2", "m1", "Merged #21.", at, 100))
+	h.ticks(8, time.Minute)
+	if tr := h.sup.Tracks()["s1"]; tr.Nudges != 1 {
+		t.Fatalf("nudges = %d after the continue", tr.Nudges)
+	}
+	h.status("s1", moreWork)
+	reply := h.clock.Now()
+	h.transcriptOf("s1", "t1", promptLine("u3", "continue", reply)+summaryLine("u4", "m2", "Nothing more right now.", reply, 100))
+	h.tmux.panes["s1"] = idleScreen + "\n"
+	h.ticks(1, time.Minute)
+	if tr := h.sup.Tracks()["s1"]; tr.Nudges != 0 || !tr.HashSince.Equal(reply) {
+		t.Fatalf("nudges %d, idle since %s: the reply was taken for an echo", tr.Nudges, tr.HashSince)
+	}
+}
+
+// A transcript whose last line does not end the turn, a tool call under
+// the prompt, is no ended turn, whatever the last folded turn was.
+func TestToolCallLastIsNoEndedTurn(t *testing.T) {
+	h := endedHarness(t, idleScreen)
+	at := h.clock.Now()
+	h.transcriptOf("s1", "t1", promptLine("u1", "Build the widget.", at)+summaryLine("u2", "m1", "Merged #21.", at, 100)+
+		`{"type":"assistant","timestamp":"`+at.Format(time.RFC3339Nano)+`","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","name":"Bash"}]}}`+"\n")
+	h.ticks(20, time.Minute)
+	if typed := h.typed("s1"); len(typed) != 0 {
+		t.Fatalf("typed %v", typed)
+	}
 }
 
 // No continue goes when nudging is off or nudge.max is 0, nor to a session
@@ -308,5 +352,27 @@ func TestRotationAtCheckpointBeforeContinue(t *testing.T) {
 	}
 	if typed := h.typed("s"); len(typed) != 0 {
 		t.Fatalf("typed %v instead of rotating", typed)
+	}
+}
+
+// A rotation that has given up holds no continue.
+func TestGivenUpRotationDoesNotHoldContinue(t *testing.T) {
+	h, id := contextHarness(t, false)
+	h.cfg.Policies.Nudge.Settle = Duration{time.Minute}
+	h.status("s", workLeft)
+	h.alive("s", idleScreen)
+	h.git.merge, h.git.mergeSubject = "m1", "Merge #21: contexts"
+	tr := h.sup.Tracks()["s"]
+	for i := 0; i < h.cfg.Policies.Restart.MaxRestarts; i++ {
+		tr.Failures["rotate:s:m1"] = append(tr.Failures["rotate:s:m1"], h.clock.Now())
+	}
+	at := h.clock.Now()
+	h.transcript(id, promptLine("u1", "Build the widget.", at)+summaryLine("u2", "m1", "Merged #21.", at, 150000))
+	h.ticks(12, time.Minute)
+	if n := h.count(KindAction, ActRotate, "s"); n != 0 {
+		t.Fatalf("rotations = %d after giving up", n)
+	}
+	if typed := h.typed("s"); len(typed) != 1 || !strings.HasPrefix(typed[0], h.cfg.Policies.Nudge.ContinueMessage) {
+		t.Fatalf("typed %v, want the continue", typed)
 	}
 }

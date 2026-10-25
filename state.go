@@ -271,7 +271,8 @@ func backoff(n int, p RestartPolicy) time.Duration {
 // noteHash records the pane hash and decides whether a change is progress.
 // After a nudge, a change is the nudge's echo rather than progress when it
 // comes within the settle time, or when the transcript shows no turn since
-// the nudge; an echo keeps the idle clock running. Any other change restarts
+// the nudge; an echo keeps the idle clock running. A turn the session ended
+// since the nudge answers it, however soon (applyTurn). Any other change restarts
 // the clock and the nudge count.
 func (t *Track) noteHash(hash string, now time.Time, p NudgePolicy, tr TranscriptEvidence) {
 	if !t.Observed {
