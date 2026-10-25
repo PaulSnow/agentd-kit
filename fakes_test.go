@@ -95,6 +95,7 @@ type fakeTmux struct {
 	commands   map[string]string
 	paths      map[string]string // #{pane_current_path}
 	newErr     map[string]error  // NewSession fails with this
+	stopErr    map[string]error  // Stop fails with this
 	replaceErr error             // Replace fails with this
 	calls      []call
 	mutations  int
@@ -214,6 +215,9 @@ func (f *fakeTmux) Stop(name string) error {
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, call{op: "stop", name: name})
 	f.mutations++
+	if err := f.stopErr[name]; err != nil {
+		return err
+	}
 	if !f.alive[name] {
 		return fmt.Errorf("no session %s", name)
 	}
@@ -352,7 +356,11 @@ func (g *fakeGit) AddWorktree(clone, dir, branch, target string, detach bool) er
 	if g.worktreeErr != nil {
 		return g.worktreeErr
 	}
-	g.worktrees = append(g.worktrees, clone+" "+dir+" "+branch+" "+target)
+	w := clone + " " + dir + " " + branch + " " + target
+	if detach {
+		w += " detached"
+	}
+	g.worktrees = append(g.worktrees, w)
 	return os.MkdirAll(dir, 0o755)
 }
 

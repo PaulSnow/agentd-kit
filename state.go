@@ -29,9 +29,9 @@ type Track struct {
 	Hash      string    // last pane hash seen
 	HashSince time.Time // when the pane last changed, nudge echoes excluded
 	Observed  bool      // at least one observation
-	// Provisioned is set once a started session's workdir and worktree
-	// were made (sessions.go); a new start clears it.
-	Provisioned bool
+	// Provisioned is the key of the start whose workdir and worktree
+	// were made (sessions.go).
+	Provisioned string
 
 	Restarts  []time.Time // restart times by agentd, for the backoff
 	Live      bool        // seen alive, or restarted, since the last crash: its next disappearance is a crash

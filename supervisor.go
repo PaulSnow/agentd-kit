@@ -566,7 +566,10 @@ func (s *Supervisor) step(name string, sess Session) {
 	now := s.clock.Now()
 	t := s.track(name)
 	// A started session is supervised once its workdir and worktree are made.
-	if sess.Runtime && !t.Provisioned {
+	if sess.Runtime && s.st.Ended[name] != "" {
+		return // the end of an earlier session of the name stops it first
+	}
+	if sess.Runtime && t.Provisioned != provisionKey(name, s.st.Runtime[name]) {
 		s.provision(name, sess, t, now)
 		return
 	}
@@ -1088,6 +1091,13 @@ func (s *Supervisor) post(name, action, key, message string, t *Track, now time.
 			&SkipPayload{Filtered: key})
 	}
 	console := s.cfg.Console(name)
+	if repo := s.st.Ended[name]; repo != "" { // an ended session is in no configuration
+		if r, ok := s.cfg.Repositories[repo]; ok && r.Console != "" {
+			console = r.Console
+		} else {
+			console = repo
+		}
+	}
 	tmpl := s.cfg.Policies.Escalate.Command // never empty: refused at load
 	if !s.retryDue(t, key, now) {
 		return false

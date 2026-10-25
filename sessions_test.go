@@ -309,7 +309,7 @@ func TestFoldHoldsMax(t *testing.T) {
 	h := sessionsHarness(t)
 	for i, b := range []string{"a", "b", "c"} {
 		h.sup.emit(runtimeName("widgets", b, KindWork), Event{Kind: KindSession, Mode: ModeShared,
-			Runtime: &RuntimePayload{ID: string(rune('x' + i)), Action: SessionStart, Repository: "widgets", Kind: KindWork, Branch: b, By: "c"}})
+			Runtime: &RuntimePayload{ID: string(rune('x' + i)), Action: SessionStart, Repository: "widgets", Kind: KindWork, Branch: b, Max: 2, By: "c"}})
 	}
 	if rt := projectedRuntime(h.cfg, h.events()); len(rt) != 2 {
 		t.Fatalf("running = %v, want max 2", rt)
@@ -359,5 +359,80 @@ func TestExecGitReviewerBesideWorker(t *testing.T) {
 	}
 	if a, b := gitRun(t, work, "rev-parse", "HEAD"), gitRun(t, review, "rev-parse", "HEAD"); a != b {
 		t.Fatalf("reviewer at %s, worker at %s", b, a)
+	}
+}
+
+// An end and a new start of the name in one pass: the old tmux session is
+// stopped first, and only then is the new one provisioned and launched.
+// A reviewer's worktree is detached.
+func TestEndAndStartInOnePass(t *testing.T) {
+	h := sessionsHarness(t)
+	reply, _ := h.startSession(map[string]any{"branch": "fix-spin", "kind": "reviewer", "issue": 7})
+	name := reply["name"].(string)
+	h.ticks(2, time.Minute)
+	if g := h.git.worktrees; len(g) != 1 || !strings.HasSuffix(g[0], " detached") {
+		t.Fatalf("worktrees = %q", g)
+	}
+	h.alive(name, "reviewing")
+	h.ticks(1, time.Minute)
+	srv := h.mcpServerFor("c")
+	callOne(t, srv, ToolEndSession, map[string]any{"name": name})
+	if text, refused := callOne(t, srv, ToolStartSession, map[string]any{"branch": "fix-spin", "kind": "reviewer", "issue": 8}); refused {
+		t.Fatalf("start again = %s", text)
+	}
+	h.ticks(3, time.Minute)
+	if s, n := h.tmux.count("stop", name), h.tmux.count("new-session", name); s != 1 || n != 2 {
+		t.Fatalf("stopped %d, launched %d", s, n)
+	}
+	var stop, launch int
+	for i, c := range h.tmux.calls {
+		if c.name == name && c.op == "stop" {
+			stop = i
+		}
+		if c.name == name && c.op == "new-session" {
+			launch = i
+		}
+	}
+	if stop > launch {
+		t.Fatal("launched before the old session was stopped")
+	}
+}
+
+// An end whose stop keeps failing goes to the repository's console, once.
+func TestEndThatKeepsFailingEscalates(t *testing.T) {
+	h := sessionsHarness(t)
+	reply, _ := h.startSession(map[string]any{"branch": "fix-spin"})
+	name := reply["name"].(string)
+	h.ticks(2, time.Minute)
+	h.alive(name, "working")
+	h.ticks(1, time.Minute)
+	h.tmux.stopErr = map[string]error{name: errors.New("tmux hung")}
+	if err := EndSession(h.cfg, NewLogWriter(h.buf), h.events(), h.clock.Now(), name); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(40, 10*time.Minute)
+	var posts []*ActPayload
+	for _, e := range h.events() {
+		if e.Kind == KindAction && e.Act.Action == ActEscalate && e.Session == name {
+			posts = append(posts, e.Act)
+		}
+	}
+	if len(posts) != 1 || posts[0].Console != "widgets" || !strings.Contains(posts[0].Message, "could not stop") {
+		t.Fatalf("escalations = %d, first %+v", len(posts), *posts[0])
+	}
+}
+
+// A start made under max 2 holds after max is lowered to 1.
+func TestStartHeldByItsOwnMax(t *testing.T) {
+	h := sessionsHarness(t)
+	h.startSession(map[string]any{"branch": "a"})
+	h.startSession(map[string]any{"branch": "b"})
+	w := h.cfg.Repositories["widgets"]
+	p := *w.Sessions
+	p.Max = 1
+	w.Sessions = &p
+	h.cfg.Repositories["widgets"] = w
+	if rt := projectedRuntime(h.cfg, h.events()); len(rt) != 2 {
+		t.Fatalf("running = %v", rt)
 	}
 }

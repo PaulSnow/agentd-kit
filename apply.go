@@ -34,9 +34,10 @@ type LogState struct {
 	// Feed is what the consoles' feed has posted.
 	Feed FeedState
 	// Runtime are the sessions coordinators started and nobody ended, by
-	// name; Ended are those ended whose tmux session is not yet stopped.
+	// name; Ended are those ended whose tmux session is not yet stopped,
+	// with their repository.
 	Runtime map[string]RuntimePayload
-	Ended   map[string]bool
+	Ended   map[string]string
 
 	cfg *Config // its policies, read as each event is applied
 }
@@ -45,7 +46,7 @@ type LogState struct {
 func NewLogState(cfg *Config, mode string) *LogState {
 	return &LogState{Mode: mode, Tracks: map[string]*Track{}, Pending: map[string]Event{}, Items: map[string]*Item{}, Instructions: map[string]*Instruction{},
 		Cursors: map[string]time.Time{}, Polls: map[string]PollRecord{}, Cases: map[string]*Case{},
-		Coordinators: map[string]string{}, CI: map[string]CIRecord{}, Runtime: map[string]RuntimePayload{}, Ended: map[string]bool{}, cfg: cfg}
+		Coordinators: map[string]string{}, CI: map[string]CIRecord{}, Runtime: map[string]RuntimePayload{}, Ended: map[string]string{}, cfg: cfg}
 }
 
 // setItem changes a copy of the item and puts the copy in its place: a
@@ -421,7 +422,7 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 			}
 		}
 	case ActProvision:
-		t.Provisioned = true
+		t.Provisioned = a.Key
 	case ActStop:
 		t.Stopped = a.Reason
 		if taken { // its session is gone by the owner's policy, not a crash
