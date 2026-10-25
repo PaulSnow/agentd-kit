@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -89,7 +90,7 @@ func TestFeedDecisionsCarryTheReply(t *testing.T) {
 	writeQuestions(t, h, "s2", chooseColour)
 	h.ticks(3, 5*time.Minute)
 	got := feedPosts(h)
-	if len(got) != 1 || got[0][0] != "widgets" || !strings.HasPrefix(got[0][1], "s1 asks Q1") || !strings.HasSuffix(got[0][1], "Reply: s1 Q1 <answer>") {
+	if len(got) != 1 || got[0][0] != "widgets" || !strings.HasPrefix(got[0][1], "s1 asks Q1") || !strings.HasSuffix(got[0][1], "Reply: s1 Q1@"+decisionHash(h.sup.Tracks()["s1"].Decisions[0])+" <answer>") {
 		t.Fatalf("feed posts = %v, want s1's decision once with its reply", got)
 	}
 	if n := h.count(KindAction, ActEscalate, "s2"); n != 1 || len(h.runner.calls) != 2 {
@@ -128,10 +129,14 @@ func TestConsoleReplyWakesTheLoopAndAnswers(t *testing.T) {
 	if err := ConsoleReply(h.cfg, NewLogWriter(buf), fold(), h.clock.Now(), "elsewhere", "s1 Q1 b"); err == nil {
 		t.Fatal("a reply from another console was applied")
 	}
+	if err := ConsoleReply(h.cfg, NewLogWriter(buf), fold(), h.clock.Now(), "widgets", "s1 Q1@0123abcd b"); err == nil {
+		t.Fatal("a reply to the question as it was before was applied")
+	}
 	if err := ConsoleReply(h.cfg, NewLogWriter(buf), fold(), h.clock.Now(), "widgets", "s1 Q1 c"); err == nil {
 		t.Fatal("an answer that is no option was applied")
 	}
-	if err := ConsoleReply(h.cfg, NewLogWriter(buf), fold(), h.clock.Now(), "widgets", "s1 Q1 b"); err != nil {
+	asked := decisionHash(fold().Tracks["s1"].Decisions[0])
+	if err := ConsoleReply(h.cfg, NewLogWriter(buf), fold(), h.clock.Now(), "widgets", "s1 Q1@"+asked+" b"); err != nil {
 		t.Fatal(err)
 	}
 	start := h.clock.Now()
@@ -261,5 +266,101 @@ func TestFeedRetriesThenGivesUpAndShadowWould(t *testing.T) {
 	}
 	if would != 1 || len(s.runner.calls) != 0 {
 		t.Fatalf("shadow: would %d, posts %v; want one would and no post", would, s.runner.calls)
+	}
+}
+
+// What is there when a repository's feed begins is its baseline, posted
+// never: when the feed is turned on, when a repository is configured
+// later, and when the feed is turned on again after it was off. A line
+// whose post a crash cut short is not posted again after the restart.
+func TestFeedBaselinesEachBeginning(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.alive("s1", "waiting")
+	writeQuestions(t, h, "s1", strings.Replace(chooseColour, `"blocking":true`, `"blocking":false`, 1))
+	newItem(t, h, "gitlab/example-org/widgets#4", "gitlab/example-org/widgets", "Widgets wobble")
+	newItem(t, h, "gitlab/example-org/gadgets#1", "gitlab/example-org/gadgets", "Gadgets jam")
+	h.ticks(2, 5*time.Minute)
+	h.cfg.Policies.Feed.Enabled = true
+	h.ticks(2, 5*time.Minute)
+	if got := feedPosts(h); len(got) != 0 {
+		t.Fatalf("history was posted: %v", got)
+	}
+	// A repository configured later begins with its own baseline.
+	h.cfg.Repositories["gadgets"] = Repository{Forge: "gitlab", Host: "gitlab.example.com", Project: "example-org/gadgets"}
+	h.ticks(2, 5*time.Minute)
+	// Off, then on again: what came meanwhile is history too.
+	h.cfg.Policies.Feed.Enabled = false
+	h.ticks(2, 5*time.Minute)
+	newItem(t, h, "gitlab/example-org/widgets#5", "gitlab/example-org/widgets", "Widgets squeak")
+	h.ticks(1, 5*time.Minute)
+	h.cfg.Policies.Feed.Enabled = true
+	h.ticks(2, 5*time.Minute)
+	if got := feedPosts(h); len(got) != 0 {
+		t.Fatalf("history was posted: %v", got)
+	}
+	paused := 0
+	for _, e := range h.events() {
+		if e.Kind == KindFeed && e.Feed.Phase == FeedPaused {
+			paused++
+		}
+	}
+	if paused != 1 {
+		t.Fatalf("paused events = %d, want 1", paused)
+	}
+	// An intent with no outcome: agentd crashed mid-post.
+	newItem(t, h, "gitlab/example-org/widgets#6", "gitlab/example-org/widgets", "Widgets rattle")
+	if err := NewLogWriter(h.buf).Append(Event{V: EventVersion, Time: h.clock.Now(), Kind: KindFeed, Mode: ModeLive,
+		Feed: &FeedPayload{Phase: FeedIntent, Key: "item:gitlab/example-org/widgets#6", Repository: "widgets", Console: "widgets", Text: "New issue in widgets: Widgets rattle"}}); err != nil {
+		t.Fatal(err)
+	}
+	h.restart(false)
+	newItem(t, h, "gitlab/example-org/gadgets#2", "gitlab/example-org/gadgets", "Gadgets hum")
+	h.ticks(3, 5*time.Minute)
+	if len(h.runner.calls) != 1 || h.runner.calls[0][1] != "gadgets" || !strings.HasPrefix(h.runner.calls[0][4], "New issue in gadgets: Gadgets hum") {
+		t.Fatalf("posts = %v, want only the new gadgets item", h.runner.calls)
+	}
+}
+
+// A pass posts at most FeedPerPass lines; the rest follow in later passes,
+// each once, and none is longer than FeedTextLimit.
+func TestFeedPostsABurstOverPasses(t *testing.T) {
+	h := feedHarness(t, false)
+	h.ticks(1, 5*time.Minute)
+	for i := 0; i < FeedPerPass+5; i++ {
+		newItem(t, h, fmt.Sprintf("gitlab/example-org/widgets#%d", 100+i), "gitlab/example-org/widgets", strings.Repeat("wobble ", 400))
+	}
+	h.ticks(1, 5*time.Minute)
+	if n := len(h.runner.calls); n != FeedPerPass {
+		t.Fatalf("posts in one pass = %d, want %d", n, FeedPerPass)
+	}
+	h.ticks(3, 5*time.Minute)
+	if n := len(h.runner.calls); n != FeedPerPass+5 {
+		t.Fatalf("posts = %d, want %d", n, FeedPerPass+5)
+	}
+	for _, c := range h.runner.calls {
+		if len(c[4]) > FeedTextLimit+len("…") {
+			t.Fatalf("a line of %d bytes was posted", len(c[4]))
+		}
+	}
+}
+
+// A merge agentd made is one line, not two with its request's CI record
+// saying merged as well; a merge cut short is not said to be made.
+func TestFeedMergeLines(t *testing.T) {
+	h := feedHarness(t, false, "d")
+	key := ciKey("widgets", "!1")
+	h.sup.track("d").Merges = map[string]string{key: "c0ffee", ciKey("widgets", "!2"): "beef"}
+	h.sup.track("d").Merged = map[string]string{key: "c0ffee"}
+	h.sup.st.CI = map[string]CIRecord{
+		key:                    {CIPayload: CIPayload{Repository: "widgets", Ref: "!1", Head: "c0ffee", State: CIMerged}, Session: "d"},
+		ciKey("widgets", "!3"): {CIPayload: CIPayload{Repository: "widgets", Ref: "!3", Head: "f00d", State: CIMerged}, Session: "d"},
+	}
+	var got []string
+	for _, e := range h.sup.feedEntries() {
+		got = append(got, e.Text)
+	}
+	want := []string{"agentd merged !1 in widgets at " + shortHash("c0ffee") + ", d's delivery.", "!3 in widgets: CI merged on " + shortHash("f00d") + "."}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("lines = %q, want %q", got, want)
 	}
 }

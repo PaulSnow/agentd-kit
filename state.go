@@ -116,6 +116,9 @@ type Track struct {
 	// Merges: each request agentd merged, or would have, by repository
 	// and reference, to the head it merged; a request is merged once.
 	Merges map[string]string
+	// Merged: each request agentd did merge, its action taken and not
+	// cut short, by repository and request, to the head merged.
+	Merged map[string]string
 }
 
 // DeliveryRecord is one request a delivery opened, found, or was told of.
@@ -214,7 +217,7 @@ func (t *Track) clear() {
 func newTrack() *Track {
 	return &Track{Posted: map[string]bool{}, Delivered: map[string]string{}, Skipped: map[string]bool{}, Failures: map[string][]time.Time{},
 		Blocked: map[string]string{}, Filtered: map[string]bool{}, Usage: map[string]UsagePayload{},
-		Answers: map[string]AnswerRecord{}, Deadlines: map[string]DeadlineRecord{}, CIRaised: map[string]string{}, Merges: map[string]string{}}
+		Answers: map[string]AnswerRecord{}, Deadlines: map[string]DeadlineRecord{}, CIRaised: map[string]string{}, Merges: map[string]string{}, Merged: map[string]string{}}
 }
 
 // restartsInWindow counts restarts inside the backoff window.

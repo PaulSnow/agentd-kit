@@ -29,7 +29,8 @@ type FeedPolicy struct {
 
 // Feed phases.
 const (
-	FeedBaseline = "baseline" // the entries there when the feed began: never posted
+	FeedBaseline = "baseline" // the entries there when the feed began for its repositories: never posted
+	FeedPaused   = "paused"   // the feed was off: each repository begins again with a baseline
 	FeedIntent   = "intent"   // a post is about to be made
 	FeedPosted   = "posted"
 	FeedFailed   = "failed"
@@ -39,37 +40,53 @@ const (
 
 // FeedPayload is one step of a feed post: its entry's key, the repository
 // and console, and the text posted, or the confidential pattern it matched
-// in its place. A baseline names every key there when the feed began.
+// in its place. A baseline names the repositories it begins the feed for
+// and every key of theirs there then.
 type FeedPayload struct {
-	Phase      string   `json:"phase"`
-	Key        string   `json:"key,omitempty"`
-	Keys       []string `json:"keys,omitempty"`
-	Repository string   `json:"repository,omitempty"`
-	Console    string   `json:"console,omitempty"`
-	Text       string   `json:"text,omitempty"`
-	Withheld   int      `json:"withheld,omitempty"`
-	Error      string   `json:"error,omitempty"`
+	Phase        string   `json:"phase"`
+	Key          string   `json:"key,omitempty"`
+	Keys         []string `json:"keys,omitempty"`
+	Repositories []string `json:"repositories,omitempty"`
+	Repository   string   `json:"repository,omitempty"`
+	Console      string   `json:"console,omitempty"`
+	Text         string   `json:"text,omitempty"`
+	Withheld     int      `json:"withheld,omitempty"`
+	Error        string   `json:"error,omitempty"`
 }
 
-// FeedState is what the feed events fold to: whether the baseline was
-// taken, the keys posted or settled, and each key's failed tries.
+// FeedState is what the feed events fold to: the repositories the feed
+// has begun for since it was last off, the keys posted or settled, and
+// each key's failed tries.
 type FeedState struct {
-	Started  bool
+	Begun    map[string]bool
 	Fed      map[string]bool
 	Failures map[string][]time.Time
 }
+
+// FeedPerPass is how many lines one pass posts at most; the rest wait for
+// the next, so a burst of new items does not hold the console's command
+// for long.
+const FeedPerPass = 10
+
+// FeedTextLimit is how long a posted line may be, in bytes. A line is
+// screened whole before it is cut.
+const FeedTextLimit = 1000
 
 // applyFeed folds a feed event. An intent counts as posted, so a post a
 // crash of agentd cut short is never repeated; its failure undoes it.
 func (st *LogState) applyFeed(e Event) {
 	f := &st.Feed
 	if f.Fed == nil {
-		f.Fed, f.Failures = map[string]bool{}, map[string][]time.Time{}
+		f.Begun, f.Fed, f.Failures = map[string]bool{}, map[string]bool{}, map[string][]time.Time{}
 	}
 	p := e.Feed
 	switch p.Phase {
+	case FeedPaused:
+		f.Begun = map[string]bool{}
 	case FeedBaseline:
-		f.Started = true
+		for _, r := range p.Repositories {
+			f.Begun[r] = true
+		}
 		for _, k := range p.Keys {
 			f.Fed[k] = true
 		}
@@ -90,6 +107,7 @@ type feedEntry struct {
 // repositories, in a stable order.
 func (s *Supervisor) feedEntries() []feedEntry {
 	var out []feedEntry
+	merged := map[string]bool{} // the requests agentd merged, by key and head
 	add := func(repo, key, text string) {
 		if _, ok := s.cfg.Repositories[repo]; ok {
 			out = append(out, feedEntry{Key: key, Repository: repo, Text: text})
@@ -114,7 +132,9 @@ func (s *Supervisor) feedEntries() []feedEntry {
 			if keys := optionKeys(d); keys != "" {
 				text += " Options: " + keys + "."
 			}
-			text += fmt.Sprintf(" Reply: %s %s <answer>", name, d.ID)
+			// The reply names the decision as it was posted, so a late
+			// reply cannot answer a question reworded since.
+			text += fmt.Sprintf(" Reply: %s %s@%s <answer>", name, d.ID, decisionHash(d))
 			add(sess.Repository, "decision:"+name+":"+d.ID+":"+decisionHash(d), text)
 		}
 		for _, d := range t.Deliveries {
@@ -124,14 +144,16 @@ func (s *Supervisor) feedEntries() []feedEntry {
 			}
 			add(repo, "delivery:"+d.Delivered+":"+d.Ref, fmt.Sprintf("%s delivered %s to %s.", name, d.Ref, repo))
 		}
-		keys := make([]string, 0, len(t.Merges))
-		for k := range t.Merges {
+		// Only a merge made: one cut short may not have been.
+		keys := make([]string, 0, len(t.Merged))
+		for k := range t.Merged {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
 			repo, ref, _ := strings.Cut(k, " ")
-			add(repo, "merge:"+k+":"+t.Merges[k], fmt.Sprintf("agentd merged %s in %s at %s, %s's delivery.", ref, repo, shortHash(t.Merges[k]), name))
+			merged[k+" "+t.Merged[k]] = true
+			add(repo, "merge:"+k+":"+t.Merged[k], fmt.Sprintf("agentd merged %s in %s at %s, %s's delivery.", ref, repo, shortHash(t.Merged[k]), name))
 		}
 	}
 	keys := make([]string, 0, len(s.st.CI))
@@ -145,6 +167,9 @@ func (s *Supervisor) feedEntries() []feedEntry {
 		case CISuccess, CIFailed, CIMerged, CIClosed:
 		default:
 			continue // not settled
+		}
+		if r.State == CIMerged && merged[k+" "+r.Head] {
+			continue // its merge line says so
 		}
 		text := fmt.Sprintf("%s in %s: CI %s on %s.", r.Ref, r.Repository, r.State, shortHash(r.Head))
 		if r.State == CIFailed {
@@ -212,21 +237,35 @@ func (c *Config) RepositoryConsole(repo string) string {
 	return repo
 }
 
-// feedConsoles posts each line not yet posted, in a worker, one at a time.
-// The first pass with the feed on records the lines already there as its
-// baseline, and posts none of them.
+// feedConsoles posts each line not yet posted, in a worker, one at a time,
+// at most FeedPerPass a pass. The first pass that feeds a repository,
+// whether the feed was just turned on or the repository just configured,
+// records its lines already there as its baseline, and posts none of
+// them; so does the first after the feed was off, which is recorded once.
 func (s *Supervisor) feedConsoles(now time.Time) {
+	f := s.st.Feed
 	if !s.cfg.Policies.Feed.Enabled {
+		if len(f.Begun) > 0 {
+			s.emit("", Event{Kind: KindFeed, Feed: &FeedPayload{Phase: FeedPaused}})
+		}
 		return
 	}
 	entries := s.feedEntries()
-	f := s.st.Feed
-	if !f.Started {
-		keys := []string{}
-		for _, e := range entries {
-			keys = append(keys, e.Key)
+	var begin []string
+	for repo := range s.cfg.Repositories {
+		if !f.Begun[repo] {
+			begin = append(begin, repo)
 		}
-		s.emit("", Event{Kind: KindFeed, Feed: &FeedPayload{Phase: FeedBaseline, Keys: keys}})
+	}
+	sort.Strings(begin)
+	if len(begin) > 0 {
+		p := &FeedPayload{Phase: FeedBaseline, Repositories: begin, Keys: []string{}}
+		for _, e := range entries {
+			if !f.Begun[e.Repository] && !f.Fed[e.Key] {
+				p.Keys = append(p.Keys, e.Key)
+			}
+		}
+		s.emit("", Event{Kind: KindFeed, Feed: p})
 		return
 	}
 	var due []feedEntry
@@ -235,7 +274,9 @@ func (s *Supervisor) feedConsoles(now time.Time) {
 		if f.Fed[e.Key] || n > 0 && now.Sub(f.Failures[e.Key][n-1]) < backoff(n, s.cfg.Policies.Restart) {
 			continue
 		}
-		due = append(due, e)
+		if due = append(due, e); len(due) == FeedPerPass {
+			break
+		}
 	}
 	if len(due) == 0 {
 		return
@@ -264,6 +305,7 @@ func (s *Supervisor) feedPost(e feedEntry, failed int) {
 	if i := s.confidentialMatch(e.Text); i > 0 {
 		p.Text, p.Withheld = fmt.Sprintf("Something new in %s; the details were withheld because they matched a confidential pattern. Look at the page.", e.Repository), i
 	}
+	p.Text = cutUTF8(p.Text, FeedTextLimit)
 	if s.shadow {
 		p.Phase = FeedWould
 		s.emit("", Event{Kind: KindFeed, Feed: &p})
@@ -320,6 +362,7 @@ func ConsoleReply(cfg *Config, log *Log, st *LogState, now time.Time, console, r
 		return errors.New(`reply "SESSION ID ANSWER" or "seen ID..."`)
 	}
 	session, id := f[0], f[1]
+	id, asked, versioned := strings.Cut(id, "@")
 	sess, ok := cfg.Sessions[session]
 	if !ok {
 		return fmt.Errorf("no session %q", session)
@@ -334,6 +377,9 @@ func ConsoleReply(cfg *Config, log *Log, st *LogState, now time.Time, console, r
 	d, ok := t.decision(id)
 	if !ok {
 		return fmt.Errorf("%s has no open decision %q", session, id)
+	}
+	if versioned && asked != decisionHash(d) {
+		return fmt.Errorf("%s's %s changed since that line was posted; reply to its new line", session, id)
 	}
 	// The answer is the rest of the reply as typed.
 	rest := strings.TrimSpace(reply)

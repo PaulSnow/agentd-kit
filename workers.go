@@ -174,6 +174,7 @@ func (t *Track) clone() *Track {
 	c.CIFixes = append([]CIFixRecord(nil), t.CIFixes...)
 	c.CIRaised = copyMap(t.CIRaised)
 	c.Merges = copyMap(t.Merges)
+	c.Merged = copyMap(t.Merged)
 	if t.WakeBase != nil {
 		b := *t.WakeBase
 		c.WakeBase = &b

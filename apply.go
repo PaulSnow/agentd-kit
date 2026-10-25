@@ -386,6 +386,12 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 			t.Merges = map[string]string{}
 		}
 		t.Merges[ciKey(a.Repository, a.Ref)] = a.Head
+		if taken {
+			if t.Merged == nil {
+				t.Merged = map[string]string{}
+			}
+			t.Merged[ciKey(a.Repository, a.Ref)] = a.Head
+		}
 	case ActRaise:
 		if counted && a.Raised != nil {
 			if t.CIRaised == nil {

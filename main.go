@@ -93,7 +93,7 @@ func usage() {
   agentd mark-delivered [--config PATH] [--log PATH] SESSION WORKTREE REF
   agentd clear [--config PATH] [--log PATH] SESSION
   agentd coordinator [--config PATH] [--log PATH] release REPOSITORY
-  agentd console [--config PATH] [--log PATH] reply CONSOLE TEXT...
+  agentd console [--config PATH] [--log PATH] [--shadow] reply CONSOLE TEXT...
   agentd inventory [--config PATH]
   agentd report [--config PATH] [--log PATH] [--shadow] [--host NAME] --out PATH
   agentd page [--config PATH] [--log PATH] [--shadow]
@@ -317,12 +317,18 @@ func coordinatorCmd(args []string) error {
 }
 
 // consoleCmd is the command-line face of ConsoleReply. The decisions are
-// read as a live run holds them, as the page reads them.
+// read as the live run holds them, or with --shadow the shadow run, as the
+// page reads them.
 func consoleCmd(args []string) error {
 	fs := flag.NewFlagSet("console", flag.ContinueOnError)
+	shadow := fs.Bool("shadow", false, "answer the decisions the shadow run holds")
 	cfg, _, err := loadConfigFlag(fs, args)
 	if err != nil {
 		return err
+	}
+	mode := ModeLive
+	if *shadow {
+		mode = ModeShadow
 	}
 	rest := fs.Args()
 	if len(rest) < 3 || rest[0] != "reply" {
@@ -333,7 +339,7 @@ func consoleCmd(args []string) error {
 		return err
 	}
 	defer log.Close()
-	st := NewLogState(cfg, ModeLive).Fold(events)
+	st := NewLogState(cfg, mode).Fold(events)
 	return ConsoleReply(cfg, log, st, time.Now(), rest[1], strings.Join(rest[2:], " "))
 }
 
