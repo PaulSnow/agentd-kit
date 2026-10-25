@@ -167,6 +167,11 @@ func (t *Track) applyTurn(tn *TurnPayload) {
 		t.TurnLines[tn.Transcript] = tn.Line
 	}
 	t.TurnCount++
+	// A turn ended since the last nudge answered it, however soon after:
+	// the idle clock and the nudge count start again from its end.
+	if tn.Role == TurnSummary && t.Nudges > 0 && tn.At.After(t.LastNudge) {
+		t.Nudges, t.HashSince = 0, tn.At
+	}
 	r := TurnRecord{Role: tn.Role, Text: tn.Text, Withheld: tn.Withheld > 0, At: tn.At}
 	if len(t.Turns) == turnsKept {
 		t.Turns = t.Turns[1:len(t.Turns):len(t.Turns)]

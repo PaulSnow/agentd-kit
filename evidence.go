@@ -29,6 +29,7 @@ type Evidence struct {
 	PanePath    string     // where the live pane runs, #{pane_current_path}
 	Dialog      string     // the dialog pattern the visible screen matches, or ""
 	DialogShape bool       // the visible screen has a dialog's shape, which alone may be declined
+	Prompt      bool       // the screen ends at Claude Code's input prompt, with no turn running
 	Status      StatusEvidence
 	// StatusQuestions is the hash of STATUS.md's own Questions section;
 	// Status.Questions is what still waits on the owner once the answers
@@ -235,6 +236,48 @@ func dialogShape(screen string) bool {
 			if next++; next > 2 && cursor {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// inputPrompt is Claude Code's input prompt, in its box or not, empty or
+// showing its placeholder suggestion: text typed at it, a draft or a line
+// whose Enter did not take, is not idle. promptRunning is the line a
+// running turn shows.
+var (
+	inputPrompt   = regexp.MustCompile(`^[>❯›](\s+Try ".*)?$`)
+	promptRunning = regexp.MustCompile(`(?i)esc to interrupt`)
+)
+
+// promptLines is how far from the screen's last line the prompt may be:
+// the box's border and the mode line below it. A running turn's line is
+// looked for promptAbove lines further up, where it shows above the box,
+// so session output quoting it higher up does not hide the prompt.
+const (
+	promptLines = 6
+	promptAbove = 4
+)
+
+// idlePrompt says whether the screen ends at the input prompt with no
+// turn running: a prompt line among its last few lines, and no running
+// turn's line near it. A quoted prompt higher up, in the
+// scrollback, is not the prompt.
+func idlePrompt(screen string) bool {
+	var lines []string
+	for _, l := range strings.Split(screen, "\n") {
+		if l = strings.Trim(l, " \t│┃|"); l != "" {
+			lines = append(lines, l)
+		}
+	}
+	for i := len(lines) - 1; i >= 0 && i >= len(lines)-promptLines-promptAbove; i-- {
+		if promptRunning.MatchString(lines[i]) {
+			return false
+		}
+	}
+	for i := len(lines) - 1; i >= 0 && i >= len(lines)-promptLines; i-- {
+		if inputPrompt.MatchString(lines[i]) && !dialogOption.MatchString(strings.TrimLeft(lines[i], ">❯› ")) {
+			return true
 		}
 	}
 	return false

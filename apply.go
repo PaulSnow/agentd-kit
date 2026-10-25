@@ -430,6 +430,12 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 		}
 	case ActNudge:
 		t.Nudges++
+		if a.StatusHash != "" {
+			if a.StatusHash != t.ContinueStatus {
+				t.Continues, t.ContinueStatus = 0, a.StatusHash
+			}
+			t.Continues++
+		}
 		t.NudgeCount += n
 		t.LastNudge = at
 		if a.PaneHash != "" { // the screen after the nudge's echo
@@ -516,6 +522,7 @@ func (t *Track) launched(transcript string, at time.Time) {
 	// A new Claude can draw the same trust prompt, the same screen: it
 	// has not had the keys.
 	t.Launched, t.TrustHash = at, ""
+	t.Continues, t.ContinueStatus = 0, ""
 	if transcript != "" {
 		t.Transcript, t.Measured = transcript, ""
 	}

@@ -40,8 +40,14 @@ type Track struct {
 	Clears    int         // owner clears applied
 	Nudges    int         // nudges in the current idle episode
 	LastNudge time.Time
-	Limited   bool
-	TrustHash string // the screen hash the trust keys were last sent for
+	// Continues counts the continue nudges in a row since the launch that
+	// handed the same facts, ContinueStatus their hash: a session that
+	// ends its turn again and again with STATUS.md's item, state and next
+	// steps unchanged is not continued past nudge.max.
+	Continues      int
+	ContinueStatus string
+	Limited        bool
+	TrustHash      string // the screen hash the trust keys were last sent for
 	// NotClaudeSince is when the pane was first seen running a command
 	// that is not Claude, or zero while it runs Claude.
 	NotClaudeSince time.Time
@@ -265,7 +271,8 @@ func backoff(n int, p RestartPolicy) time.Duration {
 // noteHash records the pane hash and decides whether a change is progress.
 // After a nudge, a change is the nudge's echo rather than progress when it
 // comes within the settle time, or when the transcript shows no turn since
-// the nudge; an echo keeps the idle clock running. Any other change restarts
+// the nudge; an echo keeps the idle clock running. A turn the session ended
+// since the nudge answers it, however soon (applyTurn). Any other change restarts
 // the clock and the nudge count.
 func (t *Track) noteHash(hash string, now time.Time, p NudgePolicy, tr TranscriptEvidence) {
 	if !t.Observed {
@@ -286,6 +293,28 @@ func (t *Track) noteHash(hash string, now time.Time, p NudgePolicy, tr Transcrip
 	}
 	t.HashSince = now
 	t.Nudges = 0
+}
+
+// lastTurn is the session's latest folded turn, or none.
+func (t *Track) lastTurn() TurnRecord {
+	if len(t.Turns) == 0 {
+		return TurnRecord{}
+	}
+	return t.Turns[len(t.Turns)-1]
+}
+
+// turnEnded says whether the session ended its turn and waits at the
+// prompt: its last folded turn is a summary, made since it was last
+// launched (a transcript before it is another Claude's), the transcript's
+// last line, when read, ends a turn, the screen shows the idle prompt, and
+// it has a STATUS.md to go on from. Done, Questions and blocking decisions
+// are judged before it is asked.
+func (t *Track) turnEnded(ev Evidence) bool {
+	last := t.lastTurn()
+	if last.Role != TurnSummary || !last.At.After(t.Launched) || !ev.Prompt || !ev.Status.Exists {
+		return false
+	}
+	return !ev.Transcript.Found || ev.Transcript.Role == "assistant" && ev.Transcript.StopReason == "end_turn"
 }
 
 // Classify derives the state from evidence and memory. It changes nothing
@@ -325,6 +354,9 @@ func Classify(t *Track, ev Evidence, pol Policies, now time.Time) (State, string
 		return Starting, "first observation"
 	}
 	unchanged := now.Sub(t.HashSince)
+	if pol.Nudge.Enabled && t.turnEnded(ev) {
+		return Idle, "turn ended at the prompt and STATUS.md is not DONE"
+	}
 	if pol.Nudge.Enabled && unchanged >= pol.Nudge.Stall.Duration {
 		if ev.Transcript.Found && now.Sub(ev.Transcript.At) < pol.Nudge.Stall.Duration {
 			return Working, fmt.Sprintf("screen unchanged for %s but the transcript moved %s ago", unchanged.Round(time.Minute), now.Sub(ev.Transcript.At).Round(time.Minute))
