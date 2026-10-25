@@ -274,17 +274,28 @@ func (c *Config) checkPolicy(name string, repo *Repository, errs *[]error) {
 // repo, as cases name it: policies.rounds, its max the owner's policy's
 // when it sets one, lowered by the repository's own files.
 func (c *Config) roundsFor(st *LogState, repo string) RoundsPolicy {
+	// Repositories that share a project share its cases: the lowest of
+	// their maxes holds.
 	p := c.Policies.Rounds
-	for name, r := range c.Repositories {
+	lowest := 0
+	for _, name := range sortedKeys(c.Repositories) {
+		r := c.Repositories[name]
 		if repoKey(r.Forge, r.Project) != repo {
 			continue
 		}
+		m := c.Policies.Rounds.Max
 		if r.Policy.Review.Rounds.Max > 0 {
-			p.Max = r.Policy.Review.Rounds.Max
+			m = r.Policy.Review.Rounds.Max
 		}
-		if eff, _ := effectivePolicy(c, st, name); eff.Review.Rounds.Max > 0 && eff.Review.Rounds.Max < p.Max {
-			p.Max = eff.Review.Rounds.Max
+		if eff, _ := effectivePolicy(c, st, name); eff.Review.Rounds.Max > 0 && eff.Review.Rounds.Max < m {
+			m = eff.Review.Rounds.Max
 		}
+		if lowest == 0 || m < lowest {
+			lowest = m
+		}
+	}
+	if lowest > 0 {
+		p.Max = lowest
 	}
 	return p
 }
@@ -393,7 +404,7 @@ func narrowKey(eff *RepoPolicy, key string, raw json.RawMessage) bool {
 	var n int64
 	var m Matches
 	subset := func(have *[]string) bool {
-		if strictJSON(raw, &strs) != nil || !isSubset(strs, *have) {
+		if strictJSON(raw, &strs) != nil || !isSubset(strs, *have) || len(strs) == 0 && key == "sessions.models" {
 			return false
 		}
 		*have = strs
@@ -515,8 +526,10 @@ func narrowKey(eff *RepoPolicy, key string, raw json.RawMessage) bool {
 	case "sessions.accounts":
 		return subset(&eff.Sessions.Accounts)
 	case "sessions.models":
+		// No list to narrow is any model, and an empty one would read
+		// the same.
 		if len(eff.Sessions.Models) == 0 {
-			return false // no list to narrow: any model the owner allows is all of them
+			return false
 		}
 		return subset(&eff.Sessions.Models)
 	case "sessions.fallback":
@@ -630,8 +643,9 @@ func effectivePolicy(cfg *Config, st *LogState, repo string) (RepoPolicy, []Poli
 		return eff, nil
 	}
 	var files []PolicyPayload
+	targets := eff.Merge.Targets
 	for _, k := range sortedKeys(st.Policies) {
-		if f := st.Policies[k]; f.Repository == repo {
+		if f := st.Policies[k]; f.Repository == repo && contains(targets, f.Target) {
 			eff = narrowBy(eff, f)
 			files = append(files, f)
 		}
@@ -715,7 +729,9 @@ func (s *Supervisor) notePolicy(name string, t *Track, repo, target, tip string,
 			}
 		}
 	}
-	if prev, ok := s.st.Policies[policyKey(repo, target)]; !ok || prev.Hash != p.Hash {
+	// A file is screened at every read, so a pattern changed since lets
+	// it be read, or withholds it, at once.
+	if prev, ok := s.st.Policies[policyKey(repo, target)]; !ok || prev.Hash != p.Hash || (prev.Withheld > 0) != (p.Withheld > 0) {
 		if s.emit("", Event{Kind: KindPolicy, Mode: ModeShared, Policy: &p}); s.halt != nil {
 			return effectiveFor(s.cfg, s.st, repo, target)
 		}
@@ -724,8 +740,8 @@ func (s *Supervisor) notePolicy(name string, t *Track, repo, target, tip string,
 			s.escalate(name, "policy:"+repo+":"+target+":"+hash, fmt.Sprintf("%s's own %s on %s at %s matches confidential pattern %d, so agentd cannot read it, and merges into %s are off until it changes. Change the file, or the patterns.",
 				repo, MergePolicyFile, target, shortHash(tip), p.Withheld, target), t, s.clock.Now())
 		case len(p.Refused) > 0:
-			s.escalate(name, "policy:"+repo+":"+target+":"+hash, fmt.Sprintf("%s's own %s on %s at %s would widen your policy for it, so these keys are refused: %s. "+
-				"A repository's file may only narrow the policy in your configuration; the keys that narrow it apply. Change the file, or your configuration.",
+			s.escalate(name, "policy:"+repo+":"+target+":"+hash, fmt.Sprintf("%s's own %s on %s at %s would widen your policy for it, or names keys that are yours alone, so these keys are refused: %s. "+
+				"A repository's file may only narrow the policy in your configuration, and never delivery.allow; the keys that narrow it apply. Change the file, or your configuration.",
 				repo, MergePolicyFile, target, shortHash(tip), strings.Join(p.Refused, ", ")), t, s.clock.Now())
 		}
 	}

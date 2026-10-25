@@ -45,6 +45,11 @@ func TestMergeRefusedByPolicy(t *testing.T) {
 			if s := h.mergeSkips(); len(h.forge.merges) != 0 || len(s) != 1 || !strings.Contains(s[0], c.want) {
 				t.Fatalf("merges = %+v, skips %q", h.forge.merges, s)
 			}
+			for _, call := range api.callList() {
+				if name == "target" && strings.Contains(call, "policy.json") {
+					t.Fatalf("read the file of a target outside the policy: %s", call)
+				}
+			}
 		})
 	}
 	// With the approval given, it merges.
@@ -394,6 +399,9 @@ func TestRepositoryPatternsAndRounds(t *testing.T) {
 	if got := h.sup.withheld("a sekrit-12 b"); strings.Contains(got, "withheld") {
 		t.Fatalf("withheld before the file: %q", got)
 	}
+	ww := h.cfg.Repositories["widgets"]
+	ww.Policy.Merge.Targets = []string{"main"}
+	h.cfg.Repositories["widgets"] = ww
 	h.sup.st.applyPolicy(Event{Policy: &PolicyPayload{Repository: "widgets", Target: "main", Tip: "t", File: json.RawMessage(`{"confidential_patterns":["sekrit-[0-9]+"],"review":{"rounds":{"max":2}}}`), Applied: []string{"confidential_patterns", "review.rounds"}}})
 	if got := h.sup.withheld("a sekrit-12 b"); !strings.Contains(got, "withheld") {
 		t.Fatalf("the file's pattern: %q", got)
@@ -448,6 +456,14 @@ func TestPolicyFileWithheld(t *testing.T) {
 	if n := h.count(KindAction, ActEscalate, ""); n != 1 {
 		t.Fatalf("escalations = %d", n)
 	}
+	// The pattern removed, the same file is read at the next check.
+	h.cfg.ConfidentialPatterns = nil
+	h.restart(false)
+	h.sup.api = api
+	h.ticks(6, 5*time.Minute)
+	if ps := h.policyEvents(); len(h.forge.merges) != 1 || len(ps) != 2 || ps[1].Withheld != 0 {
+		t.Fatalf("after the pattern went: merges %+v, policy events %+v", h.forge.merges, ps)
+	}
 
 	h, api = mergeHarness(t)
 	api.set(func() {
@@ -459,9 +475,10 @@ func TestPolicyFileWithheld(t *testing.T) {
 	}
 }
 
-// Requests into two targets each read their own target's file, once per
-// file: no event for each round, and one target's file does not hold the
-// other's merges.
+// Each target's file is recorded once per file, and a merge reads its own
+// target's file alone: release's file does not hold main's merges, while
+// what sessions read is narrowed by both. A target outside the owner's
+// targets is not read at all.
 func TestPolicyFilePerTarget(t *testing.T) {
 	h, api := mergeHarness(t)
 	setMerge(t, h, func(m *MergeRules) { m.Targets = []string{"main", "release"} })

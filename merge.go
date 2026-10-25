@@ -194,6 +194,12 @@ func (s *Supervisor) mergeRequest(name string, t *Track, w ciWatched, r CIRecord
 		skip("held", v.held)
 		return
 	}
+	// A target outside the owner's is not merged into, and its file is
+	// not read: a session could point its request at a branch it writes.
+	if owner := s.cfg.Repositories[w.Repository].Policy.Merge; !contains(owner.Targets, v.target) {
+		skip("target", fmt.Sprintf("its target %s is not one the policy merges into: %s", v.target, strings.Join(owner.Targets, ", ")))
+		return
+	}
 	tip, err := v.tip(v.target)
 	if err != nil {
 		unknown(err)
