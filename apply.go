@@ -522,6 +522,7 @@ func (t *Track) launched(transcript string, at time.Time) {
 	// A new Claude can draw the same trust prompt, the same screen: it
 	// has not had the keys.
 	t.Launched, t.TrustHash = at, ""
+	t.Continues, t.ContinueStatus = 0, ""
 	if transcript != "" {
 		t.Transcript, t.Measured = transcript, ""
 	}

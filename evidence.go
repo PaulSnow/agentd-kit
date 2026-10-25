@@ -243,9 +243,11 @@ func dialogShape(screen string) bool {
 }
 
 // inputPrompt is Claude Code's input prompt, in its box or not, empty or
-// showing a suggestion; promptRunning is the line a running turn shows.
+// showing its placeholder suggestion: text typed at it, a draft or a line
+// whose Enter did not take, is not idle. promptRunning is the line a
+// running turn shows.
 var (
-	inputPrompt   = regexp.MustCompile(`^[>❯›](\s.*)?$`)
+	inputPrompt   = regexp.MustCompile(`^[>❯›](\s+Try ".*)?$`)
 	promptRunning = regexp.MustCompile(`(?i)esc to interrupt`)
 )
 

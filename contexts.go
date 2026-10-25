@@ -404,16 +404,18 @@ func (s *Supervisor) rotationPoint(sess Session, t *Track, ev Evidence, now time
 
 // rotationPending says whether the session will be rotated at a
 // checkpoint it has reached, once its grace has passed: it is over the
-// threshold and has a merge since its launch it was not rotated at. A turn
-// it ended there is not continued; the rotation goes on from it instead.
-func (s *Supervisor) rotationPending(sess Session, t *Track) bool {
+// threshold and has a merge since its launch it was not rotated at, and
+// the rotation has neither given up nor been refused for the account. A
+// turn it ended there is not continued; the rotation goes on from it.
+func (s *Supervisor) rotationPending(name string, sess Session, t *Track) bool {
 	pol := s.cfg.Policies.Context
 	u, ok := t.current()
 	if !pol.Enabled || !ok || u.Context <= pol.Threshold || u.Guessed && !s.shadow || sess.Role == RoleCoordinator {
 		return false
 	}
 	cp := t.Checkpoint
-	return cp.SHA != "" && !cp.Baseline && cp.At.After(t.Launched) && t.RotatedFor != cp.SHA
+	return cp.SHA != "" && !cp.Baseline && cp.At.After(t.Launched) && t.RotatedFor != cp.SHA &&
+		!s.failed(t, "rotate:"+name+":"+cp.SHA) && !t.Skipped["account:"+name]
 }
 
 // overBudget says why the session must stop, or "": the stop time has come,
@@ -596,6 +598,11 @@ func (s *Supervisor) packFactsWith(name string, sess Session, t *Track, why stri
 	if cp := t.Checkpoint; cp.SHA != "" {
 		f.LastMerge = cutUTF8(shortHash(cp.SHA)+" "+cp.Subject, progressCell)
 	}
+	if why == "continue" {
+		// The session keeps its context: it has its case and tools
+		// already, and needs only where its progress stands.
+		return encodeFacts(f)
+	}
 	if sess.Role == RoleCoordinator {
 		f.Repository, f.Pack = sess.Repository, sess.Workdir+"/"+PackFile
 		if servesTools(s.cfg, sess) && s.passesMCP() {
@@ -611,6 +618,11 @@ func (s *Supervisor) packFactsWith(name string, sess Session, t *Track, why stri
 		}
 		f.Rounds = roundsFact(s.st.Cases[id])
 	}
+	return encodeFacts(f)
+}
+
+// encodeFacts is a facts document as compact JSON, without HTML escapes.
+func encodeFacts(f restartFacts) []byte {
 	var b strings.Builder
 	enc := json.NewEncoder(&b)
 	enc.SetEscapeHTML(false)

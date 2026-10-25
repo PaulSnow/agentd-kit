@@ -40,9 +40,10 @@ type Track struct {
 	Clears    int         // owner clears applied
 	Nudges    int         // nudges in the current idle episode
 	LastNudge time.Time
-	// Continues counts the continue nudges in a row given while STATUS.md
-	// read ContinueStatus, its hash: a session that ends its turn again
-	// and again without changing it is not continued past nudge.max.
+	// Continues counts the continue nudges in a row since the launch that
+	// handed the same facts, ContinueStatus their hash: a session that
+	// ends its turn again and again with STATUS.md's item, state and next
+	// steps unchanged is not continued past nudge.max.
 	Continues      int
 	ContinueStatus string
 	Limited        bool
@@ -302,11 +303,14 @@ func (t *Track) lastTurn() TurnRecord {
 }
 
 // turnEnded says whether the session ended its turn and waits at the
-// prompt: its last folded turn is a summary, the transcript's last line,
-// when read, ends a turn, and the screen shows the idle prompt. Done,
-// Questions and blocking decisions are judged before it is asked.
+// prompt: its last folded turn is a summary, made since it was last
+// launched (a transcript before it is another Claude's), the transcript's
+// last line, when read, ends a turn, the screen shows the idle prompt, and
+// it has a STATUS.md to go on from. Done, Questions and blocking decisions
+// are judged before it is asked.
 func (t *Track) turnEnded(ev Evidence) bool {
-	if t.lastTurn().Role != TurnSummary || !ev.Prompt {
+	last := t.lastTurn()
+	if last.Role != TurnSummary || !last.At.After(t.Launched) || !ev.Prompt || !ev.Status.Exists {
 		return false
 	}
 	return !ev.Transcript.Found || ev.Transcript.Role == "assistant" && ev.Transcript.StopReason == "end_turn"
@@ -349,7 +353,7 @@ func Classify(t *Track, ev Evidence, pol Policies, now time.Time) (State, string
 		return Starting, "first observation"
 	}
 	unchanged := now.Sub(t.HashSince)
-	if t.turnEnded(ev) {
+	if pol.Nudge.Enabled && t.turnEnded(ev) {
 		return Idle, "turn ended at the prompt and STATUS.md is not DONE"
 	}
 	if pol.Nudge.Enabled && unchanged >= pol.Nudge.Stall.Duration {

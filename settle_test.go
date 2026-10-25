@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -59,11 +60,28 @@ func TestScreenShowsIdlePrompt(t *testing.T) {
 		{"turn running", runningScreen, false},
 		{"dialog cursor", "Do you want to proceed?\n❯ 1. Yes\n  2. No\n", false},
 		{"quoted prompt high in the scrollback", "> Build the widget\n" + strings.Repeat("output line\n", 10), false},
+		{"text typed at the prompt", "done.\n\n│ > a draft the owner typed │\n", false},
 		{"nothing", "", false},
 	} {
 		if got := idlePrompt(tc.screen); got != tc.want {
 			t.Errorf("%s: idlePrompt = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// A summary from before the session was last launched is another Claude's
+// turn, not this one's.
+func TestTurnEndedOnlySinceLaunch(t *testing.T) {
+	at := time.Date(2026, 10, 22, 1, 0, 0, 0, time.UTC)
+	ev := Evidence{Prompt: true, Status: StatusEvidence{Exists: true}}
+	tr := newTrack()
+	tr.applyTurn(&TurnPayload{Transcript: "t1", Line: 1, Role: TurnSummary, Text: "Done here.", At: at})
+	if !tr.turnEnded(ev) {
+		t.Fatal("a summary at the prompt is no ended turn")
+	}
+	tr.launched("t2", at.Add(time.Minute))
+	if tr.turnEnded(ev) {
+		t.Fatal("the previous Claude's summary ended the new one's turn")
 	}
 }
 
@@ -106,6 +124,11 @@ func TestEndedTurnContinuedAfterSettle(t *testing.T) {
 	if n := len(h.typed("s1")); n != 1 {
 		t.Fatalf("typed %d lines for one ended turn", n)
 	}
+	h.ticks(20, time.Minute)
+	if typed := h.typed("s1"); len(typed) != 2 || typed[1] != h.cfg.Policies.Nudge.Message {
+		t.Fatalf("typed %v, want the stall nudge once the stall has passed", typed)
+	}
+	h.tmux.calls = nil
 
 	// It worked, wrote STATUS.md, and ended another turn.
 	h.tmux.panes["s1"] = runningScreen
@@ -115,12 +138,12 @@ func TestEndedTurnContinuedAfterSettle(t *testing.T) {
 	h.transcriptOf("s1", "t1", promptLine("u3", typed[0], later)+summaryLine("u4", "m2", "Merged #22.", later, 100))
 	h.tmux.panes["s1"] = idleScreen + "\n"
 	h.ticks(8, time.Minute)
-	if n := len(h.typed("s1")); n != 2 {
+	if n := len(h.typed("s1")); n != 1 {
 		t.Fatalf("typed %d lines, want a second continue for the second ended turn", n)
 	}
 	// Replayed, the continues stand.
 	h.restart(false)
-	if tr := h.sup.Tracks()["s1"]; tr.Continues != 1 || tr.ContinueStatus != ParseStatus(moreWork).Hash || tr.NudgeCount != 2 {
+	if tr := h.sup.Tracks()["s1"]; tr.Continues != 1 || tr.ContinueStatus == "" || tr.NudgeCount != 3 {
 		t.Fatalf("after replay: continues %d for %q, nudges %d", tr.Continues, tr.ContinueStatus, tr.NudgeCount)
 	}
 }
@@ -140,8 +163,69 @@ func TestEndedTurnContinuedAtMostMax(t *testing.T) {
 	if n := len(h.typed("s1")); n != 3 {
 		t.Fatalf("typed %d lines, want nudge.max = 3", n)
 	}
-	if len(h.runner.calls) != 1 || !strings.Contains(h.runner.calls[0][4], "STATUS.md unchanged") {
+	if len(h.runner.calls) != 1 || !strings.Contains(h.runner.calls[0][4], "progress unchanged") {
 		t.Fatalf("escalations = %v", h.runner.calls)
+	}
+	// Then it is left to the stall, like a turn that has not ended.
+	h.ticks(40, time.Minute)
+	if typed := h.typed("s1"); len(typed) != 4 || typed[3] != h.cfg.Policies.Nudge.Message {
+		t.Fatalf("typed %d lines, want the stall nudge after the continues", len(typed))
+	}
+}
+
+// No continue goes when nudging is off or nudge.max is 0, nor to a session
+// with no STATUS.md to go on from, nor in shadow mode, which records the
+// continue it would type.
+func TestEndedTurnNotContinuedWhenNudgesOffOrNoStatus(t *testing.T) {
+	for _, tc := range []string{"disabled", "max 0", "no status", "shadow"} {
+		t.Run(tc, func(t *testing.T) {
+			h := endedHarness(t, idleScreen)
+			switch tc {
+			case "disabled":
+				h.cfg.Policies.Nudge.Enabled = false
+			case "max 0":
+				h.cfg.Policies.Nudge.Max = 0
+			case "no status":
+				if err := os.Remove(filepath.Join(h.dir, "s1", "STATUS.md")); err != nil {
+					t.Fatal(err)
+				}
+			case "shadow":
+				h.restart(true)
+			}
+			at := h.clock.Now()
+			h.transcriptOf("s1", "t1", promptLine("u1", "Build the widget.", at)+summaryLine("u2", "m1", "Merged #21.", at, 100))
+			h.ticks(20, time.Minute)
+			if typed := h.typed("s1"); len(typed) != 0 {
+				t.Fatalf("typed %v", typed)
+			}
+			want := 0
+			if tc == "shadow" {
+				want = 1
+			}
+			if n := h.count(KindWould, ActNudge, "s1"); n != want {
+				t.Fatalf("would-be nudges = %d, want %d", n, want)
+			}
+			if tc == "disabled" && h.state("s1") != Working {
+				t.Fatalf("state = %s with nudging off", h.state("s1"))
+			}
+		})
+	}
+}
+
+// Facts that match a confidential pattern are not typed, and the log
+// never holds the facts, only the message and their hash.
+func TestContinueLineScreened(t *testing.T) {
+	h := endedHarness(t, idleScreen)
+	h.cfg.ConfidentialPatterns = []string{`#20 poll`}
+	h.restart(false)
+	at := h.clock.Now()
+	h.transcriptOf("s1", "t1", promptLine("u1", "Build the widget.", at)+summaryLine("u2", "m1", "Merged #21.", at, 100))
+	h.ticks(8, time.Minute)
+	if typed := h.typed("s1"); len(typed) != 1 || typed[0] != h.cfg.Policies.Nudge.ContinueMessage {
+		t.Fatalf("typed %v, want the message alone", typed)
+	}
+	if strings.Contains(h.buf.String(), "#20 poll") {
+		t.Fatal("the log holds the confidential facts")
 	}
 }
 
@@ -175,11 +259,25 @@ func TestEndedTurnNotContinuedWhenFinishedOrBlocked(t *testing.T) {
 	}
 }
 
-// A turn still running is working, and is not nudged before the stall.
+// A turn still running is working, and is not nudged before the stall:
+// one after a prompt, and one whose screen runs a turn although the last
+// folded turn is a summary.
 func TestRunningTurnNotNudgedBeforeStall(t *testing.T) {
+	for _, tc := range []string{"prompt last", "summary last"} {
+		t.Run(tc, func(t *testing.T) {
+			runningTurn(t, tc == "summary last")
+		})
+	}
+}
+
+func runningTurn(t *testing.T, summaryLast bool) {
 	h := endedHarness(t, runningScreen)
 	at := h.clock.Now()
-	h.transcriptOf("s1", "t1", summaryLine("u0", "m0", "Earlier turn.", at, 100)+promptLine("u1", "Build the widget.", at))
+	lines := summaryLine("u0", "m0", "Earlier turn.", at, 100) + promptLine("u1", "Build the widget.", at)
+	if summaryLast {
+		lines += summaryLine("u2", "m1", "Thinking out loud.", at, 100)
+	}
+	h.transcriptOf("s1", "t1", lines)
 	h.ticks(39, time.Minute)
 	if h.state("s1") != Working {
 		t.Fatalf("state = %s, want working", h.state("s1"))

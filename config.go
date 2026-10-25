@@ -471,6 +471,9 @@ func (c *Config) finish(base string) error {
 	if m := c.Policies.Rounds.Max; m < 1 || m > maxRounds {
 		errs = append(errs, fmt.Errorf("policies.rounds.max must be 1 to %d", maxRounds))
 	}
+	if p := c.Policies.Nudge.ContinueMessage; c.Policies.Nudge.Enabled && strings.ContainsAny(p, "\r\n") {
+		errs = append(errs, errors.New("policies.nudge.continue_message: must be one line"))
+	}
 	if p := c.Policies.CI.Pointer; strings.TrimSpace(p) == "" || strings.ContainsAny(p, "\r\n") {
 		errs = append(errs, errors.New("policies.ci.pointer must be one non-empty line"))
 	}
