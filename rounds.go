@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -63,6 +64,9 @@ const (
 	maxPlanStep     = 300
 	maxLessons      = 5
 	maxLesson       = 300
+	// repeatRounds is how many rounds in a row a finding comes back
+	// before it parks the case.
+	repeatRounds = 3
 )
 
 // RoundsPolicy is the backstop a case's rounds have until the owner sets
@@ -82,6 +86,10 @@ type Finding struct {
 	Paths       []string `json:"paths,omitempty"`
 	Consequence string   `json:"consequence"`
 	Suggestion  string   `json:"suggestion,omitempty"`
+	// Key is a hash of the title and paths as the reviewer gave them,
+	// before screening, so a finding given again matches even when its
+	// text was withheld.
+	Key string `json:"key,omitempty"`
 }
 
 // CaseFindings is an accepted review_findings: round N's findings, the
@@ -134,6 +142,8 @@ type CaseRounds struct {
 type RoundRecord struct {
 	N            int           `json:"n"`
 	Reviewer     string        `json:"reviewer"`
+	Call         string        `json:"call"` // the review call's hash
+	JudgeCall    string        `json:"judge_call,omitempty"`
 	At           time.Time     `json:"at"`
 	Findings     []Finding     `json:"findings"`
 	New          []string      `json:"new"`
@@ -171,8 +181,17 @@ func (r *CloseRecord) check() error {
 
 // applyFindings, applyDispositions and applyRounds fold a round's events
 // into c, copying what they change.
+//
+// Two sessions can be checked against the same state before either call
+// is appended; the later call's round is then not the next one, nor its
+// dispositions the latest round's, and the fold ignores it. The server
+// reads the log back after appending and tells that session so.
 func (c *Case) applyFindings(e Event, f *CaseFindings) {
-	r := RoundRecord{N: f.Round, Reviewer: e.Session, At: e.Time, Findings: f.Findings, New: f.New}
+	if f.Round != len(c.Rounds)+1 || len(c.Rounds) > 0 && len(c.Rounds[len(c.Rounds)-1].Findings) > 0 && c.Rounds[len(c.Rounds)-1].Dispositions == nil ||
+		c.RoundStop != nil {
+		return
+	}
+	r := RoundRecord{N: f.Round, Reviewer: e.Session, Call: e.Case.Call.Hash, At: e.Time, Findings: f.Findings, New: f.New}
 	c.Rounds = append(c.Rounds[:len(c.Rounds):len(c.Rounds)], r)
 	if f.Stop != nil {
 		c.RoundStop = f.Stop
@@ -181,15 +200,40 @@ func (c *Case) applyFindings(e Event, f *CaseFindings) {
 }
 
 func (c *Case) applyDispositions(e Event, d *CaseDispositions) {
-	for i, r := range c.Rounds {
-		if r.N == d.Round && r.Dispositions == nil {
-			rounds := append([]RoundRecord(nil), c.Rounds...)
-			r.Judge, r.JudgedAt, r.Dispositions, r.Plan, r.Lessons = e.Session, e.Time, d.Dispositions, d.Plan, d.Lessons
-			rounds[i] = r
-			c.Rounds = rounds
+	i := len(c.Rounds) - 1
+	if i < 0 || c.Rounds[i].N != d.Round || c.Rounds[i].Dispositions != nil || len(d.Dispositions) != len(c.Rounds[i].Findings) {
+		return
+	}
+	for _, x := range d.Dispositions {
+		if !hasFinding(c.Rounds[i].Findings, x.FindingID) {
 			return
 		}
 	}
+	rounds := append([]RoundRecord(nil), c.Rounds...)
+	r := rounds[i]
+	r.Judge, r.JudgeCall, r.JudgedAt, r.Dispositions, r.Plan, r.Lessons = e.Session, e.Case.Call.Hash, e.Time, d.Dispositions, d.Plan, d.Lessons
+	rounds[i] = r
+	c.Rounds = rounds
+}
+
+func hasFinding(fs []Finding, id string) bool {
+	for _, f := range fs {
+		if f.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// recorded says whether the fold took the round call with hash h: a
+// review that opened its round, or the dispositions of one.
+func (c *Case) recorded(tool, h string) bool {
+	for _, r := range c.Rounds {
+		if tool == ToolReviewFindings && r.Call == h || tool == ToolJudgeDispositions && r.JudgeCall == h {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Case) applyRounds(r *CaseRounds) {
@@ -323,6 +367,14 @@ func (srv *MCPServer) checkFindings(args json.RawMessage, c *Case) (*CaseFinding
 		items[it.ID] = true
 	}
 	next := len(known) + 1
+	// The ids the reviewer names: a finding given without one never
+	// takes one of these.
+	var named []string
+	for _, f := range a.Findings {
+		if f.ID != "" {
+			named = append(named, f.ID)
+		}
+	}
 	var out []Finding
 	var problems []problem
 	var ids, fresh []string
@@ -369,11 +421,13 @@ func (srv *MCPServer) checkFindings(args json.RawMessage, c *Case) (*CaseFinding
 			}
 		} else {
 			for _, k := range known {
-				if samePaths(k.Paths, f.Paths) {
-					if _, ok := alike(k.Title, title); ok || k.Title == title {
-						id = k.ID
-						break
-					}
+				if contains(named, k.ID) || contains(ids, k.ID) {
+					continue
+				}
+				_, like := alike(k.Title, title)
+				if k.Key == findingKey(title, f.Paths) || samePaths(k.Paths, f.Paths) && (like || k.Title == title) {
+					id = k.ID
+					break
 				}
 			}
 		}
@@ -392,7 +446,7 @@ func (srv *MCPServer) checkFindings(args json.RawMessage, c *Case) (*CaseFinding
 			paths[j] = srv.withheld(p)
 		}
 		out = append(out, Finding{ID: id, Title: srv.withheld(title), Severity: f.Severity, Items: f.Items, WidensScope: f.WidensScope,
-			Paths: paths, Consequence: srv.withheld(consequence), Suggestion: srv.withheld(suggestion)})
+			Paths: paths, Consequence: srv.withheld(consequence), Suggestion: srv.withheld(suggestion), Key: findingKey(title, f.Paths)})
 	}
 	if len(problems) > 0 {
 		return nil, problems
@@ -402,12 +456,25 @@ func (srv *MCPServer) checkFindings(args json.RawMessage, c *Case) (*CaseFinding
 	return rec, nil
 }
 
-// stopAt is the stop round f brings, if any: no new findings, or the last
-// round the backstop allows. Its lessons are the judges' since the last
-// reset and, at a park, what the facts show.
+// stopAt is the stop round f brings, if any: no new findings; a finding
+// that keeps coming back, given in repeatRounds rounds in a row; or the
+// last round the backstop allows. Its lessons are the judges' since the
+// last reset and, at a park, what the facts show.
 func (srv *MCPServer) stopAt(c *Case, f *CaseFindings) *RoundStop {
 	var s *RoundStop
-	switch max := c.backstop(srv.cfg.Policies.Rounds); {
+	var back []string // the findings in each of the last repeatRounds rounds
+	if n := len(c.Rounds); n-c.RoundBase >= repeatRounds-1 {
+		for _, x := range f.Findings {
+			in := true
+			for _, r := range c.Rounds[n-repeatRounds+1:] {
+				in = in && hasFinding(r.Findings, x.ID)
+			}
+			if in {
+				back = append(back, x.ID)
+			}
+		}
+	}
+	switch limit := c.backstop(srv.cfg.Policies.Rounds); {
 	case len(f.Findings) == 0:
 		s = &RoundStop{Reason: RoundsConverged}
 	case len(f.New) == 0:
@@ -418,16 +485,27 @@ func (srv *MCPServer) stopAt(c *Case, f *CaseFindings) *RoundStop {
 		s = &RoundStop{Reason: RoundsRepeating, Lessons: []string{fmt.Sprintf(
 			"Round %d brought nothing new: %s came back. The fixes did not hold, or the reviewer and the judge disagree; the owner decides.",
 			f.Round, strings.Join(ids, ", "))}}
-	case f.Round-c.RoundBase >= max:
+	case len(back) > 0:
+		s = &RoundStop{Reason: RoundsRepeating, Lessons: []string{fmt.Sprintf(
+			"%s came back in each of the last %d rounds: the fixes do not hold, or the reviewer and the judge disagree; the owner decides.",
+			strings.Join(back, ", "), repeatRounds)}}
+	case f.Round-c.RoundBase >= limit:
 		s = &RoundStop{Reason: RoundsBackstop, Lessons: []string{fmt.Sprintf(
-			"Round %d, the last of %d the backstop allows, still brought %d new findings (%s): the work does not converge.",
-			f.Round, max, len(f.New), strings.Join(f.New, ", "))}}
+			"Round %d, the last of the %d the backstop allows since round %d, still brought %d new findings (%s): the work does not converge.",
+			f.Round, limit, c.RoundBase, len(f.New), strings.Join(f.New, ", "))}}
 	default:
 		return nil
 	}
 	s.Round = f.Round
 	s.Lessons = append(c.lessons(c.RoundBase), s.Lessons...)
 	return s
+}
+
+// findingKey is a hash of a finding's title and paths as given.
+func findingKey(title string, paths []string) string {
+	ps := append([]string(nil), paths...)
+	sort.Strings(ps)
+	return shortHash(HashPane(strings.ToLower(title) + "\x00" + strings.Join(ps, "\x00")))
 }
 
 // samePaths says whether two findings name the same paths, in any order.
@@ -508,8 +586,8 @@ func (srv *MCPServer) checkDispositions(args json.RawMessage, c *Case) (*CaseDis
 	for _, p := range a.Plan {
 		id, step := strings.TrimSpace(p.ID), strings.TrimSpace(p.Step)
 		switch {
-		case id == "" || len(id) > 20:
-			bad("a plan step needs an id of 1 to 20 characters")
+		case !planID.MatchString(id):
+			bad("a plan step needs an id of 1 to 20 letters, digits, dots, dashes or underscores")
 		case contains(planIDs, id):
 			bad("plan id %s is given twice", id)
 		case step == "" || utf8.RuneCountInString(step) > maxPlanStep:
@@ -534,13 +612,21 @@ func (srv *MCPServer) checkDispositions(args json.RawMessage, c *Case) (*CaseDis
 	return out, nil
 }
 
+var planID = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,20}$`)
+
+// naText is a close text that says N/A, any case, and its reason.
+var naText = regexp.MustCompile(`(?i)^n/a(?:\s*:|\s|$)\s*(.*)$`)
+
 // RecordRounds records the owner's backstop for a case's rounds, counted
 // from now, which also resets a stopped loop.
 func RecordRounds(log *Log, cfg *Config, st *LogState, now time.Time, id string, n int) error {
 	id = strings.ToLower(id)
+	if !knownCase(cfg, st, id) {
+		return fmt.Errorf("no case %q", id)
+	}
 	c := st.Cases[id]
 	if c == nil {
-		return fmt.Errorf("case %q has no rounds", id)
+		c = &Case{}
 	}
 	if c.Closed {
 		return fmt.Errorf("case %s is closed; reopen it first", id)
@@ -560,8 +646,8 @@ func closeRecord(c *Case, text string) (*CloseRecord, error) {
 	}
 	r := &CloseRecord{}
 	text = strings.TrimSpace(text)
-	if rest, ok := strings.CutPrefix(text, "N/A"); ok {
-		r.NA = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(rest), ":"))
+	if m := naText.FindStringSubmatch(text); m != nil {
+		r.NA = strings.TrimSpace(m[1])
 		if r.NA == "" {
 			return nil, errors.New(`N/A needs its reason: "N/A: why there is nothing to see"`)
 		}
@@ -649,7 +735,7 @@ func roundsView(c *Case, p RoundsPolicy) *RoundsView {
 		Stop: c.RoundStop, Lessons: c.lessons(0)}
 }
 
-// parked says whether the case's rounds wait on the owner.
+// roundsParked says whether the case's rounds wait on the owner.
 func (c *Case) roundsParked() bool {
 	return c.RoundStop != nil && c.RoundStop.Reason != RoundsConverged
 }

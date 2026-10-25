@@ -304,14 +304,7 @@ func (s *Supervisor) noteReport(name string, sess Session, ev Evidence) {
 // so two rulings recorded at the same moment could share an id.
 func RecordRuling(log *Log, cfg *Config, st *LogState, now time.Time, id, kind, text, by string) error {
 	id = strings.ToLower(id)
-	known := st.Cases[id] != nil
-	for _, sess := range cfg.Sessions {
-		known = known || cfg.caseOf(sess) == id
-	}
-	if it := st.Items[id]; it != nil && it.Kind == ItemIssue && !it.OwnerOnly {
-		known = true
-	}
-	if !known {
+	if !knownCase(cfg, st, id) {
 		return fmt.Errorf("no case %q", id)
 	}
 	c := st.Cases[id]
@@ -357,11 +350,23 @@ func RecordRuling(log *Log, cfg *Config, st *LogState, now time.Time, id, kind, 
 	return log.Append(Event{V: EventVersion, Time: now, Kind: KindCase, Mode: ModeOwner, Case: &CasePayload{Case: id, Ruling: &r}})
 }
 
+// knownCase says whether the owner may record on case id: one the log, a
+// configured session or an issue item names.
+func knownCase(cfg *Config, st *LogState, id string) bool {
+	known := st.Cases[id] != nil
+	for _, sess := range cfg.Sessions {
+		known = known || cfg.caseOf(sess) == id
+	}
+	if it := st.Items[id]; it != nil && it.Kind == ItemIssue && !it.OwnerOnly {
+		known = true
+	}
+	return known
+}
+
 // caseState is what the facts say of a case: closed by the owner; waiting
 // on the owner when its review rounds parked or any of its sessions waits;
-// stopped by policy; delivered
-// when a session's work went out; working while a session runs or is done
-// and not yet delivered; else not started.
+// stopped by policy; delivered when a session's work went out; working
+// while a session runs or is done and not yet delivered; else not started.
 func caseState(c *Case, ts []*Track) string {
 	if c != nil && c.Closed {
 		return CaseClosed

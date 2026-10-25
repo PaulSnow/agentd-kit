@@ -325,14 +325,7 @@ const maxGoalItem = 500
 // ids are read from st.
 func RecordGoal(log *Log, cfg *Config, st *LogState, now time.Time, id, body string) error {
 	id = strings.ToLower(id)
-	known := st.Cases[id] != nil
-	for _, sess := range cfg.Sessions {
-		known = known || cfg.caseOf(sess) == id
-	}
-	if it := st.Items[id]; it != nil && it.Kind == ItemIssue && !it.OwnerOnly {
-		known = true
-	}
-	if !known {
+	if !knownCase(cfg, st, id) {
 		return fmt.Errorf("no case %q", id)
 	}
 	texts := DoneWhen(body)
@@ -673,6 +666,15 @@ func (srv *MCPServer) call(tool string, args json.RawMessage) (string, bool) {
 		Case: &CasePayload{Case: srv.caseID, Call: rec}})
 	if err != nil {
 		return compact(map[string]any{"refused": "agentd could not record the call: " + err.Error()}), true
+	}
+	// A round call checked against the state another session's call
+	// changed before this one was appended is not folded (rounds.go).
+	if (rec.Findings != nil || rec.Dispositions != nil) && rec.Refused == "" {
+		if events, err := srv.read(); err == nil {
+			if c := NewLogState(srv.cfg, ModeLive).Fold(events).Cases[srv.caseID]; c == nil || !c.recorded(tool, rec.Hash) {
+				return compact(map[string]any{"refused": "another session's call changed the round first; nothing of this call was recorded; read the case again and call again", "case": srv.caseID}), true
+			}
+		}
 	}
 	return compact(reply), rec.Refused != ""
 }

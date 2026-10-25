@@ -362,3 +362,129 @@ func TestRoundsRoleFromConfig(t *testing.T) {
 		t.Fatalf("session %+v: %v", s, err)
 	}
 }
+
+// Two reviewers checked against the same state: the call appended second
+// is not the next round, is not folded, and is told so; the close still
+// waits for every finding the fold has.
+func TestRoundsTwoReviewersRace(t *testing.T) {
+	h, _ := roundsHarness(t)
+	s := h.cfg.Sessions["rv"]
+	s.Workdir = filepath.Join(h.dir, "rv2")
+	h.cfg.Sessions["rv2"] = s
+	stale := h.events()
+	reads := 0
+	srv, err := NewMCPServer(h.cfg, "rv2", NewLogWriter(h.buf), func() ([]Event, error) {
+		if reads++; reads == 1 {
+			return stale, nil
+		}
+		return h.events(), nil
+	}, h.clock.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	review(t, h, finding("Spin has no test"))
+	text, refused := callOne(t, srv, ToolReviewFindings, map[string]any{"findings": []any{finding("Gears grind")}})
+	if !refused || !strings.Contains(text, "another session") {
+		t.Fatalf("second reviewer %s", text)
+	}
+	c := roundsOf(t, h)
+	if len(c.Rounds) != 1 || len(c.findings()) != 1 || c.findings()[0].Title != "Spin has no test" {
+		t.Fatalf("rounds %+v", c.Rounds)
+	}
+}
+
+// Text matching a confidential pattern is withheld, a finding given again
+// still keeps its id, and a refused call logs no value it was given.
+func TestRoundsScreening(t *testing.T) {
+	h, _ := roundsHarness(t)
+	h.cfg.ConfidentialPatterns = []string{"(?i)gizmo"}
+	secret := finding("The gizmo leaks")
+	reply, _ := review(t, h, secret)
+	judge(t, h, DispositionAdopt, "F1")
+	c := roundsOf(t, h)
+	if f := c.Rounds[0].Findings[0]; !strings.HasPrefix(f.Title, "(withheld") {
+		t.Fatalf("finding %+v", f)
+	}
+	if reply, _ = review(t, h, secret, finding("Gears grind")); !reflect.DeepEqual(reply["ids"], []any{"F1", "F2"}) {
+		t.Fatalf("again %v", reply)
+	}
+	judge(t, h, DispositionAdopt, "F1", "F2")
+	bad := finding("Made up")
+	bad["id"] = "F77-gizmo"
+	if reply, refused := review(t, h, bad); !refused || !strings.Contains(reply["refused"].(string), "F77-gizmo") {
+		t.Fatalf("refused %v", reply)
+	}
+	for _, e := range h.events() {
+		if e.Case != nil && e.Case.Call != nil && strings.Contains(strings.ToLower(e.Case.Call.Refused+compact(e.Case.Call.Findings)), "gizmo") {
+			t.Fatalf("logged %+v", e.Case.Call)
+		}
+	}
+	// Other paths and an unlike title are a new finding.
+	other := finding("Gears grind")
+	other["paths"] = []any{"gears.go"}
+	if reply, _ := review(t, h, other); !reflect.DeepEqual(reply["new"], []any{"F3"}) {
+		t.Fatalf("other paths %v", reply)
+	}
+}
+
+// A finding that comes back in three rounds in a row parks the case even
+// while each round brings something new.
+func TestRoundsFindingThatKeepsComingBack(t *testing.T) {
+	h, _ := roundsHarness(t)
+	h.cfg.Policies.Rounds.Max = 5
+	for i, extra := range []string{"Gears grind", "Axles squeak", "Bolts rattle"} {
+		reply, _ := review(t, h, finding("Spin has no test"), finding(extra))
+		var ids []string
+		for _, id := range reply["ids"].([]any) {
+			ids = append(ids, id.(string))
+		}
+		if i < 2 && reply["stopped"] != nil || i == 2 && reply["stopped"] != RoundsRepeating {
+			t.Fatalf("round %d %v", i+1, reply)
+		}
+		judge(t, h, DispositionAdopt, ids...)
+	}
+}
+
+// A close logged before closes had records still replays; a close's N/A
+// is read in any case; the owner's rounds record takes a configured case
+// the log does not have yet.
+func TestRoundsOldCloseAndOwnerRecords(t *testing.T) {
+	h, _ := roundsHarness(t)
+	NewLogWriter(h.buf).Append(Event{V: EventVersion, Time: h.clock.Now(), Kind: KindCase, Mode: ModeOwner, Case: &CasePayload{Case: widgetsCase, Ruling: &CaseRuling{Kind: RulingClose}}})
+	if c := roundsOf(t, h); !c.Closed {
+		t.Fatal("an old close did not replay")
+	}
+	h2 := caseHarness(t)
+	if err := RecordRounds(NewLogWriter(h2.buf), h2.cfg, h2.logState(), h2.clock.Now(), widgetsCase, 4); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordRounds(NewLogWriter(h2.buf), h2.cfg, h2.logState(), h2.clock.Now(), "gitlab/example-org/widgets#99", 4); err == nil {
+		t.Fatal("an unknown case took a rounds record")
+	}
+	if err := RecordRuling(NewLogWriter(h2.buf), h2.cfg, h2.logState(), h2.clock.Now(), widgetsCase, RulingClose, "n/a: nothing to see", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	c := h2.logState().Cases[widgetsCase]
+	if r := c.Rulings[len(c.Rulings)-1].Close; r.NA != "nothing to see" || r.Demo != "" {
+		t.Fatalf("close %+v", r)
+	}
+}
+
+// A judge's facts keep the rulings without asking it to acknowledge them.
+func TestRoundsJudgeFacts(t *testing.T) {
+	h, _ := roundsHarness(t)
+	h.cfg.Policies.Restart.Command = []string{"claude", "--mcp-config={mcp}", "{prompt}"}
+	if err := RecordRuling(NewLogWriter(h.buf), h.cfg, h.logState(), h.clock.Now(), widgetsCase, RulingRestriction, "Do not touch the gears.", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	review(t, h, finding("Spin has no test"))
+	h.restart(false)
+	_, facts := h.sup.launchCommand("jd", h.cfg.Sessions["jd"], newTrack(), "id-1", "restart")
+	var f restartFacts
+	if err := json.Unmarshal(facts, &f); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Acknowledge) != 0 || len(f.Rulings) != 1 || f.Rounds == nil || f.Rounds.Findings[0].Disposition != "" {
+		t.Fatalf("facts %s", facts)
+	}
+}
