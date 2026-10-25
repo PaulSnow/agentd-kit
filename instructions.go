@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"regexp"
 	"sort"
 	"strings"
@@ -20,10 +21,13 @@ import (
 // InstructionPayload is an owner instruction: its id, the repositories it
 // is for, and its text, left out when it matches a confidential pattern
 // (Withheld, from 1, says which). Hash is the text's, so the same words
-// sent twice are recorded once; a withheld text has none.
+// sent twice are recorded once; a withheld text has none. Console names
+// a console without a repository (#42) the instruction came from: it is
+// for no repository, so no coordinator, and inbox alone reads it.
 type InstructionPayload struct {
 	ID           string   `json:"id"`
 	Repositories []string `json:"repositories"`
+	Console      string   `json:"console,omitempty"`
 	Text         string   `json:"text,omitempty"`
 	Withheld     int      `json:"withheld,omitempty"`
 	Hash         string   `json:"hash,omitempty"`
@@ -125,36 +129,37 @@ func (s *Supervisor) packInstructions(repo string, handled bool) []PackInstructi
 // the same console, while a coordinator it is for has not yet been woken
 // with an earlier copy, are not recorded again.
 func RecordInstruction(cfg *Config, log *Log, st *LogState, now time.Time, console, text string) error {
-	var repos []string
-	for name := range cfg.Repositories {
-		if cfg.RepositoryConsole(name) == console {
-			repos = append(repos, name)
-		}
+	if _, ok := cfg.Consoles[console]; ok {
+		return recordInstruction(cfg, log, st, now, nil, console, "console:"+console, text)
 	}
-	sort.Strings(repos)
+	repos := cfg.consoleRepos(console)
 	if len(repos) == 0 {
 		return fmt.Errorf("console %q feeds no repository, so it takes no instruction", console)
 	}
-	return recordInstruction(cfg, log, st, now, repos, "console:"+console, text)
+	return recordInstruction(cfg, log, st, now, repos, "", "console:"+console, text)
 }
 
 // UIInstruction records text as the owner's instruction from the UI for
-// one repository (#41), as a console reply is recorded.
+// one repository (#41), or for a console without one (#42), as a console
+// reply is recorded.
 func UIInstruction(cfg *Config, log *Log, st *LogState, now time.Time, repo, text string) error {
+	if _, ok := cfg.Consoles[repo]; ok {
+		return recordInstruction(cfg, log, st, now, nil, repo, "ui", text)
+	}
 	if _, ok := cfg.Repositories[repo]; !ok {
 		return fmt.Errorf("no repository %q", repo)
 	}
-	return recordInstruction(cfg, log, st, now, []string{repo}, "ui", text)
+	return recordInstruction(cfg, log, st, now, []string{repo}, "", "ui", text)
 }
 
-// recordInstruction records text as the owner's instruction for repos,
-// screened, from where it was typed.
-func recordInstruction(cfg *Config, log *Log, st *LogState, now time.Time, repos []string, from, text string) error {
+// recordInstruction records text as the owner's instruction for repos, or
+// for console when it has none, screened, from where it was typed.
+func recordInstruction(cfg *Config, log *Log, st *LogState, now time.Time, repos []string, console, from, text string) error {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return errors.New("an empty instruction")
 	}
-	p := &InstructionPayload{Repositories: repos, Text: text, Hash: shortHash(HashPane(text)), From: from}
+	p := &InstructionPayload{Repositories: repos, Console: console, Text: text, Hash: shortHash(HashPane(text)), From: from}
 	for i, pat := range screenPatterns(cfg) {
 		if regexp.MustCompile(pat).MatchString(text) {
 			// Nothing of a withheld text is logged, not even its hash,
@@ -165,7 +170,7 @@ func recordInstruction(cfg *Config, log *Log, st *LogState, now time.Time, repos
 	}
 	p.ID = "I" + shortHash(HashPane(now.UTC().Format(time.RFC3339Nano) + "\n" + from + "\n" + p.Hash))[:8]
 	for _, in := range st.Instructions {
-		if p.Hash == "" || in.Hash != p.Hash || in.From != from || strings.Join(in.Repositories, ",") != strings.Join(repos, ",") {
+		if p.Hash == "" || in.Hash != p.Hash || in.From != from || in.Console != console || strings.Join(in.Repositories, ",") != strings.Join(repos, ",") {
 			continue
 		}
 		// A copy no wake has carried yet is still waiting. A repository
@@ -181,10 +186,14 @@ func recordInstruction(cfg *Config, log *Log, st *LogState, now time.Time, repos
 }
 
 // ImportLine is one message of the old console's history, as agentd
-// console import reads it: one JSON object per line.
+// console import reads it: one JSON object per line. The outside console
+// program's lines (#42) give their time as TS, Unix seconds, and a Kind.
+// Repository may name a console without a repository too.
 type ImportLine struct {
 	At         time.Time `json:"at"`
+	TS         *float64  `json:"ts,omitempty"`
 	From       string    `json:"from"`
+	Kind       string    `json:"kind,omitempty"`
 	Text       string    `json:"text"`
 	Repository string    `json:"repository,omitempty"`
 }
@@ -223,8 +232,13 @@ func ImportConsole(cfg *Config, log *Log, events []Event, now time.Time, repo st
 		if l.Repository == "" {
 			l.Repository = repo
 		}
-		if _, ok := cfg.Repositories[l.Repository]; !ok {
-			return 0, 0, fmt.Errorf("line %d: no repository %q", n, l.Repository)
+		_, repo := cfg.Repositories[l.Repository]
+		if _, con := cfg.Consoles[l.Repository]; !repo && !con {
+			return 0, 0, fmt.Errorf("line %d: no repository or console %q", n, l.Repository)
+		}
+		if l.TS != nil && l.At.IsZero() && *l.TS > 0 && *l.TS < 1e11 {
+			sec, frac := math.Modf(*l.TS)
+			l.At = time.Unix(int64(sec), int64(math.Round(frac*1e9))).UTC()
 		}
 		if l.At.IsZero() || strings.TrimSpace(l.Text) == "" {
 			return 0, 0, fmt.Errorf("line %d: a line needs its time and text", n)
@@ -243,7 +257,7 @@ func ImportConsole(cfg *Config, log *Log, events []Event, now time.Time, repo st
 		}
 		have[key] = true
 		at := l.At
-		p := &FeedPayload{Phase: FeedImported, Key: key, Repository: l.Repository, Text: l.Text, At: &at, From: l.From}
+		p := &FeedPayload{Phase: FeedImported, Key: key, Repository: l.Repository, Text: l.Text, At: &at, From: l.From, Kind: l.Kind}
 		for i, pat := range pats {
 			if regexp.MustCompile(pat).MatchString(l.Text + "\n" + l.From) {
 				p.Text, p.From, p.Withheld = "", "", i+1

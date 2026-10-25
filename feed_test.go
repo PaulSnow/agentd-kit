@@ -381,14 +381,3 @@ func TestFeedMergeLines(t *testing.T) {
 		t.Fatalf("lines = %q, want %q", got, want)
 	}
 }
-
-// The feed posts through the escalation command, so turning it on without
-// one is refused at load.
-func TestFeedNeedsTheEscalationCommand(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.TranscriptDir = ""
-	cfg.Policies.Feed.Enabled = true
-	if err := cfg.finish(t.TempDir()); err == nil || !strings.Contains(err.Error(), "policies.feed.enabled") {
-		t.Fatalf("finish = %v, want the feed refused without a command", err)
-	}
-}

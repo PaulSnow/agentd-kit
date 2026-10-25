@@ -41,6 +41,8 @@ type Config struct {
 	Jobs JobsConfig `json:"jobs"`
 	// Usage is the reading of the accounts' usage, which placement acts on.
 	Usage UsageConfig `json:"usage"`
+	// Consoles are the consoles that are no repository's (#42).
+	Consoles map[string]ConsoleConfig `json:"consoles"`
 }
 
 // Account is a Claude login a session runs under: its config directory,
@@ -219,8 +221,9 @@ type DialogPolicy struct {
 }
 
 // EscalatePolicy runs Command, with {console} and {message} substituted, once
-// per escalation key. DefaultConsole receives escalations for sessions that
-// name no repository.
+// per escalation key; without it, an escalation is logged only, and the UI
+// shows it. DefaultConsole receives escalations for sessions that name no
+// repository and no console's sessions match.
 type EscalatePolicy struct {
 	Command        []string `json:"command"`
 	DefaultConsole string   `json:"default_console"`
@@ -615,15 +618,9 @@ func (c *Config) finish(base string) error {
 		}
 		c.Sessions[name] = s
 	}
-	// Escalation is the only path to the owner; without it a blocked
-	// session would wait unseen.
-	if len(c.Sessions) > 0 && len(c.Policies.Escalate.Command) == 0 {
-		errs = append(errs, errors.New("policies.escalate.command must be set when sessions are configured"))
-	}
-	// The consoles' feed posts through the same command.
-	if c.Policies.Feed.Enabled && len(c.Policies.Escalate.Command) == 0 {
-		errs = append(errs, errors.New("policies.escalate.command must be set when policies.feed.enabled is"))
-	}
+	// Without an escalation command, escalations and feed lines are
+	// logged, and the UI shows them in their consoles (#42).
+	c.checkConsoles(&errs)
 	// A bare command name is left for PATH to find; a path is expanded.
 	if cmd := c.Policies.Escalate.Command; len(cmd) > 0 && (strings.HasPrefix(cmd[0], "~") || strings.Contains(cmd[0], "/")) {
 		cmd[0] = path("policies.escalate.command", cmd[0])
@@ -773,6 +770,9 @@ func (c *Config) Console(name string) string {
 			return r.Console
 		}
 		return s.Repository
+	}
+	if con := c.consoleOf(name); con != "" {
+		return con
 	}
 	return c.Policies.Escalate.DefaultConsole
 }

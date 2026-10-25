@@ -21,6 +21,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -103,6 +104,8 @@ func usage() {
   agentd policy [--config PATH] [--log PATH] show REPO
   agentd console [--config PATH] [--log PATH] [--shadow] reply CONSOLE TEXT...
   agentd console [--config PATH] [--log PATH] [--repository REPO] import FILE
+  agentd console post [--config PATH] [--log PATH] [--kind KIND] [--from NAME] [--to SESSION] CONSOLE TEXT...|-
+  agentd console inbox [--config PATH] [--log PATH] [--from NAME] CONSOLE
   agentd inventory [--config PATH]
   agentd report [--config PATH] [--log PATH] [--shadow] [--host NAME] --out PATH
   agentd ui [--config PATH] [--log PATH]
@@ -139,7 +142,14 @@ owner, each repository's console and each session; its writes are answers,
 deadlines, items marked seen and console replies. accounts reads every
 configured account's plan usage now and prints it: the five-hour and weekly
 utilization, their resets, and overage; it logs nothing. console import appends
-the old console's history in FILE, one JSON object per line, once. triage tries the triage job on the items in
+the old console's history in FILE, one JSON object per line, once: at or
+ts (Unix seconds), from, kind and text. console post records a post in a
+console of this config's log, of KIND info (the default), decision,
+delivered, ci or finished, from NAME (default this tmux session, else
+cli), TEXT or - for standard input, at most 16 KiB; --to also types it
+into that tmux session. console inbox prints the owner's replies for a
+console that NAME has not read, one JSON object a line, and records them
+read. triage tries the triage job on the items in
 FILE with one call (retried once on failure) and prints its checked answer and cost; it logs nothing.
 cases lists the cases, one per issue, ranked: the owner's pins and the
 repositories' order from tracking.priorities when that file exists, then
@@ -355,13 +365,16 @@ func sessionsCmd(args []string) error {
 	return EndSession(cfg, log, events, time.Now(), rest[1])
 }
 
-// consoleCmd is the command-line face of ConsoleReply. The decisions are
-// read as the live run holds them, or with --shadow the shadow run, as the
-// page reads them.
+// consoleCmd is the command-line face of ConsoleReply, ImportConsole,
+// PostMessage and ConsoleInbox. The decisions are read as the live run
+// holds them, or with --shadow the shadow run, as the page reads them.
 func consoleCmd(args []string) error {
+	if len(args) > 0 && (args[0] == "post" || args[0] == "inbox") {
+		return consolePostCmd(args[0], args[1:], os.Stdin, os.Stdout)
+	}
 	fs := flag.NewFlagSet("console", flag.ContinueOnError)
 	shadow := fs.Bool("shadow", false, "answer the decisions the shadow run holds")
-	repo := fs.String("repository", "", "import: the repository the lines are for, unless a line names its own")
+	repo := fs.String("repository", "", "import: the repository or console the lines are for, unless a line names its own")
 	cfg, _, err := loadConfigFlag(fs, args)
 	if err != nil {
 		return err
@@ -371,9 +384,12 @@ func consoleCmd(args []string) error {
 		mode = ModeShadow
 	}
 	rest := fs.Args()
+	if len(rest) > 0 && (rest[0] == "post" || rest[0] == "inbox") {
+		return consolePostCmd(rest[0], append(configArgs(fs), rest[1:]...), os.Stdin, os.Stdout)
+	}
 	importing := len(rest) == 2 && rest[0] == "import"
 	if !importing && (len(rest) < 3 || rest[0] != "reply") {
-		return fmt.Errorf("usage: agentd console reply CONSOLE TEXT... | agentd console --repository REPO import FILE")
+		return fmt.Errorf("usage: agentd console reply CONSOLE TEXT... | agentd console --repository REPO import FILE | agentd console post CONSOLE TEXT|- | agentd console inbox CONSOLE")
 	}
 	log, events, err := openLoaded(cfg.EventLog)
 	if err != nil {
@@ -392,6 +408,61 @@ func consoleCmd(args []string) error {
 	}
 	st := NewLogState(cfg, mode).Fold(events)
 	return ConsoleReply(cfg, log, st, time.Now(), rest[1], strings.Join(rest[2:], " "))
+}
+
+// configArgs are the --config and --log flags fs was given, to pass on.
+func configArgs(fs *flag.FlagSet) []string {
+	var out []string
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "config" || f.Name == "log" {
+			out = append(out, "--"+f.Name, f.Value.String())
+		}
+	})
+	return out
+}
+
+// consolePostCmd is agentd console post and agentd console inbox (#42),
+// which write to the log of the configuration given. Their author and
+// reader is --from, by default the tmux session this runs in, else cli.
+func consolePostCmd(verb string, args []string, stdin io.Reader, stdout io.Writer) error {
+	fs := flag.NewFlagSet("console "+verb, flag.ContinueOnError)
+	from := fs.String("from", "", "who posts or reads (default: this tmux session's name, else cli)")
+	var kind, to *string
+	if verb == "post" {
+		kind = fs.String("kind", "info", "info, decision, delivered, ci or finished")
+		to = fs.String("to", "", "also type the text into this tmux session, by its exact name")
+	}
+	cfg, _, err := loadConfigFlag(fs, args)
+	if err != nil {
+		return err
+	}
+	if *from == "" {
+		if *from = tmuxSessionName(); *from == "" {
+			*from = "cli"
+		}
+	}
+	rest := fs.Args()
+	if verb == "inbox" && len(rest) != 1 || verb == "post" && len(rest) < 2 {
+		return fmt.Errorf("usage: agentd console post [--kind KIND] [--from NAME] [--to SESSION] CONSOLE TEXT...|- | agentd console inbox [--from NAME] CONSOLE")
+	}
+	log, events, err := openLoaded(cfg.EventLog)
+	if err != nil {
+		return err
+	}
+	defer log.Close()
+	if verb == "inbox" {
+		_, err := ConsoleInbox(cfg, log, events, time.Now(), rest[0], *from, stdout)
+		return err
+	}
+	text := strings.Join(rest[1:], " ")
+	if len(rest) == 2 && rest[1] == "-" {
+		b, err := io.ReadAll(io.LimitReader(stdin, MessageLimit+1))
+		if err != nil {
+			return err
+		}
+		text = string(b)
+	}
+	return PostMessage(cfg, log, ExecTmux{Timeout: cfg.Timeouts.Tmux.Duration}, time.Now(), MessagePost{Console: rest[0], Kind: *kind, From: *from, Text: text, To: *to})
 }
 
 // clearCmd is the command-line face of ClearSession.

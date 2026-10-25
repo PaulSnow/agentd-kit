@@ -1178,16 +1178,20 @@ func (s *Supervisor) post(name, action, key, message string, t *Track, now time.
 			console = repo
 		}
 	}
-	tmpl := s.cfg.Policies.Escalate.Command // never empty: refused at load
 	if !s.retryDue(t, key, now) {
 		return false
 	}
-	argv := make([]string, len(tmpl))
-	for i, part := range tmpl {
-		argv[i] = strings.NewReplacer("{console}", console, "{message}", message).Replace(part)
+	// Without a command the action event is the post: the UI shows it
+	// in its console (#42).
+	run := func() error { return nil }
+	if tmpl := s.cfg.Policies.Escalate.Command; len(tmpl) > 0 {
+		argv := make([]string, len(tmpl))
+		for i, part := range tmpl {
+			argv[i] = strings.NewReplacer("{console}", console, "{message}", message).Replace(part)
+		}
+		run = func() error { return s.runner.Run(argv) }
 	}
-	err := s.act(name, action, &ActPayload{Key: key, Console: console, Message: message, QuestionsHash: what.QuestionsHash, Update: what.Update, Dialog: what.Dialog, Episode: what.Episode},
-		func() error { return s.runner.Run(argv) })
+	err := s.act(name, action, &ActPayload{Key: key, Console: console, Message: message, QuestionsHash: what.QuestionsHash, Update: what.Update, Dialog: what.Dialog, Episode: what.Episode}, run)
 	if err == nil {
 		return true
 	}

@@ -60,6 +60,8 @@ type Event struct {
 	Policy      *PolicyPayload      `json:"policy,omitempty"`
 	Approval    *ApprovalPayload    `json:"approval,omitempty"`
 	Account     *AccountPayload     `json:"account,omitempty"`
+	Message     *MessagePayload     `json:"message,omitempty"`
+	Inbox       *InboxPayload       `json:"inbox,omitempty"`
 }
 
 // Event kinds.
@@ -96,6 +98,8 @@ const (
 	KindApproval    = "approval"    // a coordinator approved a request at a head
 	KindInstruction = "instruction" // the owner's free-text reply in a console, for the repositories it feeds
 	KindAccount     = "account"     // a reading of an account's usage: its utilization, resets and overage
+	KindMessage     = "message"     // a post to a console: a session's or a coordinator's report (agentd console post)
+	KindInbox       = "inbox"       // a reader read the owner's instructions for a console (agentd console inbox)
 )
 
 // Modes, in the mode every event carries. A run reads only the events of
@@ -342,7 +346,7 @@ func (e Event) check() error {
 		KindSkip: e.Skip != nil, KindCrash: e.Crash != nil, KindClear: e.Clear != nil, KindError: e.Error != nil, KindWarning: e.Warning != nil,
 		KindItem: e.Item != nil, KindSeen: e.Seen != nil, KindCursor: e.Cursor != nil, KindUsage: e.Usage != nil,
 		KindCheckpoint: e.Checkpoint != nil, KindPoll: e.Poll != nil, KindTriage: e.Triage != nil, KindDecision: e.Decision != nil,
-		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, KindApproval: e.Approval != nil, KindAccount: e.Account != nil, "act": e.Act != nil,
+		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, KindApproval: e.Approval != nil, KindAccount: e.Account != nil, KindMessage: e.Message != nil, KindInbox: e.Inbox != nil, "act": e.Act != nil,
 	}
 	want := e.Kind
 	switch e.Kind {
@@ -361,13 +365,17 @@ func (e Event) check() error {
 	// too; the owner marks items seen.
 	failedTriage := e.Kind == KindError && e.Error.Triage != nil
 	switch {
+	case e.Kind == KindMessage && (e.Session != "" || e.Mode != ModeShared || e.Message.Console == "" || e.Message.Kind == ""):
+		return errors.New("a message is a shared fact, for no one session, and names its console and kind")
+	case e.Kind == KindInbox && (e.Session != "" || e.Mode != ModeShared || e.Inbox.Console == "" || e.Inbox.Reader == ""):
+		return errors.New("an inbox event is a shared fact, for no one session, and names its console and reader")
 	case e.Kind == KindAccount && (e.Session != "" || e.Mode != ModeShared || e.Account.Account == ""):
 		return errors.New("an account reading is a shared fact, for no one session, and names its account")
 	case e.Kind == KindApproval && (e.Session == "" || e.Mode != ModeShared || e.Approval.Repository == "" || e.Approval.Ref == "" || e.Approval.SHA == ""):
 		return errors.New("an approval is a shared fact of the coordinator that gave it, and names its repository, request and head")
 	case e.Kind == KindPolicy && (e.Session != "" || e.Mode != ModeShared || e.Policy.Repository == "" || e.Policy.Tip == ""):
 		return errors.New("a policy event is a shared fact, for no one session, and names its repository and tip")
-	case e.Kind != KindCase && e.Kind != KindCoordinator && e.Kind != KindSession && e.Kind != KindPolicy && e.Kind != KindApproval && e.Kind != KindAccount && (e.Kind == KindItem || e.Kind == KindCursor || e.Kind == KindTriage || failedTriage) != (e.Mode == ModeShared):
+	case e.Kind != KindCase && e.Kind != KindCoordinator && e.Kind != KindSession && e.Kind != KindPolicy && e.Kind != KindApproval && e.Kind != KindAccount && e.Kind != KindMessage && e.Kind != KindInbox && (e.Kind == KindItem || e.Kind == KindCursor || e.Kind == KindTriage || failedTriage) != (e.Mode == ModeShared):
 		return fmt.Errorf("a %s event must not carry mode %q", e.Kind, e.Mode)
 	case e.Kind == KindSeen && e.Mode != ModeOwner:
 		return fmt.Errorf("a seen event is the owner's, not %q", e.Mode)
@@ -385,8 +393,8 @@ func (e Event) check() error {
 		return errors.New("a ci event is a run's, for the session that delivered the request, and names its repository and request")
 	case e.Kind == KindFeed && (e.Session != "" || (e.Feed.Phase == FeedImported) != (e.Mode == ModeOwner) || e.Mode != ModeLive && e.Mode != ModeShadow && e.Mode != ModeOwner):
 		return errors.New("a feed event is a run's, for no one session; an imported line is the owner's")
-	case e.Kind == KindInstruction && (e.Session != "" || e.Mode != ModeOwner || e.Instruction.ID == "" || len(e.Instruction.Repositories) == 0):
-		return errors.New("an instruction event is the owner's, for no one session, and names its id and repositories")
+	case e.Kind == KindInstruction && (e.Session != "" || e.Mode != ModeOwner || e.Instruction.ID == "" || (len(e.Instruction.Repositories) == 0) == (e.Instruction.Console == "")):
+		return errors.New("an instruction event is the owner's, for no one session, and names its id and either its repositories or its console")
 	case e.Kind == KindSession && (e.Session == "" || e.Mode != ModeShared && e.Mode != ModeOwner || e.Runtime.ID == "" || e.Runtime.Repository == "" ||
 		e.Runtime.Action != SessionStart && e.Runtime.Action != SessionEnd && e.Runtime.Action != SessionPlace ||
 		e.Runtime.Action == SessionStart && (e.Mode != ModeShared || e.Runtime.Branch == "") ||

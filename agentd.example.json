@@ -83,6 +83,9 @@
       "default_console": "infra"
     }
   },
+  "consoles": {
+    "chat": {"title": "General chat", "sessions": ["chat-*"]}
+  },
   "repositories": {
     "widgets": {
       "forge": "gitlab",
