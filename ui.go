@@ -92,7 +92,8 @@ func parseWhois(out []byte) (string, error) {
 }
 
 // uiKeptMessages is how many console messages a source keeps for each
-// repository, and uiKeptEvents how many events for each session.
+// repository, and as many of its sessions' turns besides; uiKeptEvents
+// is how many events for each session.
 const (
 	uiKeptMessages = 200
 	uiKeptEvents   = 40

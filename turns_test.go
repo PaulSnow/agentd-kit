@@ -36,6 +36,18 @@ func TestTurnsPostedOnceAcrossRestart(t *testing.T) {
 		got[1].Kind != MessageReply || !strings.HasPrefix(got[1].Text, "Built it.\nThe check passes.") || len(got[1].Text) > 50+len("…") || got[0].ID == got[1].ID {
 		t.Fatalf("turns posted = %+v", got)
 	}
+	// Each post follows its turn event in the log.
+	var order []string
+	for _, e := range h.events() {
+		if e.Kind == KindTurn && e.Session == "a" {
+			order = append(order, "turn")
+		} else if e.Kind == KindMessage {
+			order = append(order, "post")
+		}
+	}
+	if strings.Join(order, ",") != "turn,post,turn,post" {
+		t.Fatalf("log order = %v", order)
+	}
 	// Turns read in one pass are each folded as themselves.
 	if tr := h.sup.Tracks()["a"]; len(tr.Turns) != 2 || tr.Turns[0].Text != "Build the widget." || tr.Turns[1].Role != TurnSummary {
 		t.Fatalf("track turns = %+v", tr.Turns)
@@ -91,6 +103,14 @@ func TestTurnPostWithheld(t *testing.T) {
 	h.transcriptOf("a", "t1", promptLine("u1", strings.Repeat("x", turnText+10)+" hunter2", h.clock.Now()))
 	h.ticks(2, time.Minute)
 	if got := h.turnMessages(); len(got) != 1 || got[0].Text != "" || got[0].Withheld != 1 || got[0].From != "a" {
+		t.Fatalf("turns posted = %+v", got)
+	}
+	// A session whose name matches is withheld too.
+	h.cfg.ConfidentialPatterns = []string{`hunter2`, `^b$`}
+	h.restart(false)
+	h.transcriptOf("b", "t2", promptLine("u1", "Plain words.", h.clock.Now()))
+	h.ticks(2, time.Minute)
+	if got := h.turnMessages(); len(got) != 2 || got[1].Text != "" || got[1].Withheld != 2 {
 		t.Fatalf("turns posted = %+v", got)
 	}
 }

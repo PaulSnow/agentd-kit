@@ -112,6 +112,8 @@ func (s *Supervisor) postTurn(name string, tn TurnPayload) {
 	case tn.Role != TurnPrompt:
 		return
 	}
+	// A turn without a time is as old as a backlog's, and so is one
+	// written while agentd was stopped for longer than turnBacklog.
 	if s.clock.Now().Sub(tn.At) > turnBacklog {
 		return
 	}
@@ -121,6 +123,7 @@ func (s *Supervisor) postTurn(name string, tn TurnPayload) {
 	}
 	m := &MessagePayload{ID: "T" + shortHash(HashPane(name + "\n" + tn.Transcript + "\n" + fmt.Sprint(tn.Line)))[:8],
 		Console: console, Kind: kind, From: name, Text: cutUTF8(tn.Text, s.cfg.Policies.Feed.TurnLength)}
+	// The session's name stays, as it does in every event of the session.
 	if i := s.confidentialMatch(tn.Text, name); i > 0 {
 		m.Text, m.Withheld = "", i
 	}
