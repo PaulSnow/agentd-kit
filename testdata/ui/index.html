@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Overview</title>
+<link rel="stylesheet" href="/ui.css">
+<script src="/ui.js" defer></script>
+</head>
+<body>
+<header class="topbar"><a class="brand" href="/">agentd</a><span class="topbar-title">Overview</span></header>
+<main>
+
+<section id="runs" class="runs" data-refresh aria-label="Runs">
+<ul class="chips"><li class="chip">
+<strong>night</strong> <span class="badge mode-live">live</span>
+<span class="meta">started 6h · spent 450k of 5.0M</span>
+</li><li class="chip">
+<strong>coord</strong> <span class="badge mode-live">live</span>
+<span class="meta">started 6h</span>
+</li></ul>
+</section>
+<section id="needs" data-refresh aria-labelledby="needs-h">
+<h2 id="needs-h">Needs you <span class="count">4</span></h2>
+<article class="card need need-decision">
+<header class="card-head">
+<span class="badge kind-decision">blocking</span>
+<a class="session" href="/session/night/s-blocked">s-blocked</a>
+<span class="muted">widgets · waiting 2h</span>
+</header>
+
+<div class="question md"><p>Which &lt;b&gt;colour&lt;/b&gt;?</p>
+</div>
+<div class="context md"><p>&lt;/pre&gt;&lt;script&gt;y()&lt;/script&gt;</p>
+</div>
+<dl class="facts">
+
+
+<dt>Recommended</dt><dd>b</dd>
+</dl>
+<form class="answer" method="post" action="/answer"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/"><input type="hidden" name="src" value="night"><input type="hidden" name="session" value="s-blocked"><input type="hidden" name="id" value="Q1">
+<div class="choices"><button type="submit" name="choice" value="a"><span class="option-label">Blue</span><span class="option-note">old logo</span></button><button type="submit" name="choice" value="b" class="recommended"><span class="option-label">Green</span><span class="option-note">new guide</span></button></div>
+
+</form>
+<details class="own-words" data-key="night-s-blocked-Q1-own"><summary>Answer in your own words</summary>
+<form class="answer" method="post" action="/answer"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/"><input type="hidden" name="src" value="night"><input type="hidden" name="session" value="s-blocked"><input type="hidden" name="id" value="Q1">
+<textarea name="other" rows="2" maxlength="2000" aria-label="Your own words" required></textarea>
+<p class="muted">Your own words reach the session but do not settle the decision.</p><div class="choices"><button type="submit">Send</button></div></form></details>
+
+
+</article><article class="card need need-decision">
+<header class="card-head">
+<span class="badge kind-decision">blocking</span>
+<a class="session" href="/session/night/txt1">txt1</a>
+<span class="muted">widgets · waiting 45m</span>
+</header>
+
+<div class="question md"><p>the Questions in STATUS.md</p>
+</div>
+<div class="context md"><p>Which colour should the <strong>logo</strong> be?</p>
+</div>
+
+<form class="answer" method="post" action="/answer"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/"><input type="hidden" name="src" value="night"><input type="hidden" name="session" value="txt1"><input type="hidden" name="id" value="status-920d6f4df245">
+<textarea name="text" rows="3" maxlength="2000" aria-label="Your answer" required></textarea><div class="choices"><button type="submit">Answer</button></div>
+</form>
+
+
+
+</article><article class="card need need-usage-limited">
+<header class="card-head">
+<span class="badge kind-usage-limited">usage-limited</span>
+<a class="session" href="/session/coord/lim1">lim1</a>
+<span class="muted">widgets · waiting 40m</span>
+</header>
+<div class="md"><p>usage limit until 14:00</p>
+</div>
+</article><article class="card need need-decision">
+<header class="card-head">
+<span class="badge kind-decision">decision</span>
+<a class="session" href="/session/coord/g1">g1</a>
+<span class="muted">gadgets · waiting 25m</span>
+</header>
+
+<div class="question md"><p>Release gadgets 2.0?</p>
+</div>
+
+<dl class="facts">
+<dt>Why</dt><dd>the changelog is ready</dd>
+
+
+</dl>
+<form class="answer" method="post" action="/answer"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/"><input type="hidden" name="src" value="coord"><input type="hidden" name="session" value="g1"><input type="hidden" name="id" value="Q1">
+<div class="choices"><button type="submit" name="answer" value="yes">Yes</button><button type="submit" name="answer" value="no">No</button></div>
+
+</form>
+<details class="own-words" data-key="coord-g1-Q1-own"><summary>Answer in your own words</summary>
+<form class="answer" method="post" action="/answer"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/"><input type="hidden" name="src" value="coord"><input type="hidden" name="session" value="g1"><input type="hidden" name="id" value="Q1">
+<textarea name="other" rows="2" maxlength="2000" aria-label="Your own words" required></textarea>
+<p class="muted">Your own words reach the session but do not settle the decision.</p><div class="choices"><button type="submit">Send</button></div></form></details>
+
+
+</article>
+</section>
+<section id="repos" data-refresh aria-labelledby="repos-h">
+<h2 id="repos-h">Repositories</h2>
+<article class="card repo">
+<header class="card-head"><h3>widgets</h3><span class="badge alert">3 need you</span><a class="console-link" href="/console/widgets">Console</a></header>
+<ul class="rows"><li class="row">
+<a class="session" href="/session/coord/cw">cw</a>
+<span class="badge state-idle">idle</span>
+<span class="meta">0 wakes</span>
+
+<span class="meta"></span>
+</li><li class="row">
+<a class="session" href="/session/coord/lim1">lim1</a>
+<span class="badge state-usage-limited">usage-limited</span>
+
+
+<span class="meta"></span>
+</li><li class="row">
+<a class="session" href="/session/night/quiet1">quiet1</a>
+<span class="badge state-working">working</span>
+
+
+<span class="meta"></span>
+</li><li class="row">
+<a class="session" href="/session/night/s-blocked">s-blocked</a>
+<span class="badge state-idle">idle</span>
+
+
+<span class="meta"></span>
+</li><li class="row">
+<a class="session" href="/session/night/txt1">txt1</a>
+<span class="badge state-blocked-on-owner">blocked-on-owner</span>
+
+
+<span class="meta"></span>
+</li><li class="row">
+<a class="session" href="/session/night/w17">w17</a>
+<span class="badge state-working">working</span>
+
+<span class="head">Widgets blue &#34;&gt;&lt;b&gt;bold&lt;/b&gt;</span>
+<span class="meta">context 120k · spent 450k · turn 20m</span>
+</li><li class="row">
+<a class="session" href="/session/night/w18">w18</a>
+<span class="badge state-working">working</span>
+
+
+<span class="meta"></span>
+</li></ul>
+<h4>Open requests</h4><ul class="rows"><li class="row">
+<a href="https://gitlab.example/example-org/widgets/-/merge_requests/9" rel="noreferrer">!9</a>
+<span class="badge ci-pending">CI pending</span>
+<span class="meta">by contributor-c · open discussion</span>
+</li></ul>
+<details class="items" data-key="widgets-night-items"><summary>1 new item</summary>
+<form method="post" action="/seen"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/"><input type="hidden" name="src" value="night"><ul class="rows"><li class="row"><label><input type="checkbox" name="id" value="gitlab/example-org/widgets#19" checked> <span class="badge">issue</span> <a href="https://gitlab.example/example-org/widgets/-/issues/19" rel="noreferrer">&lt;iframe src=x&gt;</a></label></li></ul>
+<div class="choices"><button type="submit">Mark the ticked items seen</button></div></form></details>
+<details class="finished" data-key="widgets-finished"><summary>1 finished</summary><ul class="rows"><li class="row">
+<a class="session" href="/session/night/done1">done1</a>
+<span class="badge state-done">done</span>
+
+
+<span class="meta"></span>
+</li></ul></details>
+</article><article class="card repo">
+<header class="card-head"><h3>gadgets</h3><span class="badge alert">1 needs you</span><a class="console-link" href="/console/gadgets">Console</a></header>
+<ul class="rows"><li class="row">
+<a class="session" href="/session/coord/g1">g1</a>
+<span class="badge state-working">working</span>
+
+
+<span class="meta"></span>
+</li></ul>
+
+
+
+</article>
+</section>
+</main>
+<footer class="foot muted">Shown 2026-10-23 12:00. The page refreshes every 30 seconds.</footer>
+</body>
+</html>

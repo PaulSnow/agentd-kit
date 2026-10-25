@@ -359,3 +359,16 @@ func TestShellJoin(t *testing.T) {
 		t.Fatalf("shellJoin = %s", got)
 	}
 }
+
+// Every way a session says it has no questions is none, and a DONE line
+// under the heading is the end of the file, not a question (#41).
+func TestNoQuestionsForms(t *testing.T) {
+	for _, body := range []string{"none", "None.", "None open.", "(none)", "", "DONE", "None.\nDONE", "No open questions.", "no questions", "n/a", "- None so far"} {
+		if ev := ParseStatus("# T\n\n## Questions\n\n" + body + "\n"); ev.Questions != "" {
+			t.Errorf("%q: questions %q", body, ev.Questions)
+		}
+	}
+	if ev := ParseStatus("# T\n\n## Questions\n\nWhich colour?\n\nDONE\n"); ev.Questions != "Which colour?" || !ev.Done {
+		t.Fatalf("questions %q, done %v", ev.Questions, ev.Done)
+	}
+}

@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>widgets console</title>
+<link rel="stylesheet" href="/ui.css">
+<script src="/ui.js" defer></script>
+</head>
+<body>
+<header class="topbar"><a class="brand" href="/">agentd</a><span class="topbar-title">widgets console</span></header>
+<main>
+
+<p class="crumbs"><a href="/">All repositories</a></p>
+<section id="console-needs" data-refresh aria-labelledby="console-needs-h">
+<h2 id="console-needs-h">Needs you <span class="count">3</span></h2>
+<article class="card need need-decision">
+<header class="card-head">
+<span class="badge kind-decision">blocking</span>
+<a class="session" href="/session/night/s-blocked">s-blocked</a>
+<span class="muted">widgets · waiting 2h</span>
+</header>
+
+<div class="question md"><p>Which &lt;b&gt;colour&lt;/b&gt;?</p>
+</div>
+<div class="context md"><p>&lt;/pre&gt;&lt;script&gt;y()&lt;/script&gt;</p>
+</div>
+<dl class="facts">
+
+
+<dt>Recommended</dt><dd>b</dd>
+</dl>
+<form class="answer" method="post" action="/answer"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/console/widgets"><input type="hidden" name="src" value="night"><input type="hidden" name="session" value="s-blocked"><input type="hidden" name="id" value="Q1">
+<div class="choices"><button type="submit" name="choice" value="a"><span class="option-label">Blue</span><span class="option-note">old logo</span></button><button type="submit" name="choice" value="b" class="recommended"><span class="option-label">Green</span><span class="option-note">new guide</span></button></div>
+
+</form>
+<details class="own-words" data-key="night-s-blocked-Q1-own"><summary>Answer in your own words</summary>
+<form class="answer" method="post" action="/answer"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/console/widgets"><input type="hidden" name="src" value="night"><input type="hidden" name="session" value="s-blocked"><input type="hidden" name="id" value="Q1">
+<textarea name="other" rows="2" maxlength="2000" aria-label="Your own words" required></textarea>
+<p class="muted">Your own words reach the session but do not settle the decision.</p><div class="choices"><button type="submit">Send</button></div></form></details>
+
+
+</article><article class="card need need-decision">
+<header class="card-head">
+<span class="badge kind-decision">blocking</span>
+<a class="session" href="/session/night/txt1">txt1</a>
+<span class="muted">widgets · waiting 45m</span>
+</header>
+
+<div class="question md"><p>the Questions in STATUS.md</p>
+</div>
+<div class="context md"><p>Which colour should the <strong>logo</strong> be?</p>
+</div>
+
+<form class="answer" method="post" action="/answer"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/console/widgets"><input type="hidden" name="src" value="night"><input type="hidden" name="session" value="txt1"><input type="hidden" name="id" value="status-920d6f4df245">
+<textarea name="text" rows="3" maxlength="2000" aria-label="Your answer" required></textarea><div class="choices"><button type="submit">Answer</button></div>
+</form>
+
+
+
+</article><article class="card need need-usage-limited">
+<header class="card-head">
+<span class="badge kind-usage-limited">usage-limited</span>
+<a class="session" href="/session/coord/lim1">lim1</a>
+<span class="muted">widgets · waiting 40m</span>
+</header>
+<div class="md"><p>usage limit until 14:00</p>
+</div>
+</article>
+</section>
+<section id="messages" data-refresh aria-labelledby="messages-h">
+<h2 id="messages-h">Messages</h2>
+<ol class="messages"><li class="msg msg-imported">
+<div class="msg-head"><span class="from">owner-a</span> <span class="badge">imported</span> <time class="muted">2026-10-20 12:00</time></div>
+<div class="md"><p>Old console line</p>
+</div>
+</li><li class="msg msg-feed">
+<div class="msg-head"><span class="from">agentd</span> <span class="badge">feed</span> <time class="muted">2026-10-23 07:00</time></div>
+<div class="md"><p>w17 delivered !4</p>
+</div>
+</li><li class="msg msg-escalation">
+<div class="msg-head"><span class="from">agentd</span> <a href="/session/night/w18">w18</a> <span class="badge">escalation</span> <time class="muted">2026-10-23 08:00</time></div>
+<div class="md"><p>w18 shows a dialog: <strong>Allow</strong> the tool?</p>
+</div>
+</li><li class="msg msg-instruction">
+<div class="msg-head"><span class="from">console:widgets-console</span> <span class="badge">instruction</span> <time class="muted">2026-10-23 10:30</time></div>
+<div class="md"><p>Ship it on Friday</p>
+</div>
+</li></ol>
+</section>
+<section id="reply" aria-labelledby="reply-h">
+<h2 id="reply-h">Reply</h2>
+<form class="answer" method="post" action="/reply"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/console/widgets"><input type="hidden" name="src" value="coord"><input type="hidden" name="repository" value="widgets">
+<textarea name="text" rows="3" maxlength="4000" aria-label="Your instruction" required></textarea>
+<p class="muted">Recorded as your instruction for widgets; its coordinator reads it at its next wake.</p>
+<div class="choices"><button type="submit">Send</button></div></form>
+
+</section>
+</main>
+<footer class="foot muted">Shown 2026-10-23 12:00. The page refreshes every 30 seconds.</footer>
+</body>
+</html>

@@ -379,8 +379,8 @@ func (e Event) check() error {
 		return errors.New("a coordinator claim is a shared fact of one session; a release is the owner's, for no session")
 	case e.Kind == KindCI && (e.Mode == ModeOwner || e.Mode == ModeShared || e.Session == "" || e.CI.Repository == "" || e.CI.Ref == ""):
 		return errors.New("a ci event is a run's, for the session that delivered the request, and names its repository and request")
-	case e.Kind == KindFeed && (e.Session != "" || e.Mode != ModeLive && e.Mode != ModeShadow):
-		return errors.New("a feed event is a run's, for no one session")
+	case e.Kind == KindFeed && (e.Session != "" || (e.Feed.Phase == FeedImported) != (e.Mode == ModeOwner) || e.Mode != ModeLive && e.Mode != ModeShadow && e.Mode != ModeOwner):
+		return errors.New("a feed event is a run's, for no one session; an imported line is the owner's")
 	case e.Kind == KindInstruction && (e.Session != "" || e.Mode != ModeOwner || e.Instruction.ID == "" || len(e.Instruction.Repositories) == 0):
 		return errors.New("an instruction event is the owner's, for no one session, and names its id and repositories")
 	case e.Kind == KindSession && (e.Session == "" || e.Mode != ModeShared && e.Mode != ModeOwner || e.Runtime.ID == "" || e.Runtime.Repository == "" ||

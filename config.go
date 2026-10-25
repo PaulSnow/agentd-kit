@@ -33,8 +33,8 @@ type Config struct {
 	Sessions             map[string]Session    `json:"sessions"`
 	// Tracking names the tracking system's files agentd reads.
 	Tracking Tracking `json:"tracking"`
-	// Page is the owner's page that agentd page serves.
-	Page PageConfig `json:"page"`
+	// UI is the owner's web UI that agentd ui serves.
+	UI UIConfig `json:"ui"`
 	// Poll is agentd's own poll of the forges for new items.
 	Poll PollConfig `json:"poll"`
 	// Jobs are the agent jobs: small, checked claude -p calls.
@@ -418,6 +418,13 @@ func (c *Config) finish(base string) error {
 	c.Tracking.Snapshot = path("tracking.snapshot", c.Tracking.Snapshot)
 	c.Tracking.Mail = path("tracking.mail", c.Tracking.Mail)
 	c.Tracking.Priorities = path("tracking.priorities", c.Tracking.Priorities)
+	for i, l := range c.UI.Logs {
+		if l == "" {
+			errs = append(errs, fmt.Errorf("ui.logs[%d] is empty", i))
+			continue
+		}
+		c.UI.Logs[i] = path(fmt.Sprintf("ui.logs[%d]", i), l)
+	}
 	if _, ok := c.Accounts[c.Jobs.Account]; c.Jobs.Account != "" && !ok {
 		errs = append(errs, fmt.Errorf("jobs.account %q is not in accounts", c.Jobs.Account))
 	}

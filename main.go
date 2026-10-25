@@ -63,8 +63,8 @@ func main() {
 		err = inventoryCmd(os.Args[2:], os.Stdout)
 	case "report":
 		err = reportCmd(os.Args[2:])
-	case "page":
-		err = pageCmd(os.Args[2:])
+	case "ui":
+		err = uiCmd(os.Args[2:])
 	case "items":
 		err = itemsCmd(os.Args[2:], os.Stdout)
 	case "triage":
@@ -100,9 +100,10 @@ func usage() {
   agentd sessions [--config PATH] [--log PATH] end NAME
   agentd policy [--config PATH] [--log PATH] show REPO
   agentd console [--config PATH] [--log PATH] [--shadow] reply CONSOLE TEXT...
+  agentd console [--config PATH] [--log PATH] [--repository REPO] import FILE
   agentd inventory [--config PATH]
   agentd report [--config PATH] [--log PATH] [--shadow] [--host NAME] --out PATH
-  agentd page [--config PATH] [--log PATH] [--shadow]
+  agentd ui [--config PATH] [--log PATH]
   agentd items [--config PATH] [--log PATH] [--new] [--seen ID,...]
   agentd triage [--config PATH] --items FILE
   agentd cases [--config PATH] [--log PATH] [--shadow] [--json]
@@ -129,8 +130,11 @@ manifest with its open work and clones, from the tracking snapshot. report
 writes report.json for the tracking site from the event log, atomically.
 items lists what is new since the owner last looked: issues, requests and
 discussions from the tracking snapshots, and mail findings; --seen marks
-items seen. page serves the owner's page on page.address, to the owner only;
-its one write marks items seen. triage tries the triage job on the items in
+items seen. ui serves the owner's UI on ui.address, to the owner only:
+this config's log and ui.logs' merged by repository, with what needs the
+owner, each repository's console and each session; its writes are answers,
+deadlines, items marked seen and console replies. console import appends
+the old console's history in FILE, one JSON object per line, once. triage tries the triage job on the items in
 FILE with one call (retried once on failure) and prints its checked answer and cost; it logs nothing.
 cases lists the cases, one per issue, ranked: the owner's pins and the
 repositories' order from tracking.priorities when that file exists, then
@@ -352,6 +356,7 @@ func sessionsCmd(args []string) error {
 func consoleCmd(args []string) error {
 	fs := flag.NewFlagSet("console", flag.ContinueOnError)
 	shadow := fs.Bool("shadow", false, "answer the decisions the shadow run holds")
+	repo := fs.String("repository", "", "import: the repository the lines are for, unless a line names its own")
 	cfg, _, err := loadConfigFlag(fs, args)
 	if err != nil {
 		return err
@@ -361,14 +366,25 @@ func consoleCmd(args []string) error {
 		mode = ModeShadow
 	}
 	rest := fs.Args()
-	if len(rest) < 3 || rest[0] != "reply" {
-		return fmt.Errorf("usage: agentd console reply CONSOLE TEXT...")
+	importing := len(rest) == 2 && rest[0] == "import"
+	if !importing && (len(rest) < 3 || rest[0] != "reply") {
+		return fmt.Errorf("usage: agentd console reply CONSOLE TEXT... | agentd console --repository REPO import FILE")
 	}
 	log, events, err := openLoaded(cfg.EventLog)
 	if err != nil {
 		return err
 	}
 	defer log.Close()
+	if importing {
+		f, err := os.Open(rest[1])
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		added, skipped, err := ImportConsole(cfg, log, events, time.Now(), *repo, f)
+		fmt.Printf("imported %d lines, %d already imported\n", added, skipped)
+		return err
+	}
 	st := NewLogState(cfg, mode).Fold(events)
 	return ConsoleReply(cfg, log, st, time.Now(), rest[1], strings.Join(rest[2:], " "))
 }

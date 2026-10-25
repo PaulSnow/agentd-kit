@@ -70,6 +70,23 @@ func ReadStatus(path string) (StatusEvidence, error) {
 	return ParseStatus(string(b)), nil
 }
 
+// statusLimit is the most of a STATUS.md the UI reads.
+const statusLimit = 1 << 18
+
+// readStatusRegular is ReadStatus for the UI (#41): the file is read only
+// as a regular file, never through a link or from a FIFO, which would
+// hold a request, and at most statusLimit bytes of it.
+func readStatusRegular(path string) (StatusEvidence, error) {
+	b, err := readRegular(path, statusLimit)
+	if errors.Is(err, os.ErrNotExist) {
+		return StatusEvidence{}, nil
+	}
+	if err != nil {
+		return StatusEvidence{}, err
+	}
+	return ParseStatus(string(b)), nil
+}
+
 // A STATUS.md may hold several Questions sections (one per issue the session
 // works through). Each is judged on its own: a section that says "none" asks
 // nothing, a section ends only at a heading of its own level or higher (a
@@ -81,8 +98,8 @@ var anyHeading = regexp.MustCompile(`^(#+)\s`)
 var thematicBreak = regexp.MustCompile(`^(-{3,}|\*{3,}|_{3,})$`)
 
 // noQuestions matches the ways a session says it has none: "none", "- none",
-// "(none yet)", "None.", "n/a".
-var noQuestions = regexp.MustCompile(`(?i)^[-*\s]*\(?\s*(none(\s+yet)?|n/a)\s*\.?\)?\s*$`)
+// "(none yet)", "None.", "None open.", "No open questions", "n/a".
+var noQuestions = regexp.MustCompile(`(?i)^[-*\s]*\(?\s*(none(\s+(yet|open|so\s+far))?|no(\s+open)?\s+questions?(\s+(yet|open))?|n/a)\s*\.?\)?\s*$`)
 
 // ParseStatus interprets STATUS.md text.
 func ParseStatus(text string) StatusEvidence {
@@ -118,7 +135,15 @@ func parseQuestions(text string, fences bool) (questions string, closed bool) {
 	level := 0  // the open Questions section's heading level, or 0 outside one
 	fence := "" // the fence the line is inside, such as "```", or ""
 	flush := func() {
-		if joined := strings.Join(section, "\n"); joined != "" && !noQuestions.MatchString(joined) {
+		// A DONE line under the heading is the end of the file, not a
+		// question.
+		var kept []string
+		for _, l := range section {
+			if strings.TrimSpace(l) != "DONE" {
+				kept = append(kept, l)
+			}
+		}
+		if joined := strings.Join(kept, "\n"); joined != "" && !noQuestions.MatchString(joined) {
 			found = append(found, joined)
 		}
 		section = nil

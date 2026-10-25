@@ -278,16 +278,8 @@ func TestCIShownOnStatusReportPageAndCase(t *testing.T) {
 	if got == nil || got.CI != CIFailed || got.CIVerdict != CITargetRed || len(got.CIJobs) != 1 {
 		t.Fatalf("report delivery = %+v", got)
 	}
-	data := testPageData()
-	data.Report = rep
-	p, err := NewPage(PageConfig{Address: pageAddr, Whois: []string{"whois", "{addr}"}, Owner: "owner-a"},
-		&fakeWhois{logins: map[string]string{"192.0.2.20": "owner-a"}}, func() (PageData, error) { return data, nil },
-		func([]string, string) error { return nil }, func(string, AnswerPayload) error { return nil }, func() time.Time { return pageAt })
-	if err != nil {
-		t.Fatal(err)
-	}
-	if body := get(p, "GET", "/", pageAddr, "192.0.2.20:51000").Body.String(); !strings.Contains(body, "CI failed (target-red) test") {
-		t.Fatalf("page lacks the request's CI:\n%s", body)
+	if body := owner(t, harnessUI(t, h), "/"); !strings.Contains(body, "CI failed</span>") || !strings.Contains(body, "· target-red · test") {
+		t.Fatalf("the UI lacks the request's CI:\n%s", body)
 	}
 	var cv *CaseView
 	for _, c := range CasesFrom(h.cfg, h.sup.st) {

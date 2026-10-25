@@ -36,6 +36,9 @@ const (
 	FeedFailed   = "failed"
 	FeedGaveUp   = "gave-up"
 	FeedWould    = "would" // shadow mode: the post it would make
+	// FeedImported is a line of the old console's history, imported once
+	// by the owner (#41): the fold ignores it, and the UI shows it.
+	FeedImported = "imported"
 )
 
 // FeedPayload is one step of a feed post: its entry's key, the repository
@@ -52,6 +55,9 @@ type FeedPayload struct {
 	Text         string   `json:"text,omitempty"`
 	Withheld     int      `json:"withheld,omitempty"`
 	Error        string   `json:"error,omitempty"`
+	// An imported line: when it was written, and by whom.
+	At   *time.Time `json:"at,omitempty"`
+	From string     `json:"from,omitempty"`
 }
 
 // FeedState is what the feed events fold to: the repositories the feed

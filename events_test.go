@@ -270,3 +270,27 @@ func TestAppendRefusesAnUnreadableEvent(t *testing.T) {
 		}
 	}
 }
+
+// An imported console line is the owner's, and only an imported line is:
+// any other feed event is a run's (#41).
+func TestFeedEventModes(t *testing.T) {
+	feed := func(phase, mode string) Event {
+		return Event{V: EventVersion, Time: time.Now(), Kind: KindFeed, Mode: mode, Feed: &FeedPayload{Phase: phase, Key: "k", Repository: "widgets", Text: "x"}}
+	}
+	for _, c := range []struct {
+		e  Event
+		ok bool
+	}{
+		{feed(FeedImported, ModeOwner), true},
+		{feed(FeedImported, ModeLive), false},
+		{feed(FeedImported, ModeShared), false},
+		{feed(FeedIntent, ModeOwner), false},
+		{feed(FeedIntent, ModeShared), false},
+		{feed(FeedIntent, ModeLive), true},
+		{feed(FeedWould, ModeShadow), true},
+	} {
+		if err := c.e.check(); (err == nil) != c.ok {
+			t.Errorf("%s %s: %v", c.e.Feed.Phase, c.e.Mode, err)
+		}
+	}
+}
