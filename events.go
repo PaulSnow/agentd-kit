@@ -365,10 +365,10 @@ func (e Event) check() error {
 	// too; the owner marks items seen.
 	failedTriage := e.Kind == KindError && e.Error.Triage != nil
 	switch {
-	case e.Kind == KindMessage && (e.Session != "" || e.Mode != ModeShared || e.Message.Console == "" || e.Message.Kind == ""):
-		return errors.New("a message is a shared fact, for no one session, and names its console and kind")
-	case e.Kind == KindInbox && (e.Session != "" || e.Mode != ModeShared || e.Inbox.Console == "" || e.Inbox.Reader == ""):
-		return errors.New("an inbox event is a shared fact, for no one session, and names its console and reader")
+	case e.Kind == KindMessage && (e.Session != "" || e.Mode != ModeShared || e.Message.ID == "" || e.Message.Console == "" || !messageKinds[e.Message.Kind]):
+		return errors.New("a message is a shared fact, for no one session, and names its id, console and kind")
+	case e.Kind == KindInbox && (e.Session != "" || e.Mode != ModeShared || e.Inbox.Console == "" || e.Inbox.Reader == "" || len(e.Inbox.IDs) == 0):
+		return errors.New("an inbox event is a shared fact, for no one session, and names its console, reader and the ids read")
 	case e.Kind == KindAccount && (e.Session != "" || e.Mode != ModeShared || e.Account.Account == ""):
 		return errors.New("an account reading is a shared fact, for no one session, and names its account")
 	case e.Kind == KindApproval && (e.Session == "" || e.Mode != ModeShared || e.Approval.Repository == "" || e.Approval.Ref == "" || e.Approval.SHA == ""):

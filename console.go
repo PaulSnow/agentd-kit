@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Console posts and inbox (#42): the sessions' and coordinators' reports
@@ -68,8 +69,17 @@ type MessagePost struct {
 }
 
 // checkConsoles checks the consoles without a repository: a name no
-// repository or repository's console has, and globs that compile.
+// repository or repository's console has, and globs that compile. Without
+// an escalation command the UI is the only place an escalation shows, so
+// a session must escalate to a console it lists.
 func (c *Config) checkConsoles(errs *[]error) {
+	if len(c.Policies.Escalate.Command) == 0 {
+		for _, name := range sortedKeys(c.Sessions) {
+			if con := c.Console(name); !c.knownConsole(con) {
+				*errs = append(*errs, fmt.Errorf("sessions.%s escalates to console %q, which no repository or consoles entry has; without policies.escalate.command its escalations would show nowhere", name, con))
+			}
+		}
+	}
 	for name, con := range c.Consoles {
 		if name == "" || strings.TrimSpace(name) != name {
 			*errs = append(*errs, fmt.Errorf("consoles: %q is not a console name", name))
@@ -161,12 +171,35 @@ func PostMessage(cfg *Config, log *Log, tmux Tmux, now time.Time, p MessagePost)
 	}
 	m.ID = "M" + shortHash(HashPane(now.UTC().Format(time.RFC3339Nano) + "\n" + p.Console + "\n" + p.From + "\n" + text))[:8]
 	if p.To != "" {
-		if err := typeTo(cfg, tmux, p.To, text); err != nil {
+		line, err := typedLine(text)
+		if err != nil {
+			return err
+		}
+		if err := typeTo(cfg, tmux, p.To, line); err != nil {
 			return err
 		}
 		m.To, m.Typed = p.To, true
 	}
 	return log.Append(Event{V: EventVersion, Time: now, Kind: KindMessage, Mode: ModeShared, Message: m})
+}
+
+// typedLine is text as one typed line: its line breaks and tabs become
+// spaces, since a typed line break or a carriage return would submit the
+// prompt early. Any other control character, an Escape that would
+// interrupt the session among them, is refused.
+func typedLine(text string) (string, error) {
+	var b strings.Builder
+	for _, r := range text {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			b.WriteByte(' ')
+		case unicode.IsControl(r):
+			return "", fmt.Errorf("the post holds control character %U, which would be typed as a key", r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return strings.Join(strings.Fields(b.String()), " "), nil
 }
 
 // typeTo types text into tmux session name, checked as a nudge is: the
@@ -270,7 +303,11 @@ var tmuxSessionName = func() string {
 	if os.Getenv("TMUX") == "" {
 		return ""
 	}
-	out, err := runTimed(10*time.Second, "", nil, false, "tmux", "display-message", "-p", "#S")
+	args := []string{"display-message", "-p"}
+	if pane := os.Getenv("TMUX_PANE"); pane != "" {
+		args = append(args, "-t", pane)
+	}
+	out, err := runTimed(10*time.Second, "", nil, false, "tmux", append(args, "#S")...)
 	if err != nil {
 		return ""
 	}

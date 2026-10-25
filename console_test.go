@@ -84,6 +84,12 @@ func TestConsolePostWithheld(t *testing.T) {
 	if body := owner(t, u, "/console/widgets"); !strings.Contains(body, "withheld: it matched a confidential pattern") {
 		t.Fatalf("the withheld post is not shown:\n%s", body)
 	}
+	if err := PostMessage(f.night, NewLogWriter(f.nightBuf), nil, pageAt, MessagePost{Console: "widgets-console", From: "embargoed-bot", Text: "Plain words"}); err != nil {
+		t.Fatal(err)
+	}
+	if ms := messages(t, f.nightBuf); len(ms) != 2 || ms[1].Withheld != 1 || ms[1].From != "" || strings.Contains(f.nightBuf.String(), "embargoed-bot") {
+		t.Fatalf("a confidential author was logged: %+v", ms)
+	}
 }
 
 // --to types the text into that tmux session, by its exact name, after
@@ -95,11 +101,11 @@ func TestConsolePostTo(t *testing.T) {
 	tmux := newFakeTmux()
 	tmux.alive["a"], tmux.panes["a"] = true, "❯ "
 	log := NewLogWriter(h.buf)
-	if err := PostMessage(h.cfg, log, tmux, h.clock.Now(), MessagePost{Console: "widgets", Text: "Rebase on main, then carry on", To: "a"}); err != nil {
+	if err := PostMessage(h.cfg, log, tmux, h.clock.Now(), MessagePost{Console: "widgets", Text: "Rebase on main,\r\nthen\tcarry on", To: "a"}); err != nil {
 		t.Fatal(err)
 	}
-	if n := tmux.count("type", "a"); n != 1 {
-		t.Fatalf("typed %d times", n)
+	if typed := h.typedBy(tmux, "a"); len(typed) != 1 || typed[0] != "Rebase on main, then carry on" {
+		t.Fatalf("typed %q", typed)
 	}
 	ms := messages(t, h.buf)
 	if len(ms) != 1 || ms[0].To != "a" || !ms[0].Typed {
@@ -107,7 +113,8 @@ func TestConsolePostTo(t *testing.T) {
 	}
 	tmux.alive["b-shell"], tmux.commands["b-shell"] = true, "bash"
 	tmux.alive["c-dialog"], tmux.panes["c-dialog"] = true, "Do you want to proceed?\n❯ 1. Yes\n  2. No"
-	for _, to := range []string{"nobody", "a*", "b-shell", "c-dialog"} {
+	tmux.alive["d-dead"], tmux.dead["d-dead"] = true, true
+	for _, to := range []string{"nobody", "a*", "b-shell", "c-dialog", "d-dead"} {
 		if err := PostMessage(h.cfg, log, tmux, h.clock.Now(), MessagePost{Console: "widgets", Text: "hello", To: to}); err == nil {
 			t.Errorf("--to %s was accepted", to)
 		}
@@ -115,9 +122,26 @@ func TestConsolePostTo(t *testing.T) {
 			t.Errorf("typed into %s", to)
 		}
 	}
+	if err := PostMessage(h.cfg, log, tmux, h.clock.Now(), MessagePost{Console: "widgets", Text: "stop\x1b[A", To: "a"}); err == nil {
+		t.Error("a post with an Escape was typed")
+	}
+	if n := tmux.count("type", "a"); n != 1 {
+		t.Errorf("typed into a %d times", n)
+	}
 	if n := len(messages(t, h.buf)); n != 1 {
 		t.Fatalf("a refused post was recorded: %d messages", n)
 	}
+}
+
+// typedBy is the text typed into name.
+func (h *harness) typedBy(tmux *fakeTmux, name string) []string {
+	var out []string
+	for _, c := range tmux.calls {
+		if c.op == "type" && c.name == name {
+			out = append(out, c.args[0])
+		}
+	}
+	return out
 }
 
 // inbox prints the owner's replies for a console once to each reader,
@@ -201,6 +225,19 @@ func TestExtraConsoleConfig(t *testing.T) {
 	if err := bad.finish(t.TempDir()); err == nil {
 		t.Error("a bad glob was accepted")
 	}
+	// Without an escalation command, a session must escalate to a console
+	// the UI lists.
+	lost := DefaultConfig()
+	lost.TranscriptDir = ""
+	lost.Policies.Escalate.DefaultConsole = "infra"
+	lost.Sessions = map[string]Session{"ops-1": {Workdir: t.TempDir(), Cwd: t.TempDir()}}
+	if err := lost.finish(t.TempDir()); err == nil || !strings.Contains(err.Error(), "sessions.ops-1") {
+		t.Errorf("escalations shown nowhere: %v", err)
+	}
+	lost.Consoles = map[string]ConsoleConfig{"infra": {Title: "Infrastructure"}}
+	if err := lost.finish(t.TempDir()); err != nil {
+		t.Errorf("default console listed: %v", err)
+	}
 }
 
 // A console without a repository is listed by the UI after the
@@ -212,12 +249,19 @@ func TestExtraConsoleInUI(t *testing.T) {
 	if err := PostMessage(f.night, NewLogWriter(f.nightBuf), nil, pageAt.Add(-time.Minute), MessagePost{Console: "chat", Kind: "finished", From: "host-a", Text: "Backups are done"}); err != nil {
 		t.Fatal(err)
 	}
+	// An escalation of a session with no repository shows in the console
+	// it went to.
+	esc := Event{V: EventVersion, Time: pageAt.Add(-time.Minute), Session: "ops-1", Kind: KindAction, Mode: ModeLive,
+		Act: &ActPayload{Action: ActEscalate, Key: "k", Console: "chat", Message: "ops-1 needs a disk"}}
+	if err := NewLogWriter(f.nightBuf).Append(esc); err != nil {
+		t.Fatal(err)
+	}
 	body := owner(t, u, "/")
 	if i, j := strings.Index(body, `href="/console/gadgets"`), strings.Index(body, `href="/console/chat"`); j < 0 || i > j || !strings.Contains(body, "General chat") {
 		t.Fatalf("the console is not listed after the repositories:\n%s", body)
 	}
 	body = owner(t, u, "/console/chat")
-	if !strings.Contains(body, "Backups are done") || !strings.Contains(body, `name="repository" value="chat"`) {
+	if !strings.Contains(body, "Backups are done") || !strings.Contains(body, "ops-1 needs a disk") || !strings.Contains(body, `name="repository" value="chat"`) {
 		t.Fatalf("the console lacks its post or its reply box:\n%s", body)
 	}
 	w := ownerPost(u, "/reply", url.Values{"src": {"night"}, "repository": {"chat"}, "text": {"Rotate the logs tonight"}, "back": {"/console/chat"}})
@@ -319,19 +363,22 @@ func TestConsoleImportOutsideLines(t *testing.T) {
 		t.Fatalf("import = %d, %d, %v", added, skipped, err)
 	}
 	events, _, _ = NewLogWriter(f.nightBuf).Tail(0)
-	var got []*FeedPayload
+	byText := map[string]*FeedPayload{}
 	for _, e := range events {
-		if e.Kind == KindFeed && e.Feed.Phase == FeedImported && e.Feed.From != "owner-a" || e.Kind == KindFeed && e.Feed.Text == "Use the blue paint" {
-			got = append(got, e.Feed)
+		if e.Kind == KindFeed && e.Feed.Phase == FeedImported {
+			byText[e.Feed.Text] = e.Feed
 		}
 	}
-	want := time.Unix(1761350400, 250_000_000)
-	if len(got) < 2 || !got[len(got)-2].At.Equal(want) || got[len(got)-2].Kind != "decision" || got[len(got)-1].Repository != "chat" {
-		t.Fatalf("imported = %+v", got)
+	blue, now := byText["Use the blue paint"], byText["Painting now"]
+	if blue == nil || now == nil || !blue.At.Equal(time.Unix(1761350400, 250_000_000)) || blue.Kind != "decision" || blue.Repository != "widgets" || now.Repository != "chat" || now.From != "w17" {
+		t.Fatalf("imported = %+v, %+v", blue, now)
 	}
 	added, skipped, err = ImportConsole(f.night, NewLogWriter(f.nightBuf), events, pageAt, "widgets", strings.NewReader(in))
 	if err != nil || added != 0 || skipped != 2 {
 		t.Fatalf("second import = %d, %d, %v", added, skipped, err)
+	}
+	if _, _, err := ImportConsole(f.night, NewLogWriter(f.nightBuf), events, pageAt, "widgets", strings.NewReader(`{"ts": 1761350400000, "text": "ms"}`)); err == nil || !strings.Contains(err.Error(), "Unix seconds") {
+		t.Fatalf("a ts in milliseconds: %v", err)
 	}
 }
 

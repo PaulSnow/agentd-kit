@@ -232,11 +232,14 @@ func ImportConsole(cfg *Config, log *Log, events []Event, now time.Time, repo st
 		if l.Repository == "" {
 			l.Repository = repo
 		}
-		_, repo := cfg.Repositories[l.Repository]
-		if _, con := cfg.Consoles[l.Repository]; !repo && !con {
+		_, isRepo := cfg.Repositories[l.Repository]
+		if _, isConsole := cfg.Consoles[l.Repository]; !isRepo && !isConsole {
 			return 0, 0, fmt.Errorf("line %d: no repository or console %q", n, l.Repository)
 		}
-		if l.TS != nil && l.At.IsZero() && *l.TS > 0 && *l.TS < 1e11 {
+		if l.TS != nil && l.At.IsZero() {
+			if !(*l.TS > 0 && *l.TS < 1e11) {
+				return 0, 0, fmt.Errorf("line %d: ts %v is not a time in Unix seconds", n, *l.TS)
+			}
 			sec, frac := math.Modf(*l.TS)
 			l.At = time.Unix(int64(sec), int64(math.Round(frac*1e9))).UTC()
 		}

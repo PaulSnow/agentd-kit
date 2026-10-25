@@ -192,13 +192,23 @@ func (src *uiSource) catchUp() error {
 			if e.Feed.At != nil {
 				at = *e.Feed.At
 			}
-			add(e.Feed.Repository, uiMessage{At: at, Kind: "imported", From: e.Feed.From, Text: e.Feed.Text})
+			kind := "imported"
+			if e.Feed.Kind != "" {
+				kind = "imported " + e.Feed.Kind
+			}
+			add(e.Feed.Repository, uiMessage{At: at, Kind: kind, From: e.Feed.From, Text: e.Feed.Text})
 		case e.Act != nil && (e.Kind == KindAction || e.Kind == KindWould) && (e.Act.Action == ActEscalate || e.Act.Action == ActUpdate):
 			m := uiMessage{At: e.Time, Kind: "escalation", From: "agentd", Session: e.Session, Text: e.Act.Message}
+			// A session's repository has it; one that names none, its
+			// console's repositories or the console without one it went to.
 			if repo := repoOf(e.Session); repo != "" {
 				add(repo, m)
 			} else if _, ok := cfg.Consoles[e.Act.Console]; ok {
 				add(e.Act.Console, m)
+			} else {
+				for _, r := range cfg.consoleRepos(e.Act.Console) {
+					add(r, m)
+				}
 			}
 		case e.Kind == KindInstruction && e.Instruction != nil:
 			m := uiMessage{At: e.Time, Kind: "instruction", From: e.Instruction.From, Text: e.Instruction.Text}

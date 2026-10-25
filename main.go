@@ -385,6 +385,9 @@ func consoleCmd(args []string) error {
 	}
 	rest := fs.Args()
 	if len(rest) > 0 && (rest[0] == "post" || rest[0] == "inbox") {
+		if *shadow || *repo != "" {
+			return fmt.Errorf("console %s takes neither --shadow nor --repository", rest[0])
+		}
 		return consolePostCmd(rest[0], append(configArgs(fs), rest[1:]...), os.Stdin, os.Stdout)
 	}
 	importing := len(rest) == 2 && rest[0] == "import"
@@ -456,9 +459,12 @@ func consolePostCmd(verb string, args []string, stdin io.Reader, stdout io.Write
 	}
 	text := strings.Join(rest[1:], " ")
 	if len(rest) == 2 && rest[1] == "-" {
-		b, err := io.ReadAll(io.LimitReader(stdin, MessageLimit+1))
+		b, err := io.ReadAll(io.LimitReader(stdin, 1<<20+1))
 		if err != nil {
 			return err
+		}
+		if len(b) > 1<<20 {
+			return fmt.Errorf("a post of over 1 MiB on standard input; at most %d bytes", MessageLimit)
 		}
 		text = string(b)
 	}
