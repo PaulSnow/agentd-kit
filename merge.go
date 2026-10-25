@@ -1,33 +1,31 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// Merge when green (#26, #1 decision D2). agentd merges a request only as
-// a fast-forward of a gated tree, and only where the repository grants it
-// twice: its configuration allows merge, and its own policy file on the
-// target branch, read at the target's tip, says merge: fast-forward, so a
-// session cannot grant itself a merge from its branch. Each watched
-// request is checked as the CI watcher records it; it merges when its
-// head is the commit agentd's gate passed and CI succeeded on, no
-// blocking decision of its session is open, the head
-// is a fast-forward of the target, and the target has not moved since
-// that check. Otherwise why is recorded, once per head and reason, and
-// nothing is done. A request is merged once; there is no squash, rebase
-// or force.
+// Merge when green (#26, #1 decision D2, #35). agentd merges a request
+// where its repository's policy enables merge (policy.go), narrowed by the
+// repository's own policy file on the target branch, read at the target's
+// tip, so a session cannot widen it from its branch. Each watched request
+// is checked as the CI watcher records it; it merges when it targets one
+// of the policy's targets, its author is one of its authors, it is not
+// excluded, each named approver approved it, what the policy requires
+// holds at its head (agentd's gate passed on it, CI succeeded on it, its
+// review rounds converged), no blocking decision of its session is open,
+// and, for a fast-forward, the head is a fast-forward of the target. The
+// target must not have moved since that check. Otherwise why is recorded,
+// once per head and reason, and nothing is done. A request is merged once,
+// by the policy's method; there is no rebase or force.
 
-// MergePolicyFile is the repository's own merge policy, read from the
-// target branch: {"merge": "fast-forward"} grants a fast-forward merge.
+// MergePolicyFile is the repository's own policy, read from the target
+// branch: rules that narrow the owner's (policy.go).
 const MergePolicyFile = ".agentd/policy.json"
-
-// MergeFastForward is the one merge a policy file may grant.
-const MergeFastForward = "fast-forward"
 
 // sourceMerge is the merge check's entry among the poll worker's due times.
 const sourceMerge = "merge"
@@ -53,7 +51,12 @@ func (s *Supervisor) mergeGreen(now time.Time) {
 		return
 	}
 	for _, w := range s.watchedRequests() {
-		if !contains(s.cfg.Repositories[w.Repository].Allow, "merge") {
+		// The owner's policy decides what is worth asking the forge; the
+		// repository's file, which may narrow it, is read at the target's
+		// tip in the worker, every time, so a file that narrowed it once
+		// does not hold it after it changes.
+		pol := s.cfg.Repositories[w.Repository].Policy
+		if !pol.Merge.Enabled {
 			continue
 		}
 		t := s.track(w.Session)
@@ -62,31 +65,37 @@ func (s *Supervisor) mergeGreen(now time.Time) {
 			continue
 		}
 		r, ok := s.st.CI[key]
-		code, why := s.mergeBlocked(t, w, r, ok, now)
+		reviewed := s.reviewConverged(w.Session)
+		code, why := s.mergeBlocked(t, w, r, ok, pol.Merge.Require, reviewed, now)
 		if code != "" {
 			s.mergeSkip(w.Session, t, w, r.Head, code, why)
 			continue
 		}
 		w, r := w, r
-		s.spawn(w.Session, mergeKey(w.Repository, w.Ref), func(ws *Supervisor, t *Track) { ws.mergeRequest(w.Session, t, w, r) })
+		s.spawn(w.Session, mergeKey(w.Repository, w.Ref), func(ws *Supervisor, t *Track) { ws.mergeRequest(w.Session, t, w, r, reviewed) })
 	}
+}
+
+// reviewConverged says whether the case the session works stopped its
+// review rounds converged.
+func (s *Supervisor) reviewConverged(name string) bool {
+	c := s.st.Cases[s.cfg.caseOf(s.cfg.Sessions[name])]
+	return c != nil && c.RoundStop != nil && c.RoundStop.Reason == RoundsConverged
 }
 
 // mergeBlocked is why the state alone says a request may not merge now,
 // as a short code and a reason, or "" when the forge is to be asked.
-func (s *Supervisor) mergeBlocked(t *Track, w ciWatched, r CIRecord, ok bool, now time.Time) (string, string) {
+func (s *Supervisor) mergeBlocked(t *Track, w ciWatched, r CIRecord, ok bool, require []string, reviewed bool, now time.Time) (string, string) {
 	switch {
 	case !ok || r.Head == "":
-		return "no-ci", "" // the CI watcher has not recorded it yet
+		return "no-ci", "" // the CI watcher has not recorded it yet: it knows the head
 	case r.Session != w.Session || r.Delivered != w.Delivered || t.ciStale(r):
 		return "stale", "" // the watcher records the delivery at its next round
-	case r.State == CIPending:
-		return "ci-pending", "" // CI is running
-	case r.State != CISuccess:
-		return "ci-" + r.State, fmt.Sprintf("CI on %s is %s, not green", shortHash(r.Head), r.State)
-	case !contains(t.Gated, r.Head):
-		return "ungated", fmt.Sprintf("its head %s did not pass agentd's gate", shortHash(r.Head))
-	case t.Questions.Open || t.blocking():
+	}
+	if code, why := missing(t, r, require, reviewed); code != "" {
+		return code, why
+	}
+	if t.Questions.Open || t.blocking() {
 		return "decision", "its session has an open blocking decision"
 	}
 	fkey := mergeKey(w.Repository, w.Ref) + ":" + r.Head
@@ -97,6 +106,22 @@ func (s *Supervisor) mergeBlocked(t *Track, w ciWatched, r CIRecord, ok bool, no
 	}
 	if !s.retryDue(t, fkey, now) {
 		return "backoff", ""
+	}
+	return "", ""
+}
+
+// missing is what require names that does not hold at the request's
+// head, as a short code and a reason, or "".
+func missing(t *Track, r CIRecord, require []string, reviewed bool) (string, string) {
+	switch {
+	case contains(require, RequireCI) && r.State == CIPending:
+		return "ci-pending", "" // CI is running
+	case contains(require, RequireCI) && r.State != CISuccess:
+		return "ci-" + r.State, fmt.Sprintf("CI on %s is %s, not green", shortHash(r.Head), r.State)
+	case contains(require, RequireGate) && !contains(t.Gated, r.Head):
+		return "ungated", fmt.Sprintf("its head %s did not pass agentd's gate", shortHash(r.Head))
+	case contains(require, RequireReview) && !reviewed:
+		return "unreviewed", "its case's review rounds have not stopped converged"
 	}
 	return "", ""
 }
@@ -128,17 +153,21 @@ type mergeView struct {
 	head, target, url string
 	open              bool
 	held              string // why the forge itself holds it, a draft, or ""
-	// tip is the target branch's commit, policy the merge policy file at
-	// a commit (nil when there is none), and fastForward why head is not
-	// a fast-forward of tip, or "".
+	author            string
+	labels            []string
+	// tip is the target branch's commit, policy the repository's policy
+	// file at a commit (nil when there is none), fastForward why head is
+	// not a fast-forward of tip, or "", and approvers who approved the
+	// request at head.
 	tip         func(target string) (string, error)
 	policy      func(sha string) ([]byte, error)
 	fastForward func(tip, head string) (string, error)
+	approvers   func(head string) ([]string, error)
 }
 
 // mergeRequest asks the forge whether the request may merge, and merges it
 // through the allow-listed forge client when every check holds.
-func (s *Supervisor) mergeRequest(name string, t *Track, w ciWatched, r CIRecord) {
+func (s *Supervisor) mergeRequest(name string, t *Track, w ciWatched, r CIRecord, reviewed bool) {
 	repo := s.cfg.Repositories[w.Repository]
 	api := s.api.At(repo.Host)
 	view := func() (mergeView, error) {
@@ -165,6 +194,12 @@ func (s *Supervisor) mergeRequest(name string, t *Track, w ciWatched, r CIRecord
 		skip("held", v.held)
 		return
 	}
+	// A target outside the owner's is not merged into, and its file is
+	// not read: a session could point its request at a branch it writes.
+	if owner := s.cfg.Repositories[w.Repository].Policy.Merge; !contains(owner.Targets, v.target) {
+		skip("target", fmt.Sprintf("its target %s is not one the policy merges into: %s", v.target, strings.Join(owner.Targets, ", ")))
+		return
+	}
 	tip, err := v.tip(v.target)
 	if err != nil {
 		unknown(err)
@@ -175,21 +210,56 @@ func (s *Supervisor) mergeRequest(name string, t *Track, w ciWatched, r CIRecord
 		unknown(err)
 		return
 	}
-	// Keys are matched exactly: json.Unmarshal into a struct would take
-	// "MERGE" too.
-	var pol map[string]any
-	if b == nil || json.Unmarshal(b, &pol) != nil || pol["merge"] != MergeFastForward {
-		skip("no-grant", fmt.Sprintf("%s on %s at %s does not grant merge: %s", MergePolicyFile, v.target, shortHash(tip), MergeFastForward))
+	pol := s.notePolicy(name, t, w.Repository, v.target, tip, b)
+	if s.halt != nil {
 		return
 	}
-	why, err := v.fastForward(tip, v.head)
-	if err != nil {
-		unknown(err)
+	m := pol.Merge
+	number, _ := strconv.Atoi(w.Ref[1:])
+	switch {
+	case !m.Enabled:
+		skip("disabled", fmt.Sprintf("%s on %s at %s turns merge off", MergePolicyFile, v.target, shortHash(tip)))
+		return
+	case !contains(m.Targets, v.target):
+		skip("target", fmt.Sprintf("its target %s is not one the policy merges into: %s", v.target, strings.Join(m.Targets, ", ")))
+		return
+	case !contains(m.Authors, v.author):
+		skip("author", fmt.Sprintf("its author %s is not one whose requests the policy merges", s.withheld(v.author)))
+		return
+	case m.Exclude.matches(number, v.labels):
+		skip("excluded", "the policy excludes it, by its number or a label")
+		return
+	case pol.Scope.Reserved.matches(0, v.labels):
+		skip("reserved", "it carries a label the policy reserves")
 		return
 	}
-	if why != "" {
-		skip("not-ff", why)
+	if code, why := missing(t, r, m.Require, reviewed); code != "" {
+		skip(code, why)
 		return
+	}
+	if len(m.Approvals) > 0 {
+		approved, err := v.approvers(v.head)
+		if err != nil {
+			unknown(err)
+			return
+		}
+		for _, a := range m.Approvals {
+			if !contains(approved, a) {
+				skip("approval", fmt.Sprintf("%s has not approved it at %s", a, shortHash(v.head)))
+				return
+			}
+		}
+	}
+	if m.Method == MergeFastForward {
+		why, err := v.fastForward(tip, v.head)
+		if err != nil {
+			unknown(err)
+			return
+		}
+		if why != "" {
+			skip("not-ff", why)
+			return
+		}
 	}
 	// The request and its target are asked again just before the merge:
 	// a request retargeted or moved on, or a target that moved since the
@@ -213,7 +283,7 @@ func (s *Supervisor) mergeRequest(name string, t *Track, w ciWatched, r CIRecord
 		return
 	}
 	fkey := mergeKey(w.Repository, w.Ref) + ":" + r.Head
-	s.act(name, ActMerge, &ActPayload{Key: fkey, Repository: w.Repository, Ref: w.Ref, URL: v.url, Head: v.head, Target: v.target, SHA: tip}, func() error {
+	s.act(name, ActMerge, &ActPayload{Key: fkey, Repository: w.Repository, Ref: w.Ref, URL: v.url, Head: v.head, Target: v.target, SHA: tip, Method: m.Method}, func() error {
 		return s.forge.MergeAllowed(w.Repository, w.Ref, v.head, v.target)
 	})
 }
@@ -229,16 +299,39 @@ func gitlabMergeView(api ForgeAPI, project, ref string) (mergeView, error) {
 		return ciGet(func() (APIResponse, error) { return api.GitLab(path) }, "glab api "+path, v)
 	}
 	var mr struct {
-		State        string `json:"state"`
-		WebURL       string `json:"web_url"`
-		SHA          string `json:"sha"`
-		TargetBranch string `json:"target_branch"`
-		Draft        bool   `json:"draft"`
+		State        string   `json:"state"`
+		WebURL       string   `json:"web_url"`
+		SHA          string   `json:"sha"`
+		TargetBranch string   `json:"target_branch"`
+		Draft        bool     `json:"draft"`
+		Labels       []string `json:"labels"`
+		Author       struct {
+			Username string `json:"username"`
+		} `json:"author"`
 	}
 	if err := get(base+"/merge_requests/"+ref[1:], &mr); err != nil {
 		return mergeView{}, err
 	}
-	v := mergeView{head: mr.SHA, target: mr.TargetBranch, url: mr.WebURL, open: mr.State == "opened"}
+	v := mergeView{head: mr.SHA, target: mr.TargetBranch, url: mr.WebURL, open: mr.State == "opened", author: mr.Author.Username, labels: mr.Labels}
+	// GitLab keeps an approval across a push unless the project resets
+	// approvals, so its approval is not tied to the head.
+	v.approvers = func(string) ([]string, error) {
+		var a struct {
+			ApprovedBy []struct {
+				User struct {
+					Username string `json:"username"`
+				} `json:"user"`
+			} `json:"approved_by"`
+		}
+		if err := get(base+"/merge_requests/"+ref[1:]+"/approvals", &a); err != nil {
+			return nil, err
+		}
+		var out []string
+		for _, x := range a.ApprovedBy {
+			out = append(out, x.User.Username)
+		}
+		return out, nil
+	}
 	if mr.Draft {
 		v.held = "it is a draft"
 	}
@@ -303,7 +396,13 @@ func githubMergeView(api ForgeAPI, project, ref string) (mergeView, error) {
 		Draft          bool   `json:"draft"`
 		MergeableState string `json:"mergeable_state"`
 		HTMLURL        string `json:"html_url"`
-		Head           struct {
+		User           struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		Labels []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
+		Head struct {
 			SHA string `json:"sha"`
 		} `json:"head"`
 		Base struct {
@@ -313,7 +412,42 @@ func githubMergeView(api ForgeAPI, project, ref string) (mergeView, error) {
 	if err := get(base+"/pulls/"+ref[1:], &pr); err != nil {
 		return mergeView{}, err
 	}
-	v := mergeView{head: pr.Head.SHA, target: pr.Base.Ref, url: pr.HTMLURL, open: pr.State == "open" && !pr.Merged}
+	v := mergeView{head: pr.Head.SHA, target: pr.Base.Ref, url: pr.HTMLURL, open: pr.State == "open" && !pr.Merged, author: pr.User.Login}
+	for _, l := range pr.Labels {
+		v.labels = append(v.labels, l.Name)
+	}
+	// An approval counts at the commit it was given on, while it is its
+	// reviewer's latest say: a later request for changes, or a dismissal,
+	// takes it back. More reviews than a page holds is an error, not a
+	// silent miss.
+	v.approvers = func(head string) ([]string, error) {
+		var reviews []struct {
+			State    string `json:"state"`
+			CommitID string `json:"commit_id"`
+			User     struct {
+				Login string `json:"login"`
+			} `json:"user"`
+		}
+		if err := get(base+"/pulls/"+ref[1:]+"/reviews?per_page=100", &reviews); err != nil {
+			return nil, err
+		}
+		if len(reviews) >= 100 {
+			return nil, fmt.Errorf("gh api: pull request %s has 100 reviews or more; agentd reads one page", ref)
+		}
+		latest := map[string]int{} // each reviewer's latest review that says something
+		for i, r := range reviews {
+			if r.State != "COMMENTED" && r.State != "PENDING" {
+				latest[r.User.Login] = i
+			}
+		}
+		var out []string
+		for _, login := range sortedKeys(latest) {
+			if r := reviews[latest[login]]; r.State == "APPROVED" && r.CommitID == head {
+				out = append(out, login)
+			}
+		}
+		return out, nil
+	}
 	// Moving the branch skips what GitHub's own merge would ask, so only a
 	// request GitHub says it would merge as it stands is not held: clean,
 	// or with hooks, or unstable (a check that is not required fails).

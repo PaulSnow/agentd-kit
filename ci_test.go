@@ -30,7 +30,7 @@ const ciProject = "/projects/example-org%2Fwidgets"
 func (f *fakeForgeAPI) pipelines(head, state string, jobs []string, target string, targetJobs []string) {
 	f.set(func() {
 		f.gitlab[ciProject+"/merge_requests/1"] = `{"iid":1,"state":"opened","title":"Add the feature","description":"The MR description.","web_url":"https://gitlab.example.com/example-org/widgets/-/merge_requests/1","sha":"` + head +
-			`","target_branch":"main","head_pipeline":{"id":50,"status":"` + state + `","sha":"` + head + `","web_url":"https://gitlab.example.com/example-org/widgets/-/pipelines/50"}}`
+			`","target_branch":"main","author":{"username":"widget-bot"},"labels":["agentd"],"head_pipeline":{"id":50,"status":"` + state + `","sha":"` + head + `","web_url":"https://gitlab.example.com/example-org/widgets/-/pipelines/50"}}`
 		f.gitlab[ciProject+"/pipelines/50/jobs"] = gitlabJobs(500, jobs)
 		f.gitlab[ciProject+"/pipelines|ref=main"] = `[{"id":40,"status":"` + target + `","sha":"badbeef1234","web_url":"https://gitlab.example.com/example-org/widgets/-/pipelines/40"}]`
 		f.gitlab[ciProject+"/pipelines/40/jobs"] = gitlabJobs(400, targetJobs)

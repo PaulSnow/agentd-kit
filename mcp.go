@@ -437,6 +437,7 @@ type MCPServer struct {
 	read         func() ([]Event, error) // the log as it is now
 	now          func() time.Time
 	confidential []*regexp.Regexp
+	st           *LogState // the log as folded for the call being checked
 }
 
 // NewMCPServer is the server for the named session, which must work a
@@ -456,7 +457,7 @@ func NewMCPServer(cfg *Config, name string, log *Log, read func() ([]Event, erro
 		return nil, fmt.Errorf("session %s works no case: it needs a repository and an issue", name)
 	}
 	srv := &MCPServer{cfg: cfg, name: name, sess: sess, caseID: id, log: log, read: read, now: now}
-	for _, p := range cfg.ConfidentialPatterns {
+	for _, p := range screenPatterns(cfg) {
 		srv.confidential = append(srv.confidential, regexp.MustCompile(p))
 	}
 	return srv, nil
@@ -615,6 +616,7 @@ func (srv *MCPServer) call(tool string, args json.RawMessage) (string, bool) {
 		return compact(map[string]any{"refused": "agentd could not read its log: " + err.Error()}), true
 	}
 	st := NewLogState(srv.cfg, ModeLive).Fold(events)
+	srv.st = st
 	c := st.Cases[srv.caseID]
 	if c == nil {
 		c = &Case{ID: srv.caseID}

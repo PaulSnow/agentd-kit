@@ -61,7 +61,7 @@ func (w *workState) signal() {
 // job with the same key is still running, and says whether it started it.
 func (s *Supervisor) spawn(name, key string, job func(w *Supervisor, t *Track)) bool {
 	st := &LogState{Mode: s.st.Mode, Tracks: map[string]*Track{name: s.track(name).clone()}, Pending: map[string]Event{}, cfg: s.cfg,
-		Ended: copyMap(s.st.Ended)} // an ended session's escalation goes to its repository's console
+		Ended: copyMap(s.st.Ended), Policies: copyMap(s.st.Policies), filePats: copyMap(s.st.filePats)} // an ended session's escalation goes to its repository's console
 	return s.start(key, st, func(w *Supervisor) { job(w, w.st.track(name)) })
 }
 
@@ -70,7 +70,8 @@ func (s *Supervisor) spawn(name, key string, job func(w *Supervisor, t *Track)) 
 // unless the same job is still running.
 func (s *Supervisor) spawnShared(key string, job func(w *Supervisor)) bool {
 	st := &LogState{Mode: s.st.Mode, Tracks: map[string]*Track{}, Pending: map[string]Event{}, cfg: s.cfg,
-		Items: copyMap(s.st.Items), Cursors: copyMap(s.st.Cursors), Polls: copyMap(s.st.Polls)}
+		Items: copyMap(s.st.Items), Cursors: copyMap(s.st.Cursors), Polls: copyMap(s.st.Polls),
+		filePats: copyMap(s.st.filePats)} // what it posts and logs is screened with the repositories' files' patterns too
 	return s.start(key, st, job)
 }
 

@@ -408,13 +408,17 @@ func (s *Supervisor) wake(name string, sess Session, t *Track, ev Evidence, stat
 // instructions. Summarized counts what the byte limit, or the per-session
 // limit on turns, left out.
 type Pack struct {
-	Repository string         `json:"repository"`
-	At         time.Time      `json:"at"`
-	LastWake   *time.Time     `json:"last_wake,omitempty"`
-	Due        []string       `json:"due,omitempty"`
-	Sessions   []PackSession  `json:"sessions"`
-	Decisions  []PackDecision `json:"decisions,omitempty"`
-	Items      []PackItem     `json:"items,omitempty"`
+	Repository string     `json:"repository"`
+	At         time.Time  `json:"at"`
+	LastWake   *time.Time `json:"last_wake,omitempty"`
+	Due        []string   `json:"due,omitempty"`
+	// Policy is the repository's effective policy (policy.go), so the
+	// coordinator's brief need not repeat it. Its confidential patterns
+	// are left out: they name what must not reach a session.
+	Policy    RepoPolicy     `json:"policy"`
+	Sessions  []PackSession  `json:"sessions"`
+	Decisions []PackDecision `json:"decisions,omitempty"`
+	Items     []PackItem     `json:"items,omitempty"`
 	// OwnerInstructions are the owner's console instructions for the
 	// repository, oldest first, until a wake that carried them is handled.
 	OwnerInstructions []PackInstruction `json:"owner_instructions,omitempty"`
@@ -499,6 +503,8 @@ func (s *Supervisor) packItems(repo string) []PackItem {
 func (s *Supervisor) buildPack(repo string, due []string, now time.Time, handled bool) (Pack, []byte) {
 	pol := s.cfg.Policies.Coordinator
 	p := Pack{Repository: repo, At: now, Due: append([]string(nil), due...), Sessions: []PackSession{}}
+	p.Policy, _ = effectivePolicy(s.cfg, s.st, repo)
+	p.Policy.ConfidentialPatterns = nil
 	if co := s.cfg.Repositories[repo].Coordinator; co != nil {
 		if w, ok := s.track(co.Session).lastWake(); ok {
 			at := w.At

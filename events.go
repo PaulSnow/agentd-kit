@@ -57,6 +57,7 @@ type Event struct {
 	Feed        *FeedPayload        `json:"feed,omitempty"`
 	Instruction *InstructionPayload `json:"instruction,omitempty"`
 	Runtime     *RuntimePayload     `json:"runtime,omitempty"`
+	Policy      *PolicyPayload      `json:"policy,omitempty"`
 }
 
 // Event kinds.
@@ -89,6 +90,7 @@ const (
 	KindCI          = "ci"          // a delivered request's pipeline changed state
 	KindFeed        = "feed"        // a line for a repository's console: its baseline, its post, or the post's outcome
 	KindSession     = "session"     // a coordinator started a session, or it or the owner ended one
+	KindPolicy      = "policy"      // a repository's own policy file, as read at its target's tip
 	KindInstruction = "instruction" // the owner's free-text reply in a console, for the repositories it feeds
 )
 
@@ -224,6 +226,7 @@ type ActPayload struct {
 	Branch     string `json:"branch,omitempty"`
 	Head       string `json:"head,omitempty"`
 	Target     string `json:"target,omitempty"`
+	Method     string `json:"method,omitempty"` // a merge's method
 	Title      string `json:"title,omitempty"`
 	Draft      bool   `json:"draft,omitempty"`
 	Ref        string `json:"ref,omitempty"`
@@ -334,7 +337,7 @@ func (e Event) check() error {
 		KindSkip: e.Skip != nil, KindCrash: e.Crash != nil, KindClear: e.Clear != nil, KindError: e.Error != nil, KindWarning: e.Warning != nil,
 		KindItem: e.Item != nil, KindSeen: e.Seen != nil, KindCursor: e.Cursor != nil, KindUsage: e.Usage != nil,
 		KindCheckpoint: e.Checkpoint != nil, KindPoll: e.Poll != nil, KindTriage: e.Triage != nil, KindDecision: e.Decision != nil,
-		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, "act": e.Act != nil,
+		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, "act": e.Act != nil,
 	}
 	want := e.Kind
 	switch e.Kind {
@@ -353,7 +356,9 @@ func (e Event) check() error {
 	// too; the owner marks items seen.
 	failedTriage := e.Kind == KindError && e.Error.Triage != nil
 	switch {
-	case e.Kind != KindCase && e.Kind != KindCoordinator && e.Kind != KindSession && (e.Kind == KindItem || e.Kind == KindCursor || e.Kind == KindTriage || failedTriage) != (e.Mode == ModeShared):
+	case e.Kind == KindPolicy && (e.Session != "" || e.Mode != ModeShared || e.Policy.Repository == "" || e.Policy.Tip == ""):
+		return errors.New("a policy event is a shared fact, for no one session, and names its repository and tip")
+	case e.Kind != KindCase && e.Kind != KindCoordinator && e.Kind != KindSession && e.Kind != KindPolicy && (e.Kind == KindItem || e.Kind == KindCursor || e.Kind == KindTriage || failedTriage) != (e.Mode == ModeShared):
 		return fmt.Errorf("a %s event must not carry mode %q", e.Kind, e.Mode)
 	case e.Kind == KindSeen && e.Mode != ModeOwner:
 		return fmt.Errorf("a seen event is the owner's, not %q", e.Mode)

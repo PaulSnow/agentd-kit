@@ -15,24 +15,38 @@ const (
 	mergePolicyPath = ciProject + "/repository/files/.agentd%2Fpolicy.json/raw"
 )
 
-// mergeHarness is ciHarness with request !1 green on c0ffee, the commit
-// agentd's gate passed, widgets allowing merge, and its target branch
-// granting a fast-forward merge in its own policy file: a request due to
-// merge.
+// mergeHarness is ciHarness with request !1 by widget-bot green on
+// c0ffee, the commit agentd's gate passed, and widgets' policy merging
+// widget-bot's requests into main, as a fast-forward; the target branch
+// has no policy file of its own: a request due to merge.
 func mergeHarness(t *testing.T) (*harness, *fakeForgeAPI) {
 	t.Helper()
 	h, api := ciHarness(t)
-	repo := h.cfg.Repositories["widgets"]
-	repo.Allow = []string{"push", "open", "merge"}
-	h.cfg.Repositories["widgets"] = repo
+	setMerge(t, h, func(m *MergeRules) {})
 	api.pipelines("c0ffee", "success", nil, "success", nil)
 	api.set(func() {
 		api.gitlab[ciProject+"/repository/branches/main"] = `{"name":"main","commit":{"id":"` + mergeTip + `"}}`
-		api.gitlab[mergePolicyPath+"|ref="+mergeTip] = `{"merge":"fast-forward"}`
+		api.gitlab[mergePolicyPath+"|ref="+mergeTip] = fakeNotFound
 		api.gitlab["="+ciProject] = `{"id":7,"merge_method":"ff"}`
 		api.gitlab[ciProject+"/repository/merge_base"] = `{"id":"` + mergeTip + `"}`
 	})
 	return h, api
+}
+
+// setMerge enables merge in widgets' policy, into main for widget-bot,
+// changes it as change says, and checks it as a load would, filling its
+// defaults.
+func setMerge(t *testing.T, h *harness, change func(m *MergeRules)) {
+	t.Helper()
+	repo := h.cfg.Repositories["widgets"]
+	repo.Policy.Merge = MergeRules{Enabled: true, Targets: []string{"main"}, Authors: []string{"widget-bot"}}
+	change(&repo.Policy.Merge)
+	var errs []error
+	h.cfg.checkPolicy("widgets", &repo, &errs)
+	if len(errs) > 0 {
+		t.Fatal(errs)
+	}
+	h.cfg.Repositories["widgets"] = repo
 }
 
 // mergeSkips is the reasons merges were declined, oldest first.
@@ -51,7 +65,7 @@ func (h *harness) mergeSkips() []string {
 func TestMergeGatedFastForwardMergesOnce(t *testing.T) {
 	h, _ := mergeHarness(t)
 	h.ticks(6, 5*time.Minute)
-	want := []mergedRequest{{ref: "!1", target: "main", head: "c0ffee"}}
+	want := []mergedRequest{{ref: "!1", target: "main", head: "c0ffee", method: MergeFastForward}}
 	if !reflect.DeepEqual(h.forge.merges, want) {
 		t.Fatalf("merges = %+v, want %+v (skips %q)", h.forge.merges, want, h.mergeSkips())
 	}
@@ -79,9 +93,7 @@ func TestMergeShadowMergesNothing(t *testing.T) {
 	h := newHarness(t, true, "d")
 	doneWithDelivery(t, h, "d")
 	h.cfg.Poll.CI = true
-	repo := h.cfg.Repositories["widgets"]
-	repo.Allow = []string{"push", "open", "merge"}
-	h.cfg.Repositories["widgets"] = repo
+	setMerge(t, h, func(m *MergeRules) {})
 	api := &fakeForgeAPI{gitlab: map[string]string{}}
 	h.sup.api = api
 	if err := MarkDelivered(h.cfg, h.sup.log, h.clock.Now(), "d", h.dir+"/d/wt", "!1"); err != nil {
@@ -122,7 +134,7 @@ func TestMergeHeadMovedSinceTheRecord(t *testing.T) {
 		// The request moves on before the merge check runs.
 		api.gitlab[ciProject+"/merge_requests/1"] = strings.Replace(api.gitlab[ciProject+"/merge_requests/1"], `"sha":"c0ffee"`, `"sha":"beef00"`, 1)
 	})
-	h.sup.mergeRequest("d", h.sup.track("d"), ciWatched{Session: "d", Repository: "widgets", Ref: "!1", Delivered: "d:" + h.dir + "/d/wt"}, h.sup.st.CI[ciKey("widgets", "!1")])
+	h.sup.mergeRequest("d", h.sup.track("d"), ciWatched{Session: "d", Repository: "widgets", Ref: "!1", Delivered: "d:" + h.dir + "/d/wt"}, h.sup.st.CI[ciKey("widgets", "!1")], false)
 	if len(h.forge.merges) != 0 {
 		t.Fatalf("merges = %+v", h.forge.merges)
 	}
@@ -158,36 +170,27 @@ func TestMergeGitLabNeedsFastForwardMethod(t *testing.T) {
 	}
 }
 
-// Without the grant, nothing merges: neither where the configuration does
-// not allow merge, nor where the target branch's own policy file does not
-// grant it.
-func TestMergeNeedsBothGrants(t *testing.T) {
+// Without merge enabled in the owner's policy nothing merges, and the
+// repository's own file is not asked; with it, no file is needed, and a
+// file that turns merge off holds the merge.
+func TestMergeNeedsPolicyEnabled(t *testing.T) {
 	h, api := mergeHarness(t)
-	repo := h.cfg.Repositories["widgets"]
-	repo.Allow = []string{"push", "open"}
-	h.cfg.Repositories["widgets"] = repo
+	setMerge(t, h, func(m *MergeRules) { m.Enabled = false })
 	h.ticks(6, 5*time.Minute)
 	if len(h.forge.merges) != 0 || len(h.mergeSkips()) != 0 {
 		t.Fatalf("merges = %+v, skips %q", h.forge.merges, h.mergeSkips())
 	}
 	for _, c := range api.callList() {
 		if strings.Contains(c, "policy.json") {
-			t.Fatalf("asked the policy file without the configuration's grant: %s", c)
+			t.Fatalf("asked the policy file without the policy enabling merge: %s", c)
 		}
 	}
 
-	for name, body := range map[string]string{"absent": fakeNotFound, "other": `{"merge":"squash"}`, "torn": `{"merge":`, "case": `{"MERGE":"fast-forward"}`} {
-		t.Run(name, func(t *testing.T) {
-			h, api := mergeHarness(t)
-			api.set(func() { api.gitlab[mergePolicyPath+"|ref="+mergeTip] = body })
-			h.ticks(6, 5*time.Minute)
-			if len(h.forge.merges) != 0 {
-				t.Fatalf("merges = %+v", h.forge.merges)
-			}
-			if s := h.mergeSkips(); len(s) != 1 || !strings.Contains(s[0], "does not grant merge") {
-				t.Fatalf("skips = %q", s)
-			}
-		})
+	h, api = mergeHarness(t)
+	api.set(func() { api.gitlab[mergePolicyPath+"|ref="+mergeTip] = `{"merge":{"enabled":false}}` })
+	h.ticks(6, 5*time.Minute)
+	if s := h.mergeSkips(); len(h.forge.merges) != 0 || len(s) != 1 || !strings.Contains(s[0], "turns merge off") {
+		t.Fatalf("merges = %+v, skips %q", h.forge.merges, s)
 	}
 }
 
@@ -195,7 +198,7 @@ func TestMergeNeedsBothGrants(t *testing.T) {
 // when asked directly.
 func TestMergeAllowListed(t *testing.T) {
 	f := &fakeForge{}
-	a := AllowedForge{Repos: map[string]Repository{"widgets": {Forge: "gitlab", Allow: []string{"push", "open"}}}, Forge: f}
+	a := AllowedForge{Repos: map[string]Repository{"widgets": {Forge: "gitlab", Policy: RepoPolicy{Delivery: DeliveryRules{Allow: []string{"push", "open"}}}}}, Forge: f}
 	if err := a.MergeAllowed("widgets", "!1", "c0ffee", "main"); err == nil || len(f.merges) != 0 {
 		t.Fatalf("merge allowed without the grant: %v %+v", err, f.merges)
 	}
@@ -334,17 +337,41 @@ func TestExecForgeMergeIsFastForward(t *testing.T) {
 	}
 }
 
-// merge is an allowed write, and like push needs a gate.
+// merge is enabled in the policy, and like push needs a gate, and names
+// its targets and authors.
 func TestMergeConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "c.json")
-	writeFile(t, path, `{"repositories": {"widgets": {"forge": "gitlab", "project": "example-org/widgets", "allow": ["open", "merge"], "gate": ["./bin/check"]}}}`)
-	if _, err := LoadConfig(path); err != nil {
+	writeFile(t, path, `{"repositories": {"widgets": {"forge": "gitlab", "project": "example-org/widgets", "policy": {"delivery": {"allow": ["open"]}, "gate": {"argv": ["./bin/check"]}, "merge": {"enabled": true, "targets": ["main"], "authors": ["widget-bot"]}}}}}`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
 		t.Fatalf("merge refused: %v", err)
 	}
-	writeFile(t, path, `{"repositories": {"widgets": {"forge": "gitlab", "project": "example-org/widgets", "allow": ["merge"]}}}`)
-	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "allows merge but has no gate") {
-		t.Fatalf("merge without a gate: %v", err)
+	if m := cfg.Repositories["widgets"].Policy.Merge; m.Method != MergeFastForward || !reflect.DeepEqual(m.Require, []string{RequireGate, RequireCI}) {
+		t.Fatalf("defaults = %+v", m)
+	}
+	for body, want := range map[string]string{
+		`"merge": {"enabled": true, "targets": ["main"], "authors": ["widget-bot"]}`:                                                 "gate.argv is empty",
+		`"gate": {"argv": ["make"]}, "merge": {"enabled": true, "authors": ["widget-bot"]}`:                                          "needs targets and authors",
+		`"gate": {"argv": ["make"]}, "merge": {"enabled": true, "targets": ["main"], "authors": ["widget-bot"], "method": "rebase"}`: "is not fast-forward",
+		`"gate": {"argv": ["make"]}, "merge": {"method": "command"}`:                                                                 "needs merge.command",
+		`"gate": {"argv": ["make"]}, "merge": {"enabled": true, "targets": ["main"], "authors": ["widget-bot"], "require": ["ci"]}`:  "must name gate",
+		`"gate": {"argv": ["make"]}, "merge": {"require": ["ci", "luck"]}`:                                                           "not gate, ci or review",
+		`"gate": {"argv": ["make"]}, "merge": {"exclude": {"numbers": [0]}}`:                                                         "1 or more",
+		`"gate": {"argv": ["make"]}, "merge": {"targets": ["main..x"]}`:                                                              "plain branch",
+		`"review": {"others": "all"}`:          "not review-only",
+		`"sessions": {"accounts": ["nobody"]}`: "not in accounts",
+		`"confidential_patterns": ["("]`:       "confidential_patterns[0]",
+	} {
+		writeFile(t, path, `{"repositories": {"widgets": {"forge": "gitlab", "project": "example-org/widgets", "policy": {`+body+`}}}}`)
+		if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v, want %q", body, err, want)
+		}
+	}
+	// The old keys are gone, not aliased.
+	writeFile(t, path, `{"repositories": {"widgets": {"forge": "gitlab", "project": "example-org/widgets", "allow": ["open"]}}}`)
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("the old allow key was accepted")
 	}
 }
 
@@ -392,7 +419,7 @@ func TestMergeRequestRetargetedDuringCheck(t *testing.T) {
 		api.gitlab[key] = strings.Replace(first, `"target_branch":"main"`, `"target_branch":"release"`, 1)
 	})
 	h.ticks(2, 5*time.Minute) // delivered, then the CI record of c0ffee
-	h.sup.mergeRequest("d", h.sup.track("d"), ciWatched{Session: "d", Repository: "widgets", Ref: "!1", Delivered: "d:" + h.dir + "/d/wt"}, h.sup.st.CI[ciKey("widgets", "!1")])
+	h.sup.mergeRequest("d", h.sup.track("d"), ciWatched{Session: "d", Repository: "widgets", Ref: "!1", Delivered: "d:" + h.dir + "/d/wt"}, h.sup.st.CI[ciKey("widgets", "!1")], false)
 	if len(h.forge.merges) != 0 {
 		t.Fatalf("merges = %+v", h.forge.merges)
 	}

@@ -82,21 +82,34 @@
       "host": "gitlab.example.com",
       "transport": "ssh",
       "project": "example-org/widgets",
-      "allow": ["push", "open"],
       "console": "widgets",
       "assignee": "123456",
-      "gate": ["./bin/check"],
-      "gate_timeout": "20m"
+      "policy": {
+        "delivery": {"allow": ["push", "open"]},
+        "gate": {"argv": ["./bin/check"], "timeout": "20m"},
+        "merge": {
+          "enabled": true,
+          "method": "fast-forward",
+          "targets": ["main"],
+          "authors": ["widget-bot"],
+          "exclude": {"labels": ["do-not-merge"]},
+          "require": ["gate", "ci"]
+        },
+        "review": {"rounds": {"max": 3}},
+        "scope": {"reserved": {"labels": ["owner-only"]}},
+        "sessions": {"accounts": ["work"], "max": 2, "budget": {"session_tokens": 2000000}}
+      }
     },
     "gadgets": {
       "forge": "github",
       "host": "github.com",
       "transport": "https",
       "project": "example-org/gadgets",
-      "allow": ["push", "open"],
       "console": "gadgets",
-      "gate": ["make", "test"],
-      "gate_paths": ["Makefile"]
+      "policy": {
+        "delivery": {"allow": ["push", "open"]},
+        "gate": {"argv": ["make", "test"], "paths": ["Makefile"]}
+      }
     }
   },
   "accounts": {

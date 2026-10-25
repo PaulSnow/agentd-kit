@@ -420,24 +420,41 @@ func (s *Supervisor) rotationPending(name string, sess Session, t *Track) bool {
 
 // overBudget says why the session must stop, or "": the stop time has come,
 // or the session's spend or the run's (every session's) has reached its
-// cap. Live mode counts only transcripts it launched.
-func (s *Supervisor) overBudget(t *Track, now time.Time) string {
+// cap, or its repository's policy caps (each of its sessions, and all of
+// them) were reached. Live mode counts only transcripts it launched.
+func (s *Supervisor) overBudget(name string, t *Track, now time.Time) string {
 	b := s.cfg.Policies.Budget
 	if b.StopAt != nil && !now.Before(*b.StopAt) {
 		return "stop time " + b.StopAt.Format(time.RFC3339) + " reached"
 	}
-	if sp, ok := t.spend(!s.shadow); b.SessionTokens > 0 && ok && sp >= b.SessionTokens {
+	repo := s.cfg.Sessions[name].Repository
+	rb := BudgetRules{}
+	if repo != "" {
+		pol, _ := effectivePolicy(s.cfg, s.st, repo)
+		rb = pol.Sessions.Budget
+	}
+	sp, ok := t.spend(!s.shadow)
+	if b.SessionTokens > 0 && ok && sp >= b.SessionTokens {
 		return fmt.Sprintf("session spend %d reached its cap of %d", sp, b.SessionTokens)
 	}
-	if b.RunTokens > 0 {
-		var total int64
-		for _, o := range s.st.Tracks {
+	if rb.SessionTokens > 0 && ok && sp >= rb.SessionTokens {
+		return fmt.Sprintf("session spend %d reached %s's cap of %d for each session", sp, repo, rb.SessionTokens)
+	}
+	if b.RunTokens > 0 || rb.RunTokens > 0 {
+		var total, ofRepo int64
+		for n, o := range s.st.Tracks {
 			if sp, ok := o.spend(!s.shadow); ok {
 				total += sp + o.SpendBase // a clear lifts a session's cap, not the run's
+				if repo != "" && s.cfg.Sessions[n].Repository == repo {
+					ofRepo += sp + o.SpendBase
+				}
 			}
 		}
-		if total >= b.RunTokens {
+		if b.RunTokens > 0 && total >= b.RunTokens {
 			return fmt.Sprintf("run spend %d reached its cap of %d", total, b.RunTokens)
+		}
+		if rb.RunTokens > 0 && ofRepo >= rb.RunTokens {
+			return fmt.Sprintf("%s's sessions' spend %d reached its cap of %d", repo, ofRepo, rb.RunTokens)
 		}
 	}
 	return ""
@@ -451,7 +468,7 @@ func (s *Supervisor) stopForBudget(name string, t *Track, ev Evidence, now time.
 	if t.Stopped != "" || ev.Status.Done {
 		return
 	}
-	why := s.overBudget(t, now)
+	why := s.overBudget(name, t, now)
 	key := "stop:" + name
 	if why == "" || !s.retryDue(t, key, now) {
 		return

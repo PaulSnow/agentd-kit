@@ -227,26 +227,15 @@ type EscalatePolicy struct {
 // delivery pushes to, over Transport, ssh (the default) or https; glab and
 // gh are pointed at Host.
 type Repository struct {
-	Forge     string   `json:"forge"`
-	Host      string   `json:"host"`
-	Transport string   `json:"transport"`
-	Project   string   `json:"project"`
-	Allow     []string `json:"allow"`
-	Console   string   `json:"console"`
-	Assignee  string   `json:"assignee"`
-	// Gate is the argv agentd runs in the worktree, on the exact commit,
-	// before it pushes; delivery pushes only when it exits 0. A repository
-	// that allows push must have one. GateTimeout bounds it, by default
-	// DefaultGateTimeout. It runs with PATH, LANG and TMPDIR, HOME a fresh
-	// empty directory, and the variables GateEnv names, nothing else; no
-	// agent socket, token, Claude setting or HOME may be named. The gate
-	// must be the target branch's: its script, when Gate names one in the
-	// worktree, and the files or directories GatePaths names, relative to
-	// the worktree, must be as the target branch has them.
-	Gate        []string `json:"gate"`
-	GateTimeout Duration `json:"gate_timeout"`
-	GateEnv     []string `json:"gate_env"`
-	GatePaths   []string `json:"gate_paths"`
+	Forge     string `json:"forge"`
+	Host      string `json:"host"`
+	Transport string `json:"transport"`
+	Project   string `json:"project"`
+	Console   string `json:"console"`
+	Assignee  string `json:"assignee"`
+	// Policy is the repository's rules (policy.go): what delivery may
+	// write, its gate, when agentd merges, and what its sessions may use.
+	Policy RepoPolicy `json:"policy"`
 	// OwnerOnly marks every entry the report publishes for this repository
 	// as for the owner alone.
 	OwnerOnly bool `json:"owner_only"`
@@ -254,6 +243,8 @@ type Repository struct {
 	Coordinator *Coordinator `json:"coordinator"`
 	// Sessions, when set, lets the coordinator start sessions (sessions.go).
 	Sessions *SessionsPolicy `json:"sessions"`
+
+	defaulted []string // the policy keys checkPolicy filled in
 }
 
 // Coordinator is the session that carries a repository's judgment (#3):
@@ -525,32 +516,13 @@ func (c *Config) finish(base string) error {
 			errs = append(errs, fmt.Errorf("repositories.%s.transport must be ssh or https", name))
 		}
 		c.Repositories[name] = repo
-		for _, a := range repo.Allow {
-			if a != "push" && a != "open" && a != "merge" {
-				errs = append(errs, fmt.Errorf("repositories.%s.allow: %q is not push, open or merge", name, a))
-			}
-			if (a == "push" || a == "merge") && len(repo.Gate) == 0 {
-				errs = append(errs, fmt.Errorf("repositories.%s allows %s but has no gate: nothing is delivered or merged without one", name, a))
-			}
-		}
-		if repo.GateTimeout.Duration < 0 {
-			errs = append(errs, fmt.Errorf("repositories.%s.gate_timeout must not be negative", name))
-		}
-		if repo.GateTimeout.Duration == 0 {
-			repo.GateTimeout = Duration{DefaultGateTimeout}
-		}
-		for _, v := range repo.GateEnv {
-			if secretEnv(v) || v == "" || strings.Contains(v, "=") {
-				errs = append(errs, fmt.Errorf("repositories.%s.gate_env: %q may not be passed to a gate", name, v))
-			}
-		}
-		for _, p := range repo.GatePaths {
-			if p == "" || filepath.IsAbs(p) || filepath.Clean(p) != p || p == "." || p == ".." || strings.HasPrefix(p, "../") || strings.ContainsAny(p, "*?[\\:") {
-				errs = append(errs, fmt.Errorf("repositories.%s.gate_paths: %q must be a clean path inside the worktree, without wildcards", name, p))
-			}
-		}
 	}
 	c.addCoordinators(path, &errs)
+	for name, repo := range c.Repositories {
+		repo.defaulted = nil
+		c.checkPolicy(name, &repo, &errs)
+		c.Repositories[name] = repo
+	}
 	c.checkSessionsPolicies(path, &errs)
 	if p := c.Policies.Coordinator; p.PackBytes < 1024 || p.Turns < 1 || strings.TrimSpace(p.Pointer) == "" || strings.ContainsAny(p.Pointer, "\n\r") {
 		errs = append(errs, errors.New("policies.coordinator needs pack_bytes of 1024 or more, turns of 1 or more, and a one-line pointer"))
@@ -712,7 +684,8 @@ func checkTokenFile(p string) error {
 	return nil
 }
 
-// DefaultGateTimeout bounds a gate whose repository sets no gate_timeout.
+// DefaultGateTimeout bounds a gate whose repository's policy sets no
+// gate.timeout.
 const DefaultGateTimeout = 10 * time.Minute
 
 // gateBaseEnv are the variables every gate gets, when agentd has them.
@@ -728,7 +701,7 @@ func secretEnv(name string) bool {
 // gateEnv is the environment a gate for r runs with, its HOME home.
 func gateEnv(r Repository, home string) []string {
 	env := []string{"HOME=" + home}
-	for _, name := range append(append([]string{}, gateBaseEnv...), r.GateEnv...) {
+	for _, name := range append(append([]string{}, gateBaseEnv...), r.Policy.Gate.Env...) {
 		if v, ok := os.LookupEnv(name); ok && !secretEnv(name) {
 			env = append(env, name+"="+v)
 		}
