@@ -109,7 +109,8 @@ func (m Matches) matches(number int, labels []string) bool {
 }
 
 // ReviewRules: the models review rounds use, their Rounds.Max, and Others,
-// review-only for requests by other authors (#36 acts on it).
+// review-only for requests by other authors, which merge.authors
+// already keeps from merging.
 type ReviewRules struct {
 	ReviewerModel string      `json:"reviewer_model"`
 	JudgeModel    string      `json:"judge_model"`
@@ -125,7 +126,8 @@ type RoundsRules struct {
 // ReviewOnly is ReviewRules.Others for requests reviewed, never merged.
 const ReviewOnly = "review-only"
 
-// CIRules (#36 acts on them).
+// CIRules: Required adds ci to every request's merge.require, and
+// RetestOnBaseMove retests a request whose target moved (#36).
 type CIRules struct {
 	Required         bool `json:"required"`
 	RetestOnBaseMove bool `json:"retest_on_base_move"`

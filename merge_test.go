@@ -134,7 +134,7 @@ func TestMergeHeadMovedSinceTheRecord(t *testing.T) {
 		// The request moves on before the merge check runs.
 		api.gitlab[ciProject+"/merge_requests/1"] = strings.Replace(api.gitlab[ciProject+"/merge_requests/1"], `"sha":"c0ffee"`, `"sha":"beef00"`, 1)
 	})
-	h.sup.mergeRequest("d", h.sup.track("d"), ciWatched{Session: "d", Repository: "widgets", Ref: "!1", Delivered: "d:" + h.dir + "/d/wt"}, h.sup.st.CI[ciKey("widgets", "!1")], false)
+	h.sup.mergeRequest("d", h.sup.track("d"), ciWatched{Session: "d", Repository: "widgets", Ref: "!1", Delivered: "d:" + h.dir + "/d/wt"}, h.sup.st.CI[ciKey("widgets", "!1")], false, false)
 	if len(h.forge.merges) != 0 {
 		t.Fatalf("merges = %+v", h.forge.merges)
 	}
@@ -211,7 +211,8 @@ func TestMergeTargetMoved(t *testing.T) {
 	api.set(func() {
 		// The check sees feed1234; the second look, just before the
 		// merge, sees the target moved on.
-		api.gitlabSeq = map[string][]string{key: {`{"commit":{"id":"` + mergeTip + `"}}`}}
+		// The CI watcher's base, then the check's look.
+		api.gitlabSeq = map[string][]string{key: {`{"commit":{"id":"` + mergeTip + `"}}`, `{"commit":{"id":"` + mergeTip + `"}}`}}
 		api.gitlab[key] = `{"commit":{"id":"a1b2c3d4"}}`
 	})
 	h.ticks(3, 5*time.Minute)
@@ -272,10 +273,16 @@ func TestMergeGitHubView(t *testing.T) {
 		"/repos/example-org/gadgets/git/ref/heads/main":                          `{"object":{"sha":"0123456789"}}`,
 		"/repos/example-org/gadgets/contents/.agentd/policy.json?ref=0123456789": `{"merge":"fast-forward"}`,
 		"/repos/example-org/gadgets/compare/0123456789...abc1234def":             `{"status":"ahead","behind_by":0}`,
+		// A request for changes its reviewer's dismissal took back.
+		"/repos/example-org/gadgets/pulls/4/reviews?per_page=100": `[{"state":"CHANGES_REQUESTED","user":{"login":"lead"}},{"state":"COMMENTED","user":{"login":"lead"}},{"state":"DISMISSED","user":{"login":"lead"}}]`,
 	}}
 	v, err := githubMergeView(api, "example-org/gadgets", "#4")
-	if err != nil || !v.open || v.head != "abc1234def" || v.target != "main" {
+	if err != nil || !v.open || v.head != "abc1234def" || v.target != "main" || v.unresolved {
 		t.Fatalf("view = %+v, %v", v, err)
+	}
+	api.github["/repos/example-org/gadgets/pulls/4/reviews?per_page=100"] = `[{"state":"APPROVED","user":{"login":"lead"}},{"state":"CHANGES_REQUESTED","user":{"login":"other"}},{"state":"COMMENTED","user":{"login":"other"}}]`
+	if again, err := githubMergeView(api, "example-org/gadgets", "#4"); err != nil || !again.unresolved {
+		t.Fatalf("changes requested: unresolved %v, %v", again.unresolved, err)
 	}
 	tip, err := v.tip("main")
 	if err != nil || tip != "0123456789" {
@@ -419,7 +426,7 @@ func TestMergeRequestRetargetedDuringCheck(t *testing.T) {
 		api.gitlab[key] = strings.Replace(first, `"target_branch":"main"`, `"target_branch":"release"`, 1)
 	})
 	h.ticks(2, 5*time.Minute) // delivered, then the CI record of c0ffee
-	h.sup.mergeRequest("d", h.sup.track("d"), ciWatched{Session: "d", Repository: "widgets", Ref: "!1", Delivered: "d:" + h.dir + "/d/wt"}, h.sup.st.CI[ciKey("widgets", "!1")], false)
+	h.sup.mergeRequest("d", h.sup.track("d"), ciWatched{Session: "d", Repository: "widgets", Ref: "!1", Delivered: "d:" + h.dir + "/d/wt"}, h.sup.st.CI[ciKey("widgets", "!1")], false, false)
 	if len(h.forge.merges) != 0 {
 		t.Fatalf("merges = %+v", h.forge.merges)
 	}

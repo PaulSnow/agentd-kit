@@ -85,6 +85,14 @@ type CIPayload struct {
 	Excerpt     string   `json:"excerpt,omitempty"`
 	Withheld    int      `json:"withheld,omitempty"` // the confidential pattern the excerpt matched
 	Error       string   `json:"error,omitempty"`
+	// The request's author, screened, whether it is a draft or has an
+	// open discussion, the run that judged its head, and the target's
+	// tip when that run was first seen on it (#36).
+	Author     string `json:"author,omitempty"`
+	Draft      bool   `json:"draft,omitempty"`
+	Unresolved bool   `json:"unresolved,omitempty"`
+	Run        string `json:"run,omitempty"`
+	Base       string `json:"base,omitempty"`
 }
 
 // CIRecord is a request's latest CI, as the state holds it: which session
@@ -93,6 +101,12 @@ type CIRecord struct {
 	CIPayload
 	Session string
 	At      time.Time
+	// FailedAt is when the request first failed at its head, in its run,
+	// with its cause, FailedFor, kept across records in between, so a failure is
+	// one failure however often a forge error or a new discussion
+	// changes the record.
+	FailedAt  time.Time
+	FailedFor string
 }
 
 // CIFixRecord is one fix session started for a request's failure, or
@@ -133,7 +147,8 @@ func ciKey(repo, ref string) string { return repo + " " + ref }
 // same says whether two payloads say the same of a request.
 func (p CIPayload) same(q CIPayload) bool {
 	return p.State == q.State && p.Head == q.Head && p.TargetState == q.TargetState && p.Verdict == q.Verdict &&
-		p.Cause == q.Cause && p.Error == q.Error && p.URL == q.URL && p.Delivered == q.Delivered
+		p.Cause == q.Cause && p.Error == q.Error && p.URL == q.URL && p.Delivered == q.Delivered &&
+		p.Author == q.Author && p.Draft == q.Draft && p.Unresolved == q.Unresolved && p.Run == q.Run && p.Base == q.Base
 }
 
 // applyCI folds a request's CI.
@@ -141,7 +156,13 @@ func (st *LogState) applyCI(e Event) {
 	if st.CI == nil {
 		st.CI = map[string]CIRecord{}
 	}
-	st.CI[ciKey(e.CI.Repository, e.CI.Ref)] = CIRecord{CIPayload: *e.CI, Session: e.Session, At: e.Time}
+	key := ciKey(e.CI.Repository, e.CI.Ref)
+	old := st.CI[key]
+	r := CIRecord{CIPayload: *e.CI, Session: e.Session, At: e.Time, FailedAt: old.FailedAt, FailedFor: old.FailedFor}
+	if f := r.Head + " " + r.Run + " " + r.Cause; r.State == CIFailed && r.FailedFor != f {
+		r.FailedAt, r.FailedFor = e.Time, f
+	}
+	st.CI[key] = r
 	if t := st.Tracks[e.Session]; t != nil {
 		st.ciSeenBy(t, e.CI.Repository, e.CI.Ref, true)
 	}
@@ -224,6 +245,73 @@ func (s *Supervisor) watchedRequests() []ciWatched {
 	return out
 }
 
+// coordinated is each repository with a coordinator, by name, and its
+// coordinator's session: the session the repository's other requests are
+// watched for (#36).
+func (s *Supervisor) coordinated() map[string]string {
+	out := map[string]string{}
+	for name, r := range s.cfg.Repositories {
+		if r.Coordinator != nil && r.Coordinator.Session != "" {
+			out[name] = r.Coordinator.Session
+		}
+	}
+	return out
+}
+
+// outsideRequests is every request of a coordinated repository no session
+// delivered that the watcher has recorded for its coordinator, less those
+// merged or closed, in order of their keys. delivered are the requests
+// sessions delivered.
+func (s *Supervisor) outsideRequests(delivered []ciWatched) []ciWatched {
+	coord := s.coordinated()
+	skip := map[string]bool{}
+	for _, w := range delivered {
+		skip[ciKey(w.Repository, w.Ref)] = true
+	}
+	var out []ciWatched
+	for _, key := range sortedKeys(s.st.CI) {
+		r := s.st.CI[key]
+		if c, ok := coord[r.Repository]; !ok || r.Session != c || skip[key] || r.State == CIMerged || r.State == CIClosed {
+			continue
+		}
+		out = append(out, ciWatched{Session: r.Session, Repository: r.Repository, Ref: r.Ref})
+	}
+	return out
+}
+
+// openRequests lists a repository's open requests, by reference.
+func openRequests(api ForgeAPI, repo Repository) ([]string, error) {
+	var out []string
+	if repo.Forge == "github" {
+		var prs []struct {
+			Number int `json:"number"`
+		}
+		path := "/repos/" + repo.Project + "/pulls?state=open&per_page=100"
+		if err := ciGet(func() (APIResponse, error) { return api.GitHub(path, nil) }, "gh api "+path, &prs); err != nil {
+			return nil, err
+		}
+		for _, p := range prs {
+			out = append(out, "#"+strconv.Itoa(p.Number))
+		}
+		return out, nil
+	}
+	var mrs []struct {
+		IID int `json:"iid"`
+	}
+	path := "/projects/" + url.PathEscape(repo.Project) + "/merge_requests?state=opened&per_page=100"
+	if err := ciGet(func() (APIResponse, error) { return api.GitLab(path) }, "glab api "+path, &mrs); err != nil {
+		return nil, err
+	}
+	for _, m := range mrs {
+		out = append(out, "!"+strconv.Itoa(m.IID))
+	}
+	return out, nil
+}
+
+// baseUnknown is a run's base when the target's tip could not be asked
+// as the run was first seen.
+const baseUnknown = "unknown"
+
 // requestRef is a request's reference: !12 on GitLab, #12 on GitHub.
 var requestRef = regexp.MustCompile(`^[!#][0-9]+$`)
 
@@ -240,7 +328,9 @@ func (s *Supervisor) watchCI(now time.Time) {
 		return
 	}
 	watched := s.watchedRequests()
-	if len(watched) == 0 {
+	watched = append(watched, s.outsideRequests(watched)...)
+	coord := s.coordinated()
+	if len(watched) == 0 && len(coord) == 0 {
 		return
 	}
 	prev := copyMap(s.st.CI)
@@ -248,6 +338,25 @@ func (s *Supervisor) watchCI(now time.Time) {
 		w.work.mu.Lock()
 		w.work.nextPoll[sourceCI] = now.Add(w.cfg.Poll.CIEvery.Duration)
 		w.work.mu.Unlock()
+		// Every open request of a coordinated repository is watched; one
+		// no session delivered is watched for its coordinator.
+		known := map[string]bool{}
+		for _, r := range watched {
+			known[ciKey(r.Repository, r.Ref)] = true
+		}
+		for _, name := range sortedKeys(coord) {
+			refs, err := openRequests(w.api.At(w.cfg.Repositories[name].Host), w.cfg.Repositories[name])
+			if err != nil {
+				w.emit(coord[name], Event{Kind: KindError, Error: &ErrorPayload{Step: "ci-list", Key: name, Error: w.withheld(err.Error())}})
+				continue
+			}
+			for _, ref := range refs {
+				if !known[ciKey(name, ref)] {
+					known[ciKey(name, ref)] = true
+					watched = append(watched, ciWatched{Session: coord[name], Repository: name, Ref: ref})
+				}
+			}
+		}
 		for _, r := range watched {
 			p := w.askCI(r, prev[ciKey(r.Repository, r.Ref)])
 			if old, ok := prev[ciKey(r.Repository, r.Ref)]; ok && old.Session == r.Session && old.same(p) {
@@ -272,10 +381,31 @@ func (s *Supervisor) askCI(r ciWatched, prev CIRecord) CIPayload {
 		c, err = gitlabCI(api, repo.Project, r.Ref)
 	}
 	if err != nil {
-		p.State, p.Error = CIUnknown, s.withheld(err.Error())
+		// The run and its base are kept, so a forge that failed once does
+		// not lose the base the run started on.
+		p.State, p.Error, p.Run, p.Base = CIUnknown, s.withheld(err.Error()), prev.Run, prev.Base
 		return p
 	}
 	p.URL, p.Head, p.Target, p.State = c.url, c.head, c.target, c.state
+	p.Author, p.Draft, p.Unresolved, p.Run = s.withheld(c.author), c.draft, c.unresolved, c.run
+	// The base a run tests against: the target's tip when the run was
+	// first seen, running or settled. A run first seen settled took its
+	// base from a tip that may have moved since it started, so one that
+	// moved while it ran is not caught.
+	switch {
+	case c.base != "":
+		p.Base = c.base // the merge it tested says
+	case p.Run != "" && prev.Run == p.Run && prev.Base != "":
+		p.Base = prev.Base
+	case p.Run != "" && c.tip != nil:
+		// A tip that cannot be asked is a base unknown, which no later
+		// tip stands in for: it differs from every tip, so the run is
+		// retested before a merge.
+		p.Base = baseUnknown
+		if tip, err := c.tip(); err == nil {
+			p.Base = tip
+		}
+	}
 	if c.state != CIFailed {
 		return p
 	}
@@ -357,6 +487,14 @@ type ciCheck struct {
 	failedIDs               []string
 	targetCI                func() (ciCheck, error)
 	jobLog                  func(id string) (string, error)
+	// The request's author, whether it is a draft or has an open
+	// discussion, the run that judged its head, and the target's tip.
+	author     string
+	draft      bool
+	unresolved bool
+	run        string
+	base       string // the base a merged-results run tested, when its commit says
+	tip        func() (string, error)
 }
 
 // ciGet asks one API path and decodes its JSON reply.
@@ -403,7 +541,12 @@ func gitlabCI(api ForgeAPI, project, ref string) (ciCheck, error) {
 		WebURL       string `json:"web_url"`
 		SHA          string `json:"sha"`
 		TargetBranch string `json:"target_branch"`
-		HeadPipeline *struct {
+		Draft        bool   `json:"draft"`
+		Author       struct {
+			Username string `json:"username"`
+		} `json:"author"`
+		BlockingDiscussionsResolved *bool `json:"blocking_discussions_resolved"`
+		HeadPipeline                *struct {
 			ID     int    `json:"id"`
 			Status string `json:"status"`
 			SHA    string `json:"sha"`
@@ -413,7 +556,25 @@ func gitlabCI(api ForgeAPI, project, ref string) (ciCheck, error) {
 	if err := get(base+"/merge_requests/"+ref[1:], &mr); err != nil {
 		return ciCheck{}, err
 	}
-	c := ciCheck{url: mr.WebURL, head: mr.SHA, target: mr.TargetBranch, text: mr.Title + "\n" + mr.Description}
+	c := ciCheck{url: mr.WebURL, head: mr.SHA, target: mr.TargetBranch, text: mr.Title + "\n" + mr.Description,
+		author: mr.Author.Username, draft: mr.Draft}
+	if mr.State == "opened" {
+		var err error
+		if c.unresolved, err = gitlabUnresolved(get, base, ref[1:], mr.BlockingDiscussionsResolved); err != nil {
+			return ciCheck{}, err
+		}
+	}
+	c.tip = func() (string, error) {
+		var b struct {
+			Commit struct {
+				ID string `json:"id"`
+			} `json:"commit"`
+		}
+		if err := get(base+"/repository/branches/"+url.PathEscape(mr.TargetBranch), &b); err != nil {
+			return "", err
+		}
+		return b.Commit.ID, nil
+	}
 	switch mr.State {
 	case "merged":
 		c.state = CIMerged
@@ -448,6 +609,23 @@ func gitlabCI(api ForgeAPI, project, ref string) (ciCheck, error) {
 	// A merged-results or merge-train pipeline runs on GitLab's merge of
 	// the head, under the request's own ref.
 	merged := p != nil && strings.HasPrefix(p.Ref, "refs/merge-requests/")
+	if merged && p.SHA != "" && p.SHA != mr.SHA {
+		// Its commit is GitLab's merge of a head into the target: it is
+		// the head's only while that head is its second parent, and its
+		// first parent is the base it tested. A push the pipeline skipped
+		// leaves the old one as the head pipeline.
+		var m struct {
+			ParentIDs []string `json:"parent_ids"`
+		}
+		if err := get(base+"/repository/commits/"+url.PathEscape(p.SHA), &m); err != nil {
+			return ciCheck{}, err
+		}
+		if len(m.ParentIDs) == 2 && m.ParentIDs[1] == mr.SHA {
+			c.base = m.ParentIDs[0]
+		} else {
+			merged = false
+		}
+	}
 	if p == nil || p.SHA != "" && p.SHA != mr.SHA && !merged {
 		// No pipeline has run on the head commit yet.
 		c.state = CIPending
@@ -457,6 +635,7 @@ func gitlabCI(api ForgeAPI, project, ref string) (ciCheck, error) {
 		return c, nil
 	}
 	c.state = gitlabState(p.Status)
+	c.run = strconv.Itoa(p.ID)
 	if c.state == CIFailed {
 		if err := jobs(&c, p.ID); err != nil {
 			return ciCheck{}, err
@@ -518,10 +697,14 @@ func githubCI(api ForgeAPI, project, ref string) (ciCheck, error) {
 	var pr struct {
 		State   string `json:"state"`
 		Merged  bool   `json:"merged"`
+		Draft   bool   `json:"draft"`
 		Title   string `json:"title"`
 		Body    string `json:"body"`
 		HTMLURL string `json:"html_url"`
-		Head    struct {
+		User    struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		Head struct {
 			SHA string `json:"sha"`
 		} `json:"head"`
 		Base struct {
@@ -531,7 +714,18 @@ func githubCI(api ForgeAPI, project, ref string) (ciCheck, error) {
 	if err := get(base+"/pulls/"+ref[1:], &pr); err != nil {
 		return ciCheck{}, err
 	}
-	c := ciCheck{url: pr.HTMLURL, head: pr.Head.SHA, target: pr.Base.Ref, text: pr.Title + "\n" + pr.Body}
+	c := ciCheck{url: pr.HTMLURL, head: pr.Head.SHA, target: pr.Base.Ref, text: pr.Title + "\n" + pr.Body, author: pr.User.Login, draft: pr.Draft}
+	c.tip = func() (string, error) {
+		var r struct {
+			Object struct {
+				SHA string `json:"sha"`
+			} `json:"object"`
+		}
+		if err := get(base+"/git/ref/heads/"+escapeRef(pr.Base.Ref), &r); err != nil {
+			return "", err
+		}
+		return r.Object.SHA, nil
+	}
 	switch {
 	case pr.Merged:
 		c.state = CIMerged
@@ -557,9 +751,16 @@ func githubCI(api ForgeAPI, project, ref string) (ciCheck, error) {
 			return err
 		}
 		running := false
+		var oldest int64
 		for _, r := range cr.CheckRuns {
 			if c.head == "" {
 				c.head = r.HeadSHA
+			}
+			// The oldest check run names the head's runs: a job run
+			// again, or an app's later check, tests the same commit.
+			if oldest == 0 || r.ID < oldest {
+				oldest = r.ID
+				c.run = strconv.FormatInt(r.ID, 10)
 			}
 			switch {
 			case r.Status != "completed":
@@ -588,6 +789,10 @@ func githubCI(api ForgeAPI, project, ref string) (ciCheck, error) {
 		return nil
 	}
 	if err := checks(&c, pr.Head.SHA, false); err != nil {
+		return ciCheck{}, err
+	}
+	var err error
+	if c.unresolved, err = githubUnresolved(get, base, ref[1:]); err != nil {
 		return ciCheck{}, err
 	}
 	c.targetCI = func() (ciCheck, error) {

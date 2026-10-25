@@ -44,6 +44,9 @@ type LogState struct {
 	// patterns each adds, compiled.
 	Policies map[string]PolicyPayload
 	filePats map[string][]*regexp.Regexp
+	// Approvals are each request's latest approval by its coordinator,
+	// by ciKey (#36).
+	Approvals map[string]ApprovalRecord
 
 	cfg *Config // its policies, read as each event is applied
 }
@@ -52,7 +55,7 @@ type LogState struct {
 func NewLogState(cfg *Config, mode string) *LogState {
 	return &LogState{Mode: mode, Tracks: map[string]*Track{}, Pending: map[string]Event{}, Items: map[string]*Item{}, Instructions: map[string]*Instruction{},
 		Cursors: map[string]time.Time{}, Polls: map[string]PollRecord{}, Cases: map[string]*Case{},
-		Coordinators: map[string]string{}, CI: map[string]CIRecord{}, Runtime: map[string]RuntimePayload{}, Ended: map[string]string{}, Policies: map[string]PolicyPayload{}, cfg: cfg}
+		Coordinators: map[string]string{}, CI: map[string]CIRecord{}, Runtime: map[string]RuntimePayload{}, Ended: map[string]string{}, Policies: map[string]PolicyPayload{}, Approvals: map[string]ApprovalRecord{}, cfg: cfg}
 }
 
 // setItem changes a copy of the item and puts the copy in its place: a
@@ -125,6 +128,17 @@ func (st *LogState) apply(e Event) {
 	}
 	if e.Kind == KindPolicy {
 		st.applyPolicy(e)
+		return
+	}
+	if e.Kind == KindApproval {
+		// Only the repository's coordinator approves its requests.
+		if co := st.cfg.Repositories[e.Approval.Repository].Coordinator; co == nil || co.Session != e.Session {
+			return
+		}
+		if st.Approvals == nil {
+			st.Approvals = map[string]ApprovalRecord{}
+		}
+		st.Approvals[ciKey(e.Approval.Repository, e.Approval.Ref)] = ApprovalRecord{ApprovalPayload: *e.Approval, By: e.Session, At: e.Time}
 		return
 	}
 	if e.Kind == KindCoordinator {
@@ -340,7 +354,7 @@ func (st *LogState) apply(e Event) {
 				at = *e.Warning.IntentAt
 			}
 			switch a.Action {
-			case ActEscalate, ActUpdate, ActNudge, ActResume, ActTrust, ActRotate, ActDecline, ActWake, ActMerge:
+			case ActEscalate, ActUpdate, ActNudge, ActResume, ActTrust, ActRotate, ActDecline, ActWake, ActMerge, ActRetest:
 				t.applyAction(a, false, false, at)
 			}
 			// An answer cut short may not have reached the file: it is
@@ -420,6 +434,12 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 			}
 			t.Merged[ciKey(a.Repository, a.Ref)] = a.Head
 		}
+	case ActRetest:
+		// Taken, would-be or cut short: once per head and tip.
+		if t.Retests == nil {
+			t.Retests = map[string]bool{}
+		}
+		t.Retests[a.Key] = true
 	case ActRaise:
 		if counted && a.Raised != nil {
 			if t.CIRaised == nil {

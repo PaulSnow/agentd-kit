@@ -129,6 +129,9 @@ type Track struct {
 	// Merged: each request agentd did merge, its action taken and not
 	// cut short, by repository and request, to the head merged.
 	Merged map[string]string
+	// Retests: each retest of a request agentd asked, or would have, by
+	// its key, which names the head and the target's tip (#36).
+	Retests map[string]bool
 }
 
 // DeliveryRecord is one request a delivery opened, found, or was told of.
