@@ -212,14 +212,16 @@ func TestOwnerEndsAndProvisionRetries(t *testing.T) {
 	}
 }
 
-// A coordinator gets a server, and tools in its facts, only when its
-// repository has a sessions entry; that entry needs a coordinator.
+// A coordinator gets start_session and end_session only when its
+// repository has a sessions entry, and approve always (#36); that entry
+// needs a coordinator.
 func TestCoordinatorServerNeedsSessionsEntry(t *testing.T) {
 	h := coordHarness(t)
-	if _, err := NewMCPServer(h.cfg, "c", NewLogWriter(h.buf), func() ([]Event, error) { return nil, nil }, h.clock.Now); err == nil {
-		t.Fatal("a coordinator without a sessions entry got a server")
+	rs := session(t, h.mcpServerFor("c"), `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	if len(rs) != 1 || len(rs[0].Result.Tools) != 1 || rs[0].Result.Tools[0].Name != ToolApprove {
+		t.Fatalf("tools without a sessions entry = %+v", rs)
 	}
-	if got := mcpLaunchConfig(h.cfg, "c", h.cfg.Sessions["c"]); got != emptyMCP {
+	if got := mcpLaunchConfig(h.cfg, "c", h.cfg.Sessions["c"]); !strings.Contains(got, `"--session","c"`) {
 		t.Fatalf("launch config = %s", got)
 	}
 	h = sessionsHarness(t)
@@ -227,11 +229,11 @@ func TestCoordinatorServerNeedsSessionsEntry(t *testing.T) {
 		t.Fatalf("launch config = %s", got)
 	}
 	var f restartFacts
-	if err := json.Unmarshal(h.sup.packFacts("c", h.cfg.Sessions["c"], h.sup.track("c"), "restart"), &f); err != nil || strings.Join(f.Tools, ",") != "start_session,end_session" {
+	if err := json.Unmarshal(h.sup.packFacts("c", h.cfg.Sessions["c"], h.sup.track("c"), "restart"), &f); err != nil || strings.Join(f.Tools, ",") != "start_session,end_session,approve" {
 		t.Fatalf("facts tools = %v, %v", f.Tools, err)
 	}
-	rs := session(t, h.mcpServerFor("c"), `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
-	if len(rs) != 1 || len(rs[0].Result.Tools) != 2 || rs[0].Result.Tools[0].Name != ToolStartSession {
+	rs = session(t, h.mcpServerFor("c"), `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	if len(rs) != 1 || len(rs[0].Result.Tools) != 3 || rs[0].Result.Tools[0].Name != ToolStartSession {
 		t.Fatalf("tools = %+v", rs)
 	}
 	cfg := DefaultConfig()

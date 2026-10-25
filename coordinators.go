@@ -357,6 +357,13 @@ func (s *Supervisor) due(repo string, t *Track) (reasons, keys []string) {
 			add("answer: "+n+"/"+id, o.Answers[id].At)
 		}
 	}
+	// A request no session delivered whose own CI failed, once per
+	// record: its coordinator may start a fix session for it.
+	for _, r := range s.outsideRecords(repo) {
+		if r.State == CIFailed && r.Verdict == CIOwn {
+			add(ciReason(r), r.At)
+		}
+	}
 	for _, in := range s.st.instructionsFor(repo) {
 		if _, carried := t.Carried[in.ID]; !carried {
 			reasons = append(reasons, instructionReason+in.ID)
@@ -422,7 +429,10 @@ type Pack struct {
 	// OwnerInstructions are the owner's console instructions for the
 	// repository, oldest first, until a wake that carried them is handled.
 	OwnerInstructions []PackInstruction `json:"owner_instructions,omitempty"`
-	Summarized        PackCounts        `json:"summarized"`
+	// Requests are the repository's open requests no session delivered,
+	// as the CI watcher last recorded them (#36).
+	Requests   []PackRequest `json:"requests,omitempty"`
+	Summarized PackCounts    `json:"summarized"`
 }
 
 // PackSession is one session of the repository: its state, its case and
@@ -463,6 +473,7 @@ type PackCounts struct {
 	Items        int `json:"items"`
 	Due          int `json:"due"`
 	Instructions int `json:"instructions"`
+	Requests     int `json:"requests"`
 }
 
 // packItems are repo's unseen items, oldest first, never the owner's own.
@@ -533,6 +544,7 @@ func (s *Supervisor) buildPack(repo string, due []string, now time.Time, handled
 	}
 	p.Items = s.packItems(repo)
 	p.OwnerInstructions = s.packInstructions(repo, handled)
+	p.Requests = s.packRequests(repo)
 	for {
 		b := compactJSON(p)
 		if len(b) <= pol.PackBytes {
@@ -544,6 +556,9 @@ func (s *Supervisor) buildPack(repo string, due []string, now time.Time, handled
 		case len(p.Items) > 0:
 			p.Items = p.Items[1:]
 			p.Summarized.Items++
+		case len(p.Requests) > 0:
+			p.Requests = p.Requests[:len(p.Requests)-1]
+			p.Summarized.Requests++
 		case len(p.Decisions) > 0:
 			p.Decisions = p.Decisions[:len(p.Decisions)-1]
 			p.Summarized.Decisions++

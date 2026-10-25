@@ -91,6 +91,9 @@ type Forge interface {
 	// not one; the forge's merge call, a merge commit or a squash, which
 	// fails when the head moved; or the policy's merge command.
 	Merge(repo Repository, ref, head, target string) error
+	// Retest runs the request's pipeline again, on its merge result where
+	// the project tests merge results.
+	Retest(repo Repository, ref string) error
 }
 
 // AllowedForge wraps a Forge with the per-repository allow-list. Every write
@@ -204,6 +207,15 @@ func (a AllowedForge) MergeAllowed(repo, ref, head, target string) error {
 		return err
 	}
 	return a.Forge.Merge(a.Repos[repo], ref, head, target)
+}
+
+// RetestAllowed runs a request's pipeline again if the repository allows
+// merge: it is done only on the way to a merge.
+func (a AllowedForge) RetestAllowed(repo, ref string) error {
+	if err := a.allowed(repo, "merge"); err != nil {
+		return err
+	}
+	return a.Forge.Retest(a.Repos[repo], ref)
 }
 
 // runTimed runs a command in dir and returns its standard output, or its
@@ -706,6 +718,21 @@ func (f ExecForge) Merge(repo Repository, ref, head, target string) error {
 		return mergeGitHub(f.Timeout, repo, head, target)
 	}
 	return fmt.Errorf("unknown forge %q", repo.Forge)
+}
+
+// Retest creates a new pipeline for a GitLab merge request, which runs
+// on its merge result where merged results pipelines are on. GitHub has
+// no such call.
+func (f ExecForge) Retest(repo Repository, ref string) error {
+	if repo.Forge != "gitlab" {
+		return fmt.Errorf("%s cannot run a request's pipeline again", repo.Forge)
+	}
+	proj := strings.ReplaceAll(repo.Project, "/", "%2F")
+	args := glabArgs(repo, "-X", "POST", "projects/"+proj+"/merge_requests/"+strings.TrimPrefix(ref, "!")+"/pipelines")
+	if _, err := runTimed(f.Timeout, "", forgeEnv, false, "glab", args...); err != nil {
+		return fmt.Errorf("glab: %s", exitMessage(err))
+	}
+	return nil
 }
 
 // mergeByCommand runs the policy's merge command, with no shell, its

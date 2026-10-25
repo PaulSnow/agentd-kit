@@ -434,6 +434,11 @@ func (s *Supervisor) ownerRecords() {
 			s.st.apply(e)
 			continue
 		}
+		// A coordinator's approve, which its server logged (#36).
+		if e.Kind == KindApproval {
+			s.st.apply(e)
+			continue
+		}
 		// A session's tool call, which its server logged, is a shared fact
 		// of that session's case.
 		if _, ok := s.cfg.Sessions[e.Session]; ok && e.Kind == KindCase && e.Mode == ModeShared && e.Case.Call != nil {

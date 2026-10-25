@@ -365,9 +365,9 @@ type startArgs struct {
 	Repository string `json:"repository"`
 }
 
-// callSessions checks and records a coordinator's start_session or
-// end_session. A refused call is answered and not logged: nothing reached
-// the log. A start is read back, so of two for one name only the one the
+// callSessions checks and records a coordinator's start_session,
+// end_session or approve (requests.go). A refused call is answered and
+// not logged: nothing reached the log. A start is read back, so of two for one name only the one the
 // fold holds is told it started.
 func (srv *MCPServer) callSessions(tool string, args json.RawMessage) (string, bool) {
 	refuse := func(format string, a ...any) (string, bool) {
@@ -381,6 +381,9 @@ func (srv *MCPServer) callSessions(tool string, args json.RawMessage) (string, b
 	own := srv.sess.Repository
 	repo := srv.cfg.Repositories[own]
 	pol := repo.Sessions
+	if tool == ToolApprove {
+		return srv.callApprove(st, args)
+	}
 	if pol == nil {
 		return refuse("repository %s has no sessions entry; agentd starts no sessions for it", own)
 	}

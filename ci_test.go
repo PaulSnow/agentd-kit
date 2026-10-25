@@ -306,6 +306,7 @@ func TestCIShownOnStatusReportPageAndCase(t *testing.T) {
 func TestCIGitHubPullRequest(t *testing.T) {
 	api := &fakeForgeAPI{github: map[string]string{
 		"/repos/example-org/gadgets/pulls/4":                                    `{"state":"open","merged":false,"title":"Gadgets","body":"","html_url":"https://github.com/example-org/gadgets/pull/4","head":{"sha":"abc1234def"},"base":{"ref":"main"}}`,
+		"/repos/example-org/gadgets/pulls/4/reviews?per_page=100":               `[]`,
 		"/repos/example-org/gadgets/commits/abc1234def/check-runs?per_page=100": `{"check_runs":[{"id":9,"name":"test","status":"completed","conclusion":"failure"},{"id":10,"name":"lint","status":"completed","conclusion":"success"}]}`,
 		"/repos/example-org/gadgets/commits/main/check-runs?per_page=100":       `{"check_runs":[{"id":7,"name":"test","status":"completed","conclusion":"success","head_sha":"0123456789"}]}`,
 		"/repos/example-org/gadgets/actions/jobs/9/logs":                        "2026-10-22T00:00:01.0000000Z FAIL gadgets\n",
@@ -465,6 +466,7 @@ func TestCIHeadAfterTheFixIsFollowed(t *testing.T) {
 func TestCIGitHubTargetJudgedOnCompletedRuns(t *testing.T) {
 	api := &fakeForgeAPI{github: map[string]string{
 		"/repos/example-org/gadgets/pulls/4":                                    `{"state":"open","head":{"sha":"abc1234def"},"base":{"ref":"main"}}`,
+		"/repos/example-org/gadgets/pulls/4/reviews?per_page=100":               `[]`,
 		"/repos/example-org/gadgets/commits/abc1234def/check-runs?per_page=100": `{"check_runs":[{"id":9,"name":"test","status":"completed","conclusion":"failure"}]}`,
 		"/repos/example-org/gadgets/commits/main/check-runs?per_page=100":       `{"check_runs":[{"id":7,"name":"test","status":"completed","conclusion":"failure"},{"id":8,"name":"test","status":"in_progress"}]}`,
 	}}

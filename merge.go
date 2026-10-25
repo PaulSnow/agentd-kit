@@ -50,7 +50,9 @@ func (s *Supervisor) mergeGreen(now time.Time) {
 	if now.Before(next) {
 		return
 	}
-	for _, w := range s.watchedRequests() {
+	delivered := s.watchedRequests()
+	outside := s.outsideRequests(delivered)
+	for i, w := range append(delivered, outside...) {
 		// The owner's policy decides what is worth asking the forge; the
 		// repository's file, which may narrow it, is read at the target's
 		// tip in the worker, every time, so a file that narrowed it once
@@ -65,15 +67,33 @@ func (s *Supervisor) mergeGreen(now time.Time) {
 			continue
 		}
 		r, ok := s.st.CI[key]
-		reviewed := s.reviewConverged(w.Session)
-		code, why := s.mergeBlocked(t, w, r, ok, pol.Merge.Require, reviewed, now)
+		out := i >= len(delivered)
+		// A request no session delivered is reviewed by its coordinator's
+		// approve at its head; a delivered one by its case's rounds too.
+		reviewed := ok && r.Head != "" && s.st.approvedAt(w.Repository, w.Ref) == r.Head || !out && s.reviewConverged(w.Session)
+		code, why := s.mergeBlocked(t, w, r, ok, requireOf(pol, pol.Merge.Require, out), reviewed, out, now)
 		if code != "" {
 			s.mergeSkip(w.Session, t, w, r.Head, code, why)
 			continue
 		}
 		w, r := w, r
-		s.spawn(w.Session, mergeKey(w.Repository, w.Ref), func(ws *Supervisor, t *Track) { ws.mergeRequest(w.Session, t, w, r, reviewed) })
+		s.spawn(w.Session, mergeKey(w.Repository, w.Ref), func(ws *Supervisor, t *Track) { ws.mergeRequest(w.Session, t, w, r, reviewed, out) })
 	}
+}
+
+// requireOf is what must hold at a request's head before it merges: the
+// policy's require for a request a session delivered. agentd's gate never
+// ran on a request no session delivered, so for one of those green CI and
+// its coordinator's approval are required instead, whatever require says.
+// With ci.required, green CI is required of every request.
+func requireOf(pol RepoPolicy, require []string, outside bool) []string {
+	if outside {
+		return []string{RequireCI, RequireReview}
+	}
+	if pol.CI.Required && !contains(require, RequireCI) {
+		return append(append([]string(nil), require...), RequireCI)
+	}
+	return require
 }
 
 // reviewConverged says whether the case the session works stopped its
@@ -85,17 +105,24 @@ func (s *Supervisor) reviewConverged(name string) bool {
 
 // mergeBlocked is why the state alone says a request may not merge now,
 // as a short code and a reason, or "" when the forge is to be asked.
-func (s *Supervisor) mergeBlocked(t *Track, w ciWatched, r CIRecord, ok bool, require []string, reviewed bool, now time.Time) (string, string) {
+// Outside says no session delivered it: its coordinator's decisions are
+// not about it.
+func (s *Supervisor) mergeBlocked(t *Track, w ciWatched, r CIRecord, ok bool, require []string, reviewed, outside bool, now time.Time) (string, string) {
 	switch {
 	case !ok || r.Head == "":
 		return "no-ci", "" // the CI watcher has not recorded it yet: it knows the head
 	case r.Session != w.Session || r.Delivered != w.Delivered || t.ciStale(r):
 		return "stale", "" // the watcher records the delivery at its next round
+	case r.Draft:
+		return "draft", "it is a draft"
 	}
 	if code, why := missing(t, r, require, reviewed); code != "" {
 		return code, why
 	}
-	if t.Questions.Open || t.blocking() {
+	if r.Unresolved {
+		return "unresolved", "it has an open discussion"
+	}
+	if !outside && (t.Questions.Open || t.blocking()) {
 		return "decision", "its session has an open blocking decision"
 	}
 	fkey := mergeKey(w.Repository, w.Ref) + ":" + r.Head
@@ -121,7 +148,7 @@ func missing(t *Track, r CIRecord, require []string, reviewed bool) (string, str
 	case contains(require, RequireGate) && !contains(t.Gated, r.Head):
 		return "ungated", fmt.Sprintf("its head %s did not pass agentd's gate", shortHash(r.Head))
 	case contains(require, RequireReview) && !reviewed:
-		return "unreviewed", "its case's review rounds have not stopped converged"
+		return "unreviewed", fmt.Sprintf("neither its case's review rounds converged nor its coordinator approved it at %s", shortHash(r.Head))
 	}
 	return "", ""
 }
@@ -167,7 +194,7 @@ type mergeView struct {
 
 // mergeRequest asks the forge whether the request may merge, and merges it
 // through the allow-listed forge client when every check holds.
-func (s *Supervisor) mergeRequest(name string, t *Track, w ciWatched, r CIRecord, reviewed bool) {
+func (s *Supervisor) mergeRequest(name string, t *Track, w ciWatched, r CIRecord, reviewed, outside bool) {
 	repo := s.cfg.Repositories[w.Repository]
 	api := s.api.At(repo.Host)
 	view := func() (mergeView, error) {
@@ -233,7 +260,7 @@ func (s *Supervisor) mergeRequest(name string, t *Track, w ciWatched, r CIRecord
 		skip("reserved", "it carries a label the policy reserves")
 		return
 	}
-	if code, why := missing(t, r, m.Require, reviewed); code != "" {
+	if code, why := missing(t, r, requireOf(pol, m.Require, outside), reviewed); code != "" {
 		skip(code, why)
 		return
 	}
@@ -249,6 +276,24 @@ func (s *Supervisor) mergeRequest(name string, t *Track, w ciWatched, r CIRecord
 				return
 			}
 		}
+	}
+	// A green run judged the head against the base it ran on; once the
+	// target moved on, the merge result is tested again first, once per
+	// head and tip. A base never recorded, its tip not asked, is no move.
+	if pol.CI.RetestOnBaseMove && r.Base != "" && r.Base != tip {
+		moved := fmt.Sprintf("%s moved from %s to %s since CI went green on %s", v.target, shortHash(r.Base), shortHash(tip), shortHash(v.head))
+		if repo.Forge == "github" {
+			skip("base-moved", moved+", and GitHub has no call that tests the merge result again")
+			return
+		}
+		rkey := mergeKey(w.Repository, w.Ref) + ":retest:" + v.head + ":" + tip
+		if t.Retests[rkey] {
+			return // retested: the watcher records the new run
+		}
+		s.act(name, ActRetest, &ActPayload{Key: rkey, Repository: w.Repository, Ref: w.Ref, URL: v.url, Head: v.head, Target: v.target, SHA: tip}, func() error {
+			return s.forge.RetestAllowed(w.Repository, w.Ref)
+		})
+		return
 	}
 	if m.Method == MergeFastForward {
 		why, err := v.fastForward(tip, v.head)

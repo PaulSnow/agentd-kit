@@ -472,7 +472,8 @@ type fakeForge struct {
 	recordThenFail error
 	pushErr        error // what a push returns, after recording it
 	merges         []mergedRequest
-	mergeErr       error // what a merge returns, after recording it
+	retests        []string // the requests whose pipeline was run again
+	mergeErr       error    // what a merge returns, after recording it
 }
 
 type mergedRequest struct {
@@ -507,6 +508,13 @@ func (f *fakeForge) Merge(repo Repository, ref, head, target string) error {
 	defer f.mu.Unlock()
 	f.merges = append(f.merges, mergedRequest{ref: ref, target: target, head: head, method: repo.Policy.Merge.Method})
 	return f.mergeErr
+}
+
+func (f *fakeForge) Retest(repo Repository, ref string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.retests = append(f.retests, ref)
+	return nil
 }
 
 func (f *fakeForge) result(n int) MergeResult {

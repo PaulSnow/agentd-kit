@@ -134,7 +134,7 @@ func TestMergeHeadMovedSinceTheRecord(t *testing.T) {
 		// The request moves on before the merge check runs.
 		api.gitlab[ciProject+"/merge_requests/1"] = strings.Replace(api.gitlab[ciProject+"/merge_requests/1"], `"sha":"c0ffee"`, `"sha":"beef00"`, 1)
 	})
-	h.sup.mergeRequest("d", h.sup.track("d"), ciWatched{Session: "d", Repository: "widgets", Ref: "!1", Delivered: "d:" + h.dir + "/d/wt"}, h.sup.st.CI[ciKey("widgets", "!1")], false)
+	h.sup.mergeRequest("d", h.sup.track("d"), ciWatched{Session: "d", Repository: "widgets", Ref: "!1", Delivered: "d:" + h.dir + "/d/wt"}, h.sup.st.CI[ciKey("widgets", "!1")], false, false)
 	if len(h.forge.merges) != 0 {
 		t.Fatalf("merges = %+v", h.forge.merges)
 	}
@@ -211,7 +211,8 @@ func TestMergeTargetMoved(t *testing.T) {
 	api.set(func() {
 		// The check sees feed1234; the second look, just before the
 		// merge, sees the target moved on.
-		api.gitlabSeq = map[string][]string{key: {`{"commit":{"id":"` + mergeTip + `"}}`}}
+		// The CI watcher's base, then the check's look.
+		api.gitlabSeq = map[string][]string{key: {`{"commit":{"id":"` + mergeTip + `"}}`, `{"commit":{"id":"` + mergeTip + `"}}`}}
 		api.gitlab[key] = `{"commit":{"id":"a1b2c3d4"}}`
 	})
 	h.ticks(3, 5*time.Minute)
@@ -419,7 +420,7 @@ func TestMergeRequestRetargetedDuringCheck(t *testing.T) {
 		api.gitlab[key] = strings.Replace(first, `"target_branch":"main"`, `"target_branch":"release"`, 1)
 	})
 	h.ticks(2, 5*time.Minute) // delivered, then the CI record of c0ffee
-	h.sup.mergeRequest("d", h.sup.track("d"), ciWatched{Session: "d", Repository: "widgets", Ref: "!1", Delivered: "d:" + h.dir + "/d/wt"}, h.sup.st.CI[ciKey("widgets", "!1")], false)
+	h.sup.mergeRequest("d", h.sup.track("d"), ciWatched{Session: "d", Repository: "widgets", Ref: "!1", Delivered: "d:" + h.dir + "/d/wt"}, h.sup.st.CI[ciKey("widgets", "!1")], false, false)
 	if len(h.forge.merges) != 0 {
 		t.Fatalf("merges = %+v", h.forge.merges)
 	}
