@@ -402,6 +402,20 @@ func (s *Supervisor) rotationPoint(sess Session, t *Track, ev Evidence, now time
 	return cp.SHA, true
 }
 
+// rotationPending says whether the session will be rotated at a
+// checkpoint it has reached, once its grace has passed: it is over the
+// threshold and has a merge since its launch it was not rotated at. A turn
+// it ended there is not continued; the rotation goes on from it instead.
+func (s *Supervisor) rotationPending(sess Session, t *Track) bool {
+	pol := s.cfg.Policies.Context
+	u, ok := t.current()
+	if !pol.Enabled || !ok || u.Context <= pol.Threshold || u.Guessed && !s.shadow || sess.Role == RoleCoordinator {
+		return false
+	}
+	cp := t.Checkpoint
+	return cp.SHA != "" && !cp.Baseline && cp.At.After(t.Launched) && t.RotatedFor != cp.SHA
+}
+
 // overBudget says why the session must stop, or "": the stop time has come,
 // or the session's spend or the run's (every session's) has reached its
 // cap. Live mode counts only transcripts it launched.
@@ -527,7 +541,7 @@ func ParseProgress(text string) Progress {
 // restartFacts is what agentd hands a fresh session about where it stands,
 // as one compact JSON document: data, not instructions.
 type restartFacts struct {
-	Why       string   `json:"why"` // rotation, restart, answered (restarted with the owner's answers) or ci-fix
+	Why       string   `json:"why"` // rotation, restart, answered (restarted with the owner's answers), ci-fix, or continue (typed into a turn that ended)
 	Brief     string   `json:"brief"`
 	Progress  string   `json:"progress"`
 	Item      string   `json:"item,omitempty"`

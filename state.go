@@ -40,8 +40,13 @@ type Track struct {
 	Clears    int         // owner clears applied
 	Nudges    int         // nudges in the current idle episode
 	LastNudge time.Time
-	Limited   bool
-	TrustHash string // the screen hash the trust keys were last sent for
+	// Continues counts the continue nudges in a row given while STATUS.md
+	// read ContinueStatus, its hash: a session that ends its turn again
+	// and again without changing it is not continued past nudge.max.
+	Continues      int
+	ContinueStatus string
+	Limited        bool
+	TrustHash      string // the screen hash the trust keys were last sent for
 	// NotClaudeSince is when the pane was first seen running a command
 	// that is not Claude, or zero while it runs Claude.
 	NotClaudeSince time.Time
@@ -288,6 +293,25 @@ func (t *Track) noteHash(hash string, now time.Time, p NudgePolicy, tr Transcrip
 	t.Nudges = 0
 }
 
+// lastTurn is the session's latest folded turn, or none.
+func (t *Track) lastTurn() TurnRecord {
+	if len(t.Turns) == 0 {
+		return TurnRecord{}
+	}
+	return t.Turns[len(t.Turns)-1]
+}
+
+// turnEnded says whether the session ended its turn and waits at the
+// prompt: its last folded turn is a summary, the transcript's last line,
+// when read, ends a turn, and the screen shows the idle prompt. Done,
+// Questions and blocking decisions are judged before it is asked.
+func (t *Track) turnEnded(ev Evidence) bool {
+	if t.lastTurn().Role != TurnSummary || !ev.Prompt {
+		return false
+	}
+	return !ev.Transcript.Found || ev.Transcript.Role == "assistant" && ev.Transcript.StopReason == "end_turn"
+}
+
 // Classify derives the state from evidence and memory. It changes nothing
 // but the pane memory. The reason names the evidence that decided.
 func Classify(t *Track, ev Evidence, pol Policies, now time.Time) (State, string) {
@@ -325,6 +349,9 @@ func Classify(t *Track, ev Evidence, pol Policies, now time.Time) (State, string
 		return Starting, "first observation"
 	}
 	unchanged := now.Sub(t.HashSince)
+	if t.turnEnded(ev) {
+		return Idle, "turn ended at the prompt and STATUS.md is not DONE"
+	}
 	if pol.Nudge.Enabled && unchanged >= pol.Nudge.Stall.Duration {
 		if ev.Transcript.Found && now.Sub(ev.Transcript.At) < pol.Nudge.Stall.Duration {
 			return Working, fmt.Sprintf("screen unchanged for %s but the transcript moved %s ago", unchanged.Round(time.Minute), now.Sub(ev.Transcript.At).Round(time.Minute))

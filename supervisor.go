@@ -555,6 +555,7 @@ func (s *Supervisor) observe(name string, sess Session) (Evidence, error) {
 		if ev.DialogShape = dialogShape(screen); ev.Dialog == "" && ev.DialogShape {
 			ev.Dialog = "a question line with numbered options"
 		}
+		ev.Prompt = idlePrompt(screen)
 	}
 	if root := s.transcriptRoot(sess); root != "" {
 		ev.Transcript = ReadTranscript(TranscriptDir(root, sess.Cwd))
@@ -649,6 +650,7 @@ func (s *Supervisor) logObserve(name string, t *Track, ev Evidence, state State,
 		Trust:           ev.TrustPrompt,
 		Dialog:          ev.Dialog != "",
 		DialogShape:     ev.Dialog != "" && ev.DialogShape,
+		Prompt:          ev.Prompt,
 		Command:         ev.Command,
 		Head:            ev.Status.Head,
 	}
@@ -839,6 +841,15 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 		if !pol.Nudge.Enabled || typed || sess.Role == RoleCoordinator {
 			return state
 		}
+		if t.turnEnded(ev) && t.lastTurn().At.After(t.LastNudge) {
+			s.continueTurn(name, sess, t, ev, now)
+			return state
+		}
+		// A turn that has not ended, or one that ended before the last
+		// nudge (which never reached it), waits out the stall.
+		if now.Sub(t.HashSince) < pol.Nudge.Stall.Duration {
+			return state
+		}
 		if t.Nudges >= pol.Nudge.Max {
 			key := fmt.Sprintf("stalled:%s:%d", name, t.HashSince.Unix())
 			msg := fmt.Sprintf("%s: screen unchanged since %s and %d nudges went unanswered; not nudging again.",
@@ -865,6 +876,37 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 		})
 	}
 	return state
+}
+
+// continueTurn types the continue line into a session that ended its turn
+// with work left, once Settle has passed since the turn ended and since its
+// screen last changed: the continue message and the facts its STATUS.md
+// gives, as a restart prompt hands them. A rotation due at a checkpoint
+// comes first. It is a nudge, counted as one; a
+// session that ends its turn nudge.max times in a row without changing
+// STATUS.md goes to the owner instead.
+func (s *Supervisor) continueTurn(name string, sess Session, t *Track, ev Evidence, now time.Time) {
+	pol := s.cfg.Policies.Nudge
+	if now.Sub(t.lastTurn().At) < pol.Settle.Duration || now.Sub(t.HashSince) < pol.Settle.Duration || s.rotationPending(sess, t) {
+		return
+	}
+	if t.ContinueStatus == ev.Status.Hash && t.Continues >= pol.Max {
+		s.escalate(name, fmt.Sprintf("continued:%s:%s", name, ev.Status.Hash),
+			fmt.Sprintf("%s: ended its turn %d times after being told to continue, with STATUS.md unchanged and not DONE; not continuing it again.", name, t.Continues), t, now)
+		return
+	}
+	line := pol.ContinueMessage + " " + string(s.packFacts(name, sess, t, "continue"))
+	nudge := &ActPayload{Nudge: t.Nudges + 1, Message: line, StatusHash: ev.Status.Hash}
+	s.typeInto(name, ActNudge, nudge, t, ev.PaneHash, func() error {
+		if err := s.tmux.Type(name, line); err != nil {
+			return err
+		}
+		s.clock.Sleep(time.Second)
+		if pane, err := s.tmux.CapturePane(name, PaneLines); err == nil {
+			nudge.PaneHash = StillHash(pane)
+		}
+		return nil
+	})
 }
 
 // noteCommand follows how long the pane has run something not in commands.

@@ -430,6 +430,12 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 		}
 	case ActNudge:
 		t.Nudges++
+		if a.StatusHash != "" {
+			if a.StatusHash != t.ContinueStatus {
+				t.Continues, t.ContinueStatus = 0, a.StatusHash
+			}
+			t.Continues++
+		}
 		t.NudgeCount += n
 		t.LastNudge = at
 		if a.PaneHash != "" { // the screen after the nudge's echo

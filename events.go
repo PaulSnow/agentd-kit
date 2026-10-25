@@ -151,6 +151,7 @@ type ObservePayload struct {
 	Trust           bool       `json:"trust"`
 	Dialog          bool       `json:"dialog"`
 	DialogShape     bool       `json:"dialog_shape,omitempty"` // the dialog has a dialog's shape, which alone may be declined
+	Prompt          bool       `json:"prompt,omitempty"`       // the screen ends at the idle input prompt
 	Command         string     `json:"command"`
 	Head            string     `json:"head"`
 	PaneHash        string     `json:"pane_hash,omitempty"`
@@ -202,10 +203,12 @@ type ActPayload struct {
 	AnswersAt []time.Time `json:"answers_at,omitempty"`
 
 	// Typing: a nudge, a resume, the trust keys.
-	Message  string   `json:"message,omitempty"`
-	Nudge    int      `json:"nudge,omitempty"`
-	Keys     []string `json:"keys,omitempty"`
-	PaneHash string   `json:"pane_hash,omitempty"`
+	Message string `json:"message,omitempty"`
+	Nudge   int    `json:"nudge,omitempty"`
+	// A continue nudge: the hash of the STATUS.md it was given for.
+	StatusHash string   `json:"status_hash,omitempty"`
+	Keys       []string `json:"keys,omitempty"`
+	PaneHash   string   `json:"pane_hash,omitempty"`
 
 	// An escalation or Questions update; Message is its text.
 	Console       string `json:"console,omitempty"`

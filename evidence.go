@@ -29,6 +29,7 @@ type Evidence struct {
 	PanePath    string     // where the live pane runs, #{pane_current_path}
 	Dialog      string     // the dialog pattern the visible screen matches, or ""
 	DialogShape bool       // the visible screen has a dialog's shape, which alone may be declined
+	Prompt      bool       // the screen ends at Claude Code's input prompt, with no turn running
 	Status      StatusEvidence
 	// StatusQuestions is the hash of STATUS.md's own Questions section;
 	// Status.Questions is what still waits on the owner once the answers
@@ -44,6 +45,7 @@ type StatusEvidence struct {
 	Done      bool
 	Questions string // the Questions section body when it asks something, else ""
 	Progress  Progress
+	Hash      string // the short hash of the whole file
 }
 
 // TranscriptEvidence is the last turn of the session's Claude Code
@@ -85,7 +87,7 @@ var noQuestions = regexp.MustCompile(`(?i)^[-*\s]*\(?\s*(none(\s+yet)?|n/a)\s*\.
 
 // ParseStatus interprets STATUS.md text.
 func ParseStatus(text string) StatusEvidence {
-	ev := StatusEvidence{Exists: true, Progress: ParseProgress(text)}
+	ev := StatusEvidence{Exists: true, Progress: ParseProgress(text), Hash: shortHash(HashPane(text))}
 	var lines []string
 	for _, l := range strings.Split(text, "\n") {
 		if t := strings.TrimSpace(l); t != "" {
@@ -235,6 +237,39 @@ func dialogShape(screen string) bool {
 			if next++; next > 2 && cursor {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// inputPrompt is Claude Code's input prompt, in its box or not, empty or
+// showing a suggestion; promptRunning is the line a running turn shows.
+var (
+	inputPrompt   = regexp.MustCompile(`^[>❯›](\s.*)?$`)
+	promptRunning = regexp.MustCompile(`(?i)esc to interrupt`)
+)
+
+// promptLines is how far from the screen's last line the prompt may be:
+// the box's border and the mode line below it.
+const promptLines = 6
+
+// idlePrompt says whether the screen ends at the input prompt with no
+// turn running: a prompt line among its last few lines, and no running
+// turn's line anywhere on it. A quoted prompt higher up, in the
+// scrollback, is not the prompt.
+func idlePrompt(screen string) bool {
+	if promptRunning.MatchString(screen) {
+		return false
+	}
+	var lines []string
+	for _, l := range strings.Split(screen, "\n") {
+		if l = strings.Trim(l, " \t│┃|"); l != "" {
+			lines = append(lines, l)
+		}
+	}
+	for i := len(lines) - 1; i >= 0 && i >= len(lines)-promptLines; i-- {
+		if inputPrompt.MatchString(lines[i]) && !dialogOption.MatchString(strings.TrimLeft(lines[i], ">❯› ")) {
+			return true
 		}
 	}
 	return false
