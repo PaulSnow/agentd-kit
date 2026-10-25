@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -183,12 +182,15 @@ type uiNeed struct {
 // needs lists what waits on the owner in src: every open decision, and
 // every session of the report blocked on the owner, usage-limited,
 // crash-looping, stopped or failed. A done session is never listed, and
-// a session blocked on its decisions is listed by them alone.
+// a session blocked on its Questions or with a decision open is listed
+// by its decisions alone.
 func (src *uiSource) needs(cfg *Config, rep Report, asked map[string]time.Time) []uiNeed {
 	secret := confidentialMatcher(cfg)
 	var out []uiNeed
+	decided := map[string]bool{}
 	for _, d := range DecisionsFrom(cfg, src.st, rep) {
 		d := d
+		decided[d.Session] = true
 		t := src.st.Tracks[d.Session]
 		since, ok := asked[d.Session+" "+d.ID]
 		if !ok {
@@ -206,10 +208,10 @@ func (src *uiSource) needs(cfg *Config, rep Report, asked map[string]time.Time) 
 			switch {
 			case t.Stopped != "":
 				kind = "stopped"
-			case t.State == BlockedOnOwner && t.StatusQuestions == "" && len(t.open()) == 0:
-				// Blocked on a decision, answered or not, it is listed
-				// by the decision until it is answered, and then the
-				// answer is on its way.
+			case t.State == BlockedOnOwner && !decided[c.Session] && t.StatusQuestions == "":
+				// A dialog or a tool waiting. Blocked on STATUS.md's
+				// Questions, it is listed by them until they are
+				// answered, and then the answer is on its way.
 				kind = "blocked"
 			case t.State == UsageLimited, t.State == CrashLooping, t.State == Failed:
 				kind = string(t.State)
@@ -430,6 +432,9 @@ func (src *uiSource) addIndex(v *uiIndex, get func(string) *uiRepo, now time.Tim
 		}
 		var unseen []ReportItem
 		for _, it := range rr.Items {
+			if src.echo {
+				break // the live source over the same log lists them
+			}
 			if !it.Seen {
 				unseen = append(unseen, it)
 			}
@@ -504,7 +509,7 @@ const withheldMessage = "(withheld: it matched a confidential pattern)"
 // consoleView is repo's console, nil when no source knows the repository.
 func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 	v := &uiConsole{uiPage: uiPage{Title: repo + " console", Token: u.token, Back: "/console/" + repo, Now: now, loc: u.loc}, Repository: repo}
-	known := false
+	known, coordinated := false, false
 	for _, src := range u.sources {
 		err := func() error {
 			src.mu.Lock()
@@ -515,8 +520,12 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 			}
 			if _, ok := cfg.Repositories[repo]; ok {
 				known = true
-				if v.ReplySrc == "" && src.st.Mode == ModeLive {
-					v.ReplySrc = src.Name
+				// The reply goes to the run of the repository's
+				// coordinator, which is the run that reads it, else to
+				// the first live run.
+				co := cfg.Repositories[repo].Coordinator != nil || src.st.Coordinators[repo] != ""
+				if src.st.Mode == ModeLive && (v.ReplySrc == "" || co && !coordinated) {
+					v.ReplySrc, coordinated = src.Name, co
 				}
 			}
 			secret := confidentialMatcher(cfg)
@@ -616,8 +625,10 @@ func (u *UI) sessionView(src *uiSource, name string, now time.Time) (*uiSessionP
 		v.Turns = append(v.Turns, uiTurn{Role: tr.Role, At: tr.At, Body: body})
 	}
 	if sess, ok := cfg.Sessions[name]; ok && sess.Workdir != "" {
-		b, err := readCapped(filepath.Join(sess.Workdir, "STATUS.md"), 1<<18)
+		b, err := readRegular(filepath.Join(sess.Workdir, "STATUS.md"), 1<<18)
 		switch {
+		case errors.Is(err, os.ErrNotExist):
+			v.StatusNote = "No STATUS.md."
 		case err != nil:
 			v.StatusNote = "STATUS.md could not be read."
 		case len(b) == 0:
@@ -690,17 +701,4 @@ func shortSHA(sha string) string {
 		return sha[:12]
 	}
 	return sha
-}
-
-// readCapped reads at most max bytes of path; a missing file is empty.
-func readCapped(path string, max int64) ([]byte, error) {
-	f, err := os.Open(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	return io.ReadAll(io.LimitReader(f, max))
 }

@@ -126,6 +126,9 @@ type uiSource struct {
 	messages map[string][]uiMessage // by repository, oldest first
 	events   map[string][]Event     // by session, oldest first
 	askedAt  map[string]time.Time   // when each decision was first seen, by session and id
+	// echo marks a shadow source over a live source's log: the owner's
+	// records and the shared facts are the live source's to show.
+	echo bool
 }
 
 func newUISource(name string, cfg *Config, log *Log, mode, host string) *uiSource {
@@ -149,11 +152,18 @@ func (src *uiSource) catchUp() error {
 		}
 		return src.st.Ended[session]
 	}
+	// add keeps m in time order, and the latest uiKeptMessages only, so
+	// imported history never pushes out what is new.
 	add := func(repo string, m uiMessage) {
 		if repo == "" {
 			return
 		}
-		ms := append(src.messages[repo], m)
+		ms := src.messages[repo]
+		i := len(ms)
+		for i > 0 && ms[i-1].At.After(m.At) {
+			i--
+		}
+		ms = append(ms[:i], append([]uiMessage{m}, ms[i:]...)...)
 		if len(ms) > uiKeptMessages {
 			ms = ms[len(ms)-uiKeptMessages:]
 		}
@@ -164,6 +174,7 @@ func (src *uiSource) catchUp() error {
 			continue
 		}
 		src.noteAsked(e)
+		owners := e.Mode == ModeOwner || e.Mode == ModeShared
 		if e.Session != "" {
 			es := append(src.events[e.Session], e)
 			if len(es) > uiKeptEvents {
@@ -174,6 +185,7 @@ func (src *uiSource) catchUp() error {
 		switch {
 		case e.Feed != nil && (e.Feed.Phase == FeedIntent || e.Feed.Phase == FeedWould) && e.Feed.Text != "":
 			add(e.Feed.Repository, uiMessage{At: e.Time, Kind: "feed", From: "agentd", Text: e.Feed.Text})
+		case src.echo && owners:
 		case e.Feed != nil && e.Feed.Phase == FeedImported:
 			at := e.Time
 			if e.Feed.At != nil {
@@ -661,7 +673,9 @@ func uiSources(cfg *Config, host string) ([]*uiSource, []*Log, error) {
 		sources = append(sources, newUISource(name, c, log, ModeLive, host))
 		if cfg.UI.Shadow {
 			used[name+"-shadow"] = true
-			sources = append(sources, newUISource(name+"-shadow", c, log, ModeShadow, host))
+			shadow := newUISource(name+"-shadow", c, log, ModeShadow, host)
+			shadow.echo = true
+			sources = append(sources, shadow)
 		}
 	}
 	return sources, logs, nil

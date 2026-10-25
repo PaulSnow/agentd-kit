@@ -26,13 +26,20 @@
     return false;
   }
 
-  // opened lists the summaries of the open details in section, so the
-  // new section opens the same ones.
+  // key names a details element across refreshes: its data-key, which
+  // stays when its count changes, else its summary's text.
+  function key(d) {
+    var s = d.querySelector("summary");
+    return d.getAttribute("data-key") || (s ? s.textContent : "");
+  }
+
+  // opened lists the open details in section, so the new section opens
+  // the same ones.
   function opened(section) {
     var out = {};
-    var ds = section.querySelectorAll("details[open] > summary");
+    var ds = section.querySelectorAll("details[open]");
     for (var i = 0; i < ds.length; i++) {
-      out[ds[i].textContent] = true;
+      out[key(ds[i])] = true;
     }
     return out;
   }
@@ -53,10 +60,10 @@
             continue;
           }
           var open = opened(old);
-          var ds = next.querySelectorAll("details > summary");
+          var ds = next.querySelectorAll("details");
           for (var j = 0; j < ds.length; j++) {
-            if (open[ds[j].textContent]) {
-              ds[j].parentNode.setAttribute("open", "");
+            if (open[key(ds[j])]) {
+              ds[j].setAttribute("open", "");
             }
           }
           old.replaceWith(document.importNode(next, true));

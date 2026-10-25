@@ -26,3 +26,18 @@ func TestMarkdown(t *testing.T) {
 		t.Fatalf("HTML passed:\n%s", got)
 	}
 }
+
+// Nothing inline lands in a link's target: a target holding a code span
+// is no link, bold inside a target stays text, and a link's text may hold
+// a code span or bold.
+func TestMarkdownLinkTargets(t *testing.T) {
+	for in, want := range map[string]string{
+		"[`a`](https://x.example/`b`)":              "<p>[<code>a</code>](https://x.example/<code>b</code>)</p>\n",
+		"[see](https://x.example/**b**)":            `<p><a href="https://x.example/**b**" rel="noreferrer">see</a></p>` + "\n",
+		"[`code` and **bold**](https://x.example/)": `<p><a href="https://x.example/" rel="noreferrer"><code>code</code> and <strong>bold</strong></a></p>` + "\n",
+	} {
+		if got := string(markdown(in)); got != want {
+			t.Errorf("%q:\n%s\nwant\n%s", in, got, want)
+		}
+	}
+}

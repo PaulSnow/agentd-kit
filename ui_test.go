@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -198,7 +199,7 @@ func newUIFixture(t *testing.T) *uiFixture {
 		start,
 		to(at(5*time.Hour), "w17", Working, "transcript moved"),
 		observe(at(5*time.Hour), "w17", ObservePayload{State: string(Working), Alive: true, Head: `Widgets blue "><b>bold</b>`}),
-		to(at(2*time.Hour), "s-blocked", BlockedOnOwner, "a blocking decision"),
+		to(at(2*time.Hour), "s-blocked", Idle, "turn ended"),
 		decision,
 		to(at(3*time.Hour), "done1", Done, "STATUS.md says DONE"),
 		doneDecision,
@@ -369,6 +370,15 @@ func TestUIAnswersByButtonAndBox(t *testing.T) {
 	if got := strings.Join(needKeys(t, u), ","); got != "coord/lim1/usage-limited" {
 		t.Fatalf("needs after the answers: %s", got)
 	}
+	// A dialog after the answer is the owner's again.
+	dialog := Event{V: EventVersion, Time: pageAt, Session: "s-blocked", Kind: KindTransition, Mode: ModeLive,
+		Transition: &TransitionPayload{From: string(Idle), To: string(BlockedOnOwner), Reason: "screen shows a permission or confirmation dialog"}}
+	if err := NewLogWriter(f.nightBuf).Append(dialog); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(needKeys(t, u), ","); got != "coord/lim1/usage-limited,night/s-blocked/blocked" {
+		t.Fatalf("needs after a dialog: %s", got)
+	}
 	// One source's decision is not answered through another.
 	if w := ownerPost(u, "/answer", url.Values{"src": {"coord"}, "session": {"s-blocked"}, "id": {"Q1"}, "choice": {"a"}}); w.Code != http.StatusBadRequest {
 		t.Fatalf("an answer through the wrong source: %d", w.Code)
@@ -387,7 +397,8 @@ func TestUIAnswersByButtonAndBox(t *testing.T) {
 
 // The console shows the repository's messages from every source in time
 // order, imported history first, and a reply is recorded as the owner's
-// instruction from the UI, in the first live source that configures it.
+// instruction from the UI, in the run of the repository's coordinator,
+// which is the run that reads it.
 func TestUIConsoleReply(t *testing.T) {
 	u, f := fixtureUI(t)
 	body := owner(t, u, "/console/widgets")
@@ -400,15 +411,15 @@ func TestUIConsoleReply(t *testing.T) {
 			t.Fatalf("messages out of order %v:\n%s", at, body)
 		}
 	}
-	if !strings.Contains(body, `name="src" value="night"`) || !strings.Contains(body, `action="/reply"`) || !strings.Contains(body, "Which &lt;b&gt;colour&lt;/b&gt;?") {
+	if !strings.Contains(body, `<input type="hidden" name="src" value="coord"><input type="hidden" name="repository" value="widgets">`) || !strings.Contains(body, `action="/reply"`) || !strings.Contains(body, "Which &lt;b&gt;colour&lt;/b&gt;?") {
 		t.Fatalf("console lacks the reply box or the decision:\n%s", body)
 	}
-	w := ownerPost(u, "/reply", url.Values{"src": {"night"}, "repository": {"widgets"}, "text": {"Paint the **logo** green too"}, "back": {"/console/widgets"}})
+	w := ownerPost(u, "/reply", url.Values{"src": {"coord"}, "repository": {"widgets"}, "text": {"Paint the **logo** green too"}, "back": {"/console/widgets"}})
 	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/console/widgets" {
 		t.Fatalf("reply: %d %s", w.Code, w.Body.String())
 	}
-	st := NewLogState(f.night, ModeLive)
-	events, _, _ := NewLogWriter(f.nightBuf).Tail(0)
+	st := NewLogState(f.coord, ModeLive)
+	events, _, _ := NewLogWriter(f.coordBuf).Tail(0)
 	st.Fold(events)
 	var got *Instruction
 	for _, in := range st.Instructions {
@@ -780,6 +791,18 @@ func TestConsoleImport(t *testing.T) {
 	if first < 0 || second < first || old < second || !strings.Contains(body, withheldMessage) {
 		t.Fatalf("imported lines out of order (%d, %d, %d):\n%s", first, second, old, body)
 	}
+	// Old history never pushes what is new out of the console.
+	var many strings.Builder
+	for i := 0; i < uiKeptMessages+50; i++ {
+		many.WriteString(`{"at": "2026-09-01T09:00:00Z", "text": "old ` + strconv.Itoa(i) + `"}` + "\n")
+	}
+	events, _, _ = log.Tail(0)
+	if _, _, err := ImportConsole(f.night, log, events, pageAt, "widgets", strings.NewReader(many.String())); err != nil {
+		t.Fatal(err)
+	}
+	if body := owner(t, u, "/console/widgets"); !strings.Contains(body, "w17 delivered !4") || !strings.Contains(body, "Ship it on Friday") {
+		t.Fatalf("new messages pushed out:\n%s", body)
+	}
 	// The fold ignores imported lines: the feed is as it was.
 	st := NewLogState(f.night, ModeLive)
 	events, _, _ = log.Tail(0)
@@ -792,10 +815,8 @@ func TestConsoleImport(t *testing.T) {
 // go test -run TestUIGolden -update to rewrite them after a change.
 func TestUIGolden(t *testing.T) {
 	u, _ := fixtureUI(t)
-	dir := t.TempDir()
 	for name, target := range map[string]string{"index": "/", "console": "/console/widgets", "session": "/session/night/w17"} {
 		body := owner(t, u, target)
-		body = strings.ReplaceAll(body, dir, "TMP")
 		path := filepath.Join("testdata", "ui", name+".html")
 		if *updateGolden {
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -846,5 +867,49 @@ func TestUIFitsAPhone(t *testing.T) {
 	}
 	if strings.Contains(text, "white-space: nowrap") && !regexp.MustCompile(`\.badge \{[^}]*white-space: nowrap`).MatchString(text) {
 		t.Error("something other than a badge refuses to wrap")
+	}
+}
+
+// A shadow source over a live source's log shows its own run, not the
+// owner's records and shared facts again: an instruction and an item are
+// listed once.
+func TestUIShadowEcho(t *testing.T) {
+	f := newUIFixture(t)
+	shadow := newUISource("night-shadow", f.night, NewLogWriter(f.nightBuf), ModeShadow, "host-a")
+	shadow.echo = true
+	u, _ := testUI(t, UIConfig{}, f.nightSrc, shadow)
+	if body := owner(t, u, "/console/widgets"); strings.Count(body, "Ship it on Friday") != 1 || strings.Count(body, "Old console line") != 1 {
+		t.Fatalf("console repeats the owner's lines:\n%s", body)
+	}
+	if body := owner(t, u, "/"); strings.Count(body, "1 new item") != 1 {
+		t.Fatalf("items listed twice:\n%s", body)
+	}
+}
+
+// A STATUS.md that is a FIFO or a link is not read: the session view
+// says so, and nothing hangs.
+func TestUISessionStatusNotRegular(t *testing.T) {
+	u, f := fixtureUI(t)
+	wd := f.night.Sessions["w17"].Workdir
+	status := filepath.Join(wd, "STATUS.md")
+	if err := os.Remove(status); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(status, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if body := owner(t, u, "/session/night/w17"); !strings.Contains(body, "STATUS.md could not be read.") {
+		t.Fatalf("a FIFO:\n%s", body)
+	}
+	if err := os.Remove(status); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(t.TempDir(), "elsewhere")
+	writeFile(t, secret, "# Elsewhere\n\nNot the session's.\n")
+	if err := os.Symlink(secret, status); err != nil {
+		t.Fatal(err)
+	}
+	if body := owner(t, u, "/session/night/w17"); strings.Contains(body, "Not the session") || !strings.Contains(body, "STATUS.md could not be read.") {
+		t.Fatalf("a link:\n%s", body)
 	}
 }

@@ -21,7 +21,7 @@ var (
 	mdBold    = regexp.MustCompile(`\*\*([^*]+)\*\*`)
 	// A link's text and target, both already escaped; the target must be
 	// http or https and hold no quote or space.
-	mdLink = regexp.MustCompile(`\[([^\]]+)\]\((https?://[^\s()"&]+(?:&amp;[^\s()"&]+)*)\)`)
+	mdLink = regexp.MustCompile(`\[([^\]]+)\]\((https?://[^\s()"&\x00]+(?:&amp;[^\s()"&\x00]+)*)\)`)
 )
 
 // markdown renders text as HTML.
@@ -97,7 +97,7 @@ func markdown(text string) template.HTML {
 
 // mdInline renders one line's code spans, bold and links, after escaping
 // it. Code spans are set aside first, so nothing inside one is read as
-// bold or a link.
+// bold or a link, then links.
 func mdInline(s string) string {
 	s = html.EscapeString(strings.ReplaceAll(s, "\x00", ""))
 	var spans []string
@@ -105,10 +105,17 @@ func mdInline(s string) string {
 		spans = append(spans, "<code>"+mdCode.FindStringSubmatch(m)[1]+"</code>")
 		return "\x00" + strconv.Itoa(len(spans)-1) + "\x00"
 	})
+	// Links are set aside before bold, so no tag lands in a target; a
+	// target holding a code span is no link.
+	s = mdLink.ReplaceAllStringFunc(s, func(m string) string {
+		l := mdLink.FindStringSubmatch(m)
+		spans = append(spans, `<a href="`+l[2]+`" rel="noreferrer">`+mdBold.ReplaceAllString(l[1], "<strong>$1</strong>")+`</a>`)
+		return "\x00" + strconv.Itoa(len(spans)-1) + "\x00"
+	})
 	s = mdBold.ReplaceAllString(s, "<strong>$1</strong>")
-	s = mdLink.ReplaceAllString(s, `<a href="$2" rel="noreferrer">$1</a>`)
-	for i, sp := range spans {
-		s = strings.Replace(s, "\x00"+strconv.Itoa(i)+"\x00", sp, 1)
+	// Latest first: a link's text may hold an earlier code span.
+	for i := len(spans) - 1; i >= 0; i-- {
+		s = strings.Replace(s, "\x00"+strconv.Itoa(i)+"\x00", spans[i], 1)
 	}
 	return s
 }
