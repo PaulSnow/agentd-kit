@@ -55,6 +55,7 @@ type Event struct {
 	Coordinator *CoordinatorPayload `json:"coordinator,omitempty"`
 	CI          *CIPayload          `json:"ci,omitempty"`
 	Feed        *FeedPayload        `json:"feed,omitempty"`
+	Instruction *InstructionPayload `json:"instruction,omitempty"`
 }
 
 // Event kinds.
@@ -86,6 +87,7 @@ const (
 	KindCoordinator = "coordinator" // a session claimed a repository's coordinator, or the owner released it
 	KindCI          = "ci"          // a delivered request's pipeline changed state
 	KindFeed        = "feed"        // a line for a repository's console: its baseline, its post, or the post's outcome
+	KindInstruction = "instruction" // the owner's free-text reply in a console, for the repositories it feeds
 )
 
 // Modes, in the mode every event carries. A run reads only the events of
@@ -325,7 +327,7 @@ func (e Event) check() error {
 		KindSkip: e.Skip != nil, KindCrash: e.Crash != nil, KindClear: e.Clear != nil, KindError: e.Error != nil, KindWarning: e.Warning != nil,
 		KindItem: e.Item != nil, KindSeen: e.Seen != nil, KindCursor: e.Cursor != nil, KindUsage: e.Usage != nil,
 		KindCheckpoint: e.Checkpoint != nil, KindPoll: e.Poll != nil, KindTriage: e.Triage != nil, KindDecision: e.Decision != nil,
-		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, "act": e.Act != nil,
+		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, "act": e.Act != nil,
 	}
 	want := e.Kind
 	switch e.Kind {
@@ -362,6 +364,8 @@ func (e Event) check() error {
 		return errors.New("a ci event is a run's, for the session that delivered the request, and names its repository and request")
 	case e.Kind == KindFeed && (e.Session != "" || e.Mode != ModeLive && e.Mode != ModeShadow):
 		return errors.New("a feed event is a run's, for no one session")
+	case e.Kind == KindInstruction && (e.Session != "" || e.Mode != ModeOwner || e.Instruction.ID == "" || len(e.Instruction.Repositories) == 0):
+		return errors.New("an instruction event is the owner's, for no one session, and names its id and repositories")
 	case e.Kind == KindCase:
 		if err := e.Case.check(); err != nil {
 			return err

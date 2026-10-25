@@ -356,14 +356,22 @@ func (s *Supervisor) feedPost(e feedEntry, failed int) {
 // type, and "seen ID..." marks items seen. It goes through RecordAnswer
 // and MarkSeen, as the page's POST does, from console:NAME. A session or
 // item whose repository does not feed that console cannot be answered or
-// marked from it.
+// marked from it. Any other reply is an instruction (RecordInstruction):
+// a "seen" naming no known item, or words that do not begin with a
+// session and one of its decisions or a decision's id.
 func ConsoleReply(cfg *Config, log *Log, st *LogState, now time.Time, console, reply string) error {
 	f := strings.Fields(reply)
 	from := "console:" + console
 	if len(f) == 0 {
 		return errors.New("an empty reply")
 	}
+	if !replyForm(st, cfg, f) {
+		return RecordInstruction(cfg, log, st, now, console, reply)
+	}
 	if strings.EqualFold(f[0], "seen") {
+		if len(f) == 1 {
+			return errors.New(`reply "SESSION ID ANSWER" or "seen ID..."`)
+		}
 		var ids []string
 		for _, id := range f[1:] {
 			id = strings.Trim(id, ",")
@@ -443,6 +451,34 @@ func ConsoleReply(cfg *Config, log *Log, st *LogState, now time.Time, console, r
 		a.Text = rest
 	}
 	return RecordAnswer(log, st, now, session, a)
+}
+
+// replyForm says whether a reply's words read as a seen mark (seen, then
+// at least one known item) or an answer (a session, then one of its
+// decisions or a word like a decision's id, then more); a reply that
+// does is applied as one, or refused, and never taken as an instruction.
+func replyForm(st *LogState, cfg *Config, f []string) bool {
+	if strings.EqualFold(f[0], "seen") {
+		if len(f) == 1 {
+			return true // names nothing: refused
+		}
+		for _, id := range f[1:] {
+			if _, ok := st.Items[strings.Trim(id, ",")]; ok {
+				return true
+			}
+		}
+		return false
+	}
+	if _, ok := cfg.Sessions[f[0]]; !ok || len(f) < 2 {
+		return false
+	}
+	id, _, _ := strings.Cut(f[1], "@")
+	if t := st.Tracks[f[0]]; t != nil {
+		if _, ok := t.decision(id); ok {
+			return true
+		}
+	}
+	return decisionLike.MatchString(f[1])
 }
 
 // cutFold cuts prefix from s, ignoring case.

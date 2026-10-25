@@ -154,7 +154,7 @@ func TestPackHoldsOnlyItsRepositoryUnderLimit(t *testing.T) {
 		it := it
 		h.sup.emit("", Event{Kind: KindItem, Mode: ModeShared, Item: &it})
 	}
-	p, b := h.sup.buildPack("widgets", nil, h.clock.Now())
+	p, b := h.sup.buildPack("widgets", nil, h.clock.Now(), false)
 	if len(b) > 2048 {
 		t.Fatalf("pack is %d bytes, over 2048", len(b))
 	}
@@ -435,7 +435,7 @@ func TestPackCountsDueOverLimit(t *testing.T) {
 	for i := 0; i < 600; i++ {
 		due = append(due, fmt.Sprintf("item: gitlab:example-org/widgets#%d", i))
 	}
-	p, b := h.sup.buildPack("widgets", due, h.clock.Now())
+	p, b := h.sup.buildPack("widgets", due, h.clock.Now(), false)
 	if len(b) > h.cfg.Policies.Coordinator.PackBytes || p.Summarized.Due == 0 || len(p.Due)+p.Summarized.Due != 600 {
 		t.Fatalf("pack %d bytes, due %d shown, %d summarized", len(b), len(p.Due), p.Summarized.Due)
 	}
@@ -614,9 +614,9 @@ func TestPackDropsTheOldestTurn(t *testing.T) {
 	h.transcriptOf("a", "t1", a)
 	h.transcriptOf("b", "t2", b)
 	h.ticks(2, time.Minute)
-	_, full := h.sup.buildPack("widgets", nil, h.clock.Now())
+	_, full := h.sup.buildPack("widgets", nil, h.clock.Now(), false)
 	h.cfg.Policies.Coordinator.PackBytes = len(full) - 1
-	p, _ := h.sup.buildPack("widgets", nil, h.clock.Now())
+	p, _ := h.sup.buildPack("widgets", nil, h.clock.Now(), false)
 	if len(p.Sessions[0].Turns) != 3 || len(p.Sessions[1].Turns) != 5 || p.Summarized.Turns != 1 {
 		t.Fatalf("a shows %d, b %d, summarized %d", len(p.Sessions[0].Turns), len(p.Sessions[1].Turns), p.Summarized.Turns)
 	}

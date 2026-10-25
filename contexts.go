@@ -639,7 +639,7 @@ func (s *Supervisor) launchCommandWith(name string, sess Session, t *Track, id, 
 	if sess.Role == RoleCoordinator && !s.shadow {
 		// A pack that cannot be written leaves the last one; the
 		// launch goes on.
-		_, pack := s.buildPack(sess.Repository, nil, s.clock.Now())
+		_, pack := s.buildPack(sess.Repository, nil, s.clock.Now(), false)
 		if err := writeAtomic(sess.Workdir+"/"+PackFile, pack); err != nil {
 			s.emit(name, Event{Kind: KindError, Error: &ErrorPayload{Step: "writing " + PackFile, Error: err.Error()}})
 		}

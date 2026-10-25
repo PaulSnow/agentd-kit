@@ -27,6 +27,8 @@ type LogState struct {
 	// Coordinators are the claims on each repository's coordinator: the
 	// session that holds it, by repository.
 	Coordinators map[string]string
+	// Instructions are the owner's console instructions, by id.
+	Instructions map[string]*Instruction
 	// CI is each watched request's latest CI, by repository and request.
 	CI map[string]CIRecord
 	// Feed is what the consoles' feed has posted.
@@ -37,7 +39,7 @@ type LogState struct {
 
 // NewLogState is the empty state of mode under the configuration's policies.
 func NewLogState(cfg *Config, mode string) *LogState {
-	return &LogState{Mode: mode, Tracks: map[string]*Track{}, Pending: map[string]Event{}, Items: map[string]*Item{},
+	return &LogState{Mode: mode, Tracks: map[string]*Track{}, Pending: map[string]Event{}, Items: map[string]*Item{}, Instructions: map[string]*Instruction{},
 		Cursors: map[string]time.Time{}, Polls: map[string]PollRecord{}, Cases: map[string]*Case{},
 		Coordinators: map[string]string{}, CI: map[string]CIRecord{}, cfg: cfg}
 }
@@ -134,6 +136,10 @@ func (st *LogState) apply(e Event) {
 				st.Items[e.Item.ID] = &Item{ItemPayload: *e.Item, FirstSeen: e.Time}
 			} else if st.itemChanged(*e.Item) {
 				st.setItem(e.Item.ID, func(it *Item) { it.ItemPayload = *e.Item })
+			}
+		case KindInstruction:
+			if _, ok := st.Instructions[e.Instruction.ID]; !ok {
+				st.Instructions[e.Instruction.ID] = &Instruction{InstructionPayload: *e.Instruction, At: e.Time}
 			}
 		case KindSeen:
 			for _, id := range e.Seen.IDs {

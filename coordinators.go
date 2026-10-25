@@ -192,7 +192,17 @@ func (t *Track) applyWake(a *ActPayload, taken, counted bool, at time.Time) {
 		t.Woken = map[string]bool{}
 	}
 	for _, k := range a.Covered {
-		t.Woken[k] = true
+		id, ok := instructionKey(k)
+		switch {
+		case !ok:
+			t.Woken[k] = true
+		case counted:
+			// A wake cut short leaves the instruction due.
+			if t.Carried == nil {
+				t.Carried = map[string]int{}
+			}
+			t.Carried[id] = t.WakeCount
+		}
 	}
 	for k := range t.Woken {
 		if when, ok := dueTime(k); !ok || when.Before(at.Add(-wakeMargin)) {
@@ -297,10 +307,12 @@ func (s *Supervisor) claimed(name string, sess Session, t *Track) bool {
 // due is what the coordinator of repo should judge, as reasons and the
 // keys that settle them: a session of the repository that finished or
 // waits on the owner, a new item for it, an owner answer to one of its
-// sessions, each once. A fact counts from the margin before the latest
-// wake, less what that wake and those before it covered, so one another
-// process logged during a wake's pass, at its time, is not lost. The
-// coordinator's own answers reach it by their pointer.
+// sessions, an owner instruction for it, each once. A fact counts from
+// the margin before the latest wake, less what that wake and those before
+// it covered, so one another process logged during a wake's pass, at its
+// time, is not lost. An instruction counts until a wake carried it, so
+// one a wake cut short covered is due again. The coordinator's own
+// answers reach it by their pointer.
 func (s *Supervisor) due(repo string, t *Track) (reasons, keys []string) {
 	since := time.Time{}
 	if w, ok := t.lastWake(); ok {
@@ -340,6 +352,12 @@ func (s *Supervisor) due(repo string, t *Track) (reasons, keys []string) {
 			add("answer: "+n+"/"+id, o.Answers[id].At)
 		}
 	}
+	for _, in := range s.st.instructionsFor(repo) {
+		if _, carried := t.Carried[in.ID]; !carried {
+			reasons = append(reasons, instructionReason+in.ID)
+			keys = append(keys, instructionReason+in.ID+"@"+in.At.UTC().Format(time.RFC3339Nano))
+		}
+	}
 	return reasons, keys
 }
 
@@ -366,7 +384,7 @@ func (s *Supervisor) wake(name string, sess Session, t *Track, ev Evidence, stat
 	if !s.retryDue(t, key, now) {
 		return false
 	}
-	_, pack := s.buildPack(sess.Repository, due, now)
+	_, pack := s.buildPack(sess.Repository, due, now, true)
 	pointer := s.cfg.Policies.Coordinator.Pointer
 	a := &ActPayload{Key: key, Reason: cutUTF8(strings.Join(due, "; "), wakeReasons), Message: pointer, Covered: keys}
 	if sp, ok := t.spend(!s.shadow); ok {
@@ -392,7 +410,10 @@ type Pack struct {
 	Sessions   []PackSession  `json:"sessions"`
 	Decisions  []PackDecision `json:"decisions,omitempty"`
 	Items      []PackItem     `json:"items,omitempty"`
-	Summarized PackCounts     `json:"summarized"`
+	// OwnerInstructions are the owner's console instructions for the
+	// repository, oldest first, until a wake that carried them is handled.
+	OwnerInstructions []PackInstruction `json:"owner_instructions,omitempty"`
+	Summarized        PackCounts        `json:"summarized"`
 }
 
 // PackSession is one session of the repository: its state, its case and
@@ -428,10 +449,11 @@ type PackItem struct {
 
 // PackCounts are the entries a pack left out, by kind.
 type PackCounts struct {
-	Turns     int `json:"turns"`
-	Decisions int `json:"decisions"`
-	Items     int `json:"items"`
-	Due       int `json:"due"`
+	Turns        int `json:"turns"`
+	Decisions    int `json:"decisions"`
+	Items        int `json:"items"`
+	Due          int `json:"due"`
+	Instructions int `json:"instructions"`
 }
 
 // packItems are repo's unseen items, oldest first, never the owner's own.
@@ -466,9 +488,10 @@ func (s *Supervisor) packItems(repo string) []PackItem {
 
 // buildPack is repo's pack, and its compact JSON, which stays under the
 // policy's byte limit: the oldest turns go first, then the oldest items,
-// then the latest decisions, then the last reasons due, each counted in
-// Summarized.
-func (s *Supervisor) buildPack(repo string, due []string, now time.Time) (Pack, []byte) {
+// then the latest decisions, then the last reasons due, then the oldest
+// instructions, each counted in Summarized. Handled says the coordinator
+// has handled its latest wake, as it has when it is woken again.
+func (s *Supervisor) buildPack(repo string, due []string, now time.Time, handled bool) (Pack, []byte) {
 	pol := s.cfg.Policies.Coordinator
 	p := Pack{Repository: repo, At: now, Due: append([]string(nil), due...), Sessions: []PackSession{}}
 	if co := s.cfg.Repositories[repo].Coordinator; co != nil {
@@ -498,6 +521,7 @@ func (s *Supervisor) buildPack(repo string, due []string, now time.Time) (Pack, 
 		}
 	}
 	p.Items = s.packItems(repo)
+	p.OwnerInstructions = s.packInstructions(repo, handled)
 	for {
 		b := compactJSON(p)
 		if len(b) <= pol.PackBytes {
@@ -515,6 +539,9 @@ func (s *Supervisor) buildPack(repo string, due []string, now time.Time) (Pack, 
 		case len(p.Due) > 1:
 			p.Due = p.Due[:len(p.Due)-1] // the first reasons are kept
 			p.Summarized.Due++
+		case len(p.OwnerInstructions) > 0:
+			p.OwnerInstructions = p.OwnerInstructions[1:]
+			p.Summarized.Instructions++
 		default:
 			return p, b // only the sessions' states are left
 		}
