@@ -313,7 +313,7 @@ func (s *Supervisor) measure(name string, sess Session, t *Track) {
 			// Each prompt and summary is logged once, by its line: a
 			// transcript read again from its start logs none twice.
 			for _, tn := range s.usage.turns(dir, id, t.TurnLines[id]) {
-				raw := tn // emit screens and cuts the turn it logs
+				tn, raw := tn, tn // a turn of its own for the queued event; raw, as read, for its post
 				if s.emit(name, Event{Kind: KindTurn, Turn: &tn}); s.halt != nil {
 					return
 				}

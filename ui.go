@@ -110,6 +110,9 @@ type uiMessage struct {
 	Text    string
 }
 
+// turn says whether m is a session's turn (#38).
+func (m uiMessage) turn() bool { return m.Kind == MessagePrompt || m.Kind == MessageReply }
+
 // uiSource is one log as the UI sees it: its config, its run mode, and a
 // LogState brought up to date through apply with the lines appended since
 // it last looked, so a request reads only what is new. It also keeps what
@@ -154,7 +157,9 @@ func (src *uiSource) catchUp() error {
 		return src.st.Ended[session]
 	}
 	// add keeps m in time order, and the latest uiKeptMessages only, so
-	// imported history never pushes out what is new.
+	// imported history never pushes out what is new. Sessions' turns are
+	// kept apart, the latest uiKeptMessages of them, so a busy session
+	// never pushes out the rest.
 	add := func(repo string, m uiMessage) {
 		if repo == "" {
 			return
@@ -165,8 +170,19 @@ func (src *uiSource) catchUp() error {
 			i--
 		}
 		ms = append(ms[:i], append([]uiMessage{m}, ms[i:]...)...)
-		if len(ms) > uiKeptMessages {
-			ms = ms[len(ms)-uiKeptMessages:]
+		n := 0
+		for _, o := range ms {
+			if o.turn() == m.turn() {
+				n++
+			}
+		}
+		if n > uiKeptMessages {
+			for j, o := range ms {
+				if o.turn() == m.turn() {
+					ms = append(ms[:j], ms[j+1:]...)
+					break
+				}
+			}
 		}
 		src.messages[repo] = ms
 	}
@@ -218,7 +234,7 @@ func (src *uiSource) catchUp() error {
 			add(e.Instruction.Console, m)
 		case e.Kind == KindMessage && e.Message != nil:
 			m := uiMessage{At: e.Time, Kind: e.Message.Kind, From: e.Message.From, Text: e.Message.Text}
-			if k := e.Message.Kind; k == MessagePrompt || k == MessageReply {
+			if m.turn() {
 				m.Session = e.Message.From // a session's turn links to its page
 			}
 			if _, ok := cfg.Consoles[e.Message.Console]; ok {

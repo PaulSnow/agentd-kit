@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"strings"
+	"time"
 )
 
 // Session turns on consoles (#38): each prompt a session was given and the
@@ -24,6 +24,18 @@ const (
 	MessagePrompt = "prompt"
 	MessageReply  = "reply"
 )
+
+// validMessageKind says whether a message event's kind is a post's or a
+// turn's.
+func validMessageKind(k string) bool {
+	return messageKinds[k] || k == MessagePrompt || k == MessageReply
+}
+
+// turnBacklog is how old a turn may be when it is read and still be
+// posted: a transcript agentd reads for the first time, of a session it
+// did not launch or one configured since, logs its earlier turns but
+// does not post them all at once.
+const turnBacklog = time.Hour
 
 // FeedRules is a repository's or a session's say over its console: Turns
 // is off, prompts or all, and empty leaves it to the next rule.
@@ -86,7 +98,8 @@ func (c *Config) TurnsOf(name string) string {
 // postTurn posts a turn of session name to its console, as its rule says,
 // once the turn is logged: from the text read, screened whole, then cut at
 // the turn length. A crash between the two loses the post; it never
-// repeats it. Shadow mode posts nothing, since a message is shared
+// repeats it. A turn read more than turnBacklog after it was written is
+// not posted. Shadow mode posts nothing, since a message is shared
 // and the live run posts the same turn; nor does a session whose console
 // neither a repository nor a consoles entry has, which no page shows.
 func (s *Supervisor) postTurn(name string, tn TurnPayload) {
@@ -99,13 +112,16 @@ func (s *Supervisor) postTurn(name string, tn TurnPayload) {
 	case tn.Role != TurnPrompt:
 		return
 	}
+	if s.clock.Now().Sub(tn.At) > turnBacklog {
+		return
+	}
 	console := s.cfg.Console(name)
 	if !s.cfg.knownConsole(console) {
 		return
 	}
 	m := &MessagePayload{ID: "T" + shortHash(HashPane(name + "\n" + tn.Transcript + "\n" + fmt.Sprint(tn.Line)))[:8],
-		Console: console, Kind: kind, From: name, Text: cutUTF8(strings.TrimSpace(tn.Text), s.cfg.Policies.Feed.TurnLength)}
-	if i := s.confidentialMatch(tn.Text); i > 0 {
+		Console: console, Kind: kind, From: name, Text: cutUTF8(tn.Text, s.cfg.Policies.Feed.TurnLength)}
+	if i := s.confidentialMatch(tn.Text, name); i > 0 {
 		m.Text, m.Withheld = "", i
 	}
 	s.emit("", Event{Kind: KindMessage, Mode: ModeShared, Message: m})

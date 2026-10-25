@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -34,6 +35,10 @@ func TestTurnsPostedOnceAcrossRestart(t *testing.T) {
 	if len(got) != 2 || got[0].Kind != MessagePrompt || got[0].Text != "Build the widget." || got[0].From != "a" || got[0].Console != "widgets" ||
 		got[1].Kind != MessageReply || !strings.HasPrefix(got[1].Text, "Built it.\nThe check passes.") || len(got[1].Text) > 50+len("…") || got[0].ID == got[1].ID {
 		t.Fatalf("turns posted = %+v", got)
+	}
+	// Turns read in one pass are each folded as themselves.
+	if tr := h.sup.Tracks()["a"]; len(tr.Turns) != 2 || tr.Turns[0].Text != "Build the widget." || tr.Turns[1].Role != TurnSummary {
+		t.Fatalf("track turns = %+v", tr.Turns)
 	}
 	ids := got[0].ID + got[1].ID
 	h.restart(false)
@@ -104,6 +109,14 @@ func TestCoordinatorTurnsNotPostedByDefault(t *testing.T) {
 		t.Fatalf("defaults: c %s, a %s", h.cfg.TurnsOf("c"), h.cfg.TurnsOf("a"))
 	}
 	w := h.cfg.Repositories["widgets"]
+	w.Policy.Feed.Turns = TurnsAll
+	h.cfg.Repositories["widgets"] = w
+	h.restart(false)
+	h.transcriptOf("c", "tc", promptLine("u3", "agentd: another judgment.", h.clock.Now()))
+	h.ticks(2, time.Minute)
+	if h.cfg.TurnsOf("c") != TurnsOff || len(h.turnMessages()) != 0 {
+		t.Fatalf("the repository's rule reached its coordinator: %s, %+v", h.cfg.TurnsOf("c"), h.turnMessages())
+	}
 	w.Policy.Feed.Turns = TurnsPrompts
 	w.Coordinator.Policy.Feed.Turns = TurnsAll
 	h.cfg.Repositories["widgets"] = w
@@ -126,6 +139,18 @@ func TestCoordinatorTurnsNotPostedByDefault(t *testing.T) {
 	}
 }
 
+// A turn read more than an hour after it was written, from a transcript
+// agentd reads for the first time, is logged but not posted.
+func TestTurnBacklogNotPosted(t *testing.T) {
+	h := coordHarness(t)
+	now := h.clock.Now()
+	h.transcriptOf("a", "t1", promptLine("u1", "An old prompt.", now.Add(-2*time.Hour))+promptLine("u2", "A new prompt.", now))
+	h.ticks(2, time.Minute)
+	if got := h.turnMessages(); h.count(KindTurn, "", "a") != 2 || len(got) != 1 || got[0].Text != "A new prompt." {
+		t.Fatalf("%d turns, posted %+v", h.count(KindTurn, "", "a"), got)
+	}
+}
+
 // A turns rule other than off, prompts or all, and a turn length out of
 // range, are refused at load.
 func TestTurnsRulesChecked(t *testing.T) {
@@ -145,17 +170,24 @@ func TestTurnsRulesChecked(t *testing.T) {
 	}
 }
 
-// A posted turn shows in its console with its kind, linked to its session.
+// A posted turn shows in its console with its kind, linked to its
+// session, and turns, however many, push out none of the other messages.
 func TestTurnShownInConsole(t *testing.T) {
 	u, f := fixtureUI(t)
 	log := NewLogWriter(f.nightBuf)
-	if err := log.Append(Event{V: EventVersion, Time: pageAt.Add(-time.Minute), Kind: KindMessage, Mode: ModeShared,
-		Message: &MessagePayload{ID: "T1", Console: "widgets-console", Kind: MessageReply, From: "w17", Text: "Painted the widget"}}); err != nil {
-		t.Fatal(err)
+	for i := 0; i <= uiKeptMessages; i++ {
+		if err := log.Append(Event{V: EventVersion, Time: pageAt.Add(-time.Minute), Kind: KindMessage, Mode: ModeShared,
+			Message: &MessagePayload{ID: fmt.Sprintf("T%d", i), Console: "widgets-console", Kind: MessageReply, From: "w17", Text: fmt.Sprintf("Painted coat %d", i)}}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	body := owner(t, u, "/console/widgets")
-	i := strings.Index(body, "Painted the widget")
-	if i < 0 || !strings.Contains(body[:i], `<span class="badge">reply</span>`) || !strings.Contains(body[:i], `/session/`) {
+	i := strings.Index(body, "Painted coat 200")
+	li := strings.LastIndex(body[:max(i, 0)], `<li class="msg msg-reply">`)
+	if i < 0 || li < 0 || !strings.Contains(body[li:i], `<a href="/session/night/w17">w17</a> <span class="badge">reply</span>`) {
 		t.Fatalf("the turn is not shown with its kind and session:\n%s", body)
+	}
+	if strings.Contains(body, "Painted coat 0<") || !strings.Contains(body, "Painted coat 1<") || !strings.Contains(body, "Ship it on Friday") {
+		t.Fatalf("the turns are not kept apart:\n%s", body)
 	}
 }
