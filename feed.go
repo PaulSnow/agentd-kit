@@ -23,9 +23,11 @@ import (
 // reply in a console comes back through agentd console reply as an owner
 // record, as the page's POST does, and wakes the loop.
 
-// FeedPolicy turns the feed on. It is off by default.
+// FeedPolicy turns the feed on. It is off by default. TurnLength is how
+// much of a session's turn its console is shown (turns.go), in bytes.
 type FeedPolicy struct {
-	Enabled bool `json:"enabled"`
+	Enabled    bool `json:"enabled"`
+	TurnLength int  `json:"turn_length"`
 }
 
 // Feed phases.
