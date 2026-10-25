@@ -81,8 +81,8 @@ var anyHeading = regexp.MustCompile(`^(#+)\s`)
 var thematicBreak = regexp.MustCompile(`^(-{3,}|\*{3,}|_{3,})$`)
 
 // noQuestions matches the ways a session says it has none: "none", "- none",
-// "(none yet)", "None.", "n/a".
-var noQuestions = regexp.MustCompile(`(?i)^[-*\s]*\(?\s*(none(\s+yet)?|n/a)\s*\.?\)?\s*$`)
+// "(none yet)", "None.", "None open.", "No open questions", "n/a".
+var noQuestions = regexp.MustCompile(`(?i)^[-*\s]*\(?\s*(none(\s+(yet|open|so\s+far))?|no(\s+open)?\s+questions?(\s+(yet|open))?|n/a)\s*\.?\)?\s*$`)
 
 // ParseStatus interprets STATUS.md text.
 func ParseStatus(text string) StatusEvidence {
@@ -118,7 +118,15 @@ func parseQuestions(text string, fences bool) (questions string, closed bool) {
 	level := 0  // the open Questions section's heading level, or 0 outside one
 	fence := "" // the fence the line is inside, such as "```", or ""
 	flush := func() {
-		if joined := strings.Join(section, "\n"); joined != "" && !noQuestions.MatchString(joined) {
+		// A DONE line under the heading is the end of the file, not a
+		// question.
+		var kept []string
+		for _, l := range section {
+			if strings.TrimSpace(l) != "DONE" {
+				kept = append(kept, l)
+			}
+		}
+		if joined := strings.Join(kept, "\n"); joined != "" && !noQuestions.MatchString(joined) {
 			found = append(found, joined)
 		}
 		section = nil

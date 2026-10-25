@@ -1,0 +1,139 @@
+{{define "head"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+<link rel="stylesheet" href="/ui.css">
+<script src="/ui.js" defer></script>
+</head>
+<body>
+<header class="topbar"><a class="brand" href="/">agentd</a><span class="topbar-title">{{.Title}}</span></header>
+<main>
+{{end}}
+
+{{define "foot"}}</main>
+<footer class="foot muted">Shown {{.When .Now}}. The page refreshes every 30 seconds.</footer>
+</body>
+</html>
+{{end}}
+
+{{define "hidden"}}<input type="hidden" name="token" value="{{.P.Token}}"><input type="hidden" name="back" value="{{.P.Back}}"><input type="hidden" name="src" value="{{.V.Src}}">{{end}}
+
+{{define "need"}}{{$p := .P}}{{with .V}}<article class="card need need-{{.Kind}}">
+<header class="card-head">
+<span class="badge kind-{{.Kind}}">{{if .Decision}}{{if .Decision.Blocking}}blocking{{else}}decision{{end}}{{else}}{{.Kind}}{{end}}</span>
+<a class="session" href="/session/{{.Src}}/{{.Session}}">{{.Session}}</a>
+<span class="muted">{{.Repository}} · waiting {{$p.Ago .Since}}</span>
+</header>
+{{with .Decision}}{{template "decision" (ctx $p $.V)}}{{else}}<div class="md">{{markdown .Text}}</div>{{end}}
+</article>{{end}}{{end}}
+
+{{define "decision"}}{{$p := .P}}{{$n := .V}}{{with .V.Decision}}
+{{if .Withheld}}<p class="muted">{{.Withheld}}</p>
+{{else}}<div class="question md">{{markdown .Question}}</div>
+{{with .Context}}<div class="context md">{{markdown .}}</div>{{end}}
+{{if or .Why .IfWrong .Recommendation}}<dl class="facts">
+{{with .Why}}<dt>Why</dt><dd>{{.}}</dd>{{end}}
+{{with .IfWrong}}<dt>If wrong</dt><dd>{{.}}</dd>{{end}}
+{{with .Recommendation}}<dt>Recommended</dt><dd>{{.}}</dd>{{end}}
+</dl>{{end}}
+<form class="answer" method="post" action="/answer">{{template "hidden" (ctx $p $n)}}<input type="hidden" name="session" value="{{.Session}}"><input type="hidden" name="id" value="{{.ID}}">
+{{if eq .Type "yes_no"}}<div class="choices"><button type="submit" name="answer" value="yes">Yes</button><button type="submit" name="answer" value="no">No</button></div>
+{{else if eq .Type "choose_one"}}{{$rec := .Recommendation}}<div class="choices">{{range .Options}}<button type="submit" name="choice" value="{{.Key}}"{{if eq .Key $rec}} class="recommended"{{end}}><span class="option-label">{{.Label}}</span>{{with .Consequence}}<span class="option-note">{{.}}</span>{{end}}</button>{{end}}</div>
+{{else if eq .Type "choose_many"}}<fieldset class="options">{{range .Options}}<label><input type="checkbox" name="choices" value="{{.Key}}"> <span class="option-label">{{.Label}}</span>{{with .Consequence}} <span class="option-note">{{.}}</span>{{end}}</label>{{end}}</fieldset>
+{{with .Limits}}<p class="muted">Choose{{with .MinText}} at least {{.}}{{end}}{{with .MaxText}} at most {{.}}{{end}}.</p>{{end}}<div class="choices"><button type="submit">Answer</button></div>
+{{else if eq .Type "number"}}<div class="inline"><input type="number" name="value" aria-label="Your answer"{{with .Limits}}{{with .MinText}} min="{{.}}"{{end}}{{with .MaxText}} max="{{.}}"{{end}}{{end}} step="any" required><button type="submit">Answer</button></div>
+{{else if eq .Type "date"}}<div class="inline"><input type="date" name="value" aria-label="Your answer"{{with .Limits}}{{with .MinText}} min="{{.}}"{{end}}{{with .MaxText}} max="{{.}}"{{end}}{{end}} required><button type="submit">Answer</button></div>
+{{else}}<textarea name="text" rows="3" maxlength="2000" aria-label="Your answer" required></textarea><div class="choices"><button type="submit">Answer</button></div>{{end}}
+</form>
+{{if ne .Type "text"}}<details class="own-words"><summary>Answer in your own words</summary>
+<form class="answer" method="post" action="/answer">{{template "hidden" (ctx $p $n)}}<input type="hidden" name="session" value="{{.Session}}"><input type="hidden" name="id" value="{{.ID}}">
+<textarea name="other" rows="2" maxlength="2000" aria-label="Your own words" required></textarea>
+<p class="muted">Your own words reach the session but do not settle the decision.</p><div class="choices"><button type="submit">Send</button></div></form></details>{{end}}
+{{with .Default}}<details class="own-words"><summary>Default: {{.}}</summary>
+<form class="answer" method="post" action="/deadline">{{template "hidden" (ctx $p $n)}}<input type="hidden" name="session" value="{{$n.Session}}"><input type="hidden" name="id" value="{{$n.Decision.ID}}">
+<p class="muted">Applied only if you set a deadline and it passes unanswered.{{with $n.Decision.Deadline}} The session suggests {{.}}.{{end}}{{with $n.Decision.OwnerDeadline}} Your deadline: {{$p.When .At}}.{{end}}</p>
+<div class="inline"><input type="datetime-local" name="deadline" aria-label="Deadline" required><button type="submit">Apply the default after</button></div></form></details>{{end}}
+{{end}}{{end}}{{end}}
+
+{{define "row"}}{{$p := .P}}{{with .V}}<li class="row">
+<a class="session" href="/session/{{.Src}}/{{.Name}}">{{.Name}}</a>
+<span class="badge state-{{.State}}">{{.State}}</span>
+{{if .Coordinator}}<span class="meta">{{.Wakes}} wakes{{if not .LastWake.IsZero}}, last {{$p.Ago .LastWake}}{{end}}{{with .WakeTokens}} · {{$p.Tokens .}} per wake{{end}}</span>{{end}}
+{{with .Head}}<span class="head">{{.}}</span>{{end}}
+<span class="meta">{{if .HasContext}}context {{$p.Tokens .Context}}{{end}}{{if .HasSpend}} · spent {{$p.Tokens .Spend}}{{end}}{{if not .LastTurn.IsZero}} · turn {{$p.Ago .LastTurn}}{{end}}</span>
+</li>{{end}}{{end}}
+
+{{define "index"}}{{template "head" .}}
+<section id="runs" class="runs" data-refresh aria-label="Runs">
+<ul class="chips">{{range .Runs}}<li class="chip">
+<strong>{{.Src}}</strong> <span class="badge mode-{{.Mode}}">{{.Mode}}</span>
+<span class="meta">{{if not .Stopped.IsZero}}stopped {{$.Ago .Stopped}}{{else if not .Started.IsZero}}started {{$.Ago .Started}}{{else}}not started{{end}}{{if .SpendKnown}} · spent {{$.Tokens .Spend}}{{if .Cap}} of {{$.Tokens .Cap}}{{end}}{{end}}{{with .StopAt}} · stops {{$.When .}}{{end}}</span>
+</li>{{end}}</ul>
+</section>
+<section id="needs" data-refresh aria-labelledby="needs-h">
+<h2 id="needs-h">Needs you{{with .Needs}} <span class="count">{{len .}}</span>{{end}}</h2>
+{{range .Needs}}{{template "need" (ctx $ .)}}{{else}}<p class="empty">Nothing waits on you.</p>{{end}}
+</section>
+<section id="repos" data-refresh aria-labelledby="repos-h">
+<h2 id="repos-h">Repositories</h2>
+{{range .Repos}}<article class="card repo">
+<header class="card-head"><h3>{{.Name}}</h3>{{if .NeedsYou}}<span class="badge alert">{{.NeedsYou}} need{{if eq .NeedsYou 1}}s{{end}} you</span>{{end}}{{if .Console}}<a class="console-link" href="/console/{{.Name}}">Console</a>{{end}}</header>
+{{if or .Coordinators .Working}}<ul class="rows">{{range .Coordinators}}{{template "row" (ctx $ .)}}{{end}}{{range .Working}}{{template "row" (ctx $ .)}}{{end}}</ul>{{else}}<p class="muted">No session working.</p>{{end}}
+{{with .Requests}}<h4>Open requests</h4><ul class="rows">{{range .}}<li class="row">
+{{if .URL}}<a href="{{.URL}}" rel="noreferrer">{{.Ref}}</a>{{else}}<span class="ref">{{.Ref}}</span>{{end}}
+<span class="badge ci-{{if .CI}}{{.CI}}{{else}}unwatched{{end}}">CI {{if .CI}}{{.CI}}{{else}}not watched{{end}}</span>
+<span class="meta">{{if .Outside}}by {{.Author}}{{if .Draft}} · draft{{end}}{{if .Unresolved}} · open discussion{{end}}{{else}}from {{.Session}}{{end}}{{with .Verdict}} · {{.}}{{end}}{{range .Jobs}} · {{.}}{{end}}</span>
+</li>{{end}}</ul>{{end}}
+{{range .Items}}<details class="items"><summary>{{len .Items}} new item{{if ne (len .Items) 1}}s{{end}}</summary>
+<form method="post" action="/seen">{{template "hidden" (ctx $ .)}}<ul class="rows">{{range .Items}}<li class="row"><label><input type="checkbox" name="id" value="{{.ID}}" checked> <span class="badge">{{.Kind}}</span> {{if .Link}}<a href="{{.Link}}" rel="noreferrer">{{.Title}}</a>{{else}}{{.Title}}{{end}}</label>{{with .Summary}} <span class="meta">{{.}}</span>{{end}}</li>{{end}}</ul>
+<div class="choices"><button type="submit">Mark the ticked items seen</button></div></form></details>{{end}}
+{{with .Finished}}<details class="finished"><summary>{{len .}} finished</summary><ul class="rows">{{range .}}{{template "row" (ctx $ .)}}{{end}}</ul></details>{{end}}
+</article>{{else}}<p class="empty">No repository has sessions yet.</p>{{end}}
+</section>
+{{template "foot" .}}{{end}}
+
+{{define "console"}}{{template "head" .}}
+<p class="crumbs"><a href="/">All repositories</a></p>
+<section id="console-needs" data-refresh aria-labelledby="console-needs-h">
+<h2 id="console-needs-h">Needs you{{with .Needs}} <span class="count">{{len .}}</span>{{end}}</h2>
+{{range .Needs}}{{template "need" (ctx $ .)}}{{else}}<p class="empty">Nothing in {{.Repository}} waits on you.</p>{{end}}
+</section>
+<section id="messages" data-refresh aria-labelledby="messages-h">
+<h2 id="messages-h">Messages</h2>
+<ol class="messages">{{range .Messages}}<li class="msg msg-{{.Kind}}">
+<div class="msg-head"><span class="from">{{if .From}}{{.From}}{{else}}unknown{{end}}</span>{{if .Session}} <a href="/session/{{.Src}}/{{.Session}}">{{.Session}}</a>{{end}} <span class="badge">{{.Kind}}</span> <time class="muted">{{$.When .At}}</time></div>
+<div class="md">{{.Body}}</div>
+</li>{{else}}<li class="empty">No messages yet.</li>{{end}}</ol>
+</section>
+<section id="reply" aria-labelledby="reply-h">
+<h2 id="reply-h">Reply</h2>
+{{if .ReplySrc}}<form class="answer" method="post" action="/reply"><input type="hidden" name="token" value="{{.Token}}"><input type="hidden" name="back" value="{{.Back}}"><input type="hidden" name="src" value="{{.ReplySrc}}"><input type="hidden" name="repository" value="{{.Repository}}">
+<textarea name="text" rows="3" maxlength="4000" aria-label="Your instruction" required></textarea>
+<p class="muted">Recorded as your instruction for {{.Repository}}; its coordinator reads it at its next wake.</p>
+<div class="choices"><button type="submit">Send</button></div></form>
+{{else}}<p class="muted">No live run configures {{.Repository}}, so it takes no reply.</p>{{end}}
+</section>
+{{template "foot" .}}{{end}}
+
+{{define "session"}}{{template "head" .}}
+<p class="crumbs"><a href="/">All repositories</a>{{with .Repository}} · <a href="/console/{{.}}">{{.}} console</a>{{end}}</p>
+<section id="summary" data-refresh aria-label="Summary">
+<ul class="rows">{{template "row" (ctx $ .Row)}}</ul>
+<p class="meta">{{.Src}} · {{.Row.State}} since {{.When .Row.Since}}{{with .Reason}} · {{.}}{{end}}</p>
+{{range .Needs}}{{template "need" (ctx $ .)}}{{end}}
+</section>
+<section id="turns" data-refresh aria-labelledby="turns-h">
+<h2 id="turns-h">Latest turns</h2>
+<ol class="messages">{{range .Turns}}<li class="msg msg-{{.Role}}"><div class="msg-head"><span class="from">{{.Role}}</span> <time class="muted">{{$.When .At}}</time></div><div class="md">{{.Body}}</div></li>{{else}}<li class="empty">No turns read yet.</li>{{end}}</ol>
+</section>
+<section id="status" data-refresh aria-labelledby="status-h">
+<h2 id="status-h">STATUS.md</h2>
+{{with .StatusNote}}<p class="muted">{{.}}</p>{{else}}<div class="card md status">{{.Status}}</div>{{end}}
+</section>
+<section id="events" data-refresh aria-labelledby="events-h">
+<h2 id="events-h">Events</h2>
+<ol class="timeline">{{range .Events}}<li><time class="muted">{{$.When .At}}</time> <span class="badge">{{.Kind}}</span> <span class="event-text">{{.Text}}</span></li>{{else}}<li class="empty">No events kept yet.</li>{{end}}</ol>
+</section>
+{{template "foot" .}}{{end}}

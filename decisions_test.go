@@ -328,87 +328,69 @@ func TestQuestionsFileReservedIDs(t *testing.T) {
 	}
 }
 
-// The page shows the decision form above each type's controls, the
-// agent's suggested deadline, and a deadline field for a question with a
-// default.
-func TestPageShowsDecisionTypes(t *testing.T) {
+// The UI shows the decision above each type's controls, the agent's
+// suggested deadline, and a deadline field for a question with a
+// default; its forms carry a choose_many's keys and a number's or a
+// date's value as the answer JSON, and the owner's deadline to the log;
+// a deadline it cannot read is refused.
+func TestUIDecisionTypesAndDeadline(t *testing.T) {
 	h, _ := mcpHarness(t)
-	mustRaise(t, h, decisionArgs(DecisionChooseMany, "Which platforms should it ship on?", map[string]any{"options": options("Linux", "Mac"), "default": "a,b",
+	many := mustRaise(t, h, decisionArgs(DecisionChooseMany, "Which platforms should it ship on?", map[string]any{"options": options("Linux", "Mac"), "default": "a,b",
 		"deadline": "2026-11-01T12:00:00Z"}))
-	mustRaise(t, h, decisionArgs(DecisionNumber, "How many spins per second?", map[string]any{"limits": map[string]any{"min": 1, "max": 5}}))
-	mustRaise(t, h, decisionArgs(DecisionDate, "When should it ship?", nil))
-	body := renderPageFor(t, h)
-	for _, want := range []string{`type="checkbox" name="choices" value="a"`, `type="number" name="value" min="1" max="5"`, `type="date" name="value"`,
-		`action="/deadline"`, "suggests 2026-11-01", "If wrong: A second release"} {
+	number := mustRaise(t, h, decisionArgs(DecisionNumber, "How many spins per second?", map[string]any{"limits": map[string]any{"min": 1, "max": 5}}))
+	date := mustRaise(t, h, decisionArgs(DecisionDate, "When should it ship?", nil))
+	h.alive("s1", "working")
+	h.ticks(1, time.Minute)
+	u := harnessUI(t, h)
+	body := owner(t, u, "/")
+	for _, want := range []string{`type="checkbox" name="choices" value="a"`, `type="number" name="value" aria-label="Your answer" min="1" max="5"`, `type="date" name="value"`,
+		`action="/deadline"`, "suggests 2026-11-01", "<dt>If wrong</dt><dd>A second release"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page lacks %q", want)
 		}
 	}
-	if strings.Index(body, "If wrong: A second release") > strings.Index(body, `name="choices"`) {
-		t.Error("the controls come before the decision form")
+	if strings.Index(body, "A second release") > strings.Index(body, `name="choices"`) {
+		t.Error("the controls come before the decision")
 	}
-}
-
-// renderPageFor is the page as the owner sees it, with the harness's
-// decisions.
-func renderPageFor(t *testing.T, h *harness) string {
-	t.Helper()
-	data := testPageData()
-	rep := Report{Repositories: []ReportRepo{{Name: "widgets", Cases: []ReportCase{{Session: "s1"}}}}}
-	data.Decisions = DecisionsFrom(h.cfg, h.logState(), rep)
-	p, err := NewPage(PageConfig{Address: pageAddr, Whois: []string{"whois", "{addr}"}, Owner: "owner-a"},
-		&fakeWhois{logins: map[string]string{"192.0.2.20": "owner-a"}}, func() (PageData, error) { return data, nil },
-		func([]string, string) error { return nil }, func(string, AnswerPayload) error { return nil }, func() time.Time { return pageAt })
-	if err != nil {
-		t.Fatal(err)
+	if w := ownerPost(u, "/deadline", url.Values{"src": {"main"}, "session": {"s1"}, "id": {many}, "deadline": {"2026-11-01T12:00:00Z"}}); w.Code != http.StatusSeeOther {
+		t.Fatalf("deadline: %d %s", w.Code, w.Body.String())
 	}
-	w := get(p, "GET", "/", pageAddr, "192.0.2.20:51000")
-	if w.Code != 200 {
-		t.Fatalf("page: %d", w.Code)
+	if w := ownerPost(u, "/deadline", url.Values{"src": {"main"}, "session": {"s1"}, "id": {many}, "deadline": {"soon"}}); w.Code != http.StatusBadRequest {
+		t.Fatalf("unreadable deadline: %d", w.Code)
 	}
-	return w.Body.String()
-}
-
-// The page's forms carry a choose_many's keys and a number's or a date's
-// value as the answer JSON, and the owner's deadline to the log; a
-// deadline it cannot read is refused.
-func TestPageAnswerTypesAndDeadline(t *testing.T) {
-	p, _, marks := testPageMarks(t, PageConfig{})
-	var set []string
-	p.deadline = func(session, id string, at time.Time) error {
-		set = append(set, session+" "+id+" "+at.UTC().Format(time.RFC3339))
-		return nil
+	if w := postTo(u, "/deadline", "", u.token, url.Values{"src": {"main"}, "session": {"s1"}, "id": {many}, "deadline": {"2026-11-01T12:00:00Z"}}, "192.0.2.20:51000"); w.Code != http.StatusForbidden {
+		t.Fatalf("no origin: %d", w.Code)
 	}
-	origin := "http://" + pageAddr
+	if dl, ok := h.logState().Tracks["s1"].Deadlines[many]; !ok || !dl.At.Equal(time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)) {
+		t.Fatalf("deadline %+v", dl)
+	}
 	for _, form := range []url.Values{
-		{"session": {"w17"}, "id": {"D3"}, "choices": {"a", "c"}},
-		{"session": {"w17"}, "id": {"D4"}, "value": {"4"}},
-		{"session": {"w17"}, "id": {"D5"}, "value": {"2026-11-01"}},
+		{"src": {"main"}, "session": {"s1"}, "id": {many}, "choices": {"a", "b"}},
+		{"src": {"main"}, "session": {"s1"}, "id": {number}, "value": {"4"}},
+		{"src": {"main"}, "session": {"s1"}, "id": {date}, "value": {"2026-11-01"}},
 	} {
-		if w := postTo(p, "/answer", origin, p.token, form, "192.0.2.20:51000"); w.Code != http.StatusSeeOther {
+		if w := ownerPost(u, "/answer", form); w.Code != http.StatusSeeOther {
 			t.Fatalf("%v: %d %s", form, w.Code, w.Body.String())
 		}
 	}
+	answers := h.logState().Tracks["s1"].Answers
 	var got []string
-	for _, a := range marks.answers {
-		b, _ := json.Marshal(AnswerPayload{ID: a.ID, Choices: a.Choices, Value: a.Value})
+	for _, id := range []string{many, number, date} {
+		a := answers[id]
+		b, _ := json.Marshal(AnswerPayload{ID: "x", Choices: a.Choices, Value: a.Value})
 		got = append(got, string(b))
 	}
-	if want := []string{`{"id":"D3","choices":["a","c"]}`, `{"id":"D4","value":4}`, `{"id":"D5","value":"2026-11-01"}`}; strings.Join(got, " ") != strings.Join(want, " ") {
+	if want := []string{`{"id":"x","choices":["a","b"]}`, `{"id":"x","value":4}`, `{"id":"x","value":"2026-11-01"}`}; strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("answers %v", got)
 	}
-	if w := postTo(p, "/deadline", origin, p.token, url.Values{"session": {"w17"}, "id": {"D1"}, "deadline": {"2026-11-01T12:00:00Z"}}, "192.0.2.20:51000"); w.Code != http.StatusSeeOther {
-		t.Fatalf("deadline: %d %s", w.Code, w.Body.String())
-	}
-	if w := postTo(p, "/deadline", origin, p.token, url.Values{"session": {"w17"}, "id": {"D1"}, "deadline": {"soon"}}, "192.0.2.20:51000"); w.Code != http.StatusBadRequest {
-		t.Fatalf("unreadable deadline: %d", w.Code)
-	}
-	if w := postTo(p, "/deadline", "", p.token, url.Values{"session": {"w17"}, "id": {"D1"}, "deadline": {"2026-11-01T12:00:00Z"}}, "192.0.2.20:51000"); w.Code != http.StatusForbidden {
-		t.Fatalf("no origin: %d", w.Code)
-	}
-	if len(set) != 1 || set[0] != "w17 D1 2026-11-01T12:00:00Z" {
-		t.Fatalf("deadlines %v", set)
-	}
+}
+
+// harnessUI is the UI over the harness's log, one source named main.
+func harnessUI(t *testing.T, h *harness) *UI {
+	t.Helper()
+	u, _ := testUI(t, UIConfig{}, newUISource("main", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
+	u.now = h.clock.Now
+	return u
 }
 
 // Review round 1: a default logged after an owner's answer to the same

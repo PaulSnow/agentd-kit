@@ -384,14 +384,9 @@ func TestStatusShowsWakes(t *testing.T) {
 	if !strings.Contains(out.String(), "coordinator of widgets: wakes 2, 100 tokens per wake") {
 		t.Fatalf("status:\n%s", out.String())
 	}
-	// The page shows them too, from the report.
-	rep := BuildReport(h.cfg, h.events(), ModeLive, "host-a", h.clock.Now())
-	out.Reset()
-	if err := pageTemplate.Execute(&out, buildView(PageData{Report: rep}, parseViewQuery(nil), h.clock.Now())); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out.String(), "coordinator: 2 wakes, 100 tokens per wake") {
-		t.Fatalf("page:\n%s", out.String())
+	// The UI shows them too, from the report.
+	if body := owner(t, harnessUI(t, h), "/"); !strings.Contains(body, "2 wakes") || !strings.Contains(body, "100 per wake") {
+		t.Fatalf("UI:\n%s", body)
 	}
 }
 

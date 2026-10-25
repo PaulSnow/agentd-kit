@@ -1,0 +1,706 @@
+package main
+
+import (
+	_ "embed"
+	"errors"
+	"fmt"
+	"html/template"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+)
+
+// The UI's views (#41), built from each source's state as it is now:
+// what waits on the owner is worked out from the current state alone,
+// never from the history of escalations, so an item goes when its
+// condition clears.
+
+//go:embed ui/ui.html
+var uiHTML string
+
+// uiTemplates are the views' templates; ctx pairs a view with one of its
+// parts for a template the part is rendered by.
+var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
+	"markdown": markdown,
+	"ctx":      func(p, v any) map[string]any { return map[string]any{"P": p, "V": v} },
+}).Parse(uiHTML))
+
+// uiPage is what every view carries: the form token, the time the view
+// was built and the zone it shows times in, and the path a form sends the
+// owner back to.
+type uiPage struct {
+	Title string
+	Token string
+	Back  string
+	Now   time.Time
+	loc   *time.Location
+}
+
+// When is t as the owner reads it, or "-".
+func (p uiPage) When(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	return t.In(p.loc).Format("2006-01-02 15:04")
+}
+
+// Ago is how long before the view t was, shortly: "5m", "3h", "2d".
+func (p uiPage) Ago(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	d := p.Now.Sub(t)
+	switch {
+	case d < time.Minute:
+		return "now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%dh", int(d/time.Hour))
+	}
+	return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
+}
+
+// Tokens is a token count, shortly: "950", "12k", "1.2M".
+func (uiPage) Tokens(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	case n >= 10_000:
+		return fmt.Sprintf("%dk", n/1000)
+	case n >= 1000:
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	return fmt.Sprint(n)
+}
+
+// UIDecision is one open decision a session raised, with the owner's
+// deadline on it. A withheld decision is shown by its id and type only,
+// with Withheld saying why, and no form.
+type UIDecision struct {
+	Session    string
+	Repository string
+	Decision
+	OwnerDeadline *DeadlineRecord
+	Withheld      string
+}
+
+// Why a decision is withheld.
+const (
+	withheldSecret  = "The details were withheld because they matched a confidential pattern. Look at the session directly."
+	withheldChanged = "STATUS.md's Questions changed since agentd last read them; they are shown after its next pass."
+)
+
+// DecisionsFrom lists the decisions the report's sessions wait on the
+// owner for, each session's in the order it raised them: STATUS.md's
+// Questions first, as a text decision whose context is the section read
+// from STATUS.md now, offered only while it is the section agentd last
+// saw, so an answer is to the text the owner read; then those of
+// questions.json, then those raised through the tools. A decision already
+// answered is not listed, nor is any of a done session's, nor STATUS.md's
+// Questions once the file asks none. Every text is screened again.
+func DecisionsFrom(cfg *Config, st *LogState, rep Report) []UIDecision {
+	secret := confidentialMatcher(cfg)
+	repoOf := map[string]string{}
+	for _, rr := range rep.Repositories {
+		for _, c := range rr.Cases {
+			repoOf[c.Session] = uiRepoName(rr)
+		}
+	}
+	var out []UIDecision
+	for _, n := range sortedKeys(repoOf) {
+		t := st.Tracks[n]
+		if t == nil || t.State == Done {
+			continue
+		}
+		var ds []UIDecision
+		sess, configured := cfg.Sessions[n]
+		if t.StatusQuestions != "" && configured {
+			d := UIDecision{Decision: statusDecisionFor(t.StatusQuestions)}
+			sts, err := ReadStatus(filepath.Join(sess.Workdir, "STATUS.md"))
+			switch q := sts.Questions; {
+			case err == nil && (q == "" || sts.Done):
+				d.ID = "" // it asks nothing now
+			case err != nil || shortHash(HashPane(q)) != t.StatusQuestions:
+				d.Withheld = withheldChanged
+			default:
+				d.Context = q
+			}
+			if d.ID != "" {
+				ds = append(ds, d)
+			}
+		}
+		for _, o := range t.open() {
+			ds = append(ds, UIDecision{Decision: o})
+		}
+		for _, d := range ds {
+			if _, ok := t.answer(d.ID); ok {
+				continue
+			}
+			d.Session, d.Repository = n, repoOf[n]
+			if dl, ok := t.deadline(d.Decision); ok {
+				d.OwnerDeadline = &dl
+			}
+			if d.Withheld == "" && (d.Decision.Withheld || secret(decisionTexts(d.Decision)...)) {
+				d.Withheld = withheldSecret
+			}
+			if d.Withheld != "" {
+				d.Decision = Decision{ID: d.ID, Type: d.Type, Blocking: d.Blocking}
+			}
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// uiRepoName is the name a repository is shown and merged by: its
+// configured name, or its key when no config names it.
+func uiRepoName(rr ReportRepo) string {
+	if rr.Name != "" {
+		return rr.Name
+	}
+	if rr.Repository != "" {
+		return rr.Repository
+	}
+	return "(no repository)"
+}
+
+// uiNeed is one thing waiting on the owner: an open decision, or a
+// session that cannot go on without the owner.
+type uiNeed struct {
+	Src        string
+	Repository string
+	Session    string
+	Kind       string // decision, blocked, usage-limited, crash-looping, stopped, failed
+	Since      time.Time
+	Text       string // a session's reason
+	Decision   *UIDecision
+}
+
+// needs lists what waits on the owner in src: every open decision, and
+// every session of the report blocked on the owner, usage-limited,
+// crash-looping, stopped or failed. A done session is never listed, and
+// a session blocked on its decisions is listed by them alone.
+func (src *uiSource) needs(cfg *Config, rep Report, asked map[string]time.Time) []uiNeed {
+	secret := confidentialMatcher(cfg)
+	var out []uiNeed
+	for _, d := range DecisionsFrom(cfg, src.st, rep) {
+		d := d
+		t := src.st.Tracks[d.Session]
+		since, ok := asked[d.Session+" "+d.ID]
+		if !ok {
+			since = t.Since
+		}
+		out = append(out, uiNeed{Src: src.Name, Repository: d.Repository, Session: d.Session, Kind: "decision", Since: since, Decision: &d})
+	}
+	for _, rr := range rep.Repositories {
+		for _, c := range rr.Cases {
+			t := src.st.Tracks[c.Session]
+			if t == nil || t.State == Done {
+				continue
+			}
+			kind := ""
+			switch {
+			case t.Stopped != "":
+				kind = "stopped"
+			case t.State == BlockedOnOwner && t.StatusQuestions == "" && len(t.open()) == 0:
+				// Blocked on a decision, answered or not, it is listed
+				// by the decision until it is answered, and then the
+				// answer is on its way.
+				kind = "blocked"
+			case t.State == UsageLimited, t.State == CrashLooping, t.State == Failed:
+				kind = string(t.State)
+			}
+			if kind == "" {
+				continue
+			}
+			why := t.Reason
+			if t.Stopped != "" {
+				why = "stopped: " + t.Stopped
+			}
+			if secret(why) {
+				why = "The reason was withheld because it matched a confidential pattern."
+			}
+			out = append(out, uiNeed{Src: src.Name, Repository: uiRepoName(rr), Session: c.Session, Kind: kind, Since: t.Since, Text: why})
+		}
+	}
+	return out
+}
+
+// uiRun is one source's run, for the top bar.
+type uiRun struct {
+	Src        string
+	Mode       string
+	Started    time.Time
+	Stopped    time.Time
+	Spend      int64
+	SpendKnown bool
+	Cap        int64
+	StopAt     *time.Time
+	Digest     string
+}
+
+// uiRow is one session as a repository's card lists it.
+type uiRow struct {
+	Src        string
+	Name       string
+	State      string
+	Since      time.Time
+	Head       string
+	Context    int64
+	HasContext bool
+	Spend      int64
+	HasSpend   bool
+	LastTurn   time.Time
+	// A coordinator's wakes: how many, the latest, and its spend per
+	// wake when known.
+	Coordinator bool
+	Wakes       int
+	LastWake    time.Time
+	WakeTokens  *int64
+}
+
+// uiRequest is one open request of a repository: delivered by a session,
+// or an outside one the coordinator watches (#36).
+type uiRequest struct {
+	Src        string
+	Ref        string
+	Session    string
+	URL        string
+	CI         string
+	Verdict    string
+	Jobs       []string
+	Outside    bool
+	Author     string
+	Draft      bool
+	Unresolved bool
+}
+
+// uiItems are a source's unseen items of one repository.
+type uiItems struct {
+	Src   string
+	Items []ReportItem
+}
+
+// uiRepo is one repository's card, merged across the sources.
+type uiRepo struct {
+	Name         string
+	NeedsYou     int
+	Coordinators []uiRow
+	Working      []uiRow
+	Finished     []uiRow
+	Requests     []uiRequest
+	Items        []uiItems
+	Console      bool // a source configures it, so it has a console view
+}
+
+// uiIndex is the index view.
+type uiIndex struct {
+	uiPage
+	Runs  []uiRun
+	Needs []uiNeed
+	Repos []*uiRepo
+}
+
+// view brings src up to date and reads what every view needs from it:
+// the config with the sessions coordinators started, the report, and
+// when each open decision was first seen.
+func (src *uiSource) view(now time.Time) (*Config, Report, error) {
+	if err := src.catchUp(); err != nil {
+		return nil, Report{}, err
+	}
+	cfg := withRuntime(src.cfg, src.st.Runtime)
+	return cfg, ReportFrom(cfg, src.st, src.host, now), nil
+}
+
+// row is session c of src as a card lists it.
+func (src *uiSource) row(c ReportCase) uiRow {
+	t := src.st.Tracks[c.Session]
+	live := src.st.Mode == ModeLive
+	r := uiRow{Src: src.Name, Name: c.Session, State: c.State, Since: c.Since, Head: c.Head,
+		Coordinator: c.Role == RoleCoordinator, Wakes: c.Wakes, WakeTokens: c.WakeTokens}
+	if u, ok := t.current(); ok {
+		r.Context, r.HasContext = u.Context, true
+	}
+	r.Spend, r.HasSpend = t.spend(live)
+	if n := len(t.Turns); n > 0 {
+		r.LastTurn = t.Turns[n-1].At
+	}
+	if w, ok := t.lastWake(); ok {
+		r.LastWake = w.At
+	}
+	return r
+}
+
+// indexView is the index: the runs, what needs the owner, and every
+// repository's card, merged by name across the sources.
+func (u *UI) indexView(now time.Time) (*uiIndex, error) {
+	v := &uiIndex{uiPage: uiPage{Title: "Overview", Token: u.token, Back: "/", Now: now, loc: u.loc}}
+	repos := map[string]*uiRepo{}
+	get := func(name string) *uiRepo {
+		r := repos[name]
+		if r == nil {
+			r = &uiRepo{Name: name}
+			repos[name] = r
+		}
+		return r
+	}
+	for _, src := range u.sources {
+		if err := src.addIndex(v, get, now); err != nil {
+			return nil, err
+		}
+	}
+	for _, n := range v.Needs {
+		get(n.Repository).NeedsYou++
+	}
+	sortNeeds(v.Needs)
+	for _, r := range repos {
+		for _, rows := range [][]uiRow{r.Coordinators, r.Working, r.Finished} {
+			sort.SliceStable(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
+		}
+		v.Repos = append(v.Repos, r)
+	}
+	sort.Slice(v.Repos, func(i, j int) bool {
+		a, b := v.Repos[i], v.Repos[j]
+		if a.NeedsYou != b.NeedsYou {
+			return a.NeedsYou > b.NeedsYou
+		}
+		if aw, bw := len(a.Working)+len(a.Coordinators), len(b.Working)+len(b.Coordinators); (aw > 0) != (bw > 0) {
+			return aw > 0
+		}
+		return a.Name < b.Name
+	})
+	return v, nil
+}
+
+// sortNeeds puts blocking decisions and stuck sessions first, then the
+// longest waiting.
+func sortNeeds(ns []uiNeed) {
+	urgent := func(n uiNeed) bool { return n.Decision == nil || n.Decision.Blocking }
+	sort.SliceStable(ns, func(i, j int) bool {
+		if a, b := urgent(ns[i]), urgent(ns[j]); a != b {
+			return a
+		}
+		return ns[i].Since.Before(ns[j].Since)
+	})
+}
+
+// addIndex adds src's run, needs and repositories to the index.
+func (src *uiSource) addIndex(v *uiIndex, get func(string) *uiRepo, now time.Time) error {
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	cfg, rep, err := src.view(now)
+	if err != nil {
+		return err
+	}
+	live := src.st.Mode == ModeLive
+	run := uiRun{Src: src.Name, Mode: src.st.Mode, Started: src.st.Started, Stopped: src.st.Stopped,
+		Cap: cfg.Policies.Budget.RunTokens, StopAt: cfg.Policies.Budget.StopAt, Digest: rep.OwnerDigest}
+	for _, t := range src.st.Tracks {
+		if sp, ok := t.spend(live); ok {
+			run.Spend, run.SpendKnown = run.Spend+sp+t.SpendBase, true
+		}
+	}
+	v.Runs = append(v.Runs, run)
+	v.Needs = append(v.Needs, src.needs(cfg, rep, src.askedAt)...)
+	for _, rr := range rep.Repositories {
+		r := get(uiRepoName(rr))
+		if _, ok := cfg.Repositories[rr.Name]; ok {
+			r.Console = true
+		}
+		for _, c := range rr.Cases {
+			row := src.row(c)
+			switch {
+			case row.Coordinator:
+				r.Coordinators = append(r.Coordinators, row)
+			case c.State == string(Done):
+				r.Finished = append(r.Finished, row)
+			default:
+				r.Working = append(r.Working, row)
+			}
+		}
+		for _, d := range rr.Deliveries {
+			if d.CI == CIMerged || d.CI == CIClosed {
+				continue
+			}
+			r.Requests = append(r.Requests, uiRequest{Src: src.Name, Ref: d.Ref, Session: d.Session, CI: d.CI, Verdict: d.CIVerdict, Jobs: d.CIJobs})
+		}
+		var unseen []ReportItem
+		for _, it := range rr.Items {
+			if !it.Seen {
+				unseen = append(unseen, it)
+			}
+		}
+		if len(unseen) > 0 {
+			r.Items = append(r.Items, uiItems{Src: src.Name, Items: unseen})
+		}
+	}
+	// The outside requests a coordinator watches, by repository name.
+	secret := confidentialMatcher(cfg)
+	for _, key := range sortedKeys(src.st.CI) {
+		rec := src.st.CI[key]
+		coord, ok := src.st.Coordinators[rec.Repository]
+		if !ok || rec.Session != coord || rec.State == CIMerged || rec.State == CIClosed || rec.Delivered != "" {
+			continue
+		}
+		if _, ok := cfg.Repositories[rec.Repository]; !ok || secret(rec.Repository, rec.Ref, rec.Author) {
+			continue
+		}
+		r := get(rec.Repository)
+		r.Console = true
+		r.Requests = append(r.Requests, uiRequest{Src: src.Name, Ref: rec.Ref, URL: rec.URL, CI: rec.State, Verdict: rec.Verdict, Jobs: rec.Jobs,
+			Outside: true, Author: rec.Author, Draft: rec.Draft, Unresolved: rec.Unresolved})
+	}
+	return nil
+}
+
+// noteAsked records when each decision e raises was first seen.
+func (src *uiSource) noteAsked(e Event) {
+	note := func(session, id string) {
+		if k := session + " " + id; session != "" && id != "" {
+			if _, ok := src.askedAt[k]; !ok {
+				src.askedAt[k] = e.Time
+			}
+		}
+	}
+	switch {
+	case e.Decision != nil:
+		for _, d := range e.Decision.Decisions {
+			note(e.Session, d.ID)
+		}
+	case e.Case != nil && e.Case.Call != nil && e.Case.Call.Raised != nil:
+		note(e.Session, e.Case.Call.Raised.ID)
+	case e.Act != nil && e.Act.Raised != nil:
+		note(e.Session, e.Act.Raised.ID)
+	case e.Observe != nil && e.Observe.StatusQuestions != "":
+		note(e.Session, statusDecisionFor(e.Observe.StatusQuestions).ID)
+	}
+}
+
+// uiMessageView is a console message as the view shows it.
+type uiMessageView struct {
+	uiMessage
+	Src  string
+	Body template.HTML
+}
+
+// uiConsole is a repository's console view: its messages newest last,
+// its open decisions, and the reply box.
+type uiConsole struct {
+	uiPage
+	Repository string
+	Messages   []uiMessageView
+	Needs      []uiNeed
+	ReplySrc   string // the source a reply is recorded in, or "" when none configures the repository
+}
+
+// withheldMessage stands in for a message that matches a confidential
+// pattern.
+const withheldMessage = "(withheld: it matched a confidential pattern)"
+
+// consoleView is repo's console, nil when no source knows the repository.
+func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
+	v := &uiConsole{uiPage: uiPage{Title: repo + " console", Token: u.token, Back: "/console/" + repo, Now: now, loc: u.loc}, Repository: repo}
+	known := false
+	for _, src := range u.sources {
+		err := func() error {
+			src.mu.Lock()
+			defer src.mu.Unlock()
+			cfg, rep, err := src.view(now)
+			if err != nil {
+				return err
+			}
+			if _, ok := cfg.Repositories[repo]; ok {
+				known = true
+				if v.ReplySrc == "" && src.st.Mode == ModeLive {
+					v.ReplySrc = src.Name
+				}
+			}
+			secret := confidentialMatcher(cfg)
+			for _, m := range src.messages[repo] {
+				body := markdown(m.Text)
+				if m.Text == "" || secret(m.Text) {
+					body = template.HTML(template.HTMLEscapeString(withheldMessage))
+				}
+				v.Messages = append(v.Messages, uiMessageView{uiMessage: m, Src: src.Name, Body: body})
+			}
+			for _, n := range src.needs(cfg, rep, src.askedAt) {
+				if n.Repository == repo {
+					v.Needs = append(v.Needs, n)
+				}
+			}
+			return nil
+		}()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !known && len(v.Messages) == 0 {
+		return nil, nil
+	}
+	sort.SliceStable(v.Messages, func(i, j int) bool { return v.Messages[i].At.Before(v.Messages[j].At) })
+	sortNeeds(v.Needs)
+	return v, nil
+}
+
+// uiEvent is one line of a session's timeline.
+type uiEvent struct {
+	At   time.Time
+	Kind string
+	Text string
+}
+
+// uiTurn is one of a session's latest turns.
+type uiTurn struct {
+	Role string
+	At   time.Time
+	Body template.HTML
+}
+
+// uiSessionPage is a session's view: its row, its latest turns, its
+// STATUS.md rendered, its open needs, and its latest events.
+type uiSessionPage struct {
+	uiPage
+	Src        string
+	Repository string
+	Row        uiRow
+	Reason     string
+	Turns      []uiTurn
+	Status     template.HTML
+	StatusNote string
+	Needs      []uiNeed
+	Events     []uiEvent
+}
+
+// uiTurns is how many of a session's latest turns its view shows.
+const uiTurns = 12
+
+// sessionView is session name of src, nil when the report does not show
+// it.
+func (u *UI) sessionView(src *uiSource, name string, now time.Time) (*uiSessionPage, error) {
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	cfg, rep, err := src.view(now)
+	if err != nil {
+		return nil, err
+	}
+	v := &uiSessionPage{uiPage: uiPage{Title: name, Token: u.token, Back: "/session/" + src.Name + "/" + name, Now: now, loc: u.loc}, Src: src.Name}
+	found := false
+	for _, rr := range rep.Repositories {
+		for _, c := range rr.Cases {
+			if c.Session == name {
+				v.Repository, v.Row, found = uiRepoName(rr), src.row(c), true
+			}
+		}
+	}
+	if !found {
+		return nil, nil
+	}
+	secret := confidentialMatcher(cfg)
+	t := src.st.Tracks[name]
+	if !secret(t.Reason) {
+		v.Reason = t.Reason
+	}
+	turns := t.Turns
+	if len(turns) > uiTurns {
+		turns = turns[len(turns)-uiTurns:]
+	}
+	for _, tr := range turns {
+		body := markdown(tr.Text)
+		if tr.Withheld || secret(tr.Text) {
+			body = template.HTML(template.HTMLEscapeString(withheldMessage))
+		}
+		v.Turns = append(v.Turns, uiTurn{Role: tr.Role, At: tr.At, Body: body})
+	}
+	if sess, ok := cfg.Sessions[name]; ok && sess.Workdir != "" {
+		b, err := readCapped(filepath.Join(sess.Workdir, "STATUS.md"), 1<<18)
+		switch {
+		case err != nil:
+			v.StatusNote = "STATUS.md could not be read."
+		case len(b) == 0:
+			v.StatusNote = "No STATUS.md."
+		case secret(string(b)):
+			v.StatusNote = "STATUS.md was withheld because it matched a confidential pattern."
+		default:
+			v.Status = markdown(string(b))
+		}
+	}
+	for _, n := range src.needs(cfg, rep, src.askedAt) {
+		if n.Session == name {
+			v.Needs = append(v.Needs, n)
+		}
+	}
+	es := src.events[name]
+	for i := len(es) - 1; i >= 0; i-- {
+		text := eventText(es[i])
+		if secret(text) {
+			text = withheldMessage
+		}
+		v.Events = append(v.Events, uiEvent{At: es[i].Time, Kind: es[i].Kind, Text: text})
+	}
+	return v, nil
+}
+
+// eventText is a line saying what e did, for a timeline.
+func eventText(e Event) string {
+	join := func(parts ...string) string {
+		var kept []string
+		for _, p := range parts {
+			if p = strings.TrimSpace(p); p != "" {
+				kept = append(kept, p)
+			}
+		}
+		return strings.Join(kept, " · ")
+	}
+	switch {
+	case e.Transition != nil:
+		return join(e.Transition.From+" → "+e.Transition.To, e.Transition.Reason)
+	case e.Act != nil:
+		return join(e.Act.Action, e.Act.Key, e.Act.Ref, e.Act.Reason, e.Act.Message)
+	case e.Observe != nil:
+		return join(e.Observe.State, e.Observe.Reason)
+	case e.Skip != nil:
+		return join(e.Skip.Action, e.Skip.Key, e.Skip.Reason)
+	case e.Crash != nil:
+		return fmt.Sprintf("crash %d", e.Crash.Crashes)
+	case e.Error != nil:
+		return join(e.Error.Step, e.Error.Error)
+	case e.Turn != nil:
+		return e.Turn.Role
+	case e.Usage != nil:
+		return fmt.Sprintf("context %d, spend %d", e.Usage.Context, e.Usage.Spend)
+	case e.Checkpoint != nil:
+		return join(shortSHA(e.Checkpoint.SHA), e.Checkpoint.Subject)
+	case e.Decision != nil:
+		return fmt.Sprintf("%d decisions", len(e.Decision.Decisions))
+	case e.Answer != nil:
+		return "answered " + e.Answer.ID
+	case e.CI != nil:
+		return join(e.CI.Ref, e.CI.State, e.CI.Verdict)
+	}
+	return ""
+}
+
+// shortSHA is a commit's first twelve characters.
+func shortSHA(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
+}
+
+// readCapped reads at most max bytes of path; a missing file is empty.
+func readCapped(path string, max int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, max))
+}

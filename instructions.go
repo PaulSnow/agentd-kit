@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"sort"
 	"strings"
@@ -132,11 +135,25 @@ func RecordInstruction(cfg *Config, log *Log, st *LogState, now time.Time, conso
 	if len(repos) == 0 {
 		return fmt.Errorf("console %q feeds no repository, so it takes no instruction", console)
 	}
+	return recordInstruction(cfg, log, st, now, repos, "console:"+console, text)
+}
+
+// UIInstruction records text as the owner's instruction from the UI for
+// one repository (#41), as a console reply is recorded.
+func UIInstruction(cfg *Config, log *Log, st *LogState, now time.Time, repo, text string) error {
+	if _, ok := cfg.Repositories[repo]; !ok {
+		return fmt.Errorf("no repository %q", repo)
+	}
+	return recordInstruction(cfg, log, st, now, []string{repo}, "ui", text)
+}
+
+// recordInstruction records text as the owner's instruction for repos,
+// screened, from where it was typed.
+func recordInstruction(cfg *Config, log *Log, st *LogState, now time.Time, repos []string, from, text string) error {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return errors.New("an empty instruction")
 	}
-	from := "console:" + console
 	p := &InstructionPayload{Repositories: repos, Text: text, Hash: shortHash(HashPane(text)), From: from}
 	for i, pat := range screenPatterns(cfg) {
 		if regexp.MustCompile(pat).MatchString(text) {
@@ -161,4 +178,82 @@ func RecordInstruction(cfg *Config, log *Log, st *LogState, now time.Time, conso
 		}
 	}
 	return log.Append(Event{V: EventVersion, Time: now, Kind: KindInstruction, Mode: ModeOwner, Instruction: p})
+}
+
+// ImportLine is one message of the old console's history, as agentd
+// console import reads it: one JSON object per line.
+type ImportLine struct {
+	At         time.Time `json:"at"`
+	From       string    `json:"from"`
+	Text       string    `json:"text"`
+	Repository string    `json:"repository,omitempty"`
+}
+
+// importKey identifies an imported line, so a second import skips it.
+func importKey(repo string, at time.Time, text string) string {
+	return "imported:" + shortHash(HashPane(repo+"\n"+at.UTC().Format(time.RFC3339Nano)+"\n"+text))
+}
+
+// ImportConsole appends each line of r, the old console's history, as a
+// feed event of phase imported for repo, or the line's own repository,
+// with its time and author (#41). A line already imported, by repository,
+// time and text, is skipped; every text is screened. Nothing is appended
+// unless every line reads.
+func ImportConsole(cfg *Config, log *Log, events []Event, now time.Time, repo string, r io.Reader) (added, skipped int, err error) {
+	have := map[string]bool{}
+	for _, e := range events {
+		if e.Kind == KindFeed && e.Feed != nil && e.Feed.Phase == FeedImported {
+			have[e.Feed.Key] = true
+		}
+	}
+	var lines []ImportLine
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 64<<10), 1<<20)
+	for n := 1; sc.Scan(); n++ {
+		text := strings.TrimSpace(sc.Text())
+		if text == "" {
+			continue
+		}
+		var l ImportLine
+		dec := json.NewDecoder(strings.NewReader(text))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&l); err != nil {
+			return 0, 0, fmt.Errorf("line %d: %w", n, err)
+		}
+		if l.Repository == "" {
+			l.Repository = repo
+		}
+		if _, ok := cfg.Repositories[l.Repository]; !ok {
+			return 0, 0, fmt.Errorf("line %d: no repository %q", n, l.Repository)
+		}
+		if l.At.IsZero() || strings.TrimSpace(l.Text) == "" {
+			return 0, 0, fmt.Errorf("line %d: a line needs its time and text", n)
+		}
+		lines = append(lines, l)
+	}
+	if err := sc.Err(); err != nil {
+		return 0, 0, err
+	}
+	pats := screenPatterns(cfg)
+	for _, l := range lines {
+		key := importKey(l.Repository, l.At, l.Text)
+		if have[key] {
+			skipped++
+			continue
+		}
+		have[key] = true
+		at := l.At
+		p := &FeedPayload{Phase: FeedImported, Key: key, Repository: l.Repository, Text: l.Text, At: &at, From: l.From}
+		for i, pat := range pats {
+			if regexp.MustCompile(pat).MatchString(l.Text + "\n" + l.From) {
+				p.Text, p.From, p.Withheld = "", "", i+1
+				break
+			}
+		}
+		if err := log.Append(Event{V: EventVersion, Time: now, Kind: KindFeed, Mode: ModeOwner, Feed: p}); err != nil {
+			return added, skipped, err
+		}
+		added++
+	}
+	return added, skipped, nil
 }

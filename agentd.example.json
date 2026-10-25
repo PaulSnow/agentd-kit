@@ -8,11 +8,13 @@
     "mail": "~/tracking/data/mail-findings.json",
     "priorities": "~/tracking/data/priorities.json"
   },
-  "page": {
+  "ui": {
     "address": "192.0.2.10:8770",
     "hosts": ["192.0.2.10:8770", "host-a.example.net:8770"],
     "whois": ["peer-whois", "--json", "{addr}"],
-    "owner": "owner@example.com"
+    "owner": "owner@example.com",
+    "logs": ["coordinators.json"],
+    "shadow": false
   },
   "confidential_patterns": ["(?i)embargoed", "(?i)customer:\\s*\\w+"],
   "timeouts": {
