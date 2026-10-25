@@ -284,9 +284,9 @@ func (s *Supervisor) mergeRequest(name string, t *Track, w ciWatched, r CIRecord
 	}
 	// A green run judged the head against the base it ran on; once the
 	// target moved on, the merge result is tested again first, once per
-	// head and tip. A base never recorded, its tip not asked, is no move.
+	// head and tip. A base that could not be asked counts as moved.
 	if pol.CI.RetestOnBaseMove && r.Base != "" && r.Base != tip {
-		moved := fmt.Sprintf("%s moved from %s to %s since CI went green on %s", v.target, shortHash(r.Base), shortHash(tip), shortHash(v.head))
+		moved := fmt.Sprintf("%s is at %s, not %s, the base CI ran on for %s", v.target, shortHash(tip), shortHash(r.Base), shortHash(v.head))
 		if repo.Forge == "github" {
 			skip("base-moved", moved+", and GitHub has no call that tests the merge result again")
 			return
@@ -294,7 +294,8 @@ func (s *Supervisor) mergeRequest(name string, t *Track, w ciWatched, r CIRecord
 		rkey := mergeKey(w.Repository, w.Ref) + ":retest:" + v.head + ":" + tip
 		switch {
 		case t.Retests[rkey]:
-			return // retested: the watcher records the new run
+			skip("retest-waiting", moved+"; waiting for the new pipeline")
+			return
 		case s.failed(t, rkey):
 			skip("retest-gave-up", fmt.Sprintf("%s; asking for a new pipeline failed %d times, not retrying", moved, len(t.Failures[rkey])))
 			return

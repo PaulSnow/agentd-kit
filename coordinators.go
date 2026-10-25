@@ -357,8 +357,8 @@ func (s *Supervisor) due(repo string, t *Track) (reasons, keys []string) {
 			add("answer: "+n+"/"+id, o.Answers[id].At)
 		}
 	}
-	// A request no session delivered whose own CI failed, once per head
-	// and cause: its coordinator may start a fix session for it.
+	// A request no session delivered whose own CI failed, once per head,
+	// run and cause: its coordinator may start a fix session for it.
 	for _, r := range s.outsideRecords(repo) {
 		if r.State == CIFailed && r.Verdict == CIOwn {
 			add(ciReason(r), r.FailedAt)

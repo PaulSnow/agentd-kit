@@ -367,8 +367,8 @@ type startArgs struct {
 
 // callSessions checks and records a coordinator's start_session,
 // end_session or approve (requests.go). A refused call is answered and
-// not logged: nothing reached the log. A start is read back, so of two for one name only the one the
-// fold holds is told it started.
+// not logged: nothing reached the log. A start is read back, so of two
+// for one name only the one the fold holds is told it started.
 func (srv *MCPServer) callSessions(tool string, args json.RawMessage) (string, bool) {
 	refuse := func(format string, a ...any) (string, bool) {
 		return compact(map[string]any{"refused": fmt.Sprintf(format, a...)}), true

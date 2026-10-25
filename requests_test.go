@@ -402,3 +402,69 @@ func TestOutsideGitHubMovedBaseSkipped(t *testing.T) {
 		t.Fatalf("skips = %q", s)
 	}
 }
+
+// A merged-results pipeline counts for the head only while its commit is
+// GitLab's merge of that head, and its first parent is the base it ran
+// on; one left from an earlier head, its new push not run, is not green.
+func TestMergedResultsPipelineJudgedByItsCommit(t *testing.T) {
+	api := &fakeForgeAPI{gitlab: map[string]string{
+		ciProject + "/merge_requests/2": `{"iid":2,"state":"opened","sha":"5eed0202","target_branch":"main","author":{"username":"widget-bot"},` +
+			`"head_pipeline":{"id":70,"status":"success","sha":"3e3e3e3e","ref":"refs/merge-requests/2/merge"}}`,
+		ciProject + "/merge_requests/2/discussions": `[]`,
+		ciProject + "/repository/commits/3e3e3e3e":  `{"id":"3e3e3e3e","parent_ids":["` + mergeTip + `","5eed0101"]}`,
+	}}
+	c, err := gitlabCI(api, "example-org/widgets", "!2")
+	if err != nil || c.state != CIPending {
+		t.Fatalf("pipeline of the earlier head: %+v, %v", c, err)
+	}
+	api.gitlab[ciProject+"/repository/commits/3e3e3e3e"] = `{"id":"3e3e3e3e","parent_ids":["` + mergeTip + `","5eed0202"]}`
+	c, err = gitlabCI(api, "example-org/widgets", "!2")
+	if err != nil || c.state != CISuccess || c.base != mergeTip || c.run != "70" {
+		t.Fatalf("pipeline of the head: %+v, %v", c, err)
+	}
+}
+
+// A base whose tip could not be asked when the run was first seen is
+// never filled in later: the run is retested before it merges.
+func TestOutsideUnknownBaseRetested(t *testing.T) {
+	h, api := requestsHarness(t)
+	repo := h.cfg.Repositories["widgets"]
+	repo.Policy.CI.RetestOnBaseMove = true
+	h.cfg.Repositories["widgets"] = repo
+	api.set(func() { api.gitlab[ciProject+"/repository/branches/main"] = fakeNotFound })
+	h.ticks(2, 5*time.Minute)
+	api.set(func() {
+		api.gitlab[ciProject+"/repository/branches/main"] = `{"name":"main","commit":{"id":"` + mergeTip + `"}}`
+	})
+	h.ticks(1, 5*time.Minute)
+	if r := h.sup.st.CI[ciKey("widgets", "!2")]; r.Base != baseUnknown {
+		t.Fatalf("base = %q", r.Base)
+	}
+	h.approve("!2", "5eed0101")
+	h.ticks(3, 5*time.Minute)
+	if len(h.forge.merges) != 0 || len(h.forge.retests) != 1 {
+		t.Fatalf("merges %+v, retests %v", h.forge.merges, h.forge.retests)
+	}
+	// No new run comes: the wait is said once.
+	if s := h.mergeSkips(); len(s) == 0 || !strings.Contains(s[len(s)-1], "waiting for the new pipeline") {
+		t.Fatalf("skips = %q", s)
+	}
+}
+
+// The same failure in a new run, after a green one, is due again.
+func TestOutsideRepeatFailureInNewRunIsDue(t *testing.T) {
+	h, api := requestsHarness(t)
+	red := func(run int) {
+		outsideMR(api, outsideMRState{head: "5eed0101", pipeline: run, status: "failed", jobs: []string{"test:failed"}})
+	}
+	red(60)
+	h.ticks(3, 5*time.Minute)
+	h.transcriptOf("c", "t1", summaryLine("c1", "m1", "Looked.", h.clock.Now(), 100))
+	outsideMR(api, outsideMRState{head: "5eed0101", pipeline: 61, status: "success"})
+	h.ticks(2, 5*time.Minute)
+	red(62)
+	h.ticks(3, 5*time.Minute)
+	if w := h.wakes(); len(w) != 2 || w[1].Reason != "ci: !2 failed at 5eed0101" {
+		t.Fatalf("wakes = %+v", w)
+	}
+}

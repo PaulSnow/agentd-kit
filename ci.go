@@ -101,8 +101,8 @@ type CIRecord struct {
 	CIPayload
 	Session string
 	At      time.Time
-	// FailedAt is when the request first failed at its head with its
-	// cause, FailedFor, kept across records in between, so a failure is
+	// FailedAt is when the request first failed at its head, in its run,
+	// with its cause, FailedFor, kept across records in between, so a failure is
 	// one failure however often a forge error or a new discussion
 	// changes the record.
 	FailedAt  time.Time
@@ -159,8 +159,8 @@ func (st *LogState) applyCI(e Event) {
 	key := ciKey(e.CI.Repository, e.CI.Ref)
 	old := st.CI[key]
 	r := CIRecord{CIPayload: *e.CI, Session: e.Session, At: e.Time, FailedAt: old.FailedAt, FailedFor: old.FailedFor}
-	if r.State == CIFailed && r.FailedFor != r.Head+" "+r.Cause {
-		r.FailedAt, r.FailedFor = e.Time, r.Head+" "+r.Cause
+	if f := r.Head + " " + r.Run + " " + r.Cause; r.State == CIFailed && r.FailedFor != f {
+		r.FailedAt, r.FailedFor = e.Time, f
 	}
 	st.CI[key] = r
 	if t := st.Tracks[e.Session]; t != nil {
@@ -308,6 +308,10 @@ func openRequests(api ForgeAPI, repo Repository) ([]string, error) {
 	return out, nil
 }
 
+// baseUnknown is a run's base when the target's tip could not be asked
+// as the run was first seen.
+const baseUnknown = "unknown"
+
 // requestRef is a request's reference: !12 on GitLab, #12 on GitHub.
 var requestRef = regexp.MustCompile(`^[!#][0-9]+$`)
 
@@ -388,11 +392,16 @@ func (s *Supervisor) askCI(r ciWatched, prev CIRecord) CIPayload {
 	// first seen, running or settled. A run first seen settled took its
 	// base from a tip that may have moved since it started, so one that
 	// moved while it ran is not caught.
-	if p.Run != "" && prev.Run == p.Run && prev.Base != "" {
+	switch {
+	case c.base != "":
+		p.Base = c.base // the merge it tested says
+	case p.Run != "" && prev.Run == p.Run && prev.Base != "":
 		p.Base = prev.Base
-	} else if p.Run != "" && c.tip != nil {
-		// A tip that cannot be asked leaves the base unknown, which no
-		// retest is judged by; the state stands.
+	case p.Run != "" && c.tip != nil:
+		// A tip that cannot be asked is a base unknown, which no later
+		// tip stands in for: it differs from every tip, so the run is
+		// retested before a merge.
+		p.Base = baseUnknown
 		if tip, err := c.tip(); err == nil {
 			p.Base = tip
 		}
@@ -484,6 +493,7 @@ type ciCheck struct {
 	draft      bool
 	unresolved bool
 	run        string
+	base       string // the base a merged-results run tested, when its commit says
 	tip        func() (string, error)
 }
 
@@ -599,6 +609,23 @@ func gitlabCI(api ForgeAPI, project, ref string) (ciCheck, error) {
 	// A merged-results or merge-train pipeline runs on GitLab's merge of
 	// the head, under the request's own ref.
 	merged := p != nil && strings.HasPrefix(p.Ref, "refs/merge-requests/")
+	if merged && p.SHA != "" && p.SHA != mr.SHA {
+		// Its commit is GitLab's merge of a head into the target: it is
+		// the head's only while that head is its second parent, and its
+		// first parent is the base it tested. A push the pipeline skipped
+		// leaves the old one as the head pipeline.
+		var m struct {
+			ParentIDs []string `json:"parent_ids"`
+		}
+		if err := get(base+"/repository/commits/"+url.PathEscape(p.SHA), &m); err != nil {
+			return ciCheck{}, err
+		}
+		if len(m.ParentIDs) == 2 && m.ParentIDs[1] == mr.SHA {
+			c.base = m.ParentIDs[0]
+		} else {
+			merged = false
+		}
+	}
 	if p == nil || p.SHA != "" && p.SHA != mr.SHA && !merged {
 		// No pipeline has run on the head commit yet.
 		c.state = CIPending
@@ -724,13 +751,15 @@ func githubCI(api ForgeAPI, project, ref string) (ciCheck, error) {
 			return err
 		}
 		running := false
-		var newest int64
+		var oldest int64
 		for _, r := range cr.CheckRuns {
 			if c.head == "" {
 				c.head = r.HeadSHA
 			}
-			if r.ID > newest {
-				newest = r.ID
+			// The oldest check run names the head's runs: a job run
+			// again, or an app's later check, tests the same commit.
+			if oldest == 0 || r.ID < oldest {
+				oldest = r.ID
 				c.run = strconv.FormatInt(r.ID, 10)
 			}
 			switch {
