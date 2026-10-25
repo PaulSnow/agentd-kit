@@ -86,7 +86,7 @@ func TestGateEnvironmentIsScrubbed(t *testing.T) {
 	t.Setenv("EDITOR", "vi")
 	h := newHarness(t, false, "d")
 	r := h.cfg.Repositories["widgets"]
-	r.GateEnv = []string{"GOFLAGS"}
+	r.Policy.Gate.Env = []string{"GOFLAGS"}
 	h.cfg.Repositories["widgets"] = r
 	doneWithDelivery(t, h, "d")
 	h.ticks(1, 5*time.Minute)
@@ -103,9 +103,9 @@ func TestGateEnvironmentIsScrubbed(t *testing.T) {
 	}
 	for _, name := range []string{"SSH_AUTH_SOCK", "GITLAB_TOKEN", "CLAUDE_CONFIG_DIR"} {
 		path := filepath.Join(t.TempDir(), "c.json")
-		writeFile(t, path, `{"repositories": {"r": {"forge": "gitlab", "project": "a/b", "gate": ["make"], "gate_env": ["`+name+`"]}}}`)
+		writeFile(t, path, `{"repositories": {"r": {"forge": "gitlab", "project": "a/b", "policy": {"gate": {"argv": ["make"], "env": ["`+name+`"]}}}}}`)
 		if _, err := LoadConfig(path); err == nil {
-			t.Errorf("gate_env %s was accepted", name)
+			t.Errorf("gate.env %s was accepted", name)
 		}
 	}
 }
@@ -148,11 +148,11 @@ func TestShadowDoesNotRunGates(t *testing.T) {
 // A repository that allows push without a gate is refused at load.
 func TestPushWithoutGateIsRefused(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "c.json")
-	writeFile(t, path, `{"repositories": {"r": {"forge": "gitlab", "project": "a/b", "allow": ["push", "open"]}}}`)
+	writeFile(t, path, `{"repositories": {"r": {"forge": "gitlab", "project": "a/b", "policy": {"delivery": {"allow": ["push", "open"]}}}}}`)
 	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "gate") {
 		t.Fatalf("push without a gate: %v", err)
 	}
-	writeFile(t, path, `{"repositories": {"r": {"forge": "gitlab", "project": "a/b", "allow": ["push", "open"], "gate": ["make", "check"], "gate_timeout": "20m"}}}`)
+	writeFile(t, path, `{"repositories": {"r": {"forge": "gitlab", "project": "a/b", "policy": {"delivery": {"allow": ["push", "open"]}, "gate": {"argv": ["make", "check"], "timeout": "20m"}}}}}`)
 	if _, err := LoadConfig(path); err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestExecGate(t *testing.T) {
 func TestChangedGateIsRefused(t *testing.T) {
 	h := newHarness(t, false, "d")
 	r := h.cfg.Repositories["widgets"]
-	r.GatePaths = []string{"bin/lib"}
+	r.Policy.Gate.Paths = []string{"bin/lib"}
 	h.cfg.Repositories["widgets"] = r
 	doneWithDelivery(t, h, "d")
 	h.git.gateChanged = []string{"bin/check"}
@@ -265,9 +265,9 @@ func TestGateRunsWithScratchHome(t *testing.T) {
 		t.Fatalf("gate event %+v", gate)
 	}
 	path := filepath.Join(t.TempDir(), "c.json")
-	writeFile(t, path, `{"repositories": {"r": {"forge": "gitlab", "project": "a/b", "gate": ["make"], "gate_env": ["HOME"]}}}`)
+	writeFile(t, path, `{"repositories": {"r": {"forge": "gitlab", "project": "a/b", "policy": {"gate": {"argv": ["make"], "env": ["HOME"]}}}}}`)
 	if _, err := LoadConfig(path); err == nil {
-		t.Error("gate_env HOME was accepted")
+		t.Error("gate.env HOME was accepted")
 	}
 }
 
@@ -289,7 +289,7 @@ func TestConfidentialErrorIsWithheld(t *testing.T) {
 }
 
 // A gate none of whose paths the target branch has is pinned by nothing,
-// and is refused until gate_paths names its files.
+// and is refused until gate.paths names its files.
 func TestUnpinnedGateIsRefused(t *testing.T) {
 	h := newHarness(t, false, "d")
 	doneWithDelivery(t, h, "d")
@@ -304,7 +304,7 @@ func TestUnpinnedGateIsRefused(t *testing.T) {
 			reason = e.Skip.Reason
 		}
 	}
-	if !strings.Contains(reason, "gate_paths") {
+	if !strings.Contains(reason, "gate.paths") {
 		t.Fatalf("skip reason %q", reason)
 	}
 }
@@ -373,9 +373,9 @@ func TestGateHomeIsRemovedAndAccountsAreReachable(t *testing.T) {
 func TestGatePathsAreLiteral(t *testing.T) {
 	for _, p := range []string{"bin/*", ":(glob)bin", "bin/ch?ck", "[b]in"} {
 		path := filepath.Join(t.TempDir(), "c.json")
-		writeFile(t, path, `{"repositories": {"r": {"forge": "gitlab", "project": "a/b", "gate": ["make"], "gate_paths": [`+strconv.Quote(p)+`]}}}`)
+		writeFile(t, path, `{"repositories": {"r": {"forge": "gitlab", "project": "a/b", "policy": {"gate": {"argv": ["make"], "paths": [`+strconv.Quote(p)+`]}}}}}`)
 		if _, err := LoadConfig(path); err == nil {
-			t.Errorf("gate_paths %q was accepted", p)
+			t.Errorf("gate.paths %q was accepted", p)
 		}
 	}
 }

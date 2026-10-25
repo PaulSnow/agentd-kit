@@ -456,7 +456,7 @@ func NewMCPServer(cfg *Config, name string, log *Log, read func() ([]Event, erro
 		return nil, fmt.Errorf("session %s works no case: it needs a repository and an issue", name)
 	}
 	srv := &MCPServer{cfg: cfg, name: name, sess: sess, caseID: id, log: log, read: read, now: now}
-	for _, p := range cfg.ConfidentialPatterns {
+	for _, p := range screenPatterns(cfg) {
 		srv.confidential = append(srv.confidential, regexp.MustCompile(p))
 	}
 	return srv, nil

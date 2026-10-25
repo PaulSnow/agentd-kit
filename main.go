@@ -57,6 +57,8 @@ func main() {
 		err = sessionsCmd(os.Args[2:])
 	case "console":
 		err = consoleCmd(os.Args[2:])
+	case "policy":
+		err = policyCmd(os.Args[2:], os.Stdout)
 	case "inventory":
 		err = inventoryCmd(os.Args[2:], os.Stdout)
 	case "report":
@@ -96,6 +98,7 @@ func usage() {
   agentd clear [--config PATH] [--log PATH] SESSION
   agentd coordinator [--config PATH] [--log PATH] release REPOSITORY
   agentd sessions [--config PATH] [--log PATH] end NAME
+  agentd policy [--config PATH] [--log PATH] show REPO
   agentd console [--config PATH] [--log PATH] [--shadow] reply CONSOLE TEXT...
   agentd inventory [--config PATH]
   agentd report [--config PATH] [--log PATH] [--shadow] [--host NAME] --out PATH
@@ -117,7 +120,9 @@ restarted again. coordinator release lets the session a repository's
 configuration names claim its coordinator, which another session held:
 there is one coordinator per repository. sessions end stops a session a
 coordinator started and takes it off the supervised sessions, keeping its
-files. console reply applies the owner's
+files. policy show prints a repository's effective policy, each key with
+where it came from: the owner's configuration, a default, or the
+repository's own .agentd/policy.json as last read. console reply applies the owner's
 reply in a console, as its tool hands it on: "SESSION ID ANSWER" answers a
 decision, "seen ID..." marks items seen. inventory lists every repository in the tracking system's
 manifest with its open work and clones, from the tracking snapshot. report

@@ -38,6 +38,8 @@ type LogState struct {
 	// with their repository.
 	Runtime map[string]RuntimePayload
 	Ended   map[string]string
+	// Policies are each repository's own policy file, as last read.
+	Policies map[string]PolicyPayload
 
 	cfg *Config // its policies, read as each event is applied
 }
@@ -46,7 +48,7 @@ type LogState struct {
 func NewLogState(cfg *Config, mode string) *LogState {
 	return &LogState{Mode: mode, Tracks: map[string]*Track{}, Pending: map[string]Event{}, Items: map[string]*Item{}, Instructions: map[string]*Instruction{},
 		Cursors: map[string]time.Time{}, Polls: map[string]PollRecord{}, Cases: map[string]*Case{},
-		Coordinators: map[string]string{}, CI: map[string]CIRecord{}, Runtime: map[string]RuntimePayload{}, Ended: map[string]string{}, cfg: cfg}
+		Coordinators: map[string]string{}, CI: map[string]CIRecord{}, Runtime: map[string]RuntimePayload{}, Ended: map[string]string{}, Policies: map[string]PolicyPayload{}, cfg: cfg}
 }
 
 // setItem changes a copy of the item and puts the copy in its place: a
@@ -115,6 +117,10 @@ func (st *LogState) apply(e Event) {
 	}
 	if e.Kind == KindSession {
 		st.applySession(e)
+		return
+	}
+	if e.Kind == KindPolicy {
+		st.applyPolicy(e)
 		return
 	}
 	if e.Kind == KindCoordinator {

@@ -84,7 +84,7 @@ type Supervisor struct {
 // repository allow-list here, so no caller can reach it unwrapped.
 func NewSupervisor(cfg *Config, log *Log, clock Clock, tmux Tmux, git Git, forge Forge, runner Runner, shadow bool) *Supervisor {
 	var confidential, dialogs []*regexp.Regexp
-	for _, p := range cfg.ConfidentialPatterns {
+	for _, p := range screenPatterns(cfg) {
 		confidential = append(confidential, regexp.MustCompile(p))
 	}
 	for _, p := range cfg.Policies.Dialog.Patterns {
@@ -581,7 +581,7 @@ func (s *Supervisor) step(name string, sess Session) {
 	}
 	// A session stopped for its budget, or due to be, is gone by policy;
 	// so is one whose stop a crash of agentd cut short.
-	if !ev.Alive && t.Live && !ev.Status.Done && t.Stopped == "" && s.overBudget(t, now) == "" {
+	if !ev.Alive && t.Live && !ev.Status.Done && t.Stopped == "" && s.overBudget(name, t, now) == "" {
 		screen := ev.DeadScreen
 		if !ev.PaneDead {
 			screen = shortHash(t.Hash) // gone outright: the last screen seen
@@ -1009,7 +1009,8 @@ func (s *Supervisor) typeInto(name, action string, a *ActPayload, t *Track, seen
 // confidentialMatch returns the number, from 1, of the first confidential
 // pattern that matches any of texts, or 0.
 func (s *Supervisor) confidentialMatch(texts ...string) int {
-	for i, re := range s.confidential {
+	res := append(s.confidential, filePatterns(s.st)...)
+	for i, re := range res {
 		for _, text := range texts {
 			if re.MatchString(text) {
 				return i + 1
@@ -1436,11 +1437,12 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 // a tree that changed under it is skipped, and the next pass gates the new
 // tree. Shadow mode logs the gate it would run and runs none.
 func (s *Supervisor) gate(name, key, fkey string, d Deliver, repo Repository, head string, t *Track, fail func(string, error)) bool {
-	if len(repo.Gate) == 0 { // refused at load; never deliver ungated
+	gate := repo.Policy.Gate
+	if len(gate.Argv) == 0 { // refused at load; never deliver ungated
 		s.skipOnce(name, "deliver:"+key+":no-gate", fmt.Sprintf("repository %s has no gate; not delivering", d.Repository), t, &SkipPayload{Worktree: d.Worktree})
 		return false
 	}
-	timeout := repo.GateTimeout.Duration
+	timeout := gate.Timeout.Duration
 	if timeout <= 0 {
 		timeout = DefaultGateTimeout
 	}
@@ -1462,7 +1464,7 @@ func (s *Supervisor) gate(name, key, fkey string, d Deliver, repo Repository, he
 	if !s.gatePinned(name, key, fkey, d, repo, head, t, fail) {
 		return false
 	}
-	gd := &ActPayload{Key: gkey, Gate: repo.Gate, SHA: head, Worktree: d.Worktree}
+	gd := &ActPayload{Key: gkey, Gate: gate.Argv, SHA: head, Worktree: d.Worktree}
 	var leftHome error
 	err = s.act(name, ActGate, gd, func() error {
 		// HOME is an empty directory of the gate's own, so tools find no
@@ -1475,11 +1477,11 @@ func (s *Supervisor) gate(name, key, fkey string, d Deliver, repo Repository, he
 		defer func() { leftHome = removeAll(home) }()
 		gd.Reachable = s.reachableCredentials()
 		start := s.clock.Now()
-		exit, output, err := s.runner.Gate(d.Worktree, repo.Gate, gateEnv(repo, home), timeout)
+		exit, output, err := s.runner.Gate(d.Worktree, gate.Argv, gateEnv(repo, home), timeout)
 		took := s.clock.Now().Sub(start).Seconds()
 		gd.DurationS = &took
 		if err == nil && exit != 0 {
-			err = fmt.Errorf("gate %s exited %d", strings.Join(repo.Gate, " "), exit)
+			err = fmt.Errorf("gate %s exited %d", strings.Join(gate.Argv, " "), exit)
 			gd.Exit = &exit
 		}
 		if err != nil {
@@ -1615,7 +1617,7 @@ func shellJoin(argv []string) string {
 }
 
 // gatePaths are the paths that make up r's gate: each argument of its argv
-// that is a relative path in the worktree, its script, and GatePaths.
+// that is a relative path in the worktree, its script, and its paths.
 func gatePaths(r Repository) []string {
 	var paths []string
 	seen := map[string]bool{}
@@ -1625,14 +1627,14 @@ func gatePaths(r Repository) []string {
 			paths = append(paths, p)
 		}
 	}
-	for _, a := range r.Gate {
+	for _, a := range r.Policy.Gate.Argv {
 		if strings.Contains(a, "/") && !filepath.IsAbs(a) && !strings.HasPrefix(a, "-") && !strings.Contains(a, "=") {
 			if p := filepath.Clean(a); p != "." && p != ".." && !strings.HasPrefix(p, "../") {
 				add(p)
 			}
 		}
 	}
-	for _, p := range r.GatePaths {
+	for _, p := range r.Policy.Gate.Paths {
 		add(p)
 	}
 	return paths
@@ -1661,9 +1663,9 @@ func (s *Supervisor) gatePinned(name, key, fkey string, d Deliver, repo Reposito
 	}
 	if pinned == 0 {
 		ck := "deliver:" + key + ":gate-unpinned"
-		s.skipOnce(name, ck, fmt.Sprintf("the target branch %s has none of the gate's paths (%s), so nothing pins it; name its files in repositories.%s.gate_paths",
+		s.skipOnce(name, ck, fmt.Sprintf("the target branch %s has none of the gate's paths (%s), so nothing pins it; name its files in repositories.%s.policy.gate.paths",
 			d.Target, strings.Join(paths, ", "), d.Repository), t, &SkipPayload{Worktree: d.Worktree})
-		s.escalate(name, ck, fmt.Sprintf("%s is DONE but nothing on %s pins the gate of %s; nothing is delivered until its files are named in gate_paths.",
+		s.escalate(name, ck, fmt.Sprintf("%s is DONE but nothing on %s pins the gate of %s; nothing is delivered until its files are named in its policy's gate.paths.",
 			name, d.Target, d.Repository), t, s.clock.Now())
 		return false
 	}

@@ -138,7 +138,7 @@ func RecordInstruction(cfg *Config, log *Log, st *LogState, now time.Time, conso
 	}
 	from := "console:" + console
 	p := &InstructionPayload{Repositories: repos, Text: text, Hash: shortHash(HashPane(text)), From: from}
-	for i, pat := range cfg.ConfidentialPatterns {
+	for i, pat := range screenPatterns(cfg) {
 		if regexp.MustCompile(pat).MatchString(text) {
 			// Nothing of a withheld text is logged, not even its hash,
 			// so it is never taken for a copy.

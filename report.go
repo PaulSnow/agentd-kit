@@ -165,7 +165,7 @@ func BuildReport(cfg *Config, events []Event, mode, host string, now time.Time) 
 // configuration's confidential patterns as they are now.
 func confidentialMatcher(cfg *Config) func(texts ...string) bool {
 	var confidential []*regexp.Regexp
-	for _, p := range cfg.ConfidentialPatterns {
+	for _, p := range screenPatterns(cfg) {
 		confidential = append(confidential, regexp.MustCompile(p))
 	}
 	return func(texts ...string) bool {

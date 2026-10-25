@@ -537,7 +537,7 @@ func TestNotAllowedDoesNotLatch(t *testing.T) {
 		t.Fatalf("pushes %v delivered %v while refused", h.forge.pushes, h.sup.Tracks()["d"].Delivered)
 	}
 
-	h.cfg.Repositories["readonly"] = Repository{Forge: "gitlab", Host: "gitlab.example.com", Project: "example-org/readonly", Allow: []string{"push", "open"}, Gate: []string{"make", "check"}, GatePaths: []string{"Makefile"}}
+	h.cfg.Repositories["readonly"] = Repository{Forge: "gitlab", Host: "gitlab.example.com", Project: "example-org/readonly", Policy: RepoPolicy{Delivery: DeliveryRules{Allow: []string{"push", "open"}}, Gate: GateRules{Argv: []string{"make", "check"}, Paths: []string{"Makefile"}}}}
 	h.git.remote = "git@gitlab.example.com:example-org/readonly.git"
 	h.restart(false)
 	h.ticks(3, 5*time.Minute)

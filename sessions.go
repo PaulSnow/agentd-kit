@@ -29,15 +29,13 @@ import (
 // the branch requests go to. Accounts are those a coordinator may start
 // a session under, by default its own; Max bounds how many run at once.
 type SessionsPolicy struct {
-	Root     string   `json:"root"`
-	Clone    string   `json:"clone"`
-	Target   string   `json:"target"`
-	Accounts []string `json:"accounts"`
-	Max      int      `json:"max"`
+	Root   string `json:"root"`
+	Clone  string `json:"clone"`
+	Target string `json:"target"`
 }
 
 // DefaultMaxSessions bounds a repository's started sessions when its
-// sessions entry sets no max.
+// policy sets no sessions.max.
 const DefaultMaxSessions = 4
 
 // Session kinds a coordinator may start.
@@ -147,7 +145,7 @@ func runtimeSession(name string, p RuntimePayload, repo Repository) Session {
 	case KindJudge:
 		s.Role = RoleJudge
 	}
-	if contains(repo.Allow, "push") && p.Kind == KindWork {
+	if contains(repo.Policy.Delivery.Allow, "push") && p.Kind == KindWork {
 		s.Deliver = []Deliver{{Repository: p.Repository, Worktree: s.Cwd, Target: repo.Sessions.Target, MRFile: filepath.Join(workdir, "MR.md"), Draft: true}}
 	}
 	return s
@@ -209,20 +207,6 @@ func (c *Config) checkSessionsPolicies(path func(field, p string) string, errs *
 		}
 		if !plainBranch(q.Target) {
 			*errs = append(*errs, fmt.Errorf("%s.target %q is not a plain branch name", field, q.Target))
-		}
-		if q.Max < 0 {
-			*errs = append(*errs, fmt.Errorf("%s.max must not be negative", field))
-		}
-		if q.Max == 0 {
-			q.Max = DefaultMaxSessions
-		}
-		if q.Accounts == nil && repo.Coordinator != nil {
-			q.Accounts = []string{repo.Coordinator.Account}
-		}
-		for _, a := range q.Accounts {
-			if _, ok := c.Accounts[a]; a != "" && !ok {
-				*errs = append(*errs, fmt.Errorf("%s.accounts: %q is not in accounts", field, a))
-			}
 		}
 		repo.Sessions = &q
 		c.Repositories[name] = repo
@@ -439,11 +423,16 @@ func (srv *MCPServer) callSessions(tool string, args json.RawMessage) (string, b
 	case a.Branch == pol.Target || delivers(srv.cfg, own, a.Branch):
 		return refuse("branch %s is a target requests go to; start a session on a branch of its own", a.Branch)
 	}
-	if a.Account == "" && srv.sess.Account != "" && contains(pol.Accounts, srv.sess.Account) {
+	rules, _ := effectivePolicy(srv.cfg, st, own)
+	if rules.Scope.Reserved.matches(a.Issue, nil) {
+		return refuse("issue %d is reserved in %s's policy: agentd starts no session on it", a.Issue, own)
+	}
+	allowed := rules.Sessions.Accounts
+	if a.Account == "" && srv.sess.Account != "" && contains(allowed, srv.sess.Account) {
 		a.Account = srv.sess.Account
 	}
-	if !contains(pol.Accounts, a.Account) {
-		return refuse("account %q is not one %s's sessions may use: %s", a.Account, own, strings.Join(pol.Accounts, ", "))
+	if !contains(allowed, a.Account) {
+		return refuse("account %q is not one %s's sessions may use: %s", a.Account, own, strings.Join(allowed, ", "))
 	}
 	name := runtimeName(own, a.Branch, a.Kind)
 	if _, ok := st.Runtime[name]; ok {
@@ -452,11 +441,11 @@ func (srv *MCPServer) callSessions(tool string, args json.RawMessage) (string, b
 	if s, ok := srv.cfg.Sessions[name]; ok && !s.Runtime {
 		return refuse("session %s is configured already", name)
 	}
-	if n := len(sessionsOf(st.Runtime, own)); n >= pol.Max {
+	if n := len(sessionsOf(st.Runtime, own)); n >= rules.Sessions.Max {
 		return refuse("%s runs %d started sessions, its max; end one first", own, n)
 	}
 	id := newIntentID()
-	p := RuntimePayload{ID: id, Action: SessionStart, Repository: own, Kind: a.Kind, Branch: a.Branch, Issue: a.Issue, Account: a.Account, Max: pol.Max, By: srv.name}
+	p := RuntimePayload{ID: id, Action: SessionStart, Repository: own, Kind: a.Kind, Branch: a.Branch, Issue: a.Issue, Account: a.Account, Max: rules.Sessions.Max, By: srv.name}
 	if err := srv.log.Append(Event{V: EventVersion, Time: srv.now(), Session: name, Kind: KindSession, Mode: ModeShared, Runtime: &p}); err != nil {
 		return refuse("agentd could not record the start: %v", err)
 	}

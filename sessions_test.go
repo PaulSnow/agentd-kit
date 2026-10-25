@@ -21,7 +21,8 @@ func sessionsHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	w := h.cfg.Repositories["widgets"]
-	w.Sessions = &SessionsPolicy{Root: h.dir, Clone: clone, Target: "main", Max: 2}
+	w.Sessions = &SessionsPolicy{Root: h.dir, Clone: clone, Target: "main"}
+	w.Policy.Sessions.Max = 2
 	h.cfg.Repositories["widgets"] = w
 	if err := h.cfg.finish(h.dir); err != nil {
 		t.Fatal(err)
@@ -428,9 +429,7 @@ func TestStartHeldByItsOwnMax(t *testing.T) {
 	h.startSession(map[string]any{"branch": "a"})
 	h.startSession(map[string]any{"branch": "b"})
 	w := h.cfg.Repositories["widgets"]
-	p := *w.Sessions
-	p.Max = 1
-	w.Sessions = &p
+	w.Policy.Sessions.Max = 1
 	h.cfg.Repositories["widgets"] = w
 	if rt := projectedRuntime(h.cfg, h.events()); len(rt) != 2 {
 		t.Fatalf("running = %v", rt)

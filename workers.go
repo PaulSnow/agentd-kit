@@ -61,7 +61,7 @@ func (w *workState) signal() {
 // job with the same key is still running, and says whether it started it.
 func (s *Supervisor) spawn(name, key string, job func(w *Supervisor, t *Track)) bool {
 	st := &LogState{Mode: s.st.Mode, Tracks: map[string]*Track{name: s.track(name).clone()}, Pending: map[string]Event{}, cfg: s.cfg,
-		Ended: copyMap(s.st.Ended)} // an ended session's escalation goes to its repository's console
+		Ended: copyMap(s.st.Ended), Policies: copyMap(s.st.Policies)} // an ended session's escalation goes to its repository's console
 	return s.start(key, st, func(w *Supervisor) { job(w, w.st.track(name)) })
 }
 

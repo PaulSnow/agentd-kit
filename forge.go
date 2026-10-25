@@ -86,9 +86,10 @@ type Forge interface {
 	Push(dir, url, sha, branch string) error
 	Open(repo Repository, mr MergeRequest, dir string) (MergeResult, error)
 	Find(repo Repository, source, target string) ([]MergeResult, error)
-	// Merge fast-forwards target to head, the request ref's head: never
-	// a merge commit, a squash or a rebase. It fails when that is not a
-	// fast-forward.
+	// Merge merges the request ref, whose head is head, into target by
+	// the method of repo's policy: a fast-forward, which fails when it is
+	// not one; the forge's merge call, a merge commit or a squash, which
+	// fails when the head moved; or the policy's merge command.
 	Merge(repo Repository, ref, head, target string) error
 }
 
@@ -104,10 +105,8 @@ func (a AllowedForge) allowed(repo string, write string) error {
 	if !ok {
 		return fmt.Errorf("repository %q is not configured", repo)
 	}
-	for _, w := range r.Allow {
-		if w == write {
-			return nil
-		}
+	if write == "merge" && r.Policy.Merge.Enabled || write != "merge" && contains(r.Policy.Delivery.Allow, write) {
+		return nil
 	}
 	return fmt.Errorf("repository %q does not allow %s", repo, write)
 }
@@ -693,23 +692,45 @@ func (f ExecForge) Find(repo Repository, source, target string) ([]MergeResult, 
 }
 
 func (f ExecForge) Merge(repo Repository, ref, head, target string) error {
+	method := repo.Policy.Merge.Method
+	if method == MergeByCommand {
+		return mergeByCommand(f.Timeout, repo, ref, head, target)
+	}
 	switch repo.Forge {
 	case "gitlab":
-		return mergeGitLab(f.Timeout, repo, ref, head)
+		return mergeGitLab(f.Timeout, repo, ref, head, method == MergeSquash)
 	case "github":
+		if method == MergeCommit || method == MergeSquash {
+			return mergeGitHubCall(f.Timeout, repo, ref, head, method)
+		}
 		return mergeGitHub(f.Timeout, repo, head, target)
 	}
 	return fmt.Errorf("unknown forge %q", repo.Forge)
 }
 
+// mergeByCommand runs the policy's merge command, with no shell, its
+// placeholders substituted, and the forge's no-prompt environment.
+func mergeByCommand(timeout time.Duration, repo Repository, ref, head, target string) error {
+	r := strings.NewReplacer("{repository}", repo.Project, "{request}", ref, "{head}", head, "{target}", target)
+	argv := make([]string, len(repo.Policy.Merge.Command))
+	for i, a := range repo.Policy.Merge.Command {
+		argv[i] = r.Replace(a)
+	}
+	if _, err := runTimed(timeout, "", forgeEnv, true, argv[0], argv[1:]...); err != nil {
+		return fmt.Errorf("%s: %s", argv[0], exitMessage(err))
+	}
+	return nil
+}
+
 // mergeGitLab merges the request through GitLab's merge call, which
-// merges only while the request's head is sha, and without a squash. It
-// fast-forwards because the caller saw the project's merge method is ff,
-// under which GitLab refuses a request that is not a fast-forward.
-func mergeGitLab(timeout time.Duration, repo Repository, ref, head string) error {
+// merges only while the request's head is sha. Without squash it
+// fast-forwards when the caller saw the project's merge method is ff,
+// under which GitLab refuses a request that is not a fast-forward, and
+// otherwise makes the project's merge.
+func mergeGitLab(timeout time.Duration, repo Repository, ref, head string, squash bool) error {
 	proj := strings.ReplaceAll(repo.Project, "/", "%2F")
 	args := glabArgs(repo, "-X", "PUT", "projects/"+proj+"/merge_requests/"+strings.TrimPrefix(ref, "!")+"/merge",
-		"-f", "sha="+head, "-F", "squash=false")
+		"-f", "sha="+head, "-F", "squash="+strconv.FormatBool(squash))
 	if _, err := runTimed(timeout, "", forgeEnv, false, "glab", args...); err != nil {
 		return fmt.Errorf("glab: %s", exitMessage(err))
 	}
@@ -722,6 +743,20 @@ func mergeGitLab(timeout time.Duration, repo Repository, ref, head string) error
 func mergeGitHub(timeout time.Duration, repo Repository, head, target string) error {
 	args := []string{"api", "--method", "PATCH", "repos/" + repo.Project + "/git/refs/heads/" + escapeRef(target),
 		"-f", "sha=" + head, "-F", "force=false"}
+	if repo.Host != "" {
+		args = append(args, "--hostname", repo.Host)
+	}
+	if _, err := runTimed(timeout, "", forgeEnv, false, "gh", args...); err != nil {
+		return fmt.Errorf("gh: %s", exitMessage(err))
+	}
+	return nil
+}
+
+// mergeGitHubCall merges the pull request through GitHub's merge call,
+// which merges only while its head is head, as a merge commit or a squash.
+func mergeGitHubCall(timeout time.Duration, repo Repository, ref, head, method string) error {
+	args := []string{"api", "--method", "PUT", "repos/" + repo.Project + "/pulls/" + strings.TrimPrefix(ref, "#") + "/merge",
+		"-f", "sha=" + head, "-f", "merge_method=" + method}
 	if repo.Host != "" {
 		args = append(args, "--hostname", repo.Host)
 	}

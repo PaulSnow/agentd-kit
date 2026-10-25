@@ -289,7 +289,7 @@ func TestConfigRefusesMissingDirsAndTildeUser(t *testing.T) {
 func TestConfigRefusesMistakes(t *testing.T) {
 	cases := map[string]string{
 		"unknown field":         `{"sessions": {"s": {"workdir": "w", "cwd": "c", "typo": 1}}}`,
-		"merge in allow":        `{"repositories": {"r": {"forge": "gitlab", "project": "a/b", "allow": ["merge"]}}}`,
+		"merge in allow":        `{"repositories": {"r": {"forge": "gitlab", "project": "a/b", "policy": {"delivery": {"allow": ["merge"]}}}}}`,
 		"unknown repository":    `{"sessions": {"s": {"workdir": "w", "cwd": "c", "repository": "nope"}}}`,
 		"pattern name":          `{"sessions": {"w1*": {"workdir": "w", "cwd": "c"}}}`,
 		"bad duration":          `{"poll_interval": "soon"}`,

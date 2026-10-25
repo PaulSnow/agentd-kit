@@ -477,6 +477,7 @@ type fakeForge struct {
 
 type mergedRequest struct {
 	ref, source, target, head string
+	method                    string // the policy's method a merge was asked with
 }
 
 func (f *fakeForge) Push(dir, url, sha, branch string) error {
@@ -504,7 +505,7 @@ func (f *fakeForge) Open(repo Repository, mr MergeRequest, dir string) (MergeRes
 func (f *fakeForge) Merge(repo Repository, ref, head, target string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.merges = append(f.merges, mergedRequest{ref: ref, target: target, head: head})
+	f.merges = append(f.merges, mergedRequest{ref: ref, target: target, head: head, method: repo.Policy.Merge.Method})
 	return f.mergeErr
 }
 
@@ -626,8 +627,8 @@ func newHarness(t *testing.T, shadow bool, names ...string) *harness {
 	cfg.Policies.Escalate.Command = []string{"route", "{console}", "--kind", "decision", "{message}"}
 	cfg.Policies.Escalate.DefaultConsole = "infra"
 	cfg.Repositories = map[string]Repository{
-		"widgets":  {Forge: "gitlab", Host: "gitlab.example.com", Project: "example-org/widgets", Allow: []string{"push", "open"}, Console: "widgets", Gate: []string{"./bin/check"}},
-		"readonly": {Forge: "gitlab", Host: "gitlab.example.com", Project: "example-org/readonly", Allow: nil},
+		"widgets":  {Forge: "gitlab", Host: "gitlab.example.com", Project: "example-org/widgets", Console: "widgets", Policy: RepoPolicy{Delivery: DeliveryRules{Allow: []string{"push", "open"}}, Gate: GateRules{Argv: []string{"./bin/check"}}}},
+		"readonly": {Forge: "gitlab", Host: "gitlab.example.com", Project: "example-org/readonly"},
 	}
 	cfg.Sessions = map[string]Session{}
 	tmux := newFakeTmux()
