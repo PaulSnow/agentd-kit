@@ -360,6 +360,7 @@ func (s *Supervisor) feedPost(e feedEntry, failed int) {
 // a "seen" naming no known item, or words that do not begin with a
 // session and one of its decisions or a decision's id.
 func ConsoleReply(cfg *Config, log *Log, st *LogState, now time.Time, console, reply string) error {
+	cfg = withRuntime(cfg, st.Runtime) // a started session's decisions are answered too
 	f := strings.Fields(reply)
 	from := "console:" + console
 	if len(f) == 0 {

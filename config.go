@@ -248,6 +248,8 @@ type Repository struct {
 	OwnerOnly bool `json:"owner_only"`
 	// Coordinator, when set, is the repository's one coordinator session.
 	Coordinator *Coordinator `json:"coordinator"`
+	// Sessions, when set, lets the coordinator start sessions (sessions.go).
+	Sessions *SessionsPolicy `json:"sessions"`
 }
 
 // Coordinator is the session that carries a repository's judgment (#3):
@@ -281,6 +283,9 @@ type Session struct {
 	// RoleCoordinator is a repository's coordinator, which only its
 	// repository's coordinator entry makes.
 	Role string `json:"role,omitempty"`
+	// Runtime marks a session a coordinator started: the event log, not
+	// the configuration, holds it (sessions.go).
+	Runtime bool `json:"-"`
 }
 
 // Deliver says what to push and open when the session is DONE.
@@ -537,6 +542,7 @@ func (c *Config) finish(base string) error {
 		}
 	}
 	c.addCoordinators(path, &errs)
+	c.checkSessionsPolicies(path, &errs)
 	if p := c.Policies.Coordinator; p.PackBytes < 1024 || p.Turns < 1 || strings.TrimSpace(p.Pointer) == "" || strings.ContainsAny(p.Pointer, "\n\r") {
 		errs = append(errs, errors.New("policies.coordinator needs pack_bytes of 1024 or more, turns of 1 or more, and a one-line pointer"))
 	}

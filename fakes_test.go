@@ -95,6 +95,7 @@ type fakeTmux struct {
 	commands   map[string]string
 	paths      map[string]string // #{pane_current_path}
 	newErr     map[string]error  // NewSession fails with this
+	stopErr    map[string]error  // Stop fails with this
 	replaceErr error             // Replace fails with this
 	calls      []call
 	mutations  int
@@ -214,6 +215,9 @@ func (f *fakeTmux) Stop(name string) error {
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, call{op: "stop", name: name})
 	f.mutations++
+	if err := f.stopErr[name]; err != nil {
+		return err
+	}
 	if !f.alive[name] {
 		return fmt.Errorf("no session %s", name)
 	}
@@ -341,6 +345,23 @@ type fakeGit struct {
 	onGateFiles  func(n int)          // runs, locked, in the nth GateFiles call
 	gateUnpinned bool                 // the target has none of the gate files
 	gateErr      error                // what GateFiles fails with
+	worktrees    []string             // the worktrees added: clone, dir, branch, target
+	worktreeErr  error                // what AddWorktree fails with
+}
+
+// AddWorktree makes dir and records the worktree it would have added.
+func (g *fakeGit) AddWorktree(clone, dir, branch, target string, detach bool) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.worktreeErr != nil {
+		return g.worktreeErr
+	}
+	w := clone + " " + dir + " " + branch + " " + target
+	if detach {
+		w += " detached"
+	}
+	g.worktrees = append(g.worktrees, w)
+	return os.MkdirAll(dir, 0o755)
 }
 
 func (g *fakeGit) Fetch(string) error {

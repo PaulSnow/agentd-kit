@@ -276,9 +276,10 @@ func (ps *pageState) load() (PageData, error) {
 		return data, err
 	}
 	now := time.Now()
-	data.Report = ReportFrom(ps.cfg, ps.st, ps.host, now)
-	data.Needs = NeedsFrom(ps.cfg, ps.st, data.Report, now)
-	data.Decisions = DecisionsFrom(ps.cfg, ps.st, data.Report)
+	cfg := withRuntime(ps.cfg, ps.st.Runtime)
+	data.Report = ReportFrom(cfg, ps.st, ps.host, now)
+	data.Needs = NeedsFrom(cfg, ps.st, data.Report, now)
+	data.Decisions = DecisionsFrom(cfg, ps.st, data.Report)
 	data.New = ps.st.SortedItems(true)
 	SortByUrgency(data.New)
 	return data, nil

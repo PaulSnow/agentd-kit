@@ -693,6 +693,7 @@ func casesCmd(args []string, w io.Writer) error {
 		}
 		defer log.Close()
 		st := NewLogState(cfg, mode).Fold(events)
+		cfg := withRuntime(cfg, st.Runtime)
 		if goal {
 			return RecordGoal(log, cfg, st, time.Now(), fs.Arg(1), string(body))
 		}
@@ -713,7 +714,8 @@ func casesCmd(args []string, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	cs := CasesFrom(cfg, NewLogState(cfg, mode).Fold(events))
+	st := NewLogState(cfg, mode).Fold(events)
+	cs := CasesFrom(withRuntime(cfg, st.Runtime), st)
 	RankCases(cs, pr)
 	if *asJSON {
 		week := ""
