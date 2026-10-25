@@ -17,9 +17,9 @@ import (
 // Tokens the fake usage API knows. Each is long enough that its first
 // and last sixteen characters are scrubbed too.
 const (
-	tokenA = "sk-ant-oat01-tokenA-0123456789abcdefghijklmnop" // may read the usage endpoint
-	tokenB = "sk-ant-oat01-tokenB-0123456789abcdefghijklmnop" // may not: the headers serve it
-	tokenC = "sk-ant-oat01-tokenC-0123456789abcdefghijklmnop" // the endpoint fails and echoes it
+	tokenA = "test-oat-tokenA-0123456789abcdefghijklmnop" // may read the usage endpoint
+	tokenB = "test-oat-tokenB-0123456789abcdefghijklmnop" // may not: the headers serve it
+	tokenC = "test-oat-tokenC-0123456789abcdefghijklmnop" // the endpoint fails and echoes it
 )
 
 var usageReset = time.Date(2026, 10, 23, 17, 0, 0, 0, time.UTC)
@@ -399,7 +399,7 @@ func TestUsageSteadyAccountStaysFresh(t *testing.T) {
 	if n < 3 {
 		t.Fatalf("a logged %d times in an hour, want a reading at least every %s", n, relogAfter(h.cfg.Usage))
 	}
-	if a, why, _ := placeAccount(h.cfg, h.logState(), "widgets", h.clock.Now()); a != "a" {
+	if a, why, _ := placeAccount(h.cfg, h.logState(), "widgets", h.clock.Now(), nil); a != "a" {
 		t.Fatalf("placed on %q: %s", a, why)
 	}
 }
@@ -518,5 +518,39 @@ func TestUsageAPIAndExpiry(t *testing.T) {
 	}
 	if _, err := accountToken(Account{TokenFile: filepath.Join(dir, "missing", "x.token")}); err == nil || strings.Contains(err.Error(), dir) {
 		t.Fatalf("a missing token file: %v", err)
+	}
+}
+
+// A start recorded while agentd was down is not told to the owner as a
+// long wait when agentd comes back: the run reads first, then places.
+// An earlier account not yet read by this run is waited for, never passed
+// over for a later one whose usage is off.
+func TestPlacementAfterDowntime(t *testing.T) {
+	h, _ := usageHarness(t)
+	b := h.cfg.Accounts["b"]
+	b.Usage = UsageOff
+	h.cfg.Accounts["b"] = b
+	h.restart(false)
+	reply, _ := h.startSession(map[string]any{"branch": "fix/spin", "issue": 7})
+	name, _ := reply["name"].(string)
+	h.clock.advance(2 * time.Hour)
+	h.restart(false)
+	h.ticks(3, time.Minute)
+	if n := placementNotices(h); len(n) != 0 {
+		t.Fatalf("notices after the downtime: %q", n)
+	}
+	if acct := projected(h.cfg, h.events()).Sessions[name].Account; acct != "a" {
+		t.Fatalf("placed on %q, want a, which has room", acct)
+	}
+}
+
+// The default login is never a fallback.
+func TestFallbackNamesAnAccount(t *testing.T) {
+	h, _ := usageHarness(t)
+	w := h.cfg.Repositories["widgets"]
+	w.Policy.Sessions.Fallback = []string{"a", ""}
+	h.cfg.Repositories["widgets"] = w
+	if err := h.cfg.finish(h.dir); err == nil || !strings.Contains(err.Error(), "fallback") {
+		t.Fatalf("an empty fallback: %v", err)
 	}
 }

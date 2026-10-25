@@ -395,6 +395,11 @@ func (s *Supervisor) readAccounts(now time.Time) {
 	if !u.Enabled || s.shadow {
 		return
 	}
+	s.work.mu.Lock()
+	if s.work.usageSince.IsZero() {
+		s.work.usageSince = now
+	}
+	s.work.mu.Unlock()
 	for _, name := range sortedKeys(s.cfg.Accounts) {
 		a := s.cfg.Accounts[name]
 		if a.Usage == UsageOff {
@@ -427,10 +432,14 @@ func (s *Supervisor) readAccounts(now time.Time) {
 // placeAccount is the account a started session of repo goes on: the
 // first of the repository's sessions.fallback whose latest reading is
 // fresh and under the limit on both windows, or, with the readings off,
-// the first; an account whose usage is off counts as having room. When
-// none is, it is "" and why says each account's state; full says every
-// account was read and is at or over the limit, rather than unread.
-func placeAccount(cfg *Config, st *LogState, repo string, now time.Time) (account, why string, full bool) {
+// the first; an account whose usage is off counts as having room once
+// every account before it is known to have none. Tried says whether this
+// run has read an account yet (nil: all have been): an earlier account
+// not yet tried is waited for, never passed over for a later one, since
+// a placement holds for good. When no account is chosen, it is "" and why
+// says each account's state; full says every account was read and is at
+// or over the limit, rather than unread.
+func placeAccount(cfg *Config, st *LogState, repo string, now time.Time, tried func(string) bool) (account, why string, full bool) {
 	rules, _ := effectivePolicy(cfg, st, repo)
 	u := cfg.Usage
 	var states []string
@@ -438,6 +447,9 @@ func placeAccount(cfg *Config, st *LogState, repo string, now time.Time) (accoun
 	for _, a := range rules.Sessions.Fallback {
 		if !u.Enabled || cfg.Accounts[a].Usage == UsageOff {
 			return a, "", false
+		}
+		if tried != nil && !tried(a) {
+			return "", strings.Join(append(states, a+": not read yet by this run"), "; "), false
 		}
 		r, ok := st.Accounts[a]
 		high, both := r.usageHigh()
@@ -495,7 +507,12 @@ func unplaced(p RuntimePayload) bool {
 // live run's placement.
 func (s *Supervisor) place(name string, t *Track, now time.Time) {
 	p := s.st.Runtime[name]
-	account, why, full := placeAccount(s.cfg, s.st, p.Repository, now)
+	s.work.mu.Lock()
+	read := copyMap(s.work.nextUsage)
+	since := s.work.usageSince
+	s.work.mu.Unlock()
+	tried := func(a string) bool { _, ok := read[a]; return ok }
+	account, why, full := placeAccount(s.cfg, s.st, p.Repository, now, tried)
 	if s.shadow {
 		if account != "" {
 			why = "the live run places it; it would go on " + account
@@ -509,12 +526,18 @@ func (s *Supervisor) place(name string, t *Track, now time.Time) {
 		// The owner is told once: when every account was read and is
 		// full, or when the readings have not come for as long as a
 		// reading stands, never only because the first is not in yet.
-		waited := now.Sub(s.st.StartedAt[name])
+		// Waited since the start, or since this run began reading,
+		// whichever is later: a run just started has not had its chance.
+		from := s.st.StartedAt[name]
+		if since.After(from) {
+			from = since
+		}
+		waited := now.Sub(from)
 		switch {
 		case full:
 			s.escalate(name, key, fmt.Sprintf("%s, started for branch %s of %s, waits for an account: every account of its fallback is at or over %.0f%% (%s). It starts on the first with room.",
 				name, p.Branch, p.Repository, s.cfg.Usage.Limit, why), t, now)
-		case waited >= usageStale*s.cfg.Usage.Every.Duration:
+		case !since.IsZero() && waited >= usageStale*s.cfg.Usage.Every.Duration:
 			s.escalate(name, key, fmt.Sprintf("%s, started for branch %s of %s, has waited %s for an account: %s. It starts on the first fallback account with room once it is read.",
 				name, p.Branch, p.Repository, waited.Round(time.Minute), why), t, now)
 		}

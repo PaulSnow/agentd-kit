@@ -115,6 +115,7 @@ func (st *LogState) applySession(e Event) {
 	case SessionEnd:
 		if _, ok := st.Runtime[e.Session]; ok {
 			delete(st.Runtime, e.Session)
+			delete(st.StartedAt, e.Session)
 			st.Ended[e.Session] = p.Repository
 		}
 	}

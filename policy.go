@@ -265,6 +265,11 @@ func (c *Config) checkPolicy(name string, repo *Repository, errs *[]error) {
 			bad("sessions: account %q is not in accounts", a)
 		}
 	}
+	for _, a := range s.Fallback {
+		if a == "" {
+			bad("sessions.fallback: an account must be named; the default login is never a fallback")
+		}
+	}
 	for i, pat := range p.ConfidentialPatterns {
 		if _, err := regexp.Compile(pat); err != nil {
 			bad("confidential_patterns[%d]: %v", i, err)
