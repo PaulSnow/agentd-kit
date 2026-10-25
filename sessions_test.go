@@ -257,11 +257,107 @@ func TestExecGitAddWorktree(t *testing.T) {
 	g := ExecGit{Timeout: time.Minute}
 	for _, b := range []string{"old", "new/one"} {
 		wt := filepath.Join(dir, "wt-"+strings.ReplaceAll(b, "/", "-"))
-		if err := g.AddWorktree(clone, wt, b, "main"); err != nil {
+		if err := g.AddWorktree(clone, wt, b, "main", false); err != nil {
 			t.Fatal(err)
 		}
 		if got, err := g.Branch(wt); err != nil || got != b {
 			t.Fatalf("branch = %q, %v", got, err)
 		}
+	}
+}
+
+// A branch started again after its end is a new session: a fresh Track,
+// a new brief and, where the last one finished, a fresh STATUS.md, so it
+// is launched and not taken for DONE. The coordinator's server, launched
+// while the first ran, starts it again.
+func TestStartAgainAfterEnd(t *testing.T) {
+	h := sessionsHarness(t)
+	reply, _ := h.startSession(map[string]any{"branch": "fix-spin", "issue": 7})
+	name := reply["name"].(string)
+	h.ticks(2, time.Minute)
+	h.alive(name, "working")
+	h.ticks(1, time.Minute)
+	h.status(name, "# s\n\nDONE\n")
+	h.ticks(2, time.Minute)
+	srv, err := NewMCPServer(projected(h.cfg, h.events()), "c", NewLogWriter(h.buf), func() ([]Event, error) { return h.events(), nil }, h.clock.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, refused := callOne(t, srv, ToolEndSession, map[string]any{"name": name}); refused {
+		t.Fatal("end refused")
+	}
+	h.ticks(1, time.Minute)
+	if text, refused := callOne(t, srv, ToolStartSession, map[string]any{"branch": "fix-spin", "issue": 8}); refused {
+		t.Fatalf("start again = %s", text)
+	}
+	h.ticks(3, time.Minute)
+	if n := h.tmux.count("new-session", name); n != 2 {
+		t.Fatalf("launched %d times, want twice", n)
+	}
+	brief, _ := os.ReadFile(filepath.Join(h.dir, name, "BRIEF.md"))
+	status, _ := os.ReadFile(filepath.Join(h.dir, name, "STATUS.md"))
+	if !strings.Contains(string(brief), `"issue":8`) || ParseStatus(string(status)).Done {
+		t.Fatalf("brief %q, status %q", brief, status)
+	}
+	if tr := h.sup.track(name); tr.Parked || len(tr.Crashes) != 0 || tr.State == Done {
+		t.Fatalf("track carried over: %+v", tr)
+	}
+}
+
+// Two starts past max both appended: the fold holds the first only.
+func TestFoldHoldsMax(t *testing.T) {
+	h := sessionsHarness(t)
+	for i, b := range []string{"a", "b", "c"} {
+		h.sup.emit(runtimeName("widgets", b, KindWork), Event{Kind: KindSession, Mode: ModeShared,
+			Runtime: &RuntimePayload{ID: string(rune('x' + i)), Action: SessionStart, Repository: "widgets", Kind: KindWork, Branch: b, By: "c"}})
+	}
+	if rt := projectedRuntime(h.cfg, h.events()); len(rt) != 2 {
+		t.Fatalf("running = %v, want max 2", rt)
+	}
+}
+
+// A started session's decision is answered from the console, not taken
+// for an instruction.
+func TestConsoleAnswersStartedSession(t *testing.T) {
+	h := sessionsHarness(t)
+	reply, _ := h.startSession(map[string]any{"branch": "fix-spin"})
+	name := reply["name"].(string)
+	st := NewLogState(h.cfg, ModeLive).Fold(h.events())
+	if !replyForm(st, withRuntime(h.cfg, st.Runtime), []string{name, "D1", "yes"}) {
+		t.Fatal("not an answer form")
+	}
+	if err := ConsoleReply(h.cfg, NewLogWriter(h.buf), st, h.clock.Now(), "widgets", name+" D1 yes"); err == nil {
+		t.Fatal("an answer to a decision never raised was taken")
+	}
+	if h.count(KindInstruction, "", "") != 0 {
+		t.Fatal("the answer became an instruction")
+	}
+}
+
+// A reviewer's worktree is detached at the branch its worker has out.
+func TestExecGitReviewerBesideWorker(t *testing.T) {
+	dir := t.TempDir()
+	origin, clone := filepath.Join(dir, "origin"), filepath.Join(dir, "clone")
+	gitRun(t, dir, "init", "-q", "--bare", origin)
+	seed := filepath.Join(dir, "seed")
+	gitRun(t, dir, "clone", "-q", origin, seed)
+	writeFile(t, filepath.Join(seed, "a.txt"), "a\n")
+	gitRun(t, seed, "add", "a.txt")
+	gitRun(t, seed, "commit", "-q", "-m", "a")
+	gitRun(t, seed, "push", "-q", "origin", "HEAD:refs/heads/main")
+	gitRun(t, dir, "clone", "-q", origin, clone)
+	g := ExecGit{Timeout: time.Minute}
+	work, review := filepath.Join(dir, "work"), filepath.Join(dir, "review")
+	if err := g.AddWorktree(clone, work, "fix", "main", false); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(work, "b.txt"), "b\n")
+	gitRun(t, work, "add", "b.txt")
+	gitRun(t, work, "commit", "-q", "-m", "b")
+	if err := g.AddWorktree(clone, review, "fix", "main", true); err != nil {
+		t.Fatal(err)
+	}
+	if a, b := gitRun(t, work, "rev-parse", "HEAD"), gitRun(t, review, "rev-parse", "HEAD"); a != b {
+		t.Fatalf("reviewer at %s, worker at %s", b, a)
 	}
 }

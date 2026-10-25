@@ -73,8 +73,9 @@ const (
 )
 
 // applySession folds a start or an end. The first start of a name holds
-// until it is ended; a start of a running name is ignored. A new start
-// provisions again, which keeps what the last one left.
+// until it is ended; a start of a running name, and one past its
+// repository's max, are ignored. A start begins a new Track: what an
+// earlier session of the name delivered, failed or crashed is not its.
 func (st *LogState) applySession(e Event) {
 	p := e.Runtime
 	if p == nil || e.Session == "" {
@@ -88,11 +89,12 @@ func (st *LogState) applySession(e Event) {
 		if _, ok := st.Runtime[e.Session]; ok {
 			return
 		}
+		if pol := st.cfg.Repositories[p.Repository].Sessions; pol != nil && len(sessionsOf(st.Runtime, p.Repository)) >= pol.Max {
+			return
+		}
 		st.Runtime[e.Session] = *p
 		delete(st.Ended, e.Session)
-		if t := st.Tracks[e.Session]; t != nil {
-			t.Provisioned = false
-		}
+		delete(st.Tracks, e.Session)
 	case SessionEnd:
 		if _, ok := st.Runtime[e.Session]; ok {
 			delete(st.Runtime, e.Session)
@@ -278,22 +280,23 @@ func (s *Supervisor) provisionFiles(sess Session, p RuntimePayload, pol Sessions
 	if len(sess.Deliver) > 0 {
 		facts["mr_file"], facts["draft"] = sess.Deliver[0].MRFile, true
 	}
-	files := map[string]string{"BRIEF.md": briefInstruction + "\n\n" + compact(facts) + "\n", "STATUS.md": "# Status\n\nNot started.\n"}
-	for _, f := range []string{"BRIEF.md", "STATUS.md"} {
-		path := filepath.Join(sess.Workdir, f)
-		if _, err := os.Stat(path); err == nil {
-			continue
-		} else if !errors.Is(err, os.ErrNotExist) {
+	if err := writeAtomic(filepath.Join(sess.Workdir, "BRIEF.md"), []byte(briefInstruction+"\n\n"+compact(facts)+"\n")); err != nil {
+		return err
+	}
+	// The progress an earlier session of the name left stays, unless it
+	// was finished: a new start has work to do.
+	status := filepath.Join(sess.Workdir, "STATUS.md")
+	if b, err := os.ReadFile(status); errors.Is(err, os.ErrNotExist) || err == nil && ParseStatus(string(b)).Done {
+		if err := writeAtomic(status, []byte("# Status\n\nNot started.\n")); err != nil {
 			return err
 		}
-		if err := writeAtomic(path, []byte(files[f])); err != nil {
-			return err
-		}
+	} else if err != nil {
+		return err
 	}
 	if _, err := os.Stat(sess.Cwd); err == nil {
 		return nil // the worktree an earlier start left
 	}
-	return s.git.AddWorktree(pol.Clone, sess.Cwd, p.Branch, pol.Target)
+	return s.git.AddWorktree(pol.Clone, sess.Cwd, p.Branch, pol.Target, p.Kind != KindWork)
 }
 
 // endSessions stops the tmux session of each ended session, once: its
@@ -310,7 +313,11 @@ func (s *Supervisor) endSessions(now time.Time) {
 		}
 		t := s.track(name)
 		key := "end:" + name
-		if !s.retryDue(t, key, now) || s.failed(t, key) {
+		if s.failed(t, key) {
+			s.escalate(name, key, fmt.Sprintf("agentd could not stop %s, which was ended, after %d tries; see the error events. It is no longer supervised; stop its tmux session yourself.", name, len(t.Failures[key])), t, now)
+			continue
+		}
+		if !s.retryDue(t, key, now) {
 			continue
 		}
 		s.act(name, ActEnd, &ActPayload{Key: key}, func() error {
@@ -398,8 +405,10 @@ func (srv *MCPServer) callSessions(tool string, args json.RawMessage) (string, b
 		return refuse("repository %q is not %s, the one this coordinator coordinates", a.Repository, own)
 	case a.Kind != KindWork && a.Kind != KindReviewer && a.Kind != KindJudge:
 		return refuse("kind %q is not work, reviewer or judge", a.Kind)
-	case a.Issue < 0 || a.Kind != KindWork && a.Issue == 0:
-		return refuse("a %s session needs the issue it serves, a number of 1 or more", a.Kind)
+	case a.Issue < 0:
+		return refuse("issue %d is not a number of 1 or more", a.Issue)
+	case a.Kind != KindWork && a.Issue == 0:
+		return refuse("a %s session needs the issue it serves", a.Kind)
 	case !plainBranch(a.Branch):
 		return refuse("branch %q is not a plain branch name", a.Branch)
 	case a.Branch == pol.Target || delivers(srv.cfg, own, a.Branch):
@@ -415,7 +424,7 @@ func (srv *MCPServer) callSessions(tool string, args json.RawMessage) (string, b
 	if _, ok := st.Runtime[name]; ok {
 		return refuse("branch %s already has a %s session, %s; end it first", a.Branch, a.Kind, name)
 	}
-	if _, ok := srv.cfg.Sessions[name]; ok {
+	if s, ok := srv.cfg.Sessions[name]; ok && !s.Runtime {
 		return refuse("session %s is configured already", name)
 	}
 	if n := len(sessionsOf(st.Runtime, own)); n >= pol.Max {
@@ -450,6 +459,9 @@ func projectedRuntime(cfg *Config, events []Event) map[string]RuntimePayload {
 // delivers says whether a configured session of repo delivers to branch.
 func delivers(cfg *Config, repo, branch string) bool {
 	for _, s := range cfg.Sessions {
+		if s.Runtime {
+			continue
+		}
 		for _, d := range s.Deliver {
 			if d.Repository == repo && d.Target == branch {
 				return true

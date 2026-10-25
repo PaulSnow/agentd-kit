@@ -346,7 +346,7 @@ type fakeGit struct {
 }
 
 // AddWorktree makes dir and records the worktree it would have added.
-func (g *fakeGit) AddWorktree(clone, dir, branch, target string) error {
+func (g *fakeGit) AddWorktree(clone, dir, branch, target string, detach bool) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.worktreeErr != nil {

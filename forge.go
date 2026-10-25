@@ -53,8 +53,10 @@ type Git interface {
 	// subject and its commit time, or "" when there is none.
 	LastMerge(dir string) (sha, subject string, at time.Time, err error)
 	// AddWorktree adds a worktree at dir from the clone for branch: as
-	// origin has it when it is there, else cut from origin/target.
-	AddWorktree(clone, dir, branch, target string) error
+	// the clone or origin has it when it is there, else cut from
+	// origin/target. A detached one is at the branch's commit, so a
+	// reviewer's worktree beside its worker's, which has the branch out.
+	AddWorktree(clone, dir, branch, target string, detach bool) error
 }
 
 // MergeRequest is what to open on the forge.
@@ -516,15 +518,23 @@ func blobHash(format string, data []byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func (g ExecGit) AddWorktree(clone, dir, branch, target string) error {
+func (g ExecGit) AddWorktree(clone, dir, branch, target string, detach bool) error {
 	if _, err := gitOut(g.Timeout, clone, "fetch", "-q", "origin"); err != nil {
 		return err
 	}
+	local := gitOK(g.Timeout, clone, "show-ref", "--verify", "-q", "refs/heads/"+branch)
+	remote := gitOK(g.Timeout, clone, "show-ref", "--verify", "-q", "refs/remotes/origin/"+branch)
 	var args []string
 	switch {
-	case gitOK(g.Timeout, clone, "show-ref", "--verify", "-q", "refs/heads/"+branch):
+	case detach && local:
+		args = []string{"worktree", "add", "-q", "--detach", dir, "refs/heads/" + branch}
+	case detach && remote:
+		args = []string{"worktree", "add", "-q", "--detach", dir, "refs/remotes/origin/" + branch}
+	case detach:
+		args = []string{"worktree", "add", "-q", "--detach", dir, "refs/remotes/origin/" + target}
+	case local:
 		args = []string{"worktree", "add", "-q", dir, branch}
-	case gitOK(g.Timeout, clone, "show-ref", "--verify", "-q", "refs/remotes/origin/"+branch):
+	case remote:
 		args = []string{"worktree", "add", "-q", "--track", "-b", branch, dir, "origin/" + branch}
 	default:
 		args = []string{"worktree", "add", "-q", "--no-track", "-b", branch, dir, "origin/" + target}
