@@ -65,6 +65,8 @@ func main() {
 		err = reportCmd(os.Args[2:])
 	case "ui":
 		err = uiCmd(os.Args[2:])
+	case "accounts":
+		err = accountsCmd(os.Args[2:], os.Stdout)
 	case "items":
 		err = itemsCmd(os.Args[2:], os.Stdout)
 	case "triage":
@@ -104,6 +106,7 @@ func usage() {
   agentd inventory [--config PATH]
   agentd report [--config PATH] [--log PATH] [--shadow] [--host NAME] --out PATH
   agentd ui [--config PATH] [--log PATH]
+  agentd accounts [--config PATH]
   agentd items [--config PATH] [--log PATH] [--new] [--seen ID,...]
   agentd triage [--config PATH] --items FILE
   agentd cases [--config PATH] [--log PATH] [--shadow] [--json]
@@ -133,7 +136,9 @@ discussions from the tracking snapshots, and mail findings; --seen marks
 items seen. ui serves the owner's UI on ui.address, to the owner only:
 this config's log and ui.logs' merged by repository, with what needs the
 owner, each repository's console and each session; its writes are answers,
-deadlines, items marked seen and console replies. console import appends
+deadlines, items marked seen and console replies. accounts reads every
+configured account's plan usage now and prints it: the five-hour and weekly
+utilization, their resets, and overage; it logs nothing. console import appends
 the old console's history in FILE, one JSON object per line, once. triage tries the triage job on the items in
 FILE with one call (retried once on failure) and prints its checked answer and cost; it logs nothing.
 cases lists the cases, one per issue, ranked: the owner's pins and the

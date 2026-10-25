@@ -39,6 +39,8 @@ type Config struct {
 	Poll PollConfig `json:"poll"`
 	// Jobs are the agent jobs: small, checked claude -p calls.
 	Jobs JobsConfig `json:"jobs"`
+	// Usage is the reading of the accounts' usage, which placement acts on.
+	Usage UsageConfig `json:"usage"`
 }
 
 // Account is a Claude login a session runs under: its config directory,
@@ -47,6 +49,9 @@ type Config struct {
 type Account struct {
 	ConfigDir string `json:"config_dir"`
 	TokenFile string `json:"token_file"`
+	// Usage is how agentd reads the account's usage (#39): auto (the
+	// default), endpoint, headers or off.
+	Usage string `json:"usage"`
 }
 
 // Timeouts bound every external command agentd runs. A command still
@@ -326,6 +331,7 @@ func DefaultConfig() Config {
 		EventLog:      "~/.local/state/agentd-kit/events.jsonl",
 		PollInterval:  Duration{5 * time.Minute},
 		Poll:          PollConfig{Every: Duration{DefaultPollEvery}, CIEvery: Duration{DefaultCIEvery}},
+		Usage:         UsageConfig{Every: Duration{DefaultUsageEvery}, Limit: DefaultUsageLimit, API: DefaultUsageAPI, Model: DefaultUsageModel},
 		TranscriptDir: "~/.claude/projects",
 		Timeouts:      Timeouts{Tmux: Duration{10 * time.Second}, Forge: Duration{2 * time.Minute}, Escalate: Duration{2 * time.Minute}},
 		Policies: Policies{
@@ -433,6 +439,9 @@ func (c *Config) finish(base string) error {
 	}
 	if c.Poll.Every.Duration <= 0 || c.Poll.CIEvery.Duration <= 0 {
 		errs = append(errs, errors.New("poll.every and poll.ci_every must be positive"))
+	}
+	if u := c.Usage; u.Every.Duration <= 0 || u.Limit <= 0 || u.Limit > 100 || u.Model == "" || !strings.HasPrefix(u.API, "https://") && !strings.HasPrefix(u.API, "http://") {
+		errs = append(errs, errors.New("usage: every must be positive, limit a percent above 0 and at most 100, api an http(s) URL and model set"))
 	}
 	if c.PollInterval.Duration <= 0 {
 		errs = append(errs, errors.New("poll_interval must be positive"))
@@ -544,6 +553,11 @@ func (c *Config) finish(base string) error {
 			if err := checkTokenFile(a.TokenFile); err != nil {
 				errs = append(errs, fmt.Errorf("accounts.%s.token_file: %w", name, err))
 			}
+		}
+		switch a.Usage {
+		case "", UsageAuto, UsageEndpoint, UsageHeaders, UsageOff:
+		default:
+			errs = append(errs, fmt.Errorf("accounts.%s.usage %q is not auto, endpoint, headers or off", name, a.Usage))
 		}
 		c.Accounts[name] = a
 	}

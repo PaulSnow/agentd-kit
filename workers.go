@@ -31,6 +31,8 @@ type workState struct {
 	err      error                // the first event a worker could not append
 	wake     chan struct{}        // signalled when the owner wrote to the log
 	nextPoll map[string]time.Time // when each forge source is next due
+	// nextUsage is when each account's usage is next read.
+	nextUsage map[string]time.Time
 	// pollTally holds each source's quiet polls since its last record.
 	pollTally map[string]PollPayload
 	// liveCursor is each source's cursor as far as polls have moved it,
@@ -45,7 +47,7 @@ type workerMsg struct {
 }
 
 func newWorkState() *workState {
-	return &workState{inFlight: map[string]bool{}, wake: make(chan struct{}, 1), nextPoll: map[string]time.Time{},
+	return &workState{inFlight: map[string]bool{}, wake: make(chan struct{}, 1), nextPoll: map[string]time.Time{}, nextUsage: map[string]time.Time{},
 		pollTally: map[string]PollPayload{}, liveCursor: map[string]time.Time{}}
 }
 

@@ -49,6 +49,8 @@ const (
 const (
 	SessionStart = "start"
 	SessionEnd   = "end"
+	// SessionPlace puts a start with no account on one (#39).
+	SessionPlace = "place"
 )
 
 // RuntimePayload is a session a coordinator started, or its end. Event's
@@ -97,6 +99,13 @@ func (st *LogState) applySession(e Event) {
 		}
 		st.Runtime[e.Session] = *p
 		delete(st.Tracks, e.Session)
+	case SessionPlace:
+		// Only the start it names, and only once: a session never moves
+		// to another account.
+		if r, ok := st.Runtime[e.Session]; ok && r.ID == p.ID && r.Account == "" {
+			r.Account = p.Account
+			st.Runtime[e.Session] = r
+		}
 	case SessionEnd:
 		if _, ok := st.Runtime[e.Session]; ok {
 			delete(st.Runtime, e.Session)
@@ -431,10 +440,13 @@ func (srv *MCPServer) callSessions(tool string, args json.RawMessage) (string, b
 		return refuse("issue %d is reserved in %s's policy: agentd starts no session on it", a.Issue, own)
 	}
 	allowed := rules.Sessions.Accounts
-	if a.Account == "" && srv.sess.Account != "" && contains(allowed, srv.sess.Account) {
+	// With a fallback order and no account named, agentd places the
+	// session by usage before it prepares it (#39).
+	placed := a.Account == "" && len(rules.Sessions.Fallback) > 0
+	if !placed && a.Account == "" && srv.sess.Account != "" && contains(allowed, srv.sess.Account) {
 		a.Account = srv.sess.Account
 	}
-	if !contains(allowed, a.Account) {
+	if !placed && !contains(allowed, a.Account) {
 		return refuse("account %q is not one %s's sessions may use: %s", a.Account, own, strings.Join(allowed, ", "))
 	}
 	name := runtimeName(own, a.Branch, a.Kind)
@@ -461,7 +473,11 @@ func (srv *MCPServer) callSessions(tool string, args json.RawMessage) (string, b
 		return refuse("another start for branch %s came first; it holds", a.Branch)
 	}
 	sess := runtimeSession(name, p, repo)
-	return compact(map[string]any{"started": true, "name": name, "workdir": sess.Workdir, "worktree": sess.Cwd, "branch": a.Branch, "kind": a.Kind}), false
+	reply := map[string]any{"started": true, "name": name, "workdir": sess.Workdir, "worktree": sess.Cwd, "branch": a.Branch, "kind": a.Kind}
+	if placed {
+		reply["account"] = "placed by agentd on the first account of the fallback order with room"
+	}
+	return compact(reply), false
 }
 
 // projectedRuntime is the started sessions the events leave running.
