@@ -96,7 +96,7 @@ func TestResumeOnlyToATypableSession(t *testing.T) {
 func TestTrustKeysOncePerScreen(t *testing.T) {
 	h := newHarness(t, false, "s1")
 	h.status("s1", working)
-	h.alive("s1", "Do you trust this folder?")
+	h.alive("s1", oldTrustScreen)
 	h.tmux.sticky["s1"] = true
 	h.ticks(12, 5*time.Minute)
 	if got := h.tmux.count("keys", "s1"); got != 1 {
@@ -136,7 +136,7 @@ func TestNoTypingIntoAPaneNotRunningClaude(t *testing.T) {
 		h.tmux.commands[n] = "bash"
 	}
 	h.alive("idle", "$ ")
-	h.alive("trust", "Do you trust this folder?")
+	h.alive("trust", oldTrustScreen)
 	h.alive("limit", "Limit reached, resets 3pm")
 	h.ticks(1, 5*time.Minute)
 	h.tmux.panes["limit"] = "$ "
@@ -285,7 +285,7 @@ func TestScreenChangedJustBeforeTypingIsNotTyped(t *testing.T) {
 	h.status("idle", working)
 	h.alive("idle", "static")
 	h.status("trust", working)
-	h.alive("trust", "Do you trust this folder?")
+	h.alive("trust", oldTrustScreen)
 	// changeBeforeTyping changes name's screen at its second Pane call of
 	// the next pass: the first is the observation, the second the check
 	// before typing.

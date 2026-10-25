@@ -41,6 +41,10 @@ const PaneLines = 40
 // The loop owns it; a worker runs on a copy whose worker flag is set and
 // whose state holds only a copy of its session's Track (see workState).
 type Supervisor struct {
+	// home is the home directory whose .claude.json says which
+	// directories Claude Code trusts, for a session with no account; run
+	// sets it, and without it such a session's directory is not looked up.
+	home   string
 	cfg    *Config
 	log    *Log
 	clock  Clock
@@ -436,6 +440,32 @@ func (s *Supervisor) ownerRecords() {
 	}
 }
 
+// answerTrust answers the folder-trust menu by its accepting option, only
+// for the directory agentd launches the session in: the arrows to that
+// option, or, once the screen shows it selected, the confirm keys. A menu
+// for another directory goes to the owner, once; one agentd cannot read
+// safely gets nothing, and one skip says why.
+func (s *Supervisor) answerTrust(name string, sess Session, t *Track, ev Evidence, now time.Time) {
+	m := ev.TrustMenu
+	if m != nil && !trustDirOK(sess, ev.PanePath, m) {
+		dir := ev.PanePath
+		if len(m.Dirs) > 0 {
+			dir = strings.Join(m.Dirs, ", ")
+		}
+		s.escalate(name, "trust-elsewhere:"+name+":"+dir, fmt.Sprintf("%s shows Claude Code's folder-trust dialog for %s, not %s where agentd launches it; agentd does not answer it. Attach and answer it yourself.",
+			name, dir, sess.Cwd), t, now)
+		return
+	}
+	keys, why := trustKeys(m, s.cfg.Policies.Trust.Keys)
+	if keys == nil {
+		s.skipOnce(name, "trust-menu:"+name+":"+ev.PaneHash, why+"; not answering it", t, &SkipPayload{Action: ActTrust})
+		return
+	}
+	s.typeInto(name, ActTrust, &ActPayload{Keys: keys, PaneHash: ev.PaneHash, Cwd: sess.Cwd, Reason: "selected: " + m.Options[m.Selected]}, t, ev.PaneHash, func() error {
+		return s.tmux.Keys(name, keys...)
+	})
+}
+
 // questionLine says whether a line of screen, less its indent and any box
 // border, is wholly the trust prompt's question: the same words quoted in a
 // diff, a dialog's body or a session's output sit inside other text.
@@ -462,7 +492,7 @@ func (s *Supervisor) observe(name string, sess Session) (Evidence, error) {
 		if err != nil {
 			return ev, err
 		}
-		ev.Command = info.Command
+		ev.Command, ev.PanePath = info.Command, info.Path
 		if info.Dead {
 			// The command exited and remain-on-exit kept the pane: its exit
 			// status and last screen are the crash's cause.
@@ -493,6 +523,9 @@ func (s *Supervisor) observe(name string, sess Session) (Evidence, error) {
 		}
 		ev.Limited = s.limitRe.MatchString(screen)
 		ev.TrustPrompt = s.cfg.Policies.Trust.Enabled && questionLine(s.trustRe, screen)
+		if ev.TrustPrompt {
+			ev.TrustMenu = trustMenu(screen)
+		}
 		for _, re := range s.dialogs {
 			if re.MatchString(screen) {
 				ev.Dialog = re.String()
@@ -755,9 +788,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 		// keys did not take them, and sending them again could answer
 		// whatever replaced it.
 		if ev.TrustPrompt && ev.PaneHash != t.TrustHash {
-			s.typeInto(name, ActTrust, &ActPayload{Keys: pol.Trust.Keys, PaneHash: ev.PaneHash}, t, ev.PaneHash, func() error {
-				return s.tmux.Keys(name, pol.Trust.Keys...)
-			})
+			s.answerTrust(name, sess, t, ev, now)
 		}
 	case BlockedOnOwner:
 		switch {

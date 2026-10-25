@@ -25,8 +25,10 @@ type Evidence struct {
 	PaneHash    string
 	Limited     bool
 	TrustPrompt bool
-	Dialog      string // the dialog pattern the visible screen matches, or ""
-	DialogShape bool   // the visible screen has a dialog's shape, which alone may be declined
+	TrustMenu   *TrustMenu // the trust prompt's menu, when it shows a whole one
+	PanePath    string     // where the live pane runs, #{pane_current_path}
+	Dialog      string     // the dialog pattern the visible screen matches, or ""
+	DialogShape bool       // the visible screen has a dialog's shape, which alone may be declined
 	Status      StatusEvidence
 	// StatusQuestions is the hash of STATUS.md's own Questions section;
 	// Status.Questions is what still waits on the owner once the answers

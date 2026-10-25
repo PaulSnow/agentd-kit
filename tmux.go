@@ -42,6 +42,7 @@ type PaneInfo struct {
 	Dead      bool   // #{pane_dead}: the command exited and remain-on-exit kept the pane
 	Status    int    // #{pane_dead_status}, when HasStatus
 	HasStatus bool
+	Path      string // #{pane_current_path}
 }
 
 var plainName = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
@@ -100,14 +101,15 @@ func (t ExecTmux) Pane(name string) (PaneInfo, error) {
 	if err != nil {
 		return PaneInfo{}, err
 	}
-	out, err := t.run("display-message", "-p", "-t", tg, "#{pane_current_command}\t#{pane_dead}\t#{pane_dead_status}")
+	out, err := t.run("display-message", "-p", "-t", tg, "#{pane_current_command}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_current_path}")
 	if err != nil {
 		return PaneInfo{}, fmt.Errorf("display-message %s: %w: %s", name, err, strings.TrimSpace(out))
 	}
 	return parsePaneInfo(out), nil
 }
 
-// parsePaneInfo reads display-message's command, dead flag and exit status.
+// parsePaneInfo reads display-message's command, dead flag, exit status
+// and working directory.
 func parsePaneInfo(out string) PaneInfo {
 	f := strings.Split(strings.TrimRight(out, "\n"), "\t")
 	info := PaneInfo{Command: f[0]}
@@ -118,6 +120,9 @@ func parsePaneInfo(out string) PaneInfo {
 		if n, err := strconv.Atoi(strings.TrimSpace(f[2])); err == nil {
 			info.Status, info.HasStatus = n, true
 		}
+	}
+	if len(f) > 3 {
+		info.Path = f[3]
 	}
 	return info
 }
