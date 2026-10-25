@@ -218,6 +218,9 @@ func (src *uiSource) catchUp() error {
 			add(e.Instruction.Console, m)
 		case e.Kind == KindMessage && e.Message != nil:
 			m := uiMessage{At: e.Time, Kind: e.Message.Kind, From: e.Message.From, Text: e.Message.Text}
+			if k := e.Message.Kind; k == MessagePrompt || k == MessageReply {
+				m.Session = e.Message.From // a session's turn links to its page
+			}
 			if _, ok := cfg.Consoles[e.Message.Console]; ok {
 				add(e.Message.Console, m)
 			}

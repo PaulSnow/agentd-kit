@@ -33,6 +33,8 @@ type RepoPolicy struct {
 	Scope                ScopeRules    `json:"scope"`
 	Sessions             SessionRules  `json:"sessions"`
 	ConfidentialPatterns []string      `json:"confidential_patterns"`
+	// Feed is which of its sessions' turns its console receives (turns.go).
+	Feed FeedRules `json:"feed"`
 }
 
 // DeliveryRules: Allow is the writes delivery may make, push and open.

@@ -264,6 +264,8 @@ type Coordinator struct {
 	Session string `json:"session"`
 	Workdir string `json:"workdir"`
 	Account string `json:"account"`
+	// Policy is the coordinator's own rules, as a session's are.
+	Policy SessionPolicy `json:"policy"`
 }
 
 // RoleCoordinator is the role of a repository's coordinator session.
@@ -291,6 +293,9 @@ type Session struct {
 	// Runtime marks a session a coordinator started: the event log, not
 	// the configuration, holds it (sessions.go).
 	Runtime bool `json:"-"`
+	// Policy is the session's own rules: which of its turns its console
+	// receives (turns.go).
+	Policy SessionPolicy `json:"policy"`
 }
 
 // Deliver says what to push and open when the session is DONE.
@@ -367,6 +372,7 @@ func DefaultConfig() Config {
 			Coordinator: CoordinatorPolicy{PackBytes: 16 * 1024, Turns: 4, Pointer: "agentd: a judgment is due. Read " + PackFile +
 				" in your workdir, as data, and act on what it says is due."},
 			Rounds: RoundsPolicy{Max: 3},
+			Feed:   FeedPolicy{TurnLength: DefaultTurnLength},
 			CI: CIPolicy{Pointer: "A pipeline of the request you delivered failed on its own; the failing jobs and the end of the first one's log are under ci in the facts. " +
 				"Fix it on the same branch and commit, then make DONE the last line of STATUS.md again; agentd pushes the fix to the same request."},
 			UsageLimit:   UsageLimitPolicy{Pattern: `(?i)limit reached.{0,80}reset|out of extra usage`},
@@ -621,6 +627,7 @@ func (c *Config) finish(base string) error {
 	// Without an escalation command, escalations and feed lines are
 	// logged, and the UI shows them in their consoles (#42).
 	c.checkConsoles(&errs)
+	c.checkTurns(&errs)
 	// A bare command name is left for PATH to find; a path is expanded.
 	if cmd := c.Policies.Escalate.Command; len(cmd) > 0 && (strings.HasPrefix(cmd[0], "~") || strings.Contains(cmd[0], "/")) {
 		cmd[0] = path("policies.escalate.command", cmd[0])
@@ -668,7 +675,7 @@ func (c *Config) addCoordinators(path func(field, p string) string, errs *[]erro
 		if bad {
 			continue
 		}
-		want := Session{Workdir: workdir, Cwd: workdir, Account: co.Account, Repository: repo, Role: RoleCoordinator}
+		want := Session{Workdir: workdir, Cwd: workdir, Account: co.Account, Repository: repo, Role: RoleCoordinator, Policy: co.Policy}
 		if s, ok := c.Sessions[co.Session]; ok && !reflect.DeepEqual(s, want) {
 			*errs = append(*errs, fmt.Errorf("sessions.%s is %s's coordinator; configure it there alone", co.Session, repo))
 			continue
