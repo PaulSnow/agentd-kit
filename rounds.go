@@ -96,6 +96,7 @@ type Finding struct {
 // ids new to the case, and the stop agentd found when it accepted them.
 type CaseFindings struct {
 	Round    int        `json:"round"`
+	Base     int        `json:"base"` // the round the owner last reset at, when checked
 	Findings []Finding  `json:"findings"`
 	New      []string   `json:"new"`
 	Stop     *RoundStop `json:"stop,omitempty"`
@@ -182,12 +183,13 @@ func (r *CloseRecord) check() error {
 // applyFindings, applyDispositions and applyRounds fold a round's events
 // into c, copying what they change.
 //
-// Two sessions can be checked against the same state before either call
-// is appended; the later call's round is then not the next one, nor its
-// dispositions the latest round's, and the fold ignores it. The server
+// Two calls can be checked against the same state before either is
+// appended; the later is then not the next round, nor its dispositions the
+// latest round's, or the owner reset the loop or closed the case between,
+// and the fold ignores it. The server
 // reads the log back after appending and tells that session so.
 func (c *Case) applyFindings(e Event, f *CaseFindings) {
-	if f.Round != len(c.Rounds)+1 || len(c.Rounds) > 0 && len(c.Rounds[len(c.Rounds)-1].Findings) > 0 && c.Rounds[len(c.Rounds)-1].Dispositions == nil ||
+	if c.Closed || f.Base != c.RoundBase || f.Round != len(c.Rounds)+1 || len(c.Rounds) > 0 && len(c.Rounds[len(c.Rounds)-1].Findings) > 0 && c.Rounds[len(c.Rounds)-1].Dispositions == nil ||
 		c.RoundStop != nil {
 		return
 	}
@@ -201,7 +203,7 @@ func (c *Case) applyFindings(e Event, f *CaseFindings) {
 
 func (c *Case) applyDispositions(e Event, d *CaseDispositions) {
 	i := len(c.Rounds) - 1
-	if i < 0 || c.Rounds[i].N != d.Round || c.Rounds[i].Dispositions != nil || len(d.Dispositions) != len(c.Rounds[i].Findings) {
+	if c.Closed || i < 0 || c.Rounds[i].N != d.Round || c.Rounds[i].Dispositions != nil || len(d.Dispositions) != len(c.Rounds[i].Findings) {
 		return
 	}
 	for _, x := range d.Dispositions {
@@ -225,11 +227,11 @@ func hasFinding(fs []Finding, id string) bool {
 	return false
 }
 
-// recorded says whether the fold took the round call with hash h: a
+// recorded says whether the fold took the call of round with hash h: a
 // review that opened its round, or the dispositions of one.
-func (c *Case) recorded(tool, h string) bool {
+func (c *Case) recorded(tool string, round int, h string) bool {
 	for _, r := range c.Rounds {
-		if tool == ToolReviewFindings && r.Call == h || tool == ToolJudgeDispositions && r.JudgeCall == h {
+		if r.N == round && (tool == ToolReviewFindings && r.Call == h || tool == ToolJudgeDispositions && r.JudgeCall == h) {
 			return true
 		}
 	}
@@ -451,7 +453,7 @@ func (srv *MCPServer) checkFindings(args json.RawMessage, c *Case) (*CaseFinding
 	if len(problems) > 0 {
 		return nil, problems
 	}
-	rec := &CaseFindings{Round: len(c.Rounds) + 1, Findings: out, New: append([]string{}, fresh...)}
+	rec := &CaseFindings{Round: len(c.Rounds) + 1, Base: c.RoundBase, Findings: out, New: append([]string{}, fresh...)}
 	rec.Stop = srv.stopAt(c, rec)
 	return rec, nil
 }
@@ -615,7 +617,7 @@ func (srv *MCPServer) checkDispositions(args json.RawMessage, c *Case) (*CaseDis
 var planID = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,20}$`)
 
 // naText is a close text that says N/A, any case, and its reason.
-var naText = regexp.MustCompile(`(?i)^n/a(?:\s*:|\s|$)\s*(.*)$`)
+var naText = regexp.MustCompile(`(?is)^n/a\b[\s:.,;-]*(.*)$`)
 
 // RecordRounds records the owner's backstop for a case's rounds, counted
 // from now, which also resets a stopped loop.

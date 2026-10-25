@@ -384,7 +384,7 @@ func TestRoundsTwoReviewersRace(t *testing.T) {
 	}
 	review(t, h, finding("Spin has no test"))
 	text, refused := callOne(t, srv, ToolReviewFindings, map[string]any{"findings": []any{finding("Gears grind")}})
-	if !refused || !strings.Contains(text, "another session") {
+	if !refused || !strings.Contains(text, "another call") {
 		t.Fatalf("second reviewer %s", text)
 	}
 	c := roundsOf(t, h)
@@ -486,5 +486,71 @@ func TestRoundsJudgeFacts(t *testing.T) {
 	}
 	if len(f.Acknowledge) != 0 || len(f.Rulings) != 1 || f.Rounds == nil || f.Rounds.Findings[0].Disposition != "" {
 		t.Fatalf("facts %s", facts)
+	}
+}
+
+// staleServer is the named session's server whose first read is the log
+// as it is now, and every later read the log as it is then: a call checked
+// against a state that changed before it was appended.
+func (h *harness) staleServer(name string) *MCPServer {
+	h.t.Helper()
+	stale, reads := h.events(), 0
+	srv, err := NewMCPServer(h.cfg, name, NewLogWriter(h.buf), func() ([]Event, error) {
+		if reads++; reads == 1 {
+			return stale, nil
+		}
+		return h.events(), nil
+	}, h.clock.Now)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return srv
+}
+
+// What changed between a round call's check and its append wins: another
+// round with the same words as an earlier one, the owner's reset, the
+// owner's close. The call is not folded and is refused; a reopen resets
+// the loop.
+func TestRoundsChangedBeforeAppend(t *testing.T) {
+	h, _ := roundsHarness(t)
+	review(t, h, finding("Spin has no test"))
+	judge(t, h, DispositionAdopt, "F1")
+	late := h.staleServer("rv")
+	review(t, h, finding("Gears grind"))
+	if text, refused := callOne(t, late, ToolReviewFindings, map[string]any{"findings": []any{finding("Spin has no test")}}); !refused {
+		t.Fatalf("same words as round 1 %s", text)
+	}
+	judge(t, h, DispositionAdopt, "F2")
+
+	late = h.staleServer("rv")
+	if err := RecordRounds(NewLogWriter(h.buf), h.cfg, h.logState(), h.clock.Now(), widgetsCase, 3); err != nil {
+		t.Fatal(err)
+	}
+	if text, refused := callOne(t, late, ToolReviewFindings, map[string]any{"findings": []any{finding("Axles squeak")}}); !refused {
+		t.Fatalf("across the reset %s", text)
+	}
+	if c := roundsOf(t, h); len(c.Rounds) != 2 || c.RoundStop != nil {
+		t.Fatalf("after the reset %+v", c.Rounds)
+	}
+
+	late = h.staleServer("rv")
+	if err := RecordRuling(NewLogWriter(h.buf), h.cfg, h.logState(), h.clock.Now(), widgetsCase, RulingClose, "N/A, nothing visible", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	if text, refused := callOne(t, late, ToolReviewFindings, map[string]any{"findings": []any{finding("Axles squeak")}}); !refused {
+		t.Fatalf("across the close %s", text)
+	}
+	c := roundsOf(t, h)
+	if len(c.undisposed()) != 0 || c.Rulings[len(c.Rulings)-1].Close.NA != "nothing visible" {
+		t.Fatalf("after the close %+v", c)
+	}
+	if err := RecordRuling(NewLogWriter(h.buf), h.cfg, h.logState(), h.clock.Now(), widgetsCase, RulingReopen, "", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	if reply, _ := review(t, h); reply["stopped"] != RoundsConverged {
+		t.Fatalf("after the reopen %v", reply)
+	}
+	if err := RecordRuling(NewLogWriter(h.buf), h.cfg, h.logState(), h.clock.Now(), widgetsCase, RulingClose, "N/A.", "owner"); err == nil {
+		t.Fatal("N/A without a reason accepted")
 	}
 }

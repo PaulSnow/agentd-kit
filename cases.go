@@ -211,7 +211,9 @@ func (st *LogState) applyCase(e Event) {
 			// One-shot rulings expire when the case closes.
 			c.Closed, c.Active = true, nil
 		case RulingReopen:
-			c.Closed = false
+			// A reopened case's rounds begin again from the owner's
+			// word, as a rounds record would.
+			c.Closed, c.RoundStop, c.RoundBase = false, nil, len(c.Rounds)
 		}
 	case p.Goal != nil:
 		c.applyGoal(p.Goal)

@@ -670,10 +670,18 @@ func (srv *MCPServer) call(tool string, args json.RawMessage) (string, bool) {
 	// A round call checked against the state another session's call
 	// changed before this one was appended is not folded (rounds.go).
 	if (rec.Findings != nil || rec.Dispositions != nil) && rec.Refused == "" {
-		if events, err := srv.read(); err == nil {
-			if c := NewLogState(srv.cfg, ModeLive).Fold(events).Cases[srv.caseID]; c == nil || !c.recorded(tool, rec.Hash) {
-				return compact(map[string]any{"refused": "another session's call changed the round first; nothing of this call was recorded; read the case again and call again", "case": srv.caseID}), true
-			}
+		round := 0
+		if rec.Findings != nil {
+			round = rec.Findings.Round
+		} else {
+			round = rec.Dispositions.Round
+		}
+		events, err := srv.read()
+		if err != nil {
+			return compact(map[string]any{"refused": "the call was logged, but agentd could not read its log back to confirm the round took it: " + err.Error() + "; check the case before calling again", "case": srv.caseID}), true
+		}
+		if c := NewLogState(srv.cfg, ModeLive).Fold(events).Cases[srv.caseID]; c == nil || !c.recorded(tool, round, rec.Hash) {
+			return compact(map[string]any{"refused": "another call, or the owner, changed the case first; nothing of this call was recorded; read the case again and call again", "case": srv.caseID}), true
 		}
 	}
 	return compact(reply), rec.Refused != ""
