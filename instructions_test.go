@@ -24,6 +24,8 @@ func instrHarness(t *testing.T) *harness {
 			t.Fatal(err)
 		}
 	}
+	// Wakes are not held back to settle unless a test asks (#49).
+	h.cfg.Policies.Coordinator.Settle = Duration{}
 	if err := h.cfg.finish(h.dir); err != nil {
 		t.Fatal(err)
 	}
