@@ -964,6 +964,7 @@ var (
 	errNotClaude     = errors.New("the pane does not run Claude")
 	errScreenChanged = errors.New("the screen changed since it was read")
 	errParked        = errors.New("the session is parked")
+	errTrustPrompt   = errors.New("the screen shows the folder-trust prompt")
 )
 
 // typeInto performs an action that types or sends keys, only after asking
@@ -996,6 +997,13 @@ func (s *Supervisor) typeInto(name, action string, a *ActPayload, t *Track, seen
 		if err != nil {
 			s.emit(name, Event{Kind: KindError, Error: &ErrorPayload{Step: action + ": capture", Error: err.Error()}})
 			return err
+		}
+		// A line or a key but the trust keys, sent to the folder-trust
+		// prompt, would answer it (#43).
+		if action != ActTrust && questionLine(s.trustRe, pane) {
+			s.skipOnce(name, "trust-prompt:"+action+":"+name+":"+shortHash(StillHash(pane)), "the screen shows the folder-trust prompt; not typing", t,
+				&SkipPayload{Action: action})
+			return errTrustPrompt
 		}
 		if now := StillHash(pane); now != seen {
 			// Answers wait for a working session whose screen may move

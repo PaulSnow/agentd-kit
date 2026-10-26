@@ -114,7 +114,11 @@ func TestConsolePostTo(t *testing.T) {
 	tmux.alive["b-shell"], tmux.commands["b-shell"] = true, "bash"
 	tmux.alive["c-dialog"], tmux.panes["c-dialog"] = true, "Do you want to proceed?\n❯ 1. Yes\n  2. No"
 	tmux.alive["d-dead"], tmux.dead["d-dead"] = true, true
-	for _, to := range []string{"nobody", "a*", "b-shell", "c-dialog", "d-dead"} {
+	// The trust prompt is refused by its question, whatever the dialog
+	// patterns say (#43).
+	tmux.alive["e-trust"], tmux.panes["e-trust"] = true, unnumberedTrustScreen("/work/e")
+	h.cfg.Policies.Dialog.Patterns = nil
+	for _, to := range []string{"nobody", "a*", "b-shell", "c-dialog", "d-dead", "e-trust"} {
 		if err := PostMessage(h.cfg, log, tmux, h.clock.Now(), MessagePost{Console: "widgets", Text: "hello", To: to}); err == nil {
 			t.Errorf("--to %s was accepted", to)
 		}

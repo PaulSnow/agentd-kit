@@ -235,6 +235,9 @@ func typeTo(cfg *Config, tmux Tmux, name, text string) error {
 	if dialogShape(screen) {
 		return fmt.Errorf("%s shows a dialog; not typing into it", name)
 	}
+	if questionLine(regexp.MustCompile(`^(?:`+cfg.Policies.Trust.Pattern+`)$`), screen) {
+		return fmt.Errorf("%s shows Claude Code's folder-trust prompt; not typing into it", name)
+	}
 	for _, p := range cfg.Policies.Dialog.Patterns {
 		if regexp.MustCompile(p).MatchString(screen) {
 			return fmt.Errorf("%s shows a dialog; not typing into it", name)

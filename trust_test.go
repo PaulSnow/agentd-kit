@@ -365,3 +365,26 @@ func TestTrustAnsweredBeforeReady(t *testing.T) {
 		t.Fatalf("%d lines typed into a session not yet ready", n)
 	}
 }
+
+// No line is typed, and no key but the trust keys sent, into a screen that
+// shows the folder-trust prompt, whatever state the session was read in:
+// a line would answer the menu (#43).
+func TestNothingTypedIntoTrustPrompt(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.status("s1", working)
+	h.alive("s1", "static")
+	h.ticks(1, 5*time.Minute)
+	tr := h.sup.Tracks()["s1"]
+	h.tmux.panes["s1"] = unnumberedTrustScreen(h.cfg.Sessions["s1"].Cwd)
+	for _, act := range []string{ActNudge, ActResume, ActAnswer, ActWake, ActDecline} {
+		err := h.sup.typeInto("s1", act, &ActPayload{Message: "go on"}, tr, StillHash(h.tmux.panes["s1"]), func() error {
+			return h.tmux.Type("s1", "go on")
+		})
+		if err != errTrustPrompt {
+			t.Fatalf("%s into a trust prompt = %v, want errTrustPrompt", act, err)
+		}
+	}
+	if got := typed(h, "s1"); got != 0 {
+		t.Fatalf("typed %d times into a trust prompt", got)
+	}
+}
