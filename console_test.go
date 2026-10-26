@@ -411,6 +411,17 @@ func TestConsoleImportIgnoresUnusedFields(t *testing.T) {
 	if !reflect.DeepEqual(to, map[string]string{"Paint it blue": "w17", "Paint it green": ""}) {
 		t.Fatalf("imported to = %v", to)
 	}
+	// A to that matches a confidential pattern withholds the line.
+	if _, _, err := ImportConsole(f.night, NewLogWriter(f.nightBuf), events, pageAt, "widgets", strings.NewReader(`{"ts": 1761350520, "from": "owner-a", "text": "hello", "to": "embargoed-w1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(f.nightBuf.String(), "embargoed") {
+		t.Fatal("a confidential to was logged")
+	}
+	events, _, _ = NewLogWriter(f.nightBuf).Tail(0)
+	if p := events[len(events)-1].Feed; p == nil || p.Withheld == 0 || p.To != "" || p.From != "" || p.Text != "" {
+		t.Fatalf("withheld line = %+v", p)
+	}
 	for name, line := range map[string]string{
 		"not JSON":   `ts 1761350400 text hello`,
 		"wrong type": `{"ts": 1761350400, "text": "hello", "to": 3}`,
