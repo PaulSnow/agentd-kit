@@ -305,9 +305,10 @@ func TestTrustKeysOnlyConfirm(t *testing.T) {
 // same prompt on the same screen: it is answered afresh.
 func TestTrustAnsweredAgainAfterRelaunch(t *testing.T) {
 	tr := &Track{TrustHash: "h1"}
+	tr.Ready = true
 	tr.launched("", time.Now())
-	if tr.TrustHash != "" {
-		t.Fatalf("trust hash kept over a launch: %q", tr.TrustHash)
+	if tr.TrustHash != "" || tr.Ready {
+		t.Fatalf("trust hash or readiness kept over a launch: %q, %v", tr.TrustHash, tr.Ready)
 	}
 }
 
@@ -386,5 +387,57 @@ func TestNothingTypedIntoTrustPrompt(t *testing.T) {
 	}
 	if got := typed(h, "s1"); got != 0 {
 		t.Fatalf("typed %d times into a trust prompt", got)
+	}
+	// Trust answering off with no pattern: a blank line is not the
+	// question.
+	h.sup.cfg.Policies.Trust.Enabled, h.sup.cfg.Policies.Trust.Pattern = false, ""
+	h.sup.trustRe = regexp.MustCompile(`^(?:)$`)
+	h.tmux.panes["s1"] = "static\n\n❯ "
+	if err := h.sup.typeInto("s1", ActNudge, &ActPayload{Message: "go on"}, tr, StillHash(h.tmux.panes["s1"]), func() error {
+		return h.tmux.Type("s1", "go on")
+	}); err != nil || typed(h, "s1") != 1 {
+		t.Fatalf("typeInto with no trust pattern = %v, typed %d", err, typed(h, "s1"))
+	}
+}
+
+// A session seen ready since its launch is past its trust prompt: a trust
+// menu it shows later is a dialog and gets no keys, and readiness is read
+// back from the log after a restart of agentd (#43).
+func TestTrustMenuAfterReadyIsDialog(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.status("s1", working)
+	h.alive("s1", "❯ ")
+	h.ticks(2, 5*time.Minute)
+	if !h.sup.Tracks()["s1"].Ready {
+		t.Fatal("not ready at its input prompt")
+	}
+	h.restart(false)
+	if !h.sup.Tracks()["s1"].Ready {
+		t.Fatal("readiness lost over a restart")
+	}
+	h.tmux.panes["s1"] = unnumberedTrustScreen(h.cfg.Sessions["s1"].Cwd)
+	h.ticks(3, 5*time.Minute)
+	if sent := keysSent(h, "s1"); len(sent) != 0 {
+		t.Fatalf("keys %v sent to a menu shown after the session was ready", sent)
+	}
+	if st := h.sup.Tracks()["s1"].State; st != BlockedOnOwner {
+		t.Fatalf("state %s, want %s", st, BlockedOnOwner)
+	}
+}
+
+// Only the visible screen counts: a trust question scrolled into the
+// history does not stop a nudge (#43).
+func TestTrustQuestionInHistoryDoesNotStopTyping(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.status("s1", working)
+	h.alive("s1", "static")
+	h.ticks(1, 5*time.Minute)
+	tr := h.sup.Tracks()["s1"]
+	h.tmux.history["s1"] = unnumberedTrustScreen(h.cfg.Sessions["s1"].Cwd)
+	err := h.sup.typeInto("s1", ActNudge, &ActPayload{Message: "go on"}, tr, StillHash(h.tmux.history["s1"]+"\n"+h.tmux.panes["s1"]), func() error {
+		return h.tmux.Type("s1", "go on")
+	})
+	if err != nil || typed(h, "s1") != 1 {
+		t.Fatalf("typeInto = %v, typed %d", err, typed(h, "s1"))
 	}
 }

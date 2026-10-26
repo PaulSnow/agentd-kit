@@ -96,7 +96,9 @@ func trustMenu(screen string, question *regexp.Regexp, home string) *TrustMenu {
 
 // bareOptions reads a menu without numbers into m: the last run of lines
 // before the footer, blank lines apart, is its options, when one of them,
-// and only one, carries the cursor. It returns the accepting ones.
+// and only one, carries the cursor. It returns the accepting ones. An
+// option that wraps reads as two, which only costs an arrow: Enter goes
+// on a screen that shows the accepting option itself selected.
 func bareOptions(m *TrustMenu, lines []string) (accepts []int) {
 	var run []string
 	for _, line := range lines {

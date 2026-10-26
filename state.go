@@ -340,7 +340,7 @@ func Classify(t *Track, ev Evidence, pol Policies, now time.Time) (State, string
 	t.noteHash(ev.PaneHash, now, pol.Nudge, ev.Transcript)
 	// Open Questions outrank everything on screen, so no prompt is answered
 	// for a session that waits on the owner. The trust prompt is itself a
-	// numbered menu, so in the start phase, since the session was first seen
+	// menu, so in the start phase, since the session was first seen
 	// or last restarted and before it was seen in any other state, it is
 	// recognised before the dialog patterns; after that, a menu is a dialog,
 	// unless the session has not been seen ready since its launch and the

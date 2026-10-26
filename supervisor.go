@@ -958,8 +958,10 @@ func (s *Supervisor) watchCommand(name, cmd string, t *Track, now time.Time) {
 		fmt.Sprintf("%s's pane has run %q, not Claude, since %s; agentd does not type into it. Attach and see what happened.", name, cmd, since.Format(time.RFC3339)), t, now)
 }
 
-// errNotClaude stops a typing action whose pane does not run Claude, and
-// errScreenChanged one whose screen changed after the pass read it.
+// errNotClaude stops a typing action whose pane does not run Claude,
+// errScreenChanged one whose screen changed after the pass read it,
+// errParked one for a parked session, and errTrustPrompt one whose screen
+// shows the folder-trust question.
 var (
 	errNotClaude     = errors.New("the pane does not run Claude")
 	errScreenChanged = errors.New("the screen changed since it was read")
@@ -999,11 +1001,20 @@ func (s *Supervisor) typeInto(name, action string, a *ActPayload, t *Track, seen
 			return err
 		}
 		// A line or a key but the trust keys, sent to the folder-trust
-		// prompt, would answer it (#43).
-		if action != ActTrust && questionLine(s.trustRe, pane) {
-			s.skipOnce(name, "trust-prompt:"+action+":"+name+":"+shortHash(StillHash(pane)), "the screen shows the folder-trust prompt; not typing", t,
-				&SkipPayload{Action: action})
-			return errTrustPrompt
+		// prompt, would answer it (#43). Only the visible screen counts, as
+		// when the prompt is recognised: a question in the history has
+		// been answered.
+		if action != ActTrust && s.cfg.Policies.Trust.Pattern != "" {
+			visible, err := s.tmux.CapturePane(name, 0)
+			if err != nil {
+				s.emit(name, Event{Kind: KindError, Error: &ErrorPayload{Step: action + ": capture", Error: err.Error()}})
+				return err
+			}
+			if questionLine(s.trustRe, visible) {
+				s.skipOnce(name, "trust-prompt:"+action+":"+name+":"+shortHash(StillHash(visible)), "the screen shows the folder-trust prompt; not typing", t,
+					&SkipPayload{Action: action})
+				return errTrustPrompt
+			}
 		}
 		if now := StillHash(pane); now != seen {
 			// Answers wait for a working session whose screen may move

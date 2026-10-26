@@ -237,10 +237,9 @@ func (f *fakeTmux) Type(name, text string) error {
 // Keys works the trust prompt's menu on the screen as Claude Code does:
 // numbered options, or, as Claude Code draws them now, a run of lines
 // saying Yes or No; the option marked ❯ is selected (the first when none
-// is), Down and Up
-// move the mark and redraw the screen, Enter chooses. Choosing an option
-// that says No ends the session; any other trusts the folder. A sticky
-// prompt ignores the keys.
+// is), Down and Up move the mark and redraw the screen, Enter chooses.
+// Choosing an option that says No ends the session; any other trusts the
+// folder. A sticky prompt ignores the keys.
 func (f *fakeTmux) Keys(name string, keys ...string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
