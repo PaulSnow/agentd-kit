@@ -42,6 +42,12 @@ type Config struct {
 	Usage UsageConfig `json:"usage"`
 	// Consoles are the consoles that are no repository's (#42).
 	Consoles map[string]ConsoleConfig `json:"consoles"`
+	// Hub, Hosts and Node are agentd on every machine (#29, node.go): the
+	// hub the nodes report to, the hosts it serves, and this machine's
+	// node.
+	Hub   HubConfig             `json:"hub"`
+	Hosts map[string]HostConfig `json:"hosts"`
+	Node  NodeConfig            `json:"node"`
 }
 
 // Account is a Claude login a session runs under: its config directory,
@@ -253,6 +259,9 @@ type Repository struct {
 	// Sessions, when set, is where the sessions agentd starts live, and
 	// turns on the repository's request loop (sessions.go, loop.go).
 	Sessions *SessionsPolicy `json:"sessions"`
+	// CloneOn are the hosts that must have a clone (#29): a node whose
+	// host it names creates one where it is missing.
+	CloneOn []string `json:"clone_on"`
 
 	defaulted []string // the policy keys checkPolicy filled in
 }
@@ -337,6 +346,8 @@ func DefaultConfig() Config {
 		PollInterval:  Duration{5 * time.Minute},
 		Poll:          PollConfig{Every: Duration{DefaultPollEvery}, CIEvery: Duration{DefaultCIEvery}},
 		Usage:         UsageConfig{Every: Duration{DefaultUsageEvery}, Limit: DefaultUsageLimit, API: DefaultUsageAPI, Model: DefaultUsageModel},
+		Hub:           HubConfig{SilentAfter: Duration{DefaultSilentAfter}, RetryAfter: Duration{DefaultRetryAfter}},
+		Node:          NodeConfig{ReposRoot: "~/repos", Every: Duration{DefaultNodeEvery}, OpenState: []string{".kickoff"}},
 		TranscriptDir: "~/.claude/projects",
 		Timeouts:      Timeouts{Tmux: Duration{10 * time.Second}, Forge: Duration{2 * time.Minute}, Escalate: Duration{2 * time.Minute}},
 		Policies: Policies{
@@ -550,6 +561,7 @@ func (c *Config) finish(base string) error {
 		c.Repositories[name] = repo
 	}
 	c.checkSessionsPolicies(path, &errs)
+	c.checkNodeConfig(path, &errs)
 	for name, a := range c.Accounts {
 		if a.ConfigDir == "" && a.TokenFile == "" {
 			errs = append(errs, fmt.Errorf("accounts.%s needs a config_dir, a token_file, or both", name))

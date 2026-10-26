@@ -76,6 +76,12 @@ func main() {
 		err = casesCmd(os.Args[2:], os.Stdout)
 	case "mcp":
 		err = mcpCmd(os.Args[2:], os.Stdin, os.Stdout)
+	case "hub":
+		err = hubCmd(os.Args[2:])
+	case "node":
+		err = nodeCmd(os.Args[2:])
+	case "nodes":
+		err = nodesCmd(os.Args[2:], os.Stdout)
 	case "version", "--version":
 		fmt.Println("agentd", version)
 		return
@@ -116,6 +122,9 @@ func usage() {
   agentd cases [--config PATH] [--log PATH] rule CASE restriction|waiver|close|reopen [TEXT]
   agentd cases [--config PATH] [--log PATH] goal CASE FILE|-
   agentd mcp [--config PATH] [--log PATH] --session NAME
+  agentd hub [--config PATH] [--log PATH]
+  agentd node [--config PATH] [--once]
+  agentd nodes [--config PATH] [--log PATH]
   agentd version
 
 run supervises the configured sessions; --shadow observes and logs what it
@@ -156,7 +165,14 @@ one-shot restriction or waiver on a case, or closes or reopens it; goal
 records the done-when items of the issue body in FILE (- for standard
 input) as the case's goal, A1 on. mcp serves the session's tools,
 report_progress and request_step, on standard input and output for its
-case alone; the restart command's {mcp} passes it to a fresh session.`)
+case alone; the restart command's {mcp} passes it to a fresh session.
+hub serves the nodes on hub.address: each host's node authenticates with
+its own token, its events are appended to the log in its order, and the
+answer is what it is to watch and do. node reports this machine's
+clones to node.hub every node.every and creates a clone the hub's policy
+(repositories.NAME.clone_on) requires where none is; it never touches a
+clone that exists. nodes prints each host's clones from the log, a host
+silent for hub.silent_after as unknown.`)
 }
 
 func loadConfigFlag(fs *flag.FlagSet, args []string) (*Config, *string, error) {
