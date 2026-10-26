@@ -19,6 +19,10 @@ import (
 // it has read past, go to the new server in a handover file, and the new
 // server's first tool reply says it restarted. A read that fails with the
 // binary unchanged is refused as before, saying to restart the session.
+// So is one after an install that switches a symbolic link: the session
+// runs the path the link resolved to, which still holds the old build.
+// A downgrade to a build older than this hand-over drops the call it was
+// handed, and its file stays in the temporary directory.
 
 // mcpHandoverEnv names the handover file of a re-executed server.
 const mcpHandoverEnv = "AGENTD_MCP_HANDOVER"
@@ -71,13 +75,16 @@ func buffered(br *bufio.Reader) []byte {
 	return b
 }
 
-// replacedSince notes the binary at exe and says, later, whether another
-// file is there now: an install moves a new build over the old. Nil when
-// exe cannot be read.
-func replacedSince(exe string) func() bool {
-	was, err := os.Stat(exe)
+// replacedSince notes the binary running, image, or, when that cannot be
+// read, the one at exe, and says, later, whether another file is at exe
+// now: an install moves a new build over the old. Nil when neither can be
+// read.
+func replacedSince(exe, image string) func() bool {
+	was, err := os.Stat(image)
 	if err != nil {
-		return nil
+		if was, err = os.Stat(exe); err != nil {
+			return nil
+		}
 	}
 	return func() bool {
 		now, err := os.Stat(exe)

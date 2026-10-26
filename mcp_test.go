@@ -694,6 +694,26 @@ func TestMCPRestartsOnReplacedBuild(t *testing.T) {
 	}
 }
 
+// A re-executed server that restarts again, before it has read all it
+// was handed, hands on the rest of it too, ahead of its own input.
+func TestMCPRestartHandsOnHeldInput(t *testing.T) {
+	h, _ := mcpHarness(t)
+	srv := staleServer(h, true)
+	var pending []byte
+	srv.restart = func(p []byte, _ string) error { pending = p; return nil }
+	call := toolCall(1, ToolRequestStep, map[string]any{"kind": StepReview})
+	held := call + "\n" + `{"jsonrpc":"2.0","id":2,"method":"ping","params":{"pad":"` + strings.Repeat("x", 200<<10) + `"}}` + "\n"
+	own := `{"jsonrpc":"2.0","id":3,"method":"ping"}` + "\n"
+	srv.held = bytes.NewReader([]byte(held))
+	var out bytes.Buffer
+	if err := srv.Serve(io.MultiReader(srv.held, strings.NewReader(own)), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 || string(pending) != held {
+		t.Fatalf("replied %q; handed on %d bytes, want the %d held", out.String(), len(pending), len(held))
+	}
+}
+
 // A server whose binary is unchanged refuses as before, and says what to
 // do; one whose re-execution fails says that, and goes on serving.
 func TestMCPStaleWithoutRestart(t *testing.T) {
@@ -785,7 +805,7 @@ func TestReplacedSince(t *testing.T) {
 	dir := t.TempDir()
 	exe := filepath.Join(dir, "agentd")
 	writeFile(t, exe, "old")
-	replaced := replacedSince(exe)
+	replaced := replacedSince(exe, filepath.Join(dir, "no image"))
 	if replaced == nil || replaced() {
 		t.Fatal("the binary noted is replaced")
 	}
@@ -796,7 +816,11 @@ func TestReplacedSince(t *testing.T) {
 	if !replaced() {
 		t.Fatal("a binary moved over it is not replaced")
 	}
-	if replacedSince(filepath.Join(dir, "missing")) != nil {
+	writeFile(t, filepath.Join(dir, "elsewhere"), "another build")
+	if image := replacedSince(filepath.Join(dir, "elsewhere"), exe); image == nil || !image() {
+		t.Fatal("the running image is not compared with the binary on disk")
+	}
+	if replacedSince(filepath.Join(dir, "missing"), filepath.Join(dir, "missing")) != nil {
 		t.Fatal("a binary that cannot be read is watched")
 	}
 }

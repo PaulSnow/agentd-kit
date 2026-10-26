@@ -452,9 +452,10 @@ type MCPServer struct {
 	// answered, returning only when it cannot (upgrade.go). Nil: never.
 	replaced   func() bool
 	restart    func(pending []byte, why string) error
-	restarting string // why the call just handled is left to the binary on disk
-	restartErr error  // why re-executing it failed
-	note       string // said in the next tool reply: the server restarted
+	restarting string        // why the call just handled is left to the binary on disk
+	restartErr error         // why re-executing it failed
+	note       string        // said in the next tool reply: the server restarted
+	held       *bytes.Reader // the handover input, which Serve reads before its own
 }
 
 // NewMCPServer is the server for the named session, which must work a
@@ -541,6 +542,10 @@ func (srv *MCPServer) Serve(r io.Reader, w io.Writer) error {
 				if why := srv.restarting; why != "" {
 					srv.restarting = ""
 					pending := append(append(line, '\n'), buffered(br)...)
+					if srv.held != nil {
+						rest, _ := io.ReadAll(srv.held)
+						pending = append(pending, rest...)
+					}
 					if srv.restartErr = srv.restart(pending, why); srv.restartErr == nil {
 						return nil
 					}
@@ -1230,6 +1235,12 @@ func mcpFacts(st *LogState, id, role string) ([]string, []GoalItem, []FactRuling
 
 // mcpCmd is agentd mcp --session NAME: the session's server on stdio.
 func mcpCmd(args []string, r io.Reader, w io.Writer) error {
+	// A re-executed server's handover is taken first, so it is removed
+	// whatever follows; one it cannot read is said and left.
+	pending, why, err := takeHandover()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "agentd mcp:", err)
+	}
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	session := fs.String("session", "", "the session the server reports for")
 	cfg, _, err := loadConfigFlag(fs, args)
@@ -1238,12 +1249,6 @@ func mcpCmd(args []string, r io.Reader, w io.Writer) error {
 	}
 	if *session == "" || fs.NArg() > 0 {
 		return errors.New("usage: agentd mcp [--config PATH] [--log PATH] --session NAME")
-	}
-	// A re-executed server's handover is taken first, so it is removed
-	// whatever follows.
-	pending, why, err := takeHandover()
-	if err != nil {
-		return err
 	}
 	log, err := OpenLog(cfg.EventLog)
 	if err != nil {
@@ -1266,10 +1271,11 @@ func mcpCmd(args []string, r io.Reader, w io.Writer) error {
 	if pending != nil {
 		srv.note = restartNote(why)
 		fmt.Fprintln(os.Stderr, "agentd mcp:", srv.note)
-		r = io.MultiReader(bytes.NewReader(pending), r)
+		srv.held = bytes.NewReader(pending)
+		r = io.MultiReader(srv.held, r)
 	}
 	if exe, err := os.Executable(); err == nil {
-		srv.replaced = replacedSince(exe)
+		srv.replaced = replacedSince(exe, "/proc/self/exe")
 		srv.restart = func(pending []byte, why string) error {
 			return reexecMCP(exe, append([]string{"mcp"}, args...), pending, why)
 		}
