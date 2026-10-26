@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -383,6 +384,42 @@ func TestConsoleImportOutsideLines(t *testing.T) {
 	}
 	if _, _, err := ImportConsole(f.night, NewLogWriter(f.nightBuf), events, pageAt, "widgets", strings.NewReader(`{"ts": 1761350400000, "text": "ms"}`)); err == nil || !strings.Contains(err.Error(), "Unix seconds") {
 		t.Fatalf("a ts in milliseconds: %v", err)
+	}
+}
+
+// import takes the outside console program's lines as they are (#44): a
+// line posted with --to keeps whom it was typed to, a field import does
+// not use, such as edited, is ignored, and a line that is not JSON, has a
+// field of the wrong type, or lacks its text is still refused.
+func TestConsoleImportIgnoresUnusedFields(t *testing.T) {
+	_, f := fixtureUI(t)
+	in := `{"ts": 1761350400, "from": "owner-a", "kind": "info", "text": "Paint it blue", "to": "w17"}
+{"ts": 1761350460, "from": "owner-a", "kind": "info", "text": "Paint it green", "edited": 1761350470}
+`
+	events, _, _ := NewLogWriter(f.nightBuf).Tail(0)
+	added, skipped, err := ImportConsole(f.night, NewLogWriter(f.nightBuf), events, pageAt, "widgets", strings.NewReader(in))
+	if err != nil || added != 2 || skipped != 0 {
+		t.Fatalf("import = %d, %d, %v", added, skipped, err)
+	}
+	events, _, _ = NewLogWriter(f.nightBuf).Tail(0)
+	to := map[string]string{}
+	for _, e := range events {
+		if e.Kind == KindFeed && e.Feed.Phase == FeedImported && strings.HasPrefix(e.Feed.Text, "Paint") {
+			to[e.Feed.Text] = e.Feed.To
+		}
+	}
+	if !reflect.DeepEqual(to, map[string]string{"Paint it blue": "w17", "Paint it green": ""}) {
+		t.Fatalf("imported to = %v", to)
+	}
+	for name, line := range map[string]string{
+		"not JSON":   `ts 1761350400 text hello`,
+		"wrong type": `{"ts": 1761350400, "text": "hello", "to": 3}`,
+		"no text":    `{"ts": 1761350400, "from": "owner-a", "edited": true}`,
+		"no time":    `{"from": "owner-a", "text": "hello", "to": "w17"}`,
+	} {
+		if _, _, err := ImportConsole(f.night, NewLogWriter(f.nightBuf), events, pageAt, "widgets", strings.NewReader(line)); err == nil || !strings.Contains(err.Error(), "line 1") {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }
 

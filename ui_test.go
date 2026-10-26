@@ -781,7 +781,7 @@ func TestConsoleImport(t *testing.T) {
 		`{"at": "2026-10-22T09:00:00Z", "text": "New"}` + "\nnot json\n",
 		`{"at": "2026-10-22T09:00:00Z", "text": "New", "repository": "elsewhere"}`,
 		`{"text": "no time"}`,
-		`{"at": "2026-10-22T09:00:00Z", "text": "New", "colour": "blue"}`,
+		`{"at": "2026-10-22T09:00:00Z", "text": "New", "from": 3}`,
 	} {
 		if _, _, err := ImportConsole(f.night, log, events, pageAt, "widgets", strings.NewReader(bad)); err == nil {
 			t.Errorf("%q imported", bad)
