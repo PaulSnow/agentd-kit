@@ -294,7 +294,7 @@ func (src *uiSource) reply(repo, text string) error {
 	if err := src.catchUp(); err != nil {
 		return err
 	}
-	return UIInstruction(src.cfg, src.log, src.st, time.Now(), repo, text)
+	return UIInstruction(src.cfg, src.log, time.Now(), repo, text)
 }
 
 // whoisTTL is how long the UI trusts one whois answer for an address, and

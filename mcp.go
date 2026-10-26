@@ -86,19 +86,8 @@ func toolsFor(role string) []string {
 		return []string{ToolReviewFindings}
 	case RoleJudge:
 		return []string{ToolJudgeDispositions, ToolRaiseDecision}
-	case RoleCoordinator:
-		return []string{ToolStartSession, ToolEndSession, ToolApprove}
 	}
 	return mcpTools
-}
-
-// sessionTools is the tools the session is offered: a coordinator of a
-// repository with no sessions entry approves requests only.
-func sessionTools(cfg *Config, sess Session) []string {
-	if sess.Role == RoleCoordinator && cfg.Repositories[sess.Repository].Sessions == nil {
-		return []string{ToolApprove}
-	}
-	return toolsFor(sess.Role)
 }
 
 // CaseProgress is an accepted report_progress, its text screened.
@@ -459,16 +448,14 @@ type MCPServer struct {
 }
 
 // NewMCPServer is the server for the named session, which must work a
-// case or coordinate a repository.
+// case.
 func NewMCPServer(cfg *Config, name string, log *Log, read func() ([]Event, error), now func() time.Time) (*MCPServer, error) {
 	sess, ok := cfg.Sessions[name]
 	if !ok {
 		return nil, fmt.Errorf("no session %q", name)
 	}
 	id := cfg.caseOf(sess)
-	if sess.Role == RoleCoordinator {
-		id = ""
-	} else if id == "" {
+	if id == "" {
 		return nil, fmt.Errorf("session %s works no case: it needs a repository and an issue", name)
 	}
 	srv := &MCPServer{cfg: cfg, name: name, sess: sess, caseID: id, log: log, read: read, now: now}
@@ -604,7 +591,7 @@ func (srv *MCPServer) handle(req rpcRequest) (any, *rpcError) {
 		return map[string]any{}, nil
 	case "tools/list":
 		var tools []MCPTool
-		for _, name := range sessionTools(srv.cfg, srv.sess) {
+		for _, name := range toolsFor(srv.sess.Role) {
 			for _, t := range toolList() {
 				if t.Name == name {
 					tools = append(tools, t)
@@ -622,7 +609,7 @@ func (srv *MCPServer) handle(req rpcRequest) (any, *rpcError) {
 		}
 		// A tool the server does not have is a protocol error, answered
 		// and not logged: nothing reached the case.
-		if tools := sessionTools(srv.cfg, srv.sess); !contains(tools, p.Name) {
+		if tools := toolsFor(srv.sess.Role); !contains(tools, p.Name) {
 			return nil, &rpcError{rpcInvalidParams, fmt.Sprintf("no tool %q: %s", p.Name, strings.Join(tools, ", "))}
 		}
 		reply, refused := srv.call(p.Name, p.Arguments)
@@ -639,9 +626,6 @@ func (srv *MCPServer) handle(req rpcRequest) (any, *rpcError) {
 // call checks and records one tool call. It returns the reply, compact
 // JSON, and whether the call was refused.
 func (srv *MCPServer) call(tool string, args json.RawMessage) (string, bool) {
-	if srv.sess.Role == RoleCoordinator {
-		return srv.callSessions(tool, args)
-	}
 	events, err := srv.load()
 	if err != nil {
 		return compact(map[string]any{"refused": "agentd could not read its log: " + err.Error()}), true
@@ -733,13 +717,6 @@ func (srv *MCPServer) call(tool string, args json.RawMessage) (string, bool) {
 // instructions is what the server tells the session of its tools.
 func (srv *MCPServer) instructions() string {
 	switch srv.sess.Role {
-	case RoleCoordinator:
-		approve := "Approve a request at the head you reviewed with approve; a red request is due for you, with its failing jobs in your pack."
-		if srv.cfg.Repositories[srv.sess.Repository].Sessions == nil {
-			return approve
-		}
-		return "Start a session on a branch of " + srv.sess.Repository + " with start_session, and end one with end_session. " +
-			"agentd makes its workdir, brief and worktree and supervises it; its DONE is due for you. " + approve
 	case RoleReviewer:
 		return "Review the work on case " + srv.caseID + " and report every finding with review_findings, once a round. You advise; the judge decides. " +
 			"Repeat an earlier finding by its id, F1…, from your facts; name the done-when items each bears on, or set widens_scope."
@@ -1159,22 +1136,7 @@ func toolList() []MCPTool {
 		`"plan":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"step":{"type":"string"}},"required":["id","step"],"additionalProperties":false}},` +
 		`"lessons":{"type":"array","items":{"type":"string"},"description":"what went wrong or was surprising, proposed to the owner"}},` +
 		`"required":["dispositions","plan"],"additionalProperties":false}`
-	start := `{"type":"object","properties":{` +
-		`"kind":{"enum":["work","reviewer","judge"],"description":"work by default; a reviewer or judge serves the issue's review rounds"},` +
-		`"branch":{"type":"string","description":"a plain branch name; checked out as origin has it, else cut from the target"},` +
-		`"issue":{"type":"integer","minimum":1,"description":"the issue the session works; needed for a reviewer or judge"},` +
-		`"account":{"type":"string","description":"one of the accounts the repository's sessions may use; by default yours"},` +
-		`"repository":{"type":"string","description":"your own repository; any other is refused"}},` +
-		`"required":["branch"],"additionalProperties":false}`
-	end := `{"type":"object","properties":{"name":{"type":"string","description":"the name start_session gave"}},"required":["name"],"additionalProperties":false}`
-	approve := `{"type":"object","properties":{` +
-		`"request":{"type":"string","description":"the request, !12 on GitLab or #12 on GitHub"},` +
-		`"sha":{"type":"string","description":"the head you reviewed, 7 to 40 hex digits; it must be the request's head"}},` +
-		`"required":["request","sha"],"additionalProperties":false}`
 	return []MCPTool{
-		{Name: ToolStartSession, Description: "Start a session agentd supervises, on a branch of your repository: one per branch and kind. agentd names it, makes its workdir and worktree, launches and restarts it, and wakes you when it is DONE.", InputSchema: json.RawMessage(start)},
-		{Name: ToolEndSession, Description: "End a session you started: agentd stops it and keeps its workdir and worktree.", InputSchema: json.RawMessage(end)},
-		{Name: ToolApprove, Description: "Approve a request of your repository at the head you reviewed. agentd merges a request it did not deliver only with your approval at its exact head, green CI and the repository's policy; a push after it needs a new approval.", InputSchema: json.RawMessage(approve)},
 		{Name: ToolReportProgress, Description: "Report progress on this session's case. Item ids and restriction ids are the case's; evidence is a typed reference agentd checks, never prose. Restate each done-when item in the issue's words.", InputSchema: json.RawMessage(report)},
 		{Name: ToolRaiseDecision, Description: "Ask the owner a decision, with its whole form. agentd gives it an id, D1 on; the answer arrives in answers.json as JSON of its type. An answer in the owner's own words (other) does not settle it: raise it again with options drawn from it, superseding it.", InputSchema: json.RawMessage(raise)},
 		{Name: ToolRequestStep, Description: "Ask for review, delivery or stop. A request is recorded, never evidence; agentd moves the case only on the facts.", InputSchema: json.RawMessage(step)},
@@ -1203,10 +1165,9 @@ func mcpLaunchConfig(cfg *Config, name string, sess Session) string {
 }
 
 // servesTools says whether the session gets a server: one that works a
-// case, and a coordinator, which approves requests (#36) and starts
-// sessions where its repository lets it.
+// case.
 func servesTools(cfg *Config, sess Session) bool {
-	return sess.Role == RoleCoordinator || cfg.caseOf(sess) != ""
+	return cfg.caseOf(sess) != ""
 }
 
 // FactRuling is an active restriction or waiver as a fresh session's
@@ -1260,7 +1221,7 @@ func mcpCmd(args []string, r io.Reader, w io.Writer) error {
 		events, _, err := log.Load()
 		return events, err
 	}
-	// A session a coordinator started is the log's, not the configuration's.
+	// A session agentd started is the log's, not the configuration's.
 	events, err := read()
 	if err != nil {
 		return err

@@ -264,16 +264,10 @@ type uiRow struct {
 	Spend      int64
 	HasSpend   bool
 	LastTurn   time.Time
-	// A coordinator's wakes: how many, the latest, and its spend per
-	// wake when known.
-	Coordinator bool
-	Wakes       int
-	LastWake    time.Time
-	WakeTokens  *int64
 }
 
 // uiRequest is one open request of a repository: delivered by a session,
-// or an outside one the coordinator watches (#36).
+// or an outside one the repository's loop watches (#36, #53).
 type uiRequest struct {
 	Src        string
 	Ref        string
@@ -296,14 +290,13 @@ type uiItems struct {
 
 // uiRepo is one repository's card, merged across the sources.
 type uiRepo struct {
-	Name         string
-	NeedsYou     int
-	Coordinators []uiRow
-	Working      []uiRow
-	Finished     []uiRow
-	Requests     []uiRequest
-	Items        []uiItems
-	Console      bool // a source configures it, so it has a console view
+	Name     string
+	NeedsYou int
+	Working  []uiRow
+	Finished []uiRow
+	Requests []uiRequest
+	Items    []uiItems
+	Console  bool // a source configures it, so it has a console view
 }
 
 // uiAccount is an account's latest usage reading across the sources
@@ -337,7 +330,7 @@ type uiIndex struct {
 }
 
 // view brings src up to date and reads what every view needs from it:
-// the config with the sessions coordinators started, the report, and
+// the config with the sessions agentd started, the report, and
 // when each open decision was first seen.
 func (src *uiSource) view(now time.Time) (*Config, Report, error) {
 	if err := src.catchUp(); err != nil {
@@ -351,17 +344,13 @@ func (src *uiSource) view(now time.Time) (*Config, Report, error) {
 func (src *uiSource) row(c ReportCase) uiRow {
 	t := src.st.Tracks[c.Session]
 	live := src.st.Mode == ModeLive
-	r := uiRow{Src: src.Name, Name: c.Session, State: c.State, Since: c.Since, Head: c.Head,
-		Coordinator: c.Role == RoleCoordinator, Wakes: c.Wakes, WakeTokens: c.WakeTokens}
+	r := uiRow{Src: src.Name, Name: c.Session, State: c.State, Since: c.Since, Head: c.Head}
 	if u, ok := t.current(); ok {
 		r.Context, r.HasContext = u.Context, true
 	}
 	r.Spend, r.HasSpend = t.spend(live)
 	if n := len(t.Turns); n > 0 {
 		r.LastTurn = t.Turns[n-1].At
-	}
-	if w, ok := t.lastWake(); ok {
-		r.LastWake = w.At
 	}
 	return r
 }
@@ -396,7 +385,7 @@ func (u *UI) indexView(now time.Time) (*uiIndex, error) {
 	sort.Slice(v.Accounts, func(i, j int) bool { return v.Accounts[i].Name < v.Accounts[j].Name })
 	sortNeeds(v.Needs)
 	for _, r := range repos {
-		for _, rows := range [][]uiRow{r.Coordinators, r.Working, r.Finished} {
+		for _, rows := range [][]uiRow{r.Working, r.Finished} {
 			sort.SliceStable(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 		}
 		v.Repos = append(v.Repos, r)
@@ -406,7 +395,7 @@ func (u *UI) indexView(now time.Time) (*uiIndex, error) {
 		if a.NeedsYou != b.NeedsYou {
 			return a.NeedsYou > b.NeedsYou
 		}
-		if aw, bw := len(a.Working)+len(a.Coordinators), len(b.Working)+len(b.Coordinators); (aw > 0) != (bw > 0) {
+		if aw, bw := len(a.Working), len(b.Working); (aw > 0) != (bw > 0) {
 			return aw > 0
 		}
 		return a.Name < b.Name
@@ -474,8 +463,6 @@ func (src *uiSource) addIndex(v *uiIndex, get func(string) *uiRepo, now time.Tim
 		for _, c := range rr.Cases {
 			row := src.row(c)
 			switch {
-			case row.Coordinator:
-				r.Coordinators = append(r.Coordinators, row)
 			case c.State == string(Done):
 				r.Finished = append(r.Finished, row)
 			default:
@@ -501,12 +488,14 @@ func (src *uiSource) addIndex(v *uiIndex, get func(string) *uiRepo, now time.Tim
 			r.Items = append(r.Items, uiItems{Src: src.Name, Items: unseen})
 		}
 	}
-	// The outside requests a coordinator watches, by repository name.
+	// The outside requests each repository's loop watches, by repository
+	// name.
 	secret := confidentialMatcher(cfg)
+	looping := loopingOf(cfg)
 	for _, key := range sortedKeys(src.st.CI) {
 		rec := src.st.CI[key]
-		coord, ok := src.st.Coordinators[rec.Repository]
-		if !ok || rec.Session != coord || rec.State == CIMerged || rec.State == CIClosed || rec.Delivered != "" {
+		track, ok := looping[rec.Repository]
+		if !ok || rec.Session != track || rec.State == CIMerged || rec.State == CIClosed || rec.Delivered != "" {
 			continue
 		}
 		if _, ok := cfg.Repositories[rec.Repository]; !ok || secret(rec.Repository, rec.Ref, rec.Author) {
@@ -569,7 +558,7 @@ const withheldMessage = "(withheld: it matched a confidential pattern)"
 // consoleView is repo's console, nil when no source knows the repository.
 func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 	v := &uiConsole{uiPage: uiPage{Title: repo + " console", Token: u.token, Back: "/console/" + repo, Now: now, loc: u.loc}, Repository: repo}
-	known, coordinated := false, false
+	known := false
 	for _, src := range u.sources {
 		err := func() error {
 			src.mu.Lock()
@@ -588,12 +577,9 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 				}
 			} else if _, ok := cfg.Repositories[repo]; ok {
 				known = true
-				// The reply goes to the run of the repository's
-				// coordinator, which is the run that reads it, else to
-				// the first live run.
-				co := cfg.Repositories[repo].Coordinator != nil || src.st.Coordinators[repo] != ""
-				if src.st.Mode == ModeLive && (v.ReplySrc == "" || co && !coordinated) {
-					v.ReplySrc, coordinated = src.Name, co
+				// The reply goes to the first live run.
+				if src.st.Mode == ModeLive && v.ReplySrc == "" {
+					v.ReplySrc = src.Name
 				}
 			}
 			secret := confidentialMatcher(cfg)

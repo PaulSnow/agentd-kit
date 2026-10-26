@@ -176,19 +176,12 @@ func (t *Track) clone() *Track {
 	c.Escalated = append([]EscalationRecord(nil), t.Escalated...)
 	c.Turns = append([]TurnRecord(nil), t.Turns...)
 	c.TurnLines = copyMap(t.TurnLines)
-	c.Wakes = append([]WakeRecord(nil), t.Wakes...) // a wake's spend is never changed in place
-	c.Woken = copyMap(t.Woken)
-	c.Carried = copyMap(t.Carried)
 	c.CIFixes = append([]CIFixRecord(nil), t.CIFixes...)
 	c.CIRaised = copyMap(t.CIRaised)
 	c.Merges = copyMap(t.Merges)
 	c.Merged = copyMap(t.Merged)
 	c.Retests = copyMap(t.Retests)
 	c.Unretestable = copyMap(t.Unretestable)
-	if t.WakeBase != nil {
-		b := *t.WakeBase
-		c.WakeBase = &b
-	}
 	if t.LastObs != nil {
 		o := *t.LastObs
 		c.LastObs = &o

@@ -9,14 +9,14 @@ import (
 	"time"
 )
 
-// BriefPart is one part of a coordinator's brief (#50): its path and the
+// BriefPart is one part of a configured session's brief (#50): its path and the
 // hash of what was read from it.
 type BriefPart struct {
 	Path string `json:"path"`
 	Hash string `json:"hash"`
 }
 
-// assembleBrief reads a coordinator's brief parts in order: the brief
+// assembleBrief reads a session's brief parts in order: the brief
 // they make, each part's trailing space trimmed and a blank line between
 // them, and each part's hash. A part that cannot be read is an error
 // naming its path.
@@ -42,15 +42,15 @@ func assembleBrief(paths []string) ([]byte, []BriefPart, error) {
 	return []byte(b.String()), parts, nil
 }
 
-// Brief is a coordinator's brief as read from its parts for a launch.
+// Brief is a session's brief as read from its parts for a launch.
 type Brief struct {
 	Text  []byte
 	Parts []BriefPart
 }
 
-// readBrief reads a coordinator's brief parts before it is started or
-// rotated (verb says which). A session with no parts has none, and its
-// BRIEF.md is left as it is. A part that cannot be read refuses the
+// readBrief reads a session's brief parts, sessions.NAME.brief, before it
+// is started or rotated (verb says which). A session with no parts has
+// none, and its BRIEF.md is left as it is. A part that cannot be read refuses the
 // launch: it is skipped, naming the part, and escalated once per cause;
 // the brief written last stays.
 func (s *Supervisor) readBrief(name string, sess Session, t *Track, now time.Time, verb string) (*Brief, bool) {
@@ -61,7 +61,7 @@ func (s *Supervisor) readBrief(name string, sess Session, t *Track, now time.Tim
 	if err != nil {
 		key := "brief:" + name + ":" + shortHash(HashPane(err.Error()))
 		s.skipOnce(name, key, "not "+verb+": "+err.Error(), t, nil)
-		s.escalate(name, key, fmt.Sprintf("%s is not %s: %v. Fix the part, or the brief listed under its repository's coordinator; agentd goes ahead once the brief can be written.", name, verb, err), t, now)
+		s.escalate(name, key, fmt.Sprintf("%s is not %s: %v. Fix the part, or the brief listed under sessions.%s; agentd goes ahead once the brief can be written.", name, verb, err, name), t, now)
 		return nil, false
 	}
 	return &Brief{Text: text, Parts: parts}, true

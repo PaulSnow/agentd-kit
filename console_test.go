@@ -175,7 +175,7 @@ func TestConsoleInboxOnce(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("inbox = %q", got)
 	}
-	var first PackInstruction
+	var first InboxInstruction
 	if err := json.Unmarshal([]byte(got[0]), &first); err != nil || first.Text != "Paint it **green**" || first.From != "console:widgets" || first.ID == "" {
 		t.Fatalf("first line %q: %+v %v", got[0], first, err)
 	}

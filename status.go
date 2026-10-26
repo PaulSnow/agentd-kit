@@ -9,9 +9,6 @@ import (
 	"time"
 )
 
-// statusWakes is how many of a coordinator's latest wakes the table shows.
-const statusWakes = 3
-
 // SessionStatus is one row of the status table, derived from the event log.
 type SessionStatus struct {
 	Name        string
@@ -35,54 +32,6 @@ type SessionStatus struct {
 	Rotations   int
 	Stopped     string // why the budget stopped it
 	Model       string // the model its launches run, "default" the command's own; "" a session not configured
-	// A coordinator: its role and repository, its wakes, its spend per
-	// wake (-1 when unknown), and its latest wake.
-	Role       string
-	Repository string
-	Wakes      int
-	WakeTokens int64
-	LastWake   time.Time
-	WakeReason string
-	WakeLog    []WakeStatus // its latest wakes, oldest first
-}
-
-// WakeStatus is one of a coordinator's wakes as status shows it: when, why
-// and what it spent until the next, -1 when unknown, so an empty wake
-// shows (#49). Spend is as measured at each wake, and transcripts are read
-// apart from the pass that wakes, so a turn's last calls read after the
-// next wake count toward that one.
-type WakeStatus struct {
-	At     time.Time
-	Reason string
-	Spend  int64
-}
-
-// wakeLog is t's counted wakes with what each spent: up to the next one's
-// spend, or the spend now for the last.
-func (t *Track) wakeLog(exact bool) []WakeStatus {
-	var out []WakeStatus
-	var ws []WakeRecord
-	for _, w := range t.Wakes {
-		if w.Taken {
-			ws = append(ws, w)
-		}
-	}
-	now, nowOK := t.spend(exact)
-	for i, w := range ws {
-		r := WakeStatus{At: w.At, Reason: w.Reason, Spend: -1}
-		end, ok := now, nowOK
-		if i+1 < len(ws) {
-			ok = ws[i+1].Spend != nil
-			if ok {
-				end = *ws[i+1].Spend
-			}
-		}
-		if ok && w.Spend != nil {
-			r.Spend = end - *w.Spend
-		}
-		out = append(out, r)
-	}
-	return out
 }
 
 // Summarize folds the event log for mode through the one reader into one
@@ -157,16 +106,6 @@ func SummarizeState(cfg *Config, st *LogState) ([]SessionStatus, map[string]any)
 			if r.Model == "" {
 				r.Model = "default"
 			}
-		}
-		if sess.Role == RoleCoordinator {
-			r.Role, r.Repository, r.Wakes, r.WakeTokens = sess.Role, sess.Repository, t.WakeCount, -1
-			if n, ok := t.wakeTokens(mode == ModeLive); ok {
-				r.WakeTokens = n
-			}
-			if w, ok := t.lastWake(); ok {
-				r.LastWake, r.WakeReason = w.At, w.Reason
-			}
-			r.WakeLog = t.wakeLog(mode == ModeLive)
 		}
 		for _, d := range cfg.Sessions[name].Deliver {
 			if why := t.Blocked[d.Worktree]; why != "" && t.Delivered[name+":"+d.Worktree] == "" {
@@ -282,23 +221,6 @@ func PrintStatus(w io.Writer, rows []SessionStatus, meta map[string]any, now tim
 		}
 		if r.Guessed {
 			why += "; tokens from the newest transcript in its directory, a guess"
-		}
-		if r.Role == RoleCoordinator {
-			per := "tokens per wake unknown"
-			if r.WakeTokens >= 0 {
-				per = tokens(r.WakeTokens) + " tokens per wake"
-			}
-			why += fmt.Sprintf("; coordinator of %s: wakes %d, %s", r.Repository, r.Wakes, per)
-			if !r.LastWake.IsZero() {
-				why += fmt.Sprintf(", quiet %s since the last (%s)", ago(now, r.LastWake), r.WakeReason)
-			}
-			if log := r.WakeLog; len(log) > 0 {
-				var each []string
-				for _, w := range log[max(0, len(log)-statusWakes):] {
-					each = append(each, cutUTF8(w.Reason, 80)+" "+tokens(w.Spend))
-				}
-				why += "; latest wakes: " + strings.Join(each, ", ")
-			}
 		}
 		model := r.Model
 		if model == "" {

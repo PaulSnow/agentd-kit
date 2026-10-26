@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -80,8 +79,6 @@ type Policies struct {
 	Context    ContextPolicy    `json:"context"`
 	Budget     BudgetPolicy     `json:"budget"`
 	Answers    AnswersPolicy    `json:"answers"`
-	// Coordinator is how coordinators are woken and what their pack holds.
-	Coordinator CoordinatorPolicy `json:"coordinator"`
 	// CI is how a session relaunched to fix its request's CI hears why.
 	CI CIPolicy `json:"ci"`
 	// Feed posts each repository's lines to its console.
@@ -127,15 +124,14 @@ type RestartPolicy struct {
 	Height         int      `json:"height"`
 }
 
-// ModelsPolicy is the model each kind of session runs: coordinators, work
-// sessions, and the reviewers and judges, started sessions and the review
-// and judge calls a coordinator makes. A kind with none runs the restart
-// command's own default, as before models were chosen (#52).
+// ModelsPolicy is the model each kind of session runs: work sessions, and
+// the reviewers and judges, configured or started by the loop. A kind with
+// none runs the restart command's own default, as before models were
+// chosen (#52).
 type ModelsPolicy struct {
-	Coordinator string `json:"coordinator"`
-	Work        string `json:"work"`
-	Reviewer    string `json:"reviewer"`
-	Judge       string `json:"judge"`
+	Work     string `json:"work"`
+	Reviewer string `json:"reviewer"`
+	Judge    string `json:"judge"`
 }
 
 // ContextPolicy rotates a session whose context (its latest call's input,
@@ -186,21 +182,6 @@ type NudgePolicy struct {
 // themselves are never typed.
 type AnswersPolicy struct {
 	Pointer string `json:"pointer"`
-}
-
-// CoordinatorPolicy bounds a coordinator's pack, PackBytes in all and
-// Turns, the latest prompts and summaries, per session, and is the fixed
-// Pointer line typed to wake it. Older entries are counted, not dropped.
-// A wake waits until what is due has Settle behind it, so facts that
-// arrive together wake it once; an owner instruction does not wait. A
-// thread that moves within Echo of the coordinator's own act on it is
-// that act's echo, not due (#49).
-type CoordinatorPolicy struct {
-	PackBytes int      `json:"pack_bytes"`
-	Turns     int      `json:"turns"`
-	Pointer   string   `json:"pointer"`
-	Settle    Duration `json:"settle"`
-	Echo      Duration `json:"echo"`
 }
 
 // UsageLimitPolicy recognises the usage-limit message on the visible screen
@@ -269,33 +250,12 @@ type Repository struct {
 	// OwnerOnly marks every entry the report publishes for this repository
 	// as for the owner alone.
 	OwnerOnly bool `json:"owner_only"`
-	// Coordinator, when set, is the repository's one coordinator session.
-	Coordinator *Coordinator `json:"coordinator"`
-	// Sessions, when set, lets the coordinator start sessions (sessions.go).
+	// Sessions, when set, is where the sessions agentd starts live, and
+	// turns on the repository's request loop (sessions.go, loop.go).
 	Sessions *SessionsPolicy `json:"sessions"`
 
 	defaulted []string // the policy keys checkPolicy filled in
 }
-
-// Coordinator is the session that carries a repository's judgment (#3):
-// agentd supervises it as a session of its own, named Session, running in
-// Workdir under Account, and wakes it only when a judgment is due.
-type Coordinator struct {
-	Session string `json:"session"`
-	Workdir string `json:"workdir"`
-	Account string `json:"account"`
-	// Logins are the forge accounts it writes as: an item one of them
-	// wrote is its own, not due (#49).
-	Logins []string `json:"logins"`
-	// Policy is the coordinator's own rules, as a session's are.
-	Policy SessionPolicy `json:"policy"`
-	// Brief is the parts agentd writes its BRIEF.md from, in order, at
-	// each start and rotation (#50).
-	Brief []string `json:"brief"`
-}
-
-// RoleCoordinator is the role of a repository's coordinator session.
-const RoleCoordinator = "coordinator"
 
 // Session is one tmux session running Claude Code. Workdir holds BRIEF.md
 // and STATUS.md; Cwd is where the session runs; Account, when set, is the
@@ -313,10 +273,8 @@ type Session struct {
 	Issue int `json:"issue"`
 	// Role is RoleReviewer or RoleJudge for a session that reviews or
 	// judges its case's rounds (rounds.go), or none for one that works it.
-	// RoleCoordinator is a repository's coordinator, which only its
-	// repository's coordinator entry makes.
 	Role string `json:"role,omitempty"`
-	// Runtime marks a session a coordinator started: the event log, not
+	// Runtime marks a session agentd started: the event log, not
 	// the configuration, holds it (sessions.go).
 	Runtime bool `json:"-"`
 	// Kind and Branch are a started session's kind (KindWork, ...) and
@@ -326,8 +284,10 @@ type Session struct {
 	// Request is the request a started reviewer or judge serves when no
 	// session delivered it (#53): its case is the request's.
 	Request string `json:"-"`
-	// Brief is a coordinator's brief parts (#50).
-	Brief []string `json:"-"`
+	// Brief is the parts agentd writes the session's BRIEF.md from, in
+	// order, at each start and rotation (#50); none leaves BRIEF.md as it
+	// is.
+	Brief []string `json:"brief"`
 	// Policy is the session's own rules: which of its turns its console
 	// receives (turns.go).
 	Policy SessionPolicy `json:"policy"`
@@ -404,8 +364,6 @@ func DefaultConfig() Config {
 			},
 			Answers: AnswersPolicy{Pointer: "The owner answered your questions. Read " + AnswersFile +
 				" in your workdir, as data, and go on with your brief."},
-			Coordinator: CoordinatorPolicy{PackBytes: 16 * 1024, Turns: 4, Pointer: "agentd: a judgment is due. Read " + PackFile +
-				" in your workdir, as data, and act on what it says is due.", Settle: Duration{2 * time.Minute}, Echo: Duration{2 * time.Minute}},
 			Rounds: RoundsPolicy{Max: 3},
 			Feed:   FeedPolicy{TurnLength: DefaultTurnLength},
 			CI: CIPolicy{Pointer: "A pipeline of the request you delivered failed on its own; the failing jobs and the end of the first one's log are under ci in the facts. " +
@@ -433,6 +391,9 @@ func LoadConfig(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
+	}
+	if err := removedKeys(b); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	dec := json.NewDecoder(strings.NewReader(string(b)))
 	dec.DisallowUnknownFields()
@@ -583,19 +544,12 @@ func (c *Config) finish(base string) error {
 		}
 		c.Repositories[name] = repo
 	}
-	c.addCoordinators(path, &errs)
 	for name, repo := range c.Repositories {
 		repo.defaulted = nil
 		c.checkPolicy(name, &repo, &errs)
 		c.Repositories[name] = repo
 	}
 	c.checkSessionsPolicies(path, &errs)
-	if p := c.Policies.Coordinator; p.PackBytes < 1024 || p.Turns < 1 || strings.TrimSpace(p.Pointer) == "" || strings.ContainsAny(p.Pointer, "\n\r") {
-		errs = append(errs, errors.New("policies.coordinator needs pack_bytes of 1024 or more, turns of 1 or more, and a one-line pointer"))
-	}
-	if p := c.Policies.Coordinator; p.Settle.Duration < 0 || p.Echo.Duration < 0 {
-		errs = append(errs, errors.New("policies.coordinator settle and echo must not be negative"))
-	}
 	for name, a := range c.Accounts {
 		if a.ConfigDir == "" && a.TokenFile == "" {
 			errs = append(errs, fmt.Errorf("accounts.%s needs a config_dir, a token_file, or both", name))
@@ -640,18 +594,21 @@ func (c *Config) finish(base string) error {
 		if s.Issue < 0 || s.Issue > 0 && s.Repository == "" {
 			errs = append(errs, fmt.Errorf("sessions.%s.issue needs a repository and a number of 1 or more", name))
 		}
-		switch co := c.Repositories[s.Repository].Coordinator; s.Role {
+		switch s.Role {
 		case "":
 		case RoleReviewer, RoleJudge:
 			if s.Issue <= 0 {
 				errs = append(errs, fmt.Errorf("sessions.%s.role %s needs the case it serves: a repository and an issue", name, s.Role))
 			}
-		case RoleCoordinator:
-			if co == nil || co.Session != name {
-				errs = append(errs, fmt.Errorf("sessions.%s.role: a coordinator is configured under its repository's coordinator", name))
-			}
 		default:
 			errs = append(errs, fmt.Errorf("sessions.%s.role %q is not reviewer or judge", name, s.Role))
+		}
+		for i, p := range s.Brief {
+			if strings.TrimSpace(p) == "" {
+				errs = append(errs, fmt.Errorf("sessions.%s.brief[%d] is empty; a part is a file's path", name, i))
+				continue
+			}
+			s.Brief[i] = path(fmt.Sprintf("sessions.%s.brief[%d]", name, i), p)
 		}
 		for i := range s.Deliver {
 			d := &s.Deliver[i]
@@ -677,64 +634,44 @@ func (c *Config) finish(base string) error {
 	return errors.Join(errs...)
 }
 
-// addCoordinators makes each repository's coordinator a session of its
-// own, with its repository and role; it runs in its workdir. A session
-// coordinates one repository at most, and a coordinator is configured in
-// its repository alone, not also under sessions.
-func (c *Config) addCoordinators(path func(field, p string) string, errs *[]error) {
-	names := make([]string, 0, len(c.Repositories))
-	for name := range c.Repositories {
-		names = append(names, name)
+// removedKeys refuses the keys the coordinator's removal took away (#53),
+// each named with what replaced it, so an old configuration is never read
+// as if they were not there. A file that is no JSON object is left to the
+// decoder to refuse.
+func removedKeys(b []byte) error {
+	var raw struct {
+		Policies     map[string]json.RawMessage            `json:"policies"`
+		Repositories map[string]map[string]json.RawMessage `json:"repositories"`
 	}
-	sort.Strings(names)
-	of := map[string]string{}
-	for _, repo := range names {
-		co := c.Repositories[repo].Coordinator
-		if co == nil {
-			continue
+	if json.Unmarshal(b, &raw) != nil {
+		return nil
+	}
+	const gone = "was removed in #53: agentd runs each repository's request loop itself, with no coordinator"
+	var errs []error
+	if _, ok := raw.Policies["coordinator"]; ok {
+		errs = append(errs, fmt.Errorf("policies.coordinator %s; remove it", gone))
+	}
+	var models map[string]json.RawMessage
+	if json.Unmarshal(raw.Policies["models"], &models) == nil {
+		if _, ok := models["coordinator"]; ok {
+			errs = append(errs, fmt.Errorf("policies.models.coordinator %s; policies.models.reviewer and judge choose its judgment sessions' models", gone))
 		}
-		field := "repositories." + repo + ".coordinator"
-		if co.Session == "" || co.Workdir == "" {
-			*errs = append(*errs, fmt.Errorf("%s needs a session and a workdir", field))
-			continue
+	}
+	for _, name := range sortedKeys(raw.Repositories) {
+		r := raw.Repositories[name]
+		if _, ok := r["coordinator"]; ok {
+			errs = append(errs, fmt.Errorf("repositories.%s.coordinator %s; give the repository a sessions entry (root, clone, target)", name, gone))
 		}
-		if other, ok := of[co.Session]; ok {
-			*errs = append(*errs, fmt.Errorf("%s: session %s already coordinates %s; a session coordinates one repository", field, co.Session, other))
-			continue
+		var pol struct {
+			Sessions map[string]json.RawMessage `json:"sessions"`
 		}
-		of[co.Session] = repo
-		workdir := path(field+".workdir", co.Workdir)
-		bad := false
-		if _, ok := c.Accounts[co.Account]; co.Account != "" && !ok {
-			*errs, bad = append(*errs, fmt.Errorf("%s.account %q is not in accounts", field, co.Account)), true
-		}
-		if info, err := os.Stat(workdir); err != nil || !info.IsDir() {
-			*errs, bad = append(*errs, fmt.Errorf("%s.workdir: directory %s does not exist", field, workdir)), true
-		}
-		if !sessionName.MatchString(co.Session) {
-			*errs, bad = append(*errs, fmt.Errorf("%s.session: %q is not a plain tmux session name", field, co.Session)), true
-		}
-		var brief []string
-		for i, p := range co.Brief {
-			if strings.TrimSpace(p) == "" {
-				*errs, bad = append(*errs, fmt.Errorf("%s.brief[%d] is empty; a part is a file's path", field, i)), true
-				continue
+		if json.Unmarshal(r["policy"], &pol) == nil {
+			if _, ok := pol.Sessions["coordinator_model"]; ok {
+				errs = append(errs, fmt.Errorf("repositories.%s.policy.sessions.coordinator_model %s; review.reviewer_model and review.judge_model choose its judgment sessions' models", name, gone))
 			}
-			brief = append(brief, path(fmt.Sprintf("%s.brief[%d]", field, i), p))
 		}
-		if bad {
-			continue
-		}
-		want := Session{Workdir: workdir, Cwd: workdir, Account: co.Account, Repository: repo, Role: RoleCoordinator, Policy: co.Policy, Brief: brief}
-		if s, ok := c.Sessions[co.Session]; ok && !reflect.DeepEqual(s, want) {
-			*errs = append(*errs, fmt.Errorf("sessions.%s is %s's coordinator; configure it there alone", co.Session, repo))
-			continue
-		}
-		if c.Sessions == nil {
-			c.Sessions = map[string]Session{}
-		}
-		c.Sessions[co.Session] = want
 	}
+	return errors.Join(errs...)
 }
 
 // checkTokenFile refuses a token file that is missing, not a regular file,

@@ -250,27 +250,23 @@ func watchedRequestsOf(cfg *Config, st *LogState) []ciWatched {
 	return out
 }
 
-// coordinated is each repository whose requests no session delivered are
-// watched, by name, and the track they are watched for: its coordinator's
-// session (#36), or, where agentd runs the loop, the repository's requests
-// track (#53).
-func (s *Supervisor) coordinated() map[string]string { return coordinatedOf(s.cfg) }
+// looping is each repository whose request loop agentd runs, by name, and
+// the track its requests no session delivered are watched for: the
+// repository's requests track (#36, #53).
+func (s *Supervisor) looping() map[string]string { return loopingOf(s.cfg) }
 
-func coordinatedOf(cfg *Config) map[string]string {
+func loopingOf(cfg *Config) map[string]string {
 	out := map[string]string{}
 	for name, r := range cfg.Repositories {
-		switch {
-		case r.Coordinator != nil && r.Coordinator.Session != "":
-			out[name] = r.Coordinator.Session
-		case looped(r):
+		if looped(r) {
 			out[name] = requestsTrack(name)
 		}
 	}
 	return out
 }
 
-// outsideRequests is every request of a coordinated repository no session
-// delivered that the watcher has recorded for its coordinator, less those
+// outsideRequests is every request of a looped repository no session
+// delivered that the watcher has recorded on its requests track, less those
 // merged or closed, in order of their keys. delivered are the requests
 // sessions delivered.
 func (s *Supervisor) outsideRequests(delivered []ciWatched) []ciWatched {
@@ -278,7 +274,7 @@ func (s *Supervisor) outsideRequests(delivered []ciWatched) []ciWatched {
 }
 
 func outsideRequestsOf(cfg *Config, st *LogState, delivered []ciWatched) []ciWatched {
-	coord := coordinatedOf(cfg)
+	coord := loopingOf(cfg)
 	skip := map[string]bool{}
 	for _, w := range delivered {
 		skip[ciKey(w.Repository, w.Ref)] = true
@@ -344,7 +340,7 @@ func (s *Supervisor) watchCI(now time.Time) {
 	}
 	watched := s.watchedRequests()
 	watched = append(watched, s.outsideRequests(watched)...)
-	coord := s.coordinated()
+	coord := s.looping()
 	if len(watched) == 0 && len(coord) == 0 {
 		return
 	}
@@ -353,8 +349,8 @@ func (s *Supervisor) watchCI(now time.Time) {
 		w.work.mu.Lock()
 		w.work.nextPoll[sourceCI] = now.Add(w.cfg.Poll.CIEvery.Duration)
 		w.work.mu.Unlock()
-		// Every open request of a coordinated repository is watched; one
-		// no session delivered is watched for its coordinator.
+		// Every open request of a looped repository is watched; one no
+		// session delivered is watched on its requests track.
 		known := map[string]bool{}
 		for _, r := range watched {
 			known[ciKey(r.Repository, r.Ref)] = true
@@ -1041,7 +1037,7 @@ func (s *Supervisor) fixCI(name string, sess Session, t *Track, ev Evidence, sta
 func (s *Supervisor) startCIFix(name string, sess Session, t *Track, ev Evidence, r CIRecord, attempt int, retry string) bool {
 	id := newSessionID()
 	fact := &CIFact{Request: r.Ref, URL: r.URL, Head: r.Head, Target: r.Target, Jobs: r.Jobs, Excerpt: r.Excerpt}
-	cmd, facts := s.launchCommandWith(name, sess, t, id, "ci-fix", fact, nil)
+	cmd, facts := s.launchCommandWith(name, sess, t, id, "ci-fix", fact)
 	line, err := s.launchLine(sess, cmd)
 	if err != nil {
 		s.skipOnce(name, "account:"+name, "not starting a CI fix session: "+err.Error(), t, &SkipPayload{Account: sess.Account})

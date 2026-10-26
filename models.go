@@ -23,10 +23,9 @@ func allowedModel(p RepoPolicy, m string) string {
 }
 
 // sessionModel is the model a session runs (#52): its repository's
-// policy's for its kind, or else policies.models'. A coordinator runs the
-// coordinator model; a reviewer or a judge, started or configured, the
-// reviewer or judge model; any other session is a work session. "" is the
-// restart command's own default.
+// policy's for its kind, or else policies.models'. A reviewer or a judge,
+// started or configured, runs the reviewer or judge model; any other
+// session is a work session. "" is the restart command's own default.
 func sessionModel(cfg *Config, st *LogState, sess Session) string {
 	var p RepoPolicy
 	if sess.Repository != "" {
@@ -34,26 +33,12 @@ func sessionModel(cfg *Config, st *LogState, sess Session) string {
 	}
 	g := cfg.Policies.Models
 	switch sess.Role {
-	case RoleCoordinator:
-		return orModel(p.Sessions.CoordinatorModel, g.Coordinator)
 	case RoleReviewer:
 		return allowedModel(p, orModel(p.Review.ReviewerModel, g.Reviewer))
 	case RoleJudge:
 		return allowedModel(p, orModel(p.Review.JudgeModel, g.Judge))
 	}
 	return allowedModel(p, orModel(p.Sessions.WorkModel, g.Work))
-}
-
-// reviewModels are the models a coordinator hands the review and judge
-// calls it makes, since a call it makes otherwise runs its own model.
-func reviewModels(cfg *Config, st *LogState, repo string) *PackModels {
-	p, _ := effectivePolicy(cfg, st, repo)
-	g := cfg.Policies.Models
-	m := &PackModels{Reviewer: allowedModel(p, orModel(p.Review.ReviewerModel, g.Reviewer)), Judge: allowedModel(p, orModel(p.Review.JudgeModel, g.Judge))}
-	if *m == (PackModels{}) {
-		return nil
-	}
-	return m
 }
 
 // withModel substitutes {model} in a launch command. With no model, a
@@ -84,7 +69,7 @@ func (c *Config) modelsSet() string {
 	}
 	for _, n := range sortedKeys(c.Repositories) {
 		p := c.Repositories[n].Policy
-		if p.Sessions.WorkModel != "" || p.Sessions.CoordinatorModel != "" || p.Review.ReviewerModel != "" || p.Review.JudgeModel != "" {
+		if p.Sessions.WorkModel != "" || p.Review.ReviewerModel != "" || p.Review.JudgeModel != "" {
 			return "repositories." + n + ".policy's model"
 		}
 	}

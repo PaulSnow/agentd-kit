@@ -9,22 +9,49 @@ import (
 	"time"
 )
 
-// briefHarness is coordHarness with c's brief assembled from a common part
-// and a repository part.
+// briefHarness is a live harness with session c in widgets, alive, its
+// transcripts read and its brief assembled from a common part and a
+// repository part.
 func briefHarness(t *testing.T) (*harness, string, string) {
 	t.Helper()
-	h := coordHarness(t)
+	h := newHarness(t, false, "c")
+	h.cfg.TranscriptDir = filepath.Join(h.dir, "projects")
 	common, repo := filepath.Join(h.dir, "common.md"), filepath.Join(h.dir, "widgets.md")
-	writeFile(t, common, "# Coordinator\n\nJudge each due item.\n")
+	writeFile(t, common, "# Work\n\nKeep STATUS.md current.\n")
 	writeFile(t, repo, "## widgets\n\nMerge into main only.\n")
-	w := h.cfg.Repositories["widgets"]
-	w.Coordinator.Brief = []string{common, "widgets.md"} // relative to the config's directory
-	h.cfg.Repositories["widgets"] = w
-	delete(h.cfg.Sessions, "c")
+	c := h.cfg.Sessions["c"]
+	c.Brief = []string{common, "widgets.md"} // relative to the config's directory
+	h.cfg.Sessions["c"] = c
 	if err := h.cfg.finish(h.dir); err != nil {
 		t.Fatal(err)
 	}
+	h.alive("c", "screen of c")
+	h.restart(false)
 	return h, common, repo
+}
+
+// launchSession has name found gone and restarted, so it runs under a
+// transcript agentd launched, and returns that transcript's id.
+func launchSession(t *testing.T, h *harness, name string) string {
+	t.Helper()
+	h.tmux.alive[name] = false
+	h.ticks(1, time.Minute)
+	for _, e := range h.events() {
+		if e.Kind == KindAction && e.Act.Action == ActRestart && e.Session == name {
+			return e.Act.Transcript
+		}
+	}
+	t.Fatalf("%s was not restarted", name)
+	return ""
+}
+
+// rotateAt gives c, launched under transcript id, a context over the
+// threshold and a merge since its launch, and lets the grace pass.
+func rotateAt(h *harness, id, merge string) {
+	h.t.Helper()
+	appendFile(h.t, filepath.Join(TranscriptDir(h.cfg.TranscriptDir, h.cfg.Sessions["c"].Cwd), id+".jsonl"), usageLine("u-"+merge, 10, 150000, 0, 5, false))
+	h.git.merge, h.git.mergeSubject = merge, "Merge #21: "+merge
+	h.ticks(8, time.Minute)
 }
 
 func (h *harness) brief() string {
@@ -47,23 +74,23 @@ func lastLaunch(h *harness, name string) *ActPayload {
 	return a
 }
 
-// A coordinator's brief is written from its parts at each start (#50): a
-// changed part reaches the next start, and the launch and the pack record
-// the parts' hashes.
-func TestCoordinatorBriefAssembledAtStart(t *testing.T) {
+// A configured session's brief is written from its parts at each start
+// (#50): a changed part reaches the next start, and the launch and the
+// session's track record the parts' hashes.
+func TestSessionBriefAssembledAtStart(t *testing.T) {
 	h, common, repo := briefHarness(t)
-	launchCoordinator(t, h)
-	want := "# Coordinator\n\nJudge each due item.\n\n## widgets\n\nMerge into main only.\n"
+	launchSession(t, h, "c")
+	want := "# Work\n\nKeep STATUS.md current.\n\n## widgets\n\nMerge into main only.\n"
 	if got := h.brief(); got != want {
 		t.Fatalf("brief = %q, want %q", got, want)
 	}
-	parts := []BriefPart{{Path: common, Hash: shortHash(HashPane("# Coordinator\n\nJudge each due item.\n"))},
+	parts := []BriefPart{{Path: common, Hash: shortHash(HashPane("# Work\n\nKeep STATUS.md current.\n"))},
 		{Path: repo, Hash: shortHash(HashPane("## widgets\n\nMerge into main only.\n"))}}
 	if a := lastLaunch(h, "c"); a == nil || !reflect.DeepEqual(a.Brief, parts) {
 		t.Fatalf("launch brief = %+v, want %+v", a, parts)
 	}
-	if p := h.pack(t); !reflect.DeepEqual(p.Brief, parts) {
-		t.Fatalf("pack brief = %+v, want %+v", p.Brief, parts)
+	if b := h.sup.Tracks()["c"].Brief; !reflect.DeepEqual(b, parts) {
+		t.Fatalf("track brief = %+v, want %+v", b, parts)
 	}
 
 	writeFile(t, repo, "## widgets\n\nMerge into main and release.\n")
@@ -76,18 +103,18 @@ func TestCoordinatorBriefAssembledAtStart(t *testing.T) {
 	if a := lastLaunch(h, "c"); a.Brief[1].Hash != shortHash(HashPane("## widgets\n\nMerge into main and release.\n")) {
 		t.Fatalf("launch brief = %+v", a.Brief)
 	}
-	// After a restore from the log the pack still has them.
+	// After a restore from the log the track still has them.
 	h.restart(false)
-	if p, _ := h.sup.buildPack("widgets", nil, h.clock.Now(), false); len(p.Brief) != 2 || p.Brief[1] != lastLaunch(h, "c").Brief[1] {
-		t.Fatalf("pack brief after replay = %+v", p.Brief)
+	if b := h.sup.Tracks()["c"].Brief; len(b) != 2 || b[1] != lastLaunch(h, "c").Brief[1] {
+		t.Fatalf("track brief after replay = %+v", b)
 	}
 }
 
 // A part that cannot be read refuses the start, naming its path, with one
 // escalation; the brief written last is left as it was.
-func TestCoordinatorBriefMissingPartRefusesStart(t *testing.T) {
+func TestSessionBriefMissingPartRefusesStart(t *testing.T) {
 	h, _, repo := briefHarness(t)
-	launchCoordinator(t, h)
+	launchSession(t, h, "c")
 	before := h.brief()
 	if err := os.Remove(repo); err != nil {
 		t.Fatal(err)
@@ -114,7 +141,7 @@ func TestCoordinatorBriefMissingPartRefusesStart(t *testing.T) {
 	if h.brief() != before {
 		t.Fatal("the brief changed on a refused start")
 	}
-	// The part back, the coordinator starts.
+	// The part back, the session starts.
 	writeFile(t, repo, "## widgets\n\nBack.\n")
 	h.ticks(1, time.Minute)
 	if n := h.count(KindAction, ActRestart, "c"); n != restarts+1 || !strings.HasSuffix(h.brief(), "Back.\n") {
@@ -123,16 +150,11 @@ func TestCoordinatorBriefMissingPartRefusesStart(t *testing.T) {
 }
 
 // A rotation writes the brief from its parts too.
-func TestCoordinatorBriefAssembledAtRotation(t *testing.T) {
+func TestSessionBriefAssembledAtRotation(t *testing.T) {
 	h, _, repo := briefHarness(t)
-	id := launchCoordinator(t, h)
+	id := launchSession(t, h, "c")
 	writeFile(t, repo, "## widgets\n\nRotated.\n")
-	h.ticks(2, time.Minute)
-	h.transcriptOf("c", id, promptLine("c0", "start", h.clock.Now())+usageLine("m0", 10, 150000, 0, 5, false))
-	h.status("a", "# a\n\nDONE\n")
-	h.ticks(3, time.Minute)
-	h.transcriptOf("c", id, summaryLine("c1", "m1", "Handled.", h.clock.Now(), 150000))
-	h.ticks(2, time.Minute)
+	rotateAt(h, id, "m1")
 	if n := h.count(KindAction, ActRotate, "c"); n != 1 {
 		t.Fatalf("rotations = %d, want 1", n)
 	}
@@ -142,23 +164,22 @@ func TestCoordinatorBriefAssembledAtRotation(t *testing.T) {
 }
 
 // A brief part is a path; an empty one is refused at load.
-func TestCoordinatorBriefEmptyPartRefused(t *testing.T) {
-	h := coordHarness(t)
-	w := h.cfg.Repositories["widgets"]
-	w.Coordinator.Brief = []string{""}
-	h.cfg.Repositories["widgets"] = w
-	delete(h.cfg.Sessions, "c")
-	if err := h.cfg.finish(h.dir); err == nil || !strings.Contains(err.Error(), "coordinator.brief") {
+func TestSessionBriefEmptyPartRefused(t *testing.T) {
+	h, _, _ := briefHarness(t)
+	c := h.cfg.Sessions["c"]
+	c.Brief = []string{""}
+	h.cfg.Sessions["c"] = c
+	if err := h.cfg.finish(h.dir); err == nil || !strings.Contains(err.Error(), "sessions.c.brief[0]") {
 		t.Fatalf("an empty brief part: %v", err)
 	}
 }
 
 // A start refused after the brief is read, here for its account, leaves
-// the brief and the parts the pack shows as the latest launch made them,
+// the brief and the parts the track holds as the latest launch made them,
 // as a replay of the log has them.
-func TestCoordinatorBriefRefusedLaunchWritesNothing(t *testing.T) {
+func TestSessionBriefRefusedLaunchWritesNothing(t *testing.T) {
 	h, _, repo := briefHarness(t)
-	launchCoordinator(t, h)
+	launchSession(t, h, "c")
 	before, parts := h.brief(), lastLaunch(h, "c").Brief
 	writeFile(t, repo, "## widgets\n\nNot yet.\n")
 	h.cfg.Accounts = map[string]Account{"acct": {TokenFile: filepath.Join(h.dir, "no-token")}}
@@ -175,15 +196,15 @@ func TestCoordinatorBriefRefusedLaunchWritesNothing(t *testing.T) {
 	if h.brief() != before {
 		t.Fatalf("a refused start wrote the brief: %q", h.brief())
 	}
-	if p, _ := h.sup.buildPack("widgets", nil, h.clock.Now(), false); !reflect.DeepEqual(p.Brief, parts) {
-		t.Fatalf("pack brief = %+v, want the latest launch's %+v", p.Brief, parts)
+	if b := h.sup.Tracks()["c"].Brief; !reflect.DeepEqual(b, parts) {
+		t.Fatalf("track brief = %+v, want the latest launch's %+v", b, parts)
 	}
 	sameAfterReplay(t, h, "after a refused start")
 }
 
 // Shadow mode reads the parts and records the start it would make, but
 // writes no brief.
-func TestCoordinatorBriefShadowWritesNothing(t *testing.T) {
+func TestSessionBriefShadowWritesNothing(t *testing.T) {
 	h, _, _ := briefHarness(t)
 	h.restart(true)
 	h.tmux.alive["c"] = false
@@ -208,10 +229,13 @@ func TestCoordinatorBriefShadowWritesNothing(t *testing.T) {
 
 // With no brief listed BRIEF.md is the owner's: a start leaves it and
 // records no parts.
-func TestCoordinatorNoBriefLeavesOwners(t *testing.T) {
-	h := coordHarness(t)
+func TestSessionNoBriefLeavesOwners(t *testing.T) {
+	h, _, _ := briefHarness(t)
+	c := h.cfg.Sessions["c"]
+	c.Brief = nil
+	h.cfg.Sessions["c"] = c
 	writeFile(t, filepath.Join(h.dir, "c", "BRIEF.md"), "the owner's\n")
-	launchCoordinator(t, h)
+	launchSession(t, h, "c")
 	if got := h.brief(); got != "the owner's\n" {
 		t.Fatalf("brief = %q", got)
 	}
@@ -220,21 +244,17 @@ func TestCoordinatorNoBriefLeavesOwners(t *testing.T) {
 	}
 }
 
-// A rotation refused for a part that cannot be read leaves the
-// coordinator running, with one escalation naming the part.
-func TestCoordinatorBriefMissingPartRefusesRotation(t *testing.T) {
+// A rotation refused for a part that cannot be read leaves the session
+// running, with one escalation naming the part.
+func TestSessionBriefMissingPartRefusesRotation(t *testing.T) {
 	h, _, repo := briefHarness(t)
-	id := launchCoordinator(t, h)
+	id := launchSession(t, h, "c")
 	before := h.brief()
 	if err := os.Remove(repo); err != nil {
 		t.Fatal(err)
 	}
-	h.ticks(2, time.Minute)
-	h.transcriptOf("c", id, promptLine("c0", "start", h.clock.Now())+usageLine("m0", 10, 150000, 0, 5, false))
-	h.status("a", "# a\n\nDONE\n")
-	h.ticks(3, time.Minute)
-	h.transcriptOf("c", id, summaryLine("c1", "m1", "Handled.", h.clock.Now(), 150000))
-	h.ticks(3, time.Minute)
+	h.alive("c", "screen of c")
+	rotateAt(h, id, "m1")
 	if n := h.count(KindAction, ActRotate, "c"); n != 0 {
 		t.Fatalf("rotations = %d, want 0", n)
 	}
@@ -244,7 +264,7 @@ func TestCoordinatorBriefMissingPartRefusesRotation(t *testing.T) {
 			escalations = append(escalations, e.Act.Message)
 		}
 	}
-	if len(escalations) != 1 || !strings.Contains(escalations[0], repo) || !strings.Contains(escalations[0], "not rotated") {
+	if len(escalations) != 1 || !strings.Contains(escalations[0], repo) || !strings.Contains(escalations[0], "not rotated") || !strings.Contains(escalations[0], "sessions.c") {
 		t.Fatalf("escalations %q", escalations)
 	}
 	if !h.tmux.alive["c"] || h.brief() != before {

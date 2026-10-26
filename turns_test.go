@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -24,7 +25,7 @@ func (h *harness) turnMessages() []*MessagePayload {
 // with ids that stay the same: a restart of agentd reading the transcript
 // from its start posts none again. A reply is cut at the turn length.
 func TestTurnsPostedOnceAcrossRestart(t *testing.T) {
-	h := coordHarness(t)
+	h := turnsHarness(t)
 	h.cfg.Policies.Feed.TurnLength = 50
 	h.restart(false)
 	at := h.clock.Now()
@@ -68,7 +69,7 @@ func TestTurnsPostedOnceAcrossRestart(t *testing.T) {
 // prompts posts a session's prompts only; a session's own rule overrides
 // its repository's, and off posts nothing.
 func TestTurnsPromptsOnly(t *testing.T) {
-	h := coordHarness(t)
+	h := turnsHarness(t)
 	w := h.cfg.Repositories["widgets"]
 	w.Policy.Feed.Turns = TurnsPrompts
 	h.cfg.Repositories["widgets"] = w
@@ -97,7 +98,7 @@ func TestTurnsPromptsOnly(t *testing.T) {
 // A turn that matches a confidential pattern, even past the length the
 // turn event keeps, is posted without its text.
 func TestTurnPostWithheld(t *testing.T) {
-	h := coordHarness(t)
+	h := turnsHarness(t)
 	h.cfg.ConfidentialPatterns = []string{`hunter2`}
 	h.restart(false)
 	h.transcriptOf("a", "t1", promptLine("u1", strings.Repeat("x", turnText+10)+" hunter2", h.clock.Now()))
@@ -115,37 +116,12 @@ func TestTurnPostWithheld(t *testing.T) {
 	}
 }
 
-// A coordinator's turns are not posted unless its own rule says so, and a
+// A session's turns are all posted unless a rule says otherwise, and a
 // shadow run posts none.
-func TestCoordinatorTurnsNotPostedByDefault(t *testing.T) {
-	h := coordHarness(t)
-	at := h.clock.Now()
-	h.transcriptOf("c", "tc", promptLine("u1", "agentd: a judgment is due.", at)+summaryLine("u2", "m1", "Judged.", at, 100))
-	h.ticks(3, time.Minute)
-	if h.count(KindTurn, "", "c") != 2 || len(h.turnMessages()) != 0 {
-		t.Fatalf("coordinator: %d turns, posted %+v", h.count(KindTurn, "", "c"), h.turnMessages())
-	}
-	if h.cfg.TurnsOf("c") != TurnsOff || h.cfg.TurnsOf("a") != TurnsAll {
-		t.Fatalf("defaults: c %s, a %s", h.cfg.TurnsOf("c"), h.cfg.TurnsOf("a"))
-	}
-	w := h.cfg.Repositories["widgets"]
-	w.Policy.Feed.Turns = TurnsAll
-	h.cfg.Repositories["widgets"] = w
-	h.restart(false)
-	h.transcriptOf("c", "tc", promptLine("u3", "agentd: another judgment.", h.clock.Now()))
-	h.ticks(2, time.Minute)
-	if h.cfg.TurnsOf("c") != TurnsOff || len(h.turnMessages()) != 0 {
-		t.Fatalf("the repository's rule reached its coordinator: %s, %+v", h.cfg.TurnsOf("c"), h.turnMessages())
-	}
-	w.Policy.Feed.Turns = TurnsPrompts
-	w.Coordinator.Policy.Feed.Turns = TurnsAll
-	h.cfg.Repositories["widgets"] = w
-	delete(h.cfg.Sessions, "c")
-	if err := h.cfg.finish(h.dir); err != nil {
-		t.Fatal(err)
-	}
-	if h.cfg.TurnsOf("c") != TurnsAll {
-		t.Fatalf("a coordinator's own rule: %s", h.cfg.TurnsOf("c"))
+func TestTurnsAllByDefaultShadowPostsNone(t *testing.T) {
+	h := turnsHarness(t)
+	if h.cfg.TurnsOf("a") != TurnsAll || h.cfg.TurnsOf("d") != TurnsAll {
+		t.Fatalf("defaults: a %s, d %s", h.cfg.TurnsOf("a"), h.cfg.TurnsOf("d"))
 	}
 
 	s := newHarness(t, true, "a")
@@ -162,7 +138,7 @@ func TestCoordinatorTurnsNotPostedByDefault(t *testing.T) {
 // A turn read more than an hour after it was written, from a transcript
 // agentd reads for the first time, is logged but not posted.
 func TestTurnBacklogNotPosted(t *testing.T) {
-	h := coordHarness(t)
+	h := turnsHarness(t)
 	now := h.clock.Now()
 	h.transcriptOf("a", "t1", promptLine("u1", "An old prompt.", now.Add(-2*time.Hour))+promptLine("u2", "A new prompt.", now))
 	h.ticks(2, time.Minute)
@@ -174,7 +150,7 @@ func TestTurnBacklogNotPosted(t *testing.T) {
 // A turns rule other than off, prompts or all, and a turn length out of
 // range, are refused at load.
 func TestTurnsRulesChecked(t *testing.T) {
-	h := coordHarness(t)
+	h := turnsHarness(t)
 	w := h.cfg.Repositories["widgets"]
 	w.Policy.Feed.Turns = "some"
 	h.cfg.Repositories["widgets"] = w
@@ -209,5 +185,135 @@ func TestTurnShownInConsole(t *testing.T) {
 	}
 	if strings.Contains(body, "Painted coat 0<") || !strings.Contains(body, "Painted coat 1<") || !strings.Contains(body, "Ship it on Friday") {
 		t.Fatalf("the turns are not kept apart:\n%s", body)
+	}
+}
+
+// promptLine and summaryLine are a fake transcript's user prompt and an
+// end-of-turn summary, written at at.
+func promptLine(uuid, text string, at time.Time) string {
+	b, _ := json.Marshal(map[string]any{"type": "user", "uuid": uuid, "timestamp": at.Format(time.RFC3339Nano),
+		"message": map[string]any{"role": "user", "content": text}})
+	return string(b) + "\n"
+}
+
+func summaryLine(uuid, id, text string, at time.Time, context int64) string {
+	b, _ := json.Marshal(map[string]any{"type": "assistant", "uuid": uuid, "timestamp": at.Format(time.RFC3339Nano),
+		"message": map[string]any{"id": id, "stop_reason": "end_turn", "content": []map[string]any{{"type": "text", "text": text}},
+			"usage": map[string]int64{"input_tokens": 1, "cache_creation_input_tokens": context, "cache_read_input_tokens": 0, "output_tokens": 10}}})
+	return string(b) + "\n"
+}
+
+// turnsHarness is a live harness with sessions a and b in widgets and d
+// in readonly, all alive, transcripts read.
+func turnsHarness(t *testing.T) *harness {
+	t.Helper()
+	h := newHarness(t, false, "a", "b", "d")
+	h.cfg.TranscriptDir = filepath.Join(h.dir, "projects")
+	d := h.cfg.Sessions["d"]
+	d.Repository = "readonly"
+	h.cfg.Sessions["d"] = d
+	if err := h.cfg.finish(h.dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"a", "b", "d"} {
+		h.alive(n, "screen of "+n)
+	}
+	h.restart(false)
+	return h
+}
+
+func (h *harness) transcriptOf(name, id, text string) {
+	h.t.Helper()
+	appendFile(h.t, filepath.Join(TranscriptDir(h.cfg.TranscriptDir, h.cfg.Sessions[name].Cwd), id+".jsonl"), text)
+}
+
+// launchFacts is the facts of the latest launch of name, read from its
+// command.
+func launchFacts(t *testing.T, h *harness, name string) restartFacts {
+	t.Helper()
+	var line string
+	for _, e := range h.events() {
+		if e.Kind == KindAction && (e.Act.Action == ActRestart || e.Act.Action == ActRotate) && e.Session == name {
+			line = e.Act.Command
+		}
+	}
+	i, j := strings.Index(line, `{"why"`), strings.LastIndex(line, "}")
+	if i < 0 || j < i {
+		t.Fatalf("no facts in the command: %s", line)
+	}
+	var f restartFacts
+	if err := json.Unmarshal([]byte(strings.ReplaceAll(line[i:j+1], `'\''`, `'`)), &f); err != nil {
+		t.Fatalf("facts: %v: %s", err, line[i:j+1])
+	}
+	return f
+}
+
+// A transcript's prompts and end-of-turn summaries become turn events,
+// screened and bounded, once each: a replayed agentd reading the same
+// transcript from its start logs none again. A tool result is no prompt.
+func TestTurnsFromTranscriptOnceAcrossRestarts(t *testing.T) {
+	h := turnsHarness(t)
+	h.cfg.ConfidentialPatterns = []string{`hunter2`}
+	h.restart(false)
+	at := h.clock.Now()
+	h.transcriptOf("a", "t1", promptLine("u1", "Build the widget.", at)+
+		`{"type":"user","uuid":"u2","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}`+"\n"+
+		`{"type":"user","uuid":"u3","isSidechain":true,"message":{"role":"user","content":"a subagent's prompt"}}`+"\n"+
+		summaryLine("u4", "m1", "Built it; the check passes.", at, 100)+
+		promptLine("u5", "the password is hunter2", at)+
+		promptLine("u6", strings.Repeat("long ", 200), at))
+	h.ticks(3, time.Minute)
+	turns := func() []TurnPayload {
+		var out []TurnPayload
+		for _, e := range h.events() {
+			if e.Kind == KindTurn && e.Session == "a" {
+				out = append(out, *e.Turn)
+			}
+		}
+		return out
+	}
+	got := turns()
+	if len(got) != 4 {
+		t.Fatalf("turns = %+v, want 4", got)
+	}
+	if got[0].Role != TurnPrompt || got[0].Text != "Build the widget." || got[1].Role != TurnSummary || got[1].Text != "Built it; the check passes." {
+		t.Fatalf("turns = %+v", got[:2])
+	}
+	if got[2].Text != "" || got[2].Withheld != 1 {
+		t.Fatalf("confidential prompt = %+v", got[2])
+	}
+	if len(got[3].Text) > turnText+len("…") || !strings.HasPrefix(got[3].Text, "long long") {
+		t.Fatalf("long prompt kept %d bytes", len(got[3].Text))
+	}
+	h.restart(false)
+	h.ticks(3, time.Minute)
+	if n := len(turns()); n != 4 {
+		t.Fatalf("after a restart of agentd: %d turns", n)
+	}
+	h.transcriptOf("a", "t1", promptLine("u7", "Now the gadget.", h.clock.Now()))
+	h.ticks(2, time.Minute)
+	if got := turns(); len(got) != 5 || got[4].Text != "Now the gadget." {
+		t.Fatalf("after a new prompt: %+v", got)
+	}
+	if tr := h.sup.Tracks()["a"]; tr.TurnCount != 5 || len(tr.Turns) != 5 {
+		t.Fatalf("track: %d turns, %d kept", tr.TurnCount, len(tr.Turns))
+	}
+}
+
+// A confidential term across the cut is still found: turns are screened
+// whole, then cut.
+func TestTurnScreenedBeforeCut(t *testing.T) {
+	h := turnsHarness(t)
+	h.cfg.ConfidentialPatterns = []string{`hunter2`}
+	h.restart(false)
+	h.transcriptOf("a", "t1", promptLine("u1", strings.Repeat("x", turnText-3)+"hunter2 more", h.clock.Now()))
+	h.ticks(2, time.Minute)
+	for _, e := range h.events() {
+		if e.Kind == KindTurn && (e.Turn.Withheld != 1 || e.Turn.Text != "") {
+			t.Fatalf("turn = %+v", e.Turn)
+		}
+	}
+	if h.count(KindTurn, "", "a") != 1 {
+		t.Fatal("no turn logged")
 	}
 }

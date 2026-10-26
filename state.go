@@ -61,7 +61,7 @@ type Track struct {
 	Usage      map[string]UsagePayload
 	Checkpoint Checkpoint  // the latest merge seen at the worktree's head
 	Launched   time.Time   // the latest restart or rotation started
-	Brief      []BriefPart // a coordinator's brief parts as its latest launch wrote them
+	Brief      []BriefPart // a session's brief parts as its latest launch wrote them
 	RotatedFor string      // the merge the latest rotation was at
 	Rotations  int         // rotations, taken or would-be, ever
 	Stopped    string      // why the session was stopped, until the owner clears it
@@ -113,13 +113,6 @@ type Track struct {
 	Turns     []TurnRecord
 	TurnCount int
 	TurnLines map[string]int
-	// A coordinator's wakes: the latest, oldest first, how many in all,
-	// and its spend at the first whose spend was known.
-	Wakes     []WakeRecord
-	WakeCount int
-	WakeBase  *int64
-	Woken     map[string]bool // the due keys the wakes within the margin covered
-	Carried   map[string]int  // the owner instructions a wake carried, by id, and that wake's number
 	// CI: the fix sessions started for the requests the session delivered,
 	// oldest first, and the decisions raised on a repeated failure, by
 	// request and cause.

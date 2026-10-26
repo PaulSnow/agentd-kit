@@ -52,8 +52,6 @@ func main() {
 		err = markDeliveredCmd(os.Args[2:])
 	case "clear":
 		err = clearCmd(os.Args[2:])
-	case "coordinator":
-		err = coordinatorCmd(os.Args[2:])
 	case "sessions":
 		err = sessionsCmd(os.Args[2:])
 	case "loop":
@@ -101,7 +99,6 @@ func usage() {
   agentd config [--config PATH]
   agentd mark-delivered [--config PATH] [--log PATH] SESSION WORKTREE REF
   agentd clear [--config PATH] [--log PATH] SESSION
-  agentd coordinator [--config PATH] [--log PATH] release REPOSITORY
   agentd sessions [--config PATH] [--log PATH] end NAME
   agentd loop [--config PATH] [--log PATH] retry REPOSITORY REQUEST
   agentd policy [--config PATH] [--log PATH] show REPO
@@ -126,11 +123,8 @@ would do without acting. status prints the state table from the event log.
 config prints the resolved configuration. mark-delivered records that a
 worktree was already delivered as REF by other means, so run never delivers
 it again. clear lifts a crash-looping session's park, so it may be
-restarted again. coordinator release lets the session a repository's
-configuration names claim its coordinator, which another session held:
-there is one coordinator per repository. sessions end stops a session a
-coordinator started and takes it off the supervised sessions, keeping its
-files. loop retry takes a request's failed review or judge step again.
+restarted again. sessions end stops a session agentd started and takes it
+off the supervised sessions, keeping its files. loop retry takes a request's failed review or judge step again.
 policy show prints a repository's effective policy, each key with
 where it came from: the owner's configuration, a default, or the
 repository's own .agentd/policy.json as last read. console reply applies the owner's
@@ -329,25 +323,6 @@ func markDeliveredCmd(args []string) error {
 	}
 	defer log.Close()
 	return MarkDelivered(projected(cfg, events), log, time.Now(), rest[0], rest[1], rest[2])
-}
-
-// coordinatorCmd is the command-line face of ReleaseCoordinator.
-func coordinatorCmd(args []string) error {
-	fs := flag.NewFlagSet("coordinator", flag.ContinueOnError)
-	cfg, _, err := loadConfigFlag(fs, args)
-	if err != nil {
-		return err
-	}
-	rest := fs.Args()
-	if len(rest) != 2 || rest[0] != "release" {
-		return fmt.Errorf("usage: agentd coordinator release REPOSITORY")
-	}
-	log, _, err := openLoaded(cfg.EventLog)
-	if err != nil {
-		return err
-	}
-	defer log.Close()
-	return ReleaseCoordinator(cfg, log, time.Now(), rest[1])
 }
 
 // sessionsCmd is the command-line face of EndSession.

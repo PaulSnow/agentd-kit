@@ -68,8 +68,8 @@ func (s *Supervisor) mergeGreen(now time.Time) {
 		}
 		r, ok := s.st.CI[key]
 		out := i >= len(delivered)
-		// A request no session delivered is reviewed by its coordinator's
-		// approve at its head; a delivered one by its case's rounds too.
+		// A request no session delivered is reviewed by the loop's
+		// approval at its head; a delivered one by its case's rounds.
 		reviewed := ok && r.Head != "" && s.st.approvedAt(w.Repository, w.Ref) == r.Head || !out && s.reviewConverged(w.Session)
 		require := requireOf(pol, pol.Merge.Require, out)
 		if looped(s.cfg.Repositories[w.Repository]) {
@@ -94,7 +94,7 @@ func (s *Supervisor) mergeGreen(now time.Time) {
 // requireOf is what must hold at a request's head before it merges: the
 // policy's require for a request a session delivered. agentd's gate never
 // ran on a request no session delivered, so for one of those green CI and
-// its coordinator's approval are required instead, whatever require says.
+// the loop's approval are required instead, whatever require says.
 // With ci.required, green CI is required of every request.
 func requireOf(pol RepoPolicy, require []string, outside bool) []string {
 	if outside {
@@ -115,8 +115,8 @@ func (s *Supervisor) reviewConverged(name string) bool {
 
 // mergeBlocked is why the state alone says a request may not merge now,
 // as a short code and a reason, or "" when the forge is to be asked.
-// Outside says no session delivered it: its coordinator's decisions are
-// not about it.
+// Outside says no session delivered it: the decisions of the track it is
+// watched on are not about it.
 func (s *Supervisor) mergeBlocked(t *Track, w ciWatched, r CIRecord, ok bool, require []string, reviewed, outside bool, now time.Time) (string, string) {
 	switch {
 	case !ok || r.Head == "":
@@ -158,7 +158,7 @@ func missing(t *Track, r CIRecord, require []string, reviewed bool) (string, str
 	case contains(require, RequireGate) && !contains(t.Gated, r.Head):
 		return "ungated", fmt.Sprintf("its head %s did not pass agentd's gate", shortHash(r.Head))
 	case contains(require, RequireReview) && !reviewed:
-		return "unreviewed", fmt.Sprintf("neither its case's review rounds converged nor its coordinator approved it at %s", shortHash(r.Head))
+		return "unreviewed", fmt.Sprintf("its review rounds have not converged at %s", shortHash(r.Head))
 	}
 	return "", ""
 }

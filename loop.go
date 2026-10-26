@@ -127,9 +127,9 @@ func (st *LogState) applyLoop(e Event) {
 }
 
 // looped says whether agentd runs the repository's request loop: it has
-// a sessions entry and no coordinator.
+// a sessions entry.
 func looped(repo Repository) bool {
-	return repo.Sessions != nil && repo.Coordinator == nil
+	return repo.Sessions != nil
 }
 
 // loopRequest is one open request of a looped repository: the work
@@ -504,7 +504,7 @@ func (s *Supervisor) fixRound(name string, sess Session, t *Track, ev Evidence, 
 			continue
 		}
 		id := newSessionID()
-		cmd, facts := s.launchCommandWith(name, sess, t, id, "fix-round", nil, nil)
+		cmd, facts := s.launchCommandWith(name, sess, t, id, "fix-round", nil)
 		line, err := s.launchLine(sess, cmd)
 		if err != nil {
 			s.skipOnce(name, "account:"+name, "not starting a fix round: "+err.Error(), t, &SkipPayload{Account: sess.Account})

@@ -92,15 +92,15 @@ const (
 	KindDeadline    = "deadline"    // the owner set a deadline on one of a session's decisions
 	KindCase        = "case"        // a fact about a case: the pack a session was handed, its report, or the owner's ruling
 	KindTurn        = "turn"        // a prompt or end-of-turn summary read from a session's transcript
-	KindCoordinator = "coordinator" // a session claimed a repository's coordinator, or the owner released it
+	KindCoordinator = "coordinator" // earlier versions' claim or release of a repository's coordinator: read, and ignored
 	KindCI          = "ci"          // a delivered request's pipeline changed state
 	KindFeed        = "feed"        // a line for a repository's console: its baseline, its post, or the post's outcome
-	KindSession     = "session"     // a coordinator started a session, or it or the owner ended one
+	KindSession     = "session"     // agentd started a session, or it or the owner ended one
 	KindPolicy      = "policy"      // a repository's own policy file, as read at its target's tip
-	KindApproval    = "approval"    // a coordinator approved a request at a head
+	KindApproval    = "approval"    // earlier versions' coordinator approval of a request at a head: read, and ignored
 	KindInstruction = "instruction" // the owner's free-text reply in a console, for the repositories it feeds
 	KindAccount     = "account"     // a reading of an account's usage: its utilization, resets and overage
-	KindMessage     = "message"     // a post to a console: a session's or a coordinator's report (agentd console post)
+	KindMessage     = "message"     // a post to a console: a session's report (agentd console post)
 	KindInbox       = "inbox"       // a reader read the owner's instructions for a console (agentd console inbox)
 	KindJob         = "job"         // a scheduled job's run started, ended or was skipped
 	KindLoop        = "loop"        // a step agentd took in a request's loop, or the owner's retry of a failed one
@@ -131,7 +131,7 @@ const (
 	ActRotate    = "rotate"    // a fresh context at a checkpoint: not a crash, not a restart
 	ActStop      = "stop"      // the budget or the stop time was reached
 	ActAnswer    = "answer"    // the owner's answers written to answers.json and the pointer typed
-	ActWake      = "wake"      // a coordinator's pack written and its pointer typed: a judgment is due
+	ActWake      = "wake"      // earlier versions' wake of a coordinator: read, and ignored
 	ActCIFix     = "ci-fix"    // a session relaunched to fix its request's own CI failure
 	ActFixRound  = "fix-round" // a work session relaunched to fix its request's adopted review findings
 	ActRaise     = "raise"     // agentd raised a decision for the owner on a session: a CI failure it will not fix again
@@ -205,12 +205,13 @@ type ActPayload struct {
 	Transcript string `json:"transcript,omitempty"`
 	Context    int64  `json:"context,omitempty"`
 	Checkpoint string `json:"checkpoint,omitempty"`
-	// A coordinator's restart or rotation: the brief parts it wrote.
+	// A restart or rotation of a session with brief parts: the parts it
+	// wrote (#50).
 	Brief []BriefPart `json:"brief,omitempty"`
-	// A stop: why. A wake: what is due.
+	// A stop: why. An earlier version's wake: what was due.
 	Reason string `json:"reason,omitempty"`
-	// A wake: the coordinator's spend when it was woken, when known, and
-	// the keys of what it covered, so none is due again.
+	// An earlier version's wake: the coordinator's spend when it was
+	// woken, and the keys of what it covered. Kept so its log reads.
 	Spend   *int64   `json:"spend,omitempty"`
 	Covered []string `json:"covered,omitempty"`
 	// An answer, or a restart that hands answers over: the decisions whose
@@ -345,6 +346,13 @@ type WarningPayload struct {
 	IntentAt *time.Time  `json:"intent_at,omitempty"` // when the intent was recorded
 }
 
+// CoordinatorPayload is an earlier version's claim on a repository's
+// coordinator, or the owner's release of it. The coordinator is gone (#53):
+// the event still reads, so an old log does, and the fold ignores it.
+type CoordinatorPayload struct {
+	Repository string `json:"repository"`
+}
+
 // check refuses an event this agentd cannot read exactly: another version,
 // an unknown kind or mode, or a payload other than its kind's alone.
 func (e Event) check() error {
@@ -413,7 +421,7 @@ func (e Event) check() error {
 		e.Runtime.Action != SessionStart && e.Runtime.Action != SessionEnd && e.Runtime.Action != SessionPlace ||
 		e.Runtime.Action == SessionStart && (e.Mode != ModeShared || e.Runtime.Branch == "") ||
 		e.Runtime.Action == SessionPlace && (e.Mode != ModeShared || e.Runtime.Account == "")):
-		return errors.New("a session event names its session, id and repository: a start is a coordinator's, shared, and names its branch; a placement is shared and names its account; an end is shared or the owner's")
+		return errors.New("a session event names its session, id and repository: a start is shared and names its branch; a placement is shared and names its account; an end is shared or the owner's")
 	case e.Kind == KindCase:
 		if err := e.Case.check(); err != nil {
 			return err

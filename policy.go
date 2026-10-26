@@ -143,16 +143,15 @@ type ScopeRules struct {
 // SessionRules are what the repository's started sessions may use:
 // Accounts, Models, at most Max at once, Budget caps on each and on all
 // of them, and a Fallback order of accounts (#39 acts on it). WorkModel
-// and CoordinatorModel are the models its work sessions and its
-// coordinator run, over policies.models (#52).
+// is the model its work sessions run, over policies.models (#52). With no
+// Accounts, its sessions run under the default login.
 type SessionRules struct {
-	Accounts         []string    `json:"accounts"`
-	Max              int         `json:"max"`
-	Models           []string    `json:"models"`
-	Budget           BudgetRules `json:"budget"`
-	Fallback         []string    `json:"fallback"`
-	WorkModel        string      `json:"work_model"`
-	CoordinatorModel string      `json:"coordinator_model"`
+	Accounts  []string    `json:"accounts"`
+	Max       int         `json:"max"`
+	Models    []string    `json:"models"`
+	Budget    BudgetRules `json:"budget"`
+	Fallback  []string    `json:"fallback"`
+	WorkModel string      `json:"work_model"`
 }
 
 // BudgetRules caps a repository's sessions' spend: each one's, and all of
@@ -270,10 +269,6 @@ func (c *Config) checkPolicy(name string, repo *Repository, errs *[]error) {
 	if s.Max == 0 {
 		s.Max = DefaultMaxSessions
 		def("sessions.max")
-	}
-	if s.Accounts == nil && repo.Coordinator != nil {
-		s.Accounts = []string{repo.Coordinator.Account}
-		def("sessions.accounts")
 	}
 	for _, a := range append(append([]string{}, s.Accounts...), s.Fallback...) {
 		if _, ok := c.Accounts[a]; a != "" && !ok {
@@ -558,8 +553,6 @@ func narrowKey(eff *RepoPolicy, key string, raw json.RawMessage) bool {
 		return same(&eff.Sessions.Fallback)
 	case "sessions.work_model":
 		return same(&eff.Sessions.WorkModel)
-	case "sessions.coordinator_model":
-		return same(&eff.Sessions.CoordinatorModel)
 	case "sessions.max":
 		max := int64(eff.Sessions.Max)
 		if !lower(&max) {
@@ -768,10 +761,19 @@ func (s *Supervisor) notePolicy(name string, t *Track, repo, target, tip string,
 		case len(p.Refused) > 0:
 			s.escalate(name, "policy:"+repo+":"+target+":"+hash, fmt.Sprintf("%s's own %s on %s at %s would widen your policy for it, or names keys that are yours alone, so these keys are refused: %s. "+
 				"A repository's file may only narrow the policy in your configuration, and never delivery.allow; the keys that narrow it apply. Change the file, or your configuration.",
-				repo, MergePolicyFile, target, shortHash(tip), strings.Join(p.Refused, ", ")), t, s.clock.Now())
+				repo, MergePolicyFile, target, shortHash(tip), strings.Join(p.Refused, ", "))+removedNote(p.Refused), t, s.clock.Now())
 		}
 	}
 	return effectiveFor(s.cfg, s.st, repo, target)
+}
+
+// removedNote names what replaced a key the coordinator's removal took
+// away (#53), when a repository's file still has it.
+func removedNote(refused []string) string {
+	if !contains(refused, "sessions.coordinator_model") {
+		return ""
+	}
+	return " sessions.coordinator_model was removed in #53: agentd runs the repository's request loop itself, with no coordinator; review.reviewer_model and review.judge_model choose its judgment sessions' models."
 }
 
 // policyKeys are the keys of a policy, section.key, as JSON names them.

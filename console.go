@@ -14,7 +14,7 @@ import (
 	"unicode"
 )
 
-// Console posts and inbox (#42): the sessions' and coordinators' reports
+// Console posts and inbox (#42): the sessions' reports
 // to a console, and their reading of the owner's replies there, go through
 // agentd, so no outside console program is needed. A post is a shared
 // message event in the configuration's log; the UI shows it in its
@@ -22,7 +22,7 @@ import (
 // logs; inbox prints those a reader has not read and records them read.
 // A console without a repository is declared under consoles: it is
 // listed by the UI, takes posts and replies, and its replies are
-// instructions for no coordinator.
+// instructions for no repository.
 
 // ConsoleConfig is a console that is not a repository's: its title, and
 // the globs of the sessions whose escalations go to it when they name no
@@ -261,7 +261,7 @@ func ConsoleInbox(cfg *Config, log *Log, events []Event, now time.Time, console,
 		repos[r] = true
 	}
 	read := map[string]bool{}
-	var unread []PackInstruction
+	var unread []InboxInstruction
 	for _, e := range events {
 		switch {
 		case e.Kind == KindInbox && e.Inbox != nil && e.Inbox.Console == console && e.Inbox.Reader == reader:
@@ -275,7 +275,7 @@ func ConsoleInbox(cfg *Config, log *Log, events []Event, now time.Time, console,
 				mine = mine || repos[r]
 			}
 			if mine {
-				unread = append(unread, PackInstruction{ID: in.ID, Text: in.Text, Withheld: in.Withheld > 0, From: in.From, At: e.Time})
+				unread = append(unread, InboxInstruction{ID: in.ID, Text: in.Text, Withheld: in.Withheld > 0, From: in.From, At: e.Time})
 			}
 		}
 	}
