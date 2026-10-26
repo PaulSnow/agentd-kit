@@ -419,7 +419,7 @@ func (h *Hub) take(host string, events []NodePayload) (int, nodeReply) {
 // NodeGit is the git a node runs: a clone of a URL into a new directory,
 // and a scan that changes nothing.
 type NodeGit interface {
-	Clone(url, dir string) error
+	Clone(ctx context.Context, url, dir string) error
 	Scan(dir string) (CloneState, error)
 }
 
@@ -431,8 +431,9 @@ type ExecNodeGit struct{ Timeout, CloneTimeout time.Duration }
 // CloneTimeout, and renames it to dir only once the clone is whole. A clone
 // that fails or is killed at its timeout leaves no partial checkout at dir
 // for a scan to take as the clone: its directory, which this call made, is
-// removed, and nothing else.
-func (g ExecNodeGit) Clone(url, dir string) error {
+// removed, and nothing else. A node told to stop, ending ctx, kills the
+// clone's process group and removes it all the same.
+func (g ExecNodeGit) Clone(ctx context.Context, url, dir string) error {
 	parent := filepath.Dir(dir)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return err
@@ -443,8 +444,19 @@ func (g ExecNodeGit) Clone(url, dir string) error {
 	}
 	defer os.RemoveAll(tmp)
 	into := filepath.Join(tmp, "clone")
-	if _, err := gitOut(g.CloneTimeout, tmp, "clone", "-q", "--", url, into); err != nil {
-		return err
+	ctx, cancel := context.WithTimeout(ctx, g.CloneTimeout)
+	defer cancel()
+	cmd := groupCommand(ctx, tmp, "git", append(append([]string{}, gitSafe...), "clone", "-q", "--", url, into)...)
+	cmd.Env = append(append(os.Environ(), gitEnv...), "LC_ALL=C")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("git clone of %s stopped: %w", url, ctx.Err())
+		}
+		msg := strings.TrimSpace(string(out))
+		if len(msg) > 300 {
+			msg = msg[len(msg)-300:]
+		}
+		return fmt.Errorf("git clone of %s: %s", url, msg)
 	}
 	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("something came to %s during the clone", dir)
@@ -458,7 +470,7 @@ func (g ExecNodeGit) Clone(url, dir string) error {
 func (g ExecNodeGit) Scan(dir string) (CloneState, error) {
 	var c CloneState
 	run := func(args ...string) (string, error) {
-		out, err := runTimed(g.Timeout, dir, append([]string{"GIT_OPTIONAL_LOCKS=0"}, gitEnv...), false, "git", append(append([]string{}, gitSafe...), args...)...)
+		out, err := runTimed(g.Timeout, dir, append([]string{"GIT_OPTIONAL_LOCKS=0", "LC_ALL=C"}, gitEnv...), false, "git", append(append([]string{}, gitSafe...), args...)...)
 		if err != nil {
 			return "", fmt.Errorf("git %s in %s: %s", strings.Join(args, " "), dir, exitMessage(err))
 		}
@@ -564,7 +576,7 @@ func (n *Node) Tick(ctx context.Context) error {
 		return nil
 	}
 	for _, c := range reply.Commands {
-		n.queue(NodePayload{Result: n.do(c)})
+		n.queue(NodePayload{Result: n.do(ctx, c)})
 	}
 	n.queueReport()
 	_, err = n.send(ctx)
@@ -713,7 +725,7 @@ func (n *Node) local(rel string) (string, error) {
 // do carries out one command, if it is safe: a clone, of a repository the
 // node watches at that path, into a path where nothing is. Anything else
 // is refused and nothing is done.
-func (n *Node) do(c NodeCommand) *NodeResult {
+func (n *Node) do(ctx context.Context, c NodeCommand) *NodeResult {
 	r := &NodeResult{Command: c.ID, Action: c.Action, Repository: c.Repository, Path: c.Path}
 	refuse := func(why string) *NodeResult {
 		r.Outcome, r.Error = NodeRefused, why
@@ -739,7 +751,7 @@ func (n *Node) do(c NodeCommand) *NodeResult {
 	if c.URL == "" {
 		return refuse("no URL")
 	}
-	if err := n.git.Clone(c.URL, dir); err != nil {
+	if err := n.git.Clone(ctx, c.URL, dir); err != nil {
 		r.Outcome, r.Error = NodeFailed, err.Error()
 		return r
 	}

@@ -22,7 +22,7 @@ type fakeNodeGit struct {
 	fail   error
 }
 
-func (g *fakeNodeGit) Clone(url, dir string) error {
+func (g *fakeNodeGit) Clone(_ context.Context, url, dir string) error {
 	g.cloned = append(g.cloned, url+" "+dir)
 	if g.fail != nil {
 		return g.fail
@@ -527,7 +527,7 @@ func TestNodeRefusesUnsafeCommands(t *testing.T) {
 		{ID: "c4", Action: "delete", Repository: "widgets", Path: "github.com/example-org/widgets"},
 	}
 	for _, c := range cases {
-		if r := n.do(c); r.Outcome != NodeRefused {
+		if r := n.do(context.Background(), c); r.Outcome != NodeRefused {
 			t.Fatalf("%s: %+v", c.ID, r)
 		}
 	}
@@ -553,14 +553,27 @@ func TestExecNodeGitClonesAndScans(t *testing.T) {
 	g := ExecNodeGit{Timeout: 10 * time.Second, CloneTimeout: 10 * time.Second}
 	// A clone that fails leaves nothing at its path, nor beside it.
 	bad := filepath.Join(root, "repos", "host", "bad")
-	if err := g.Clone(filepath.Join(root, "no-such.git"), bad); err == nil {
+	if err := g.Clone(context.Background(), filepath.Join(root, "no-such.git"), bad); err == nil {
 		t.Fatal("a clone of nothing succeeded")
 	}
 	if left, _ := os.ReadDir(filepath.Dir(bad)); len(left) != 0 {
 		t.Fatalf("a failed clone left %v", left)
 	}
+	// So does one killed at its timeout, and one whose node was stopped.
+	quick := ExecNodeGit{Timeout: 10 * time.Second, CloneTimeout: time.Nanosecond}
+	if err := quick.Clone(context.Background(), origin, bad); err == nil || !strings.Contains(err.Error(), "stopped") {
+		t.Fatalf("a clone past its timeout: %v", err)
+	}
+	stopped, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := g.Clone(stopped, origin, bad); err == nil {
+		t.Fatal("a clone of a stopped node succeeded")
+	}
+	if left, _ := os.ReadDir(filepath.Dir(bad)); len(left) != 0 {
+		t.Fatalf("a killed clone left %v", left)
+	}
 	dst := filepath.Join(root, "repos", "host", "clone")
-	if err := g.Clone(origin, dst); err != nil {
+	if err := g.Clone(context.Background(), origin, dst); err != nil {
 		t.Fatal(err)
 	}
 	c, err := g.Scan(dst)
