@@ -238,10 +238,16 @@ func contains(list []string, s string) bool {
 }
 
 // caseOf is the id of the case the session works, or "" when it names no
-// issue.
+// issue. A reviewer or judge of a request no session delivered works the
+// request's case: the repository's key and the request's reference.
 func (c *Config) caseOf(sess Session) string {
 	repo, ok := c.Repositories[sess.Repository]
-	if sess.Issue <= 0 || !ok {
+	switch {
+	case !ok:
+		return ""
+	case sess.Request != "":
+		return repoKey(repo.Forge, repo.Project) + sess.Request
+	case sess.Issue <= 0:
 		return ""
 	}
 	return caseID(repoKey(repo.Forge, repo.Project), sess.Issue)
@@ -253,9 +259,10 @@ func caseID(repo string, n int) string {
 	return repo + "#" + strconv.Itoa(n)
 }
 
-// splitCase is a case id's repository key and issue number.
+// splitCase is a case id's repository key and issue number, or request
+// number for a GitLab request's case.
 func splitCase(id string) (string, int, bool) {
-	i := strings.LastIndexByte(id, '#')
+	i := strings.LastIndexAny(id, "#!")
 	if i <= 0 {
 		return "", 0, false
 	}

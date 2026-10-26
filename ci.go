@@ -130,6 +130,9 @@ type CIFixRecord struct {
 	Pushed      string
 	Redelivered bool
 	Seen        bool
+	// Review marks a fix round of review findings (#53), which no CI
+	// fix's count or cause is compared with.
+	Review bool
 }
 
 // CIFact is what a fix session's pack says of the failure.
@@ -208,15 +211,17 @@ type ciWatched struct {
 // configured repository, the latest delivery of each, less those the
 // forge said were merged or closed. The owner's mark-delivered names no
 // repository: the session's deliver entry for the worktree does.
-func (s *Supervisor) watchedRequests() []ciWatched {
+func (s *Supervisor) watchedRequests() []ciWatched { return watchedRequestsOf(s.cfg, s.st) }
+
+func watchedRequestsOf(cfg *Config, st *LogState) []ciWatched {
 	seen := map[string]int{}
 	var out []ciWatched
-	for _, name := range s.cfg.SessionNames() {
-		t := s.st.Tracks[name]
+	for _, name := range cfg.SessionNames() {
+		t := st.Tracks[name]
 		if t == nil {
 			continue
 		}
-		sess := s.cfg.Sessions[name]
+		sess := cfg.Sessions[name]
 		for _, d := range t.Deliveries {
 			repo := d.Repository
 			if repo == "" {
@@ -226,11 +231,11 @@ func (s *Supervisor) watchedRequests() []ciWatched {
 					}
 				}
 			}
-			if _, ok := s.cfg.Repositories[repo]; !ok || !requestRef.MatchString(d.Ref) {
+			if _, ok := cfg.Repositories[repo]; !ok || !requestRef.MatchString(d.Ref) {
 				continue
 			}
 			key := ciKey(repo, d.Ref)
-			if r, ok := s.st.CI[key]; ok && (r.State == CIMerged || r.State == CIClosed) {
+			if r, ok := st.CI[key]; ok && (r.State == CIMerged || r.State == CIClosed) {
 				continue
 			}
 			w := ciWatched{Session: name, Repository: repo, Ref: d.Ref, Delivered: d.Delivered}
@@ -245,14 +250,20 @@ func (s *Supervisor) watchedRequests() []ciWatched {
 	return out
 }
 
-// coordinated is each repository with a coordinator, by name, and its
-// coordinator's session: the session the repository's other requests are
-// watched for (#36).
-func (s *Supervisor) coordinated() map[string]string {
+// coordinated is each repository whose requests no session delivered are
+// watched, by name, and the track they are watched for: its coordinator's
+// session (#36), or, where agentd runs the loop, the repository's requests
+// track (#53).
+func (s *Supervisor) coordinated() map[string]string { return coordinatedOf(s.cfg) }
+
+func coordinatedOf(cfg *Config) map[string]string {
 	out := map[string]string{}
-	for name, r := range s.cfg.Repositories {
-		if r.Coordinator != nil && r.Coordinator.Session != "" {
+	for name, r := range cfg.Repositories {
+		switch {
+		case r.Coordinator != nil && r.Coordinator.Session != "":
 			out[name] = r.Coordinator.Session
+		case looped(r):
+			out[name] = requestsTrack(name)
 		}
 	}
 	return out
@@ -263,14 +274,18 @@ func (s *Supervisor) coordinated() map[string]string {
 // merged or closed, in order of their keys. delivered are the requests
 // sessions delivered.
 func (s *Supervisor) outsideRequests(delivered []ciWatched) []ciWatched {
-	coord := s.coordinated()
+	return outsideRequestsOf(s.cfg, s.st, delivered)
+}
+
+func outsideRequestsOf(cfg *Config, st *LogState, delivered []ciWatched) []ciWatched {
+	coord := coordinatedOf(cfg)
 	skip := map[string]bool{}
 	for _, w := range delivered {
 		skip[ciKey(w.Repository, w.Ref)] = true
 	}
 	var out []ciWatched
-	for _, key := range sortedKeys(s.st.CI) {
-		r := s.st.CI[key]
+	for _, key := range sortedKeys(st.CI) {
+		r := st.CI[key]
 		if c, ok := coord[r.Repository]; !ok || r.Session != c || skip[key] || r.State == CIMerged || r.State == CIClosed {
 			continue
 		}
@@ -962,7 +977,12 @@ func (s *Supervisor) fixCI(name string, sess Session, t *Track, ev Evidence, sta
 		if r.State != CIFailed || r.Verdict != CIOwn || t.Delivered[r.Delivered] == "" {
 			continue
 		}
-		fixes := t.ciFixes(r.Repository, r.Ref)
+		var fixes []CIFixRecord
+		for _, f := range t.ciFixes(r.Repository, r.Ref) {
+			if !f.Review {
+				fixes = append(fixes, f)
+			}
+		}
 		var last *CIFixRecord
 		since := ""
 		if len(fixes) > 0 {

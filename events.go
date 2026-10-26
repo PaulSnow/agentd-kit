@@ -63,6 +63,7 @@ type Event struct {
 	Message     *MessagePayload     `json:"message,omitempty"`
 	Inbox       *InboxPayload       `json:"inbox,omitempty"`
 	Job         *JobPayload         `json:"job,omitempty"`
+	Loop        *LoopPayload        `json:"loop,omitempty"`
 }
 
 // Event kinds.
@@ -102,6 +103,7 @@ const (
 	KindMessage     = "message"     // a post to a console: a session's or a coordinator's report (agentd console post)
 	KindInbox       = "inbox"       // a reader read the owner's instructions for a console (agentd console inbox)
 	KindJob         = "job"         // a scheduled job's run started, ended or was skipped
+	KindLoop        = "loop"        // a step agentd took in a request's loop, or the owner's retry of a failed one
 )
 
 // Modes, in the mode every event carries. A run reads only the events of
@@ -131,6 +133,7 @@ const (
 	ActAnswer    = "answer"    // the owner's answers written to answers.json and the pointer typed
 	ActWake      = "wake"      // a coordinator's pack written and its pointer typed: a judgment is due
 	ActCIFix     = "ci-fix"    // a session relaunched to fix its request's own CI failure
+	ActFixRound  = "fix-round" // a work session relaunched to fix its request's adopted review findings
 	ActRaise     = "raise"     // agentd raised a decision for the owner on a session: a CI failure it will not fix again
 	ActProvision = "provision" // a started session's workdir, brief and worktree made
 	ActEnd       = "end"       // an ended session's tmux session stopped
@@ -353,7 +356,7 @@ func (e Event) check() error {
 		KindSkip: e.Skip != nil, KindCrash: e.Crash != nil, KindClear: e.Clear != nil, KindError: e.Error != nil, KindWarning: e.Warning != nil,
 		KindItem: e.Item != nil, KindSeen: e.Seen != nil, KindCursor: e.Cursor != nil, KindUsage: e.Usage != nil,
 		KindCheckpoint: e.Checkpoint != nil, KindPoll: e.Poll != nil, KindTriage: e.Triage != nil, KindDecision: e.Decision != nil,
-		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, KindApproval: e.Approval != nil, KindAccount: e.Account != nil, KindMessage: e.Message != nil, KindInbox: e.Inbox != nil, KindJob: e.Job != nil, "act": e.Act != nil,
+		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, KindApproval: e.Approval != nil, KindAccount: e.Account != nil, KindMessage: e.Message != nil, KindInbox: e.Inbox != nil, KindJob: e.Job != nil, KindLoop: e.Loop != nil, "act": e.Act != nil,
 	}
 	want := e.Kind
 	switch e.Kind {
@@ -378,6 +381,8 @@ func (e Event) check() error {
 		return errors.New("an inbox event is a shared fact, for no one session, and names its console, reader and the ids read")
 	case e.Kind == KindJob && (e.Session != "" || e.Mode != ModeLive && e.Mode != ModeShadow || e.Job.Name == "" || !validJobPhase(e.Job.Phase)):
 		return errors.New("a job event is a run's, for no one session, and names its job and a phase")
+	case e.Kind == KindLoop && (e.Session != "" || e.Loop.Repository == "" || e.Loop.Ref == "" || !validLoopStep(e.Loop.Step) || (e.Mode == ModeOwner) != (e.Loop.Step == LoopRetry) || e.Mode != ModeOwner && e.Mode != ModeLive && e.Mode != ModeShadow):
+		return errors.New("a loop event is a run's step, or the owner's retry, for no one session, and names its repository, request and step")
 	case e.Kind == KindAccount && (e.Session != "" || e.Mode != ModeShared || e.Account.Account == ""):
 		return errors.New("an account reading is a shared fact, for no one session, and names its account")
 	case e.Kind == KindApproval && (e.Session == "" || e.Mode != ModeShared || e.Approval.Repository == "" || e.Approval.Ref == "" || e.Approval.SHA == ""):

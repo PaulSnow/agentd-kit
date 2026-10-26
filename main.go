@@ -56,6 +56,8 @@ func main() {
 		err = coordinatorCmd(os.Args[2:])
 	case "sessions":
 		err = sessionsCmd(os.Args[2:])
+	case "loop":
+		err = loopCmd(os.Args[2:])
 	case "console":
 		err = consoleCmd(os.Args[2:])
 	case "policy":
@@ -101,6 +103,7 @@ func usage() {
   agentd clear [--config PATH] [--log PATH] SESSION
   agentd coordinator [--config PATH] [--log PATH] release REPOSITORY
   agentd sessions [--config PATH] [--log PATH] end NAME
+  agentd loop [--config PATH] [--log PATH] retry REPOSITORY REQUEST
   agentd policy [--config PATH] [--log PATH] show REPO
   agentd console [--config PATH] [--log PATH] [--shadow] reply CONSOLE TEXT...
   agentd console [--config PATH] [--log PATH] [--repository REPO] import FILE
@@ -127,7 +130,8 @@ restarted again. coordinator release lets the session a repository's
 configuration names claim its coordinator, which another session held:
 there is one coordinator per repository. sessions end stops a session a
 coordinator started and takes it off the supervised sessions, keeping its
-files. policy show prints a repository's effective policy, each key with
+files. loop retry takes a request's failed review or judge step again.
+policy show prints a repository's effective policy, each key with
 where it came from: the owner's configuration, a default, or the
 repository's own .agentd/policy.json as last read. console reply applies the owner's
 reply in a console, as its tool hands it on: "SESSION ID ANSWER" answers a
@@ -363,6 +367,25 @@ func sessionsCmd(args []string) error {
 	}
 	defer log.Close()
 	return EndSession(cfg, log, events, time.Now(), rest[1])
+}
+
+// loopCmd is agentd loop retry REPOSITORY REQUEST.
+func loopCmd(args []string) error {
+	fs := flag.NewFlagSet("loop", flag.ContinueOnError)
+	cfg, _, err := loadConfigFlag(fs, args)
+	if err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) != 3 || rest[0] != "retry" {
+		return fmt.Errorf("usage: agentd loop retry REPOSITORY REQUEST")
+	}
+	log, events, err := openLoaded(cfg.EventLog)
+	if err != nil {
+		return err
+	}
+	defer log.Close()
+	return RetryLoop(cfg, log, events, time.Now(), rest[1], rest[2])
 }
 
 // consoleCmd is the command-line face of ConsoleReply, ImportConsole,

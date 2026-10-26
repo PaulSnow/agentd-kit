@@ -213,8 +213,8 @@ func TestOwnerEndsAndProvisionRetries(t *testing.T) {
 }
 
 // A coordinator gets start_session and end_session only when its
-// repository has a sessions entry, and approve always (#36); that entry
-// needs a coordinator.
+// repository has a sessions entry, and approve always (#36); an entry
+// without a coordinator is agentd's own to start sessions from (#53).
 func TestCoordinatorServerNeedsSessionsEntry(t *testing.T) {
 	h := coordHarness(t)
 	rs := session(t, h.mcpServerFor("c"), `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
@@ -238,7 +238,8 @@ func TestCoordinatorServerNeedsSessionsEntry(t *testing.T) {
 	}
 	cfg := DefaultConfig()
 	cfg.Repositories = map[string]Repository{"widgets": {Forge: "gitlab", Project: "example-org/widgets", Sessions: &SessionsPolicy{Root: h.dir, Clone: h.dir, Target: "main"}}}
-	if err := cfg.finish(h.dir); err == nil || !strings.Contains(err.Error(), "needs the repository's coordinator") {
+	// Without a coordinator, agentd starts the sessions itself (#53).
+	if err := cfg.finish(h.dir); err != nil {
 		t.Fatalf("finish = %v", err)
 	}
 }
