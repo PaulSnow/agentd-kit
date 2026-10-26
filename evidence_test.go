@@ -193,7 +193,7 @@ func TestExampleConfigLoads(t *testing.T) {
 // would keep a crashed session alive and take the nudges meant for Claude.
 func TestDefaultRestartCommandEndsWithClaude(t *testing.T) {
 	cmd := DefaultConfig().Policies.Restart.Command
-	if cmd[2] != `exec claude --session-id "$1" --mcp-config="$2" "$3"` {
+	if cmd[2] != `exec claude ${4:+--model "$4"} --session-id "$1" --mcp-config="$2" "$3"` {
 		t.Fatalf("restart command does not end with the claude invocation: %q", cmd)
 	}
 	for _, part := range cmd {
@@ -212,7 +212,7 @@ func TestDefaultRestartCommandKeepsPermissions(t *testing.T) {
 			t.Fatalf("default restart command bypasses permissions: %q", part)
 		}
 	}
-	if cmd := strings.Join(DefaultConfig().Policies.Restart.Command, " "); !strings.Contains(cmd, `claude --session-id "$1" --mcp-config="$2" "$3"`) || !strings.Contains(cmd, "{prompt}") || strings.Contains(cmd, "--continue") {
+	if cmd := strings.Join(DefaultConfig().Policies.Restart.Command, " "); !strings.Contains(cmd, `--session-id "$1" --mcp-config="$2" "$3"`) || !strings.Contains(cmd, "{prompt}") || strings.Contains(cmd, "--continue") {
 		t.Fatalf("default restart command is not a fresh claude with a prompt: %q", cmd)
 	}
 	path := filepath.Join(t.TempDir(), "c.json")
@@ -297,6 +297,8 @@ func TestConfigRefusesMistakes(t *testing.T) {
 		"backoff max too low":           `{"policies": {"restart": {"backoff_initial": "10m", "backoff_max": "1m"}}}`,
 		"bad confidential":              `{"confidential_patterns": ["(unclosed"]}`,
 		"console named as a repository": `{"repositories": {"widgets": {"forge": "gitlab", "project": "example-org/widgets"}}, "consoles": {"widgets": {}}}`,
+		"model with no {model}":         `{"policies": {"restart": {"command": ["claude", "{prompt}"]}, "models": {"work": "haiku"}}}`,
+		"model it may not use":          `{"policies": {"models": {"work": "opus"}}, "repositories": {"r": {"forge": "gitlab", "project": "a/b", "policy": {"sessions": {"models": ["haiku"]}}}}}`,
 	}
 	for name, text := range cases {
 		path := filepath.Join(t.TempDir(), "c.json")

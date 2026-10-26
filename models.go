@@ -1,0 +1,79 @@
+package main
+
+import "strings"
+
+// orModel is a repository's model for a kind of session, or else every
+// repository's.
+func orModel(repo, all string) string {
+	if repo != "" {
+		return repo
+	}
+	return all
+}
+
+// sessionModel is the model a session runs (#52): its repository's
+// policy's for its kind, or else policies.models'. A coordinator runs the
+// coordinator model; a reviewer or a judge, started or configured, the
+// reviewer or judge model; any other session is a work session. "" is the
+// restart command's own default.
+func sessionModel(cfg *Config, st *LogState, sess Session) string {
+	var p RepoPolicy
+	if sess.Repository != "" {
+		p, _ = effectivePolicy(cfg, st, sess.Repository)
+	}
+	g := cfg.Policies.Models
+	switch sess.Role {
+	case RoleCoordinator:
+		return orModel(p.Sessions.CoordinatorModel, g.Coordinator)
+	case RoleReviewer:
+		return orModel(p.Review.ReviewerModel, g.Reviewer)
+	case RoleJudge:
+		return orModel(p.Review.JudgeModel, g.Judge)
+	}
+	return orModel(p.Sessions.WorkModel, g.Work)
+}
+
+// reviewModels are the models a coordinator hands the review and judge
+// calls it makes, since a call it makes otherwise runs its own model.
+func reviewModels(cfg *Config, st *LogState, repo string) *PackModels {
+	p, _ := effectivePolicy(cfg, st, repo)
+	g := cfg.Policies.Models
+	m := &PackModels{Reviewer: orModel(p.Review.ReviewerModel, g.Reviewer), Judge: orModel(p.Review.JudgeModel, g.Judge)}
+	if *m == (PackModels{}) {
+		return nil
+	}
+	return m
+}
+
+// withModel substitutes {model} in a launch command. With no model, an
+// argument holding {model} is left out, and with it a "--model" just
+// before it, so the command's own default runs.
+func withModel(cmd []string, model string) []string {
+	out := make([]string, 0, len(cmd))
+	for _, part := range cmd {
+		switch {
+		case !strings.Contains(part, "{model}"):
+			out = append(out, part)
+		case model != "":
+			out = append(out, strings.ReplaceAll(part, "{model}", model))
+		case len(out) > 0 && out[len(out)-1] == "--model":
+			out = out[:len(out)-1]
+		}
+	}
+	return out
+}
+
+// modelsSet names a model setting the config has, or is "" when every
+// session runs the command's default.
+func (c *Config) modelsSet() string {
+	if g := c.Policies.Models; g != (ModelsPolicy{}) {
+		return "policies.models"
+	}
+	for _, n := range sortedKeys(c.Repositories) {
+		p := c.Repositories[n].Policy
+		if p.Sessions.WorkModel != "" || p.Sessions.CoordinatorModel != "" || p.Review.ReviewerModel != "" || p.Review.JudgeModel != "" {
+			return "repositories." + n + ".policy's model"
+		}
+	}
+	return ""
+}

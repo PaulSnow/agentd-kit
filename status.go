@@ -34,6 +34,7 @@ type SessionStatus struct {
 	Guessed     bool     // a figure rests on a transcript agentd did not launch
 	Rotations   int
 	Stopped     string // why the budget stopped it
+	Model       string // the model its launches run, "" the command's default
 	// A coordinator: its role and repository, its wakes, its spend per
 	// wake (-1 when unknown), and its latest wake.
 	Role       string
@@ -147,6 +148,9 @@ func SummarizeState(cfg *Config, st *LogState) ([]SessionStatus, map[string]any)
 		if sp, ok := t.spend(mode == ModeLive); ok {
 			r.Spend = sp
 		}
+		if sess, ok := cfg.Sessions[name]; ok {
+			r.Model = sessionModel(cfg, st, sess)
+		}
 		if sess := cfg.Sessions[name]; sess.Role == RoleCoordinator {
 			r.Role, r.Repository, r.Wakes, r.WakeTokens = sess.Role, sess.Repository, t.WakeCount, -1
 			if n, ok := t.wakeTokens(mode == ModeLive); ok {
@@ -240,7 +244,7 @@ func PrintStatus(w io.Writer, rows []SessionStatus, meta map[string]any, now tim
 		}
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "SESSION\tSTATE\tFOR\tSEEN\tCONTEXT\tSPEND\tRESTARTS\tROTATED\tNUDGES\tESCALATED\tDELIVERED\tWHY")
+	fmt.Fprintln(tw, "SESSION\tSTATE\tFOR\tSEEN\tCONTEXT\tSPEND\tRESTARTS\tROTATED\tNUDGES\tESCALATED\tDELIVERED\tMODEL\tWHY")
 	for _, r := range rows {
 		delivered := strings.Join(r.Delivered, ",")
 		if delivered == "" {
@@ -279,9 +283,13 @@ func PrintStatus(w io.Writer, rows []SessionStatus, meta map[string]any, now tim
 				why += "; latest wakes: " + strings.Join(each, ", ")
 			}
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%s\t%s\n",
+		model := r.Model
+		if model == "" {
+			model = "default"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%s\t%s\t%s\n",
 			r.Name, r.State, ago(now, r.Since), ago(now, r.LastSeen), tokens(r.Context), tokens(r.Spend), r.Restarts, r.Rotations,
-			r.Nudges, r.Escalations, delivered, why)
+			r.Nudges, r.Escalations, delivered, model, why)
 	}
 	tw.Flush()
 }
