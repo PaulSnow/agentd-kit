@@ -11,7 +11,8 @@ import (
 
 // Claude Code asks, in a directory it does not yet trust, whether to trust
 // it, and has worded and ordered that menu more than one way: "Yes,
-// proceed" first and selected, or "No, exit" first and selected. agentd
+// proceed" first and selected, or "No, exit" first and selected, with its
+// options numbered or, as it draws them now, not (#43). agentd
 // answers the menu by the option's text, never its position, and only in
 // the directory it launches the session in (#32).
 
@@ -28,6 +29,7 @@ type TrustMenu struct {
 var (
 	// The cursor is ❯, or > on a terminal without Unicode.
 	trustOption = regexp.MustCompile(`^([❯›>]\s*)?(\d)\.\s+(\S.*)$`)
+	trustBare   = regexp.MustCompile(`^([❯›>]\s*)?(\S.*)$`)
 	trustFooter = regexp.MustCompile(`(?i)enter to confirm`)
 	trustYes    = regexp.MustCompile(`(?i)^yes\b`)
 )
@@ -80,6 +82,9 @@ func trustMenu(screen string, question *regexp.Regexp, home string) *TrustMenu {
 		}
 		footer = footer || trustFooter.MatchString(line)
 	}
+	if len(m.Options) == 0 {
+		accepts = bareOptions(m, lines[from+1:])
+	}
 	if len(m.Options) < 2 || m.Selected < 0 || !footer {
 		return nil
 	}
@@ -87,6 +92,48 @@ func trustMenu(screen string, question *regexp.Regexp, home string) *TrustMenu {
 		m.Accept = accepts[0]
 	}
 	return m
+}
+
+// bareOptions reads a menu without numbers into m: the last run of lines
+// before the footer, blank lines apart, is its options, when one of them,
+// and only one, carries the cursor. It returns the accepting ones. An
+// option that wraps reads as two, which only costs an arrow: Enter goes
+// on a screen that shows the accepting option itself selected.
+func bareOptions(m *TrustMenu, lines []string) (accepts []int) {
+	var run []string
+	for _, line := range lines {
+		line = strings.Trim(line, " \t│┃|")
+		if trustFooter.MatchString(line) {
+			break
+		}
+		if line == "" {
+			if len(run) > 0 {
+				m.Options, run = run, nil
+			}
+			continue
+		}
+		run = append(run, line)
+	}
+	if len(run) > 0 {
+		m.Options = run
+	}
+	if len(m.Options) > 9 {
+		m.Options = nil
+	}
+	cursors := 0
+	for i, o := range m.Options {
+		b := trustBare.FindStringSubmatch(o)
+		if b[1] != "" {
+			m.Selected, cursors = i, cursors+1
+		}
+		if m.Options[i] = b[2]; trustYes.MatchString(b[2]) {
+			accepts = append(accepts, i)
+		}
+	}
+	if cursors != 1 {
+		m.Selected = -1
+	}
+	return accepts
 }
 
 // trustKeys is what to send to menu m: the confirm keys when the

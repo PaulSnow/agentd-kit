@@ -215,6 +215,11 @@ func (st *LogState) apply(e Event) {
 		if o.Alive {
 			t.Hash = o.PaneHash
 		}
+		// Claude Code's input prompt, or a transcript written since the
+		// launch, says the session is past its folder-trust prompt.
+		if o.Alive && (o.Prompt || o.TranscriptAt != nil && !o.TranscriptAt.Before(t.Launched)) {
+			t.Ready = true
+		}
 		if o.PaneSince != nil && !o.PaneSince.Equal(t.HashSince) {
 			t.HashSince = *o.PaneSince
 			t.Nudges = 0
@@ -557,7 +562,7 @@ func (t *Track) settleDialog(n, episode int, at time.Time) {
 func (t *Track) launched(transcript string, at time.Time) {
 	// A new Claude can draw the same trust prompt, the same screen: it
 	// has not had the keys.
-	t.Launched, t.TrustHash = at, ""
+	t.Launched, t.TrustHash, t.Ready = at, "", false
 	t.Continues, t.ContinueStatus = 0, ""
 	if transcript != "" {
 		t.Transcript, t.Measured = transcript, ""
