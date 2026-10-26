@@ -135,7 +135,10 @@
     "repos_root": "~/repos",
     "every": "1m",
     "clone_timeout": "30m",
-    "open_state": [".kickoff"]
+    "open_state": [".kickoff"],
+    "sessions_root": "~/sessions",
+    "launch": ["claude", "--model", "{model}", "Read {brief} and follow it; keep {status} current."],
+    "accounts": {"work": {"config_dir": "~/.claude-work"}}
   },
   "accounts": {
     "work": {
