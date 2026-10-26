@@ -444,7 +444,9 @@ type Pack struct {
 	// Policy is the repository's effective policy (policy.go), so the
 	// coordinator's brief need not repeat it. Its confidential patterns
 	// are left out: they name what must not reach a session.
-	Policy    RepoPolicy     `json:"policy"`
+	Policy RepoPolicy `json:"policy"`
+	// Models are the models its review and judge calls run (#52).
+	Models    *PackModels    `json:"models,omitempty"`
 	Sessions  []PackSession  `json:"sessions"`
 	Decisions []PackDecision `json:"decisions,omitempty"`
 	Items     []PackItem     `json:"items,omitempty"`
@@ -458,6 +460,13 @@ type Pack struct {
 	// repository's sessions may use and fall back to (#39).
 	Accounts   []PackAccount `json:"accounts,omitempty"`
 	Summarized PackCounts    `json:"summarized"`
+}
+
+// PackModels are the models a coordinator passes to the review and judge
+// calls it makes; one left out is its own model.
+type PackModels struct {
+	Reviewer string `json:"reviewer,omitempty"`
+	Judge    string `json:"judge,omitempty"`
 }
 
 // PackSession is one session of the repository: its state, its case and
@@ -542,6 +551,7 @@ func (s *Supervisor) buildPack(repo string, due []string, now time.Time, handled
 	pol := s.cfg.Policies.Coordinator
 	p := Pack{Repository: repo, At: now, Due: append([]string(nil), due...), Sessions: []PackSession{}}
 	p.Policy, _ = effectivePolicy(s.cfg, s.st, repo)
+	p.Models = reviewModels(s.cfg, s.st, repo)
 	p.Policy.ConfidentialPatterns = nil
 	if co := s.cfg.Repositories[repo].Coordinator; co != nil {
 		if w, ok := s.track(co.Session).lastWake(); ok {

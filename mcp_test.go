@@ -461,8 +461,8 @@ func TestFactsPackNamesTheTools(t *testing.T) {
 			Args    []string `json:"args"`
 		} `json:"mcpServers"`
 	}
-	if err := json.Unmarshal([]byte(cmd[len(cmd)-2]), &mcp); err != nil {
-		t.Fatalf("mcp config %q: %v", cmd[len(cmd)-2], err)
+	if err := json.Unmarshal([]byte(cmd[len(cmd)-3]), &mcp); err != nil {
+		t.Fatalf("mcp config %q: %v", cmd[len(cmd)-3], err)
 	}
 	srv, ok := mcp.MCPServers["agentd"]
 	if !ok || srv.Command == "" || len(srv.Args) < 3 || srv.Args[0] != "mcp" || !strings.HasSuffix(strings.Join(srv.Args, " "), "--session s1") {

@@ -88,6 +88,9 @@ type Policies struct {
 	Feed FeedPolicy `json:"feed"`
 	// Rounds bounds a case's review rounds until the owner sets its own.
 	Rounds RoundsPolicy `json:"rounds"`
+	// Models are the model each kind of session runs, for every
+	// repository; a repository's policy may set its own (#52).
+	Models ModelsPolicy `json:"models"`
 	// PaneCommands are the values of tmux's #{pane_current_command} that
 	// mean the pane runs Claude Code. Nothing is typed or sent as keys into
 	// a pane running anything else, such as the shell left after Claude
@@ -122,6 +125,17 @@ type RestartPolicy struct {
 	Command        []string `json:"command"`
 	Width          int      `json:"width"`
 	Height         int      `json:"height"`
+}
+
+// ModelsPolicy is the model each kind of session runs: coordinators, work
+// sessions, and the reviewers and judges, started sessions and the review
+// and judge calls a coordinator makes. A kind with none runs the restart
+// command's own default, as before models were chosen (#52).
+type ModelsPolicy struct {
+	Coordinator string `json:"coordinator"`
+	Work        string `json:"work"`
+	Reviewer    string `json:"reviewer"`
+	Judge       string `json:"judge"`
 }
 
 // ContextPolicy rotates a session whose context (its latest call's input,
@@ -365,7 +379,7 @@ func DefaultConfig() Config {
 				Window:         Duration{time.Hour},
 				BackoffInitial: Duration{time.Minute},
 				BackoffMax:     Duration{30 * time.Minute},
-				Command:        []string{"bash", "-lic", `exec claude --session-id "$1" --mcp-config="$2" "$3"`, "agentd", "{session_id}", "{mcp}", "{prompt}"},
+				Command:        []string{"bash", "-lic", `exec claude ${4:+--model "$4"} --session-id "$1" --mcp-config="$2" "$3"`, "agentd", "{session_id}", "{mcp}", "{prompt}", "{model}"},
 				Width:          220,
 				Height:         50,
 			},
@@ -482,6 +496,9 @@ func (c *Config) finish(base string) error {
 	}
 	if r.Enabled && len(r.Command) == 0 {
 		errs = append(errs, errors.New("policies.restart.command must not be empty"))
+	}
+	if m := c.modelsSet(); (r.Enabled || c.Policies.Context.Enabled) && m != "" && !strings.Contains(strings.Join(r.Command, " "), "{model}") {
+		errs = append(errs, fmt.Errorf("%s is set, but policies.restart.command has no {model}, so no session would run it", m))
 	}
 	if x := c.Policies.Context; x.Enabled && (x.Threshold <= 0 || x.Grace.Duration < 0) {
 		errs = append(errs, errors.New("policies.context: threshold must be positive and grace non-negative"))

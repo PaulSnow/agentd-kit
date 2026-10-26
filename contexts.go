@@ -772,8 +772,8 @@ func (s *Supervisor) launchCommandWith(name string, sess Session, t *Track, id, 
 	}
 	r := strings.NewReplacer("{brief}", sess.Workdir+"/BRIEF.md", "{status}", sess.Workdir+"/STATUS.md",
 		"{session_id}", id, "{prompt}", s.promptWith(facts, why), "{mcp}", mcpLaunchConfig(s.cfg, name, sess))
-	cmd := make([]string, len(s.cfg.Policies.Restart.Command))
-	for i, part := range s.cfg.Policies.Restart.Command {
+	cmd := withModel(s.cfg.Policies.Restart.Command, sessionModel(s.cfg, s.st, sess))
+	for i, part := range cmd {
 		cmd[i] = r.Replace(part)
 	}
 	return cmd, facts

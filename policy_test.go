@@ -237,6 +237,8 @@ func TestNarrowPolicy(t *testing.T) {
 		`{"merge": {"Enabled": false}}`:                                         false,
 		`{"gate": {"env": []}}`:                                                 true,
 		`{"review": {"others": "review-only"}}`:                                 true,
+		`{"sessions": {"work_model": "haiku"}}`:                                 false,
+		`{"sessions": {"coordinator_model": ""}}`:                               true,
 		`{"ci": {"required": true}}`:                                            true,
 		`{"scope": {"reserved": {"numbers": [9]}}}`:                             true,
 		`{"sessions": {"accounts": ["a"]}}`:                                     true,

@@ -142,13 +142,17 @@ type ScopeRules struct {
 
 // SessionRules are what the repository's started sessions may use:
 // Accounts, Models, at most Max at once, Budget caps on each and on all
-// of them, and a Fallback order of accounts (#39 acts on it).
+// of them, and a Fallback order of accounts (#39 acts on it). WorkModel
+// and CoordinatorModel are the models its work sessions and its
+// coordinator run, over policies.models (#52).
 type SessionRules struct {
-	Accounts []string    `json:"accounts"`
-	Max      int         `json:"max"`
-	Models   []string    `json:"models"`
-	Budget   BudgetRules `json:"budget"`
-	Fallback []string    `json:"fallback"`
+	Accounts         []string    `json:"accounts"`
+	Max              int         `json:"max"`
+	Models           []string    `json:"models"`
+	Budget           BudgetRules `json:"budget"`
+	Fallback         []string    `json:"fallback"`
+	WorkModel        string      `json:"work_model"`
+	CoordinatorModel string      `json:"coordinator_model"`
 }
 
 // BudgetRules caps a repository's sessions' spend: each one's, and all of
@@ -253,6 +257,15 @@ func (c *Config) checkPolicy(name string, repo *Repository, errs *[]error) {
 	s := &p.Sessions
 	if s.Max < 0 || s.Budget.SessionTokens < 0 || s.Budget.RunTokens < 0 {
 		bad("sessions: max and budget must not be negative")
+	}
+	// A started session runs one of the models it may use.
+	if len(s.Models) > 0 {
+		g := c.Policies.Models
+		for _, m := range []string{orModel(s.WorkModel, g.Work), orModel(p.Review.ReviewerModel, g.Reviewer), orModel(p.Review.JudgeModel, g.Judge)} {
+			if m != "" && !contains(s.Models, m) {
+				bad("sessions.models does not have %q, a model its sessions would run", m)
+			}
+		}
 	}
 	if s.Max == 0 {
 		s.Max = DefaultMaxSessions
@@ -543,6 +556,10 @@ func narrowKey(eff *RepoPolicy, key string, raw json.RawMessage) bool {
 		return subset(&eff.Sessions.Models)
 	case "sessions.fallback":
 		return same(&eff.Sessions.Fallback)
+	case "sessions.work_model":
+		return same(&eff.Sessions.WorkModel)
+	case "sessions.coordinator_model":
+		return same(&eff.Sessions.CoordinatorModel)
 	case "sessions.max":
 		max := int64(eff.Sessions.Max)
 		if !lower(&max) {
