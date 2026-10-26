@@ -89,8 +89,14 @@ type rpcReply struct {
 // server's standard input and reads the replies from its standard output.
 func session(t *testing.T, srv *MCPServer, requests ...string) []rpcReply {
 	t.Helper()
+	return sessionOver(t, srv, strings.NewReader(strings.Join(requests, "\n")+"\n"))
+}
+
+// sessionOver is session with its input as r.
+func sessionOver(t *testing.T, srv *MCPServer, r io.Reader) []rpcReply {
+	t.Helper()
 	var out bytes.Buffer
-	if err := srv.Serve(strings.NewReader(strings.Join(requests, "\n")+"\n"), &out); err != nil {
+	if err := srv.Serve(r, &out); err != nil {
 		t.Fatal(err)
 	}
 	var replies []rpcReply
@@ -711,6 +717,14 @@ func TestMCPRestartHandsOnHeldInput(t *testing.T) {
 	}
 	if out.Len() != 0 || string(pending) != held {
 		t.Fatalf("replied %q; handed on %d bytes, want the %d held", out.String(), len(pending), len(held))
+	}
+	// A restart that fails serves all of it still.
+	srv = staleServer(h, true)
+	srv.restart = func([]byte, string) error { return errors.New("exec format error") }
+	srv.held = bytes.NewReader([]byte(held))
+	rs := sessionOver(t, srv, io.MultiReader(srv.held, strings.NewReader(own)))
+	if len(rs) != 3 || string(rs[1].ID) != "2" || string(rs[2].ID) != "3" {
+		t.Fatalf("%d replies after a failed restart", len(rs))
 	}
 }
 

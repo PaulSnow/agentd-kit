@@ -542,8 +542,9 @@ func (srv *MCPServer) Serve(r io.Reader, w io.Writer) error {
 				if why := srv.restarting; why != "" {
 					srv.restarting = ""
 					pending := append(append(line, '\n'), buffered(br)...)
-					if srv.held != nil {
-						rest, _ := io.ReadAll(srv.held)
+					if srv.held != nil { // copied, not read: a failed restart serves it still
+						rest := make([]byte, srv.held.Len())
+						srv.held.ReadAt(rest, srv.held.Size()-int64(len(rest)))
 						pending = append(pending, rest...)
 					}
 					if srv.restartErr = srv.restart(pending, why); srv.restartErr == nil {
