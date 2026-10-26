@@ -45,19 +45,21 @@ func reviewModels(cfg *Config, st *LogState, repo string) *PackModels {
 	return m
 }
 
-// withModel substitutes {model} in a launch command. With no model, an
-// argument holding {model} is left out, and with it a "--model" just
-// before it, so the command's own default runs.
+// withModel substitutes {model} in a launch command. With no model, a
+// "--model {model}" pair or a "--model={model}" is left out, so the
+// command's own default runs; any other {model} becomes "", which keeps
+// the arguments after it in place.
 func withModel(cmd []string, model string) []string {
 	out := make([]string, 0, len(cmd))
 	for _, part := range cmd {
 		switch {
-		case !strings.Contains(part, "{model}"):
-			out = append(out, part)
-		case model != "":
+		case model != "" || !strings.Contains(part, "{model}"):
 			out = append(out, strings.ReplaceAll(part, "{model}", model))
-		case len(out) > 0 && out[len(out)-1] == "--model":
+		case part == "--model={model}":
+		case part == "{model}" && len(out) > 0 && out[len(out)-1] == "--model":
 			out = out[:len(out)-1]
+		default:
+			out = append(out, strings.ReplaceAll(part, "{model}", ""))
 		}
 	}
 	return out

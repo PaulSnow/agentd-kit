@@ -436,13 +436,6 @@ func (s *Supervisor) settled(keys []string, now time.Time) bool {
 // Pack is a repository's state as its coordinator reads it: data, not
 // instructions. Summarized counts what the byte limit, or the per-session
 // limit on turns, left out.
-// PackModels are the models a coordinator passes to the review and judge
-// calls it makes; one left out is its own model.
-type PackModels struct {
-	Reviewer string `json:"reviewer,omitempty"`
-	Judge    string `json:"judge,omitempty"`
-}
-
 type Pack struct {
 	Repository string     `json:"repository"`
 	At         time.Time  `json:"at"`
@@ -467,6 +460,13 @@ type Pack struct {
 	// repository's sessions may use and fall back to (#39).
 	Accounts   []PackAccount `json:"accounts,omitempty"`
 	Summarized PackCounts    `json:"summarized"`
+}
+
+// PackModels are the models a coordinator passes to the review and judge
+// calls it makes; one left out is its own model.
+type PackModels struct {
+	Reviewer string `json:"reviewer,omitempty"`
+	Judge    string `json:"judge,omitempty"`
 }
 
 // PackSession is one session of the repository: its state, its case and

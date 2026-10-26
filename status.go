@@ -34,7 +34,7 @@ type SessionStatus struct {
 	Guessed     bool     // a figure rests on a transcript agentd did not launch
 	Rotations   int
 	Stopped     string // why the budget stopped it
-	Model       string // the model its launches run, "" the command's default
+	Model       string // the model its launches run, "default" the command's own; "" a session not configured
 	// A coordinator: its role and repository, its wakes, its spend per
 	// wake (-1 when unknown), and its latest wake.
 	Role       string
@@ -148,10 +148,14 @@ func SummarizeState(cfg *Config, st *LogState) ([]SessionStatus, map[string]any)
 		if sp, ok := t.spend(mode == ModeLive); ok {
 			r.Spend = sp
 		}
-		if sess, ok := cfg.Sessions[name]; ok {
+		sess, ok := cfg.Sessions[name]
+		if ok {
 			r.Model = sessionModel(cfg, st, sess)
+			if r.Model == "" {
+				r.Model = "default"
+			}
 		}
-		if sess := cfg.Sessions[name]; sess.Role == RoleCoordinator {
+		if sess.Role == RoleCoordinator {
 			r.Role, r.Repository, r.Wakes, r.WakeTokens = sess.Role, sess.Repository, t.WakeCount, -1
 			if n, ok := t.wakeTokens(mode == ModeLive); ok {
 				r.WakeTokens = n
@@ -285,7 +289,7 @@ func PrintStatus(w io.Writer, rows []SessionStatus, meta map[string]any, now tim
 		}
 		model := r.Model
 		if model == "" {
-			model = "default"
+			model = "-"
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%s\t%s\t%s\n",
 			r.Name, r.State, ago(now, r.Since), ago(now, r.LastSeen), tokens(r.Context), tokens(r.Spend), r.Restarts, r.Rotations,

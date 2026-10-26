@@ -30,6 +30,14 @@ func TestModelReachesTheCommandPerKind(t *testing.T) {
 	w.Policy.Sessions.WorkModel = "haiku"
 	w.Policy.Review.JudgeModel = "sonnet"
 	h.cfg.Repositories["widgets"] = w
+	ro := h.cfg.Repositories["readonly"]
+	ro.Policy.Sessions.CoordinatorModel = "haiku"
+	h.cfg.Repositories["readonly"] = ro
+	started := func(kind, repo string) Session {
+		r := h.cfg.Repositories[repo]
+		r.Sessions = &SessionsPolicy{Root: h.dir}
+		return runtimeSession("x", RuntimePayload{Repository: repo, Kind: kind, Branch: "night/1-x"}, r)
+	}
 	sess := func(role, repo string) Session {
 		s := h.cfg.Sessions["a"]
 		s.Role, s.Repository = role, repo
@@ -41,6 +49,11 @@ func TestModelReachesTheCommandPerKind(t *testing.T) {
 		want string
 	}{
 		{"coordinator", h.cfg.Sessions["c"], "opus"},
+		{"coordinator elsewhere", sess(RoleCoordinator, "readonly"), "haiku"},
+		{"started work", started(KindWork, "widgets"), "haiku"},
+		{"started reviewer", started(KindReviewer, "readonly"), "sonnet"},
+		{"started judge", started(KindJudge, "widgets"), "sonnet"},
+		{"started judge elsewhere", started(KindJudge, "readonly"), "opus"},
 		{"work", sess("", "widgets"), "haiku"},
 		{"work elsewhere", sess("", "readonly"), "sonnet"},
 		{"work of no repository", sess("", ""), "sonnet"},
@@ -56,8 +69,29 @@ func TestModelReachesTheCommandPerKind(t *testing.T) {
 	// A kind with no model leaves out --model and its value.
 	h.cfg.Policies.Models = ModelsPolicy{}
 	cmd, _ := h.sup.launchCommand("d", sess("", "readonly"), newTrack(), "id-1", "restart")
-	if len(cmd) != 2 || cmd[0] != "claude" {
+	if len(cmd) != 2 || cmd[0] != "claude" || !strings.HasPrefix(cmd[1], "You were restarted") {
 		t.Fatalf("command with no model = %q", cmd)
+	}
+}
+
+// With no model, only a --model argument is left out; any other {model}
+// becomes empty, so a positional argument after it keeps its place.
+func TestWithModel(t *testing.T) {
+	for _, c := range []struct {
+		cmd   []string
+		model string
+		want  []string
+	}{
+		{[]string{"claude", "--model", "{model}", "p"}, "haiku", []string{"claude", "--model", "haiku", "p"}},
+		{[]string{"claude", "--model", "{model}", "p"}, "", []string{"claude", "p"}},
+		{[]string{"claude", "--model={model}", "p"}, "", []string{"claude", "p"}},
+		{[]string{"claude", "--model={model}", "p"}, "opus", []string{"claude", "--model=opus", "p"}},
+		{[]string{"sh", "-c", "s", "x", "{model}", "{prompt}"}, "", []string{"sh", "-c", "s", "x", "", "{prompt}"}},
+		{[]string{"claude", "p"}, "haiku", []string{"claude", "p"}},
+	} {
+		if got := withModel(c.cmd, c.model); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("withModel(%q, %q) = %q, want %q", c.cmd, c.model, got, c.want)
+		}
 	}
 }
 
@@ -91,7 +125,7 @@ func TestStatusShowsModel(t *testing.T) {
 	for _, r := range rows {
 		got[r.Name] = r.Model
 	}
-	want := map[string]string{"a": "haiku", "b": "haiku", "c": "opus", "d": ""}
+	want := map[string]string{"a": "haiku", "b": "haiku", "c": "opus", "d": "default"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("models = %v, want %v", got, want)
 	}
