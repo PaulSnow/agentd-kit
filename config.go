@@ -474,6 +474,7 @@ func (c *Config) finish(base string) error {
 		}
 		c.UI.Logs[i] = path(fmt.Sprintf("ui.logs[%d]", i), l)
 	}
+	errs = append(errs, c.checkScheduled(base, path, isDir)...)
 	if _, ok := c.Accounts[c.Jobs.Account]; c.Jobs.Account != "" && !ok {
 		errs = append(errs, fmt.Errorf("jobs.account %q is not in accounts", c.Jobs.Account))
 	}

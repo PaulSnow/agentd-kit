@@ -65,6 +65,8 @@ type JobsConfig struct {
 	Timeout  Duration `json:"timeout"`
 	MaxInput int      `json:"max_input"`
 	Batch    int      `json:"batch"`
+	// Scheduled are the jobs agentd runs on a schedule, by name (#51).
+	Scheduled map[string]ScheduledJob `json:"scheduled"`
 }
 
 // TriagePayload is one triage call's outcome: the answers Go accepted, the

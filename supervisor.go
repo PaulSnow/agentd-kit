@@ -172,6 +172,9 @@ func (s *Supervisor) screen(e *Event) {
 	if e.Account != nil {
 		e.Account.Error = s.withheld(e.Account.Error)
 	}
+	if e.Job != nil {
+		e.Job.Error = s.withheld(e.Job.Error)
+	}
 }
 
 // withheld is text, or what the log says instead when it matches a
@@ -398,6 +401,7 @@ func (s *Supervisor) Pass() error {
 		s.feedConsoles(s.clock.Now())
 		s.triageItems(s.clock.Now())
 		s.readAccounts(s.clock.Now())
+		s.runJobs(s.clock.Now())
 	}
 	return s.halt
 }
