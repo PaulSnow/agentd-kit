@@ -25,16 +25,13 @@ type LogState struct {
 	Cursors map[string]time.Time  // how far each source of items has been read
 	Polls   map[string]PollRecord // each forge source's latest poll record
 	Cases   map[string]*Case      // each case by id
-	// Coordinators are the claims on each repository's coordinator: the
-	// session that holds it, by repository.
-	Coordinators map[string]string
 	// Instructions are the owner's console instructions, by id.
 	Instructions map[string]*Instruction
 	// CI is each watched request's latest CI, by repository and request.
 	CI map[string]CIRecord
 	// Feed is what the consoles' feed has posted.
 	Feed FeedState
-	// Runtime are the sessions coordinators started and nobody ended, by
+	// Runtime are the sessions agentd started and nobody ended, by
 	// name; Ended are those ended whose tmux session is not yet stopped,
 	// with their repository.
 	Runtime map[string]RuntimePayload
@@ -44,12 +41,9 @@ type LogState struct {
 	// patterns each adds, compiled.
 	Policies map[string]PolicyPayload
 	filePats map[string][]*regexp.Regexp
-	// Approvals are each request's latest approval by its coordinator,
-	// by ciKey (#36).
+	// Approvals are each request no session delivered that the loop's
+	// review converged on, at its head, by ciKey (#36, #53).
 	Approvals map[string]ApprovalRecord
-	// Touched is when a coordinator, or agentd for it, last acted on a
-	// forge thread, by thread: its echoes do not wake it (#49).
-	Touched map[string][]time.Time
 	// Accounts are each account's latest usage reading (#39), and
 	// StartedAt when each started session was started.
 	Accounts  map[string]AccountRecord
@@ -67,7 +61,7 @@ type LogState struct {
 func NewLogState(cfg *Config, mode string) *LogState {
 	return &LogState{Mode: mode, Tracks: map[string]*Track{}, Pending: map[string]Event{}, Items: map[string]*Item{}, Instructions: map[string]*Instruction{},
 		Cursors: map[string]time.Time{}, Polls: map[string]PollRecord{}, Cases: map[string]*Case{},
-		Coordinators: map[string]string{}, CI: map[string]CIRecord{}, Runtime: map[string]RuntimePayload{}, Ended: map[string]string{}, Policies: map[string]PolicyPayload{}, Approvals: map[string]ApprovalRecord{}, cfg: cfg}
+		CI: map[string]CIRecord{}, Runtime: map[string]RuntimePayload{}, Ended: map[string]string{}, Policies: map[string]PolicyPayload{}, Approvals: map[string]ApprovalRecord{}, cfg: cfg}
 }
 
 // setItem changes a copy of the item and puts the copy in its place: a
@@ -126,7 +120,6 @@ func (st *LogState) apply(e Event) {
 		return
 	}
 	st.Events++
-	st.noteTouch(e)
 	if e.Kind == KindCase {
 		st.applyCase(e)
 		return
@@ -143,30 +136,13 @@ func (st *LogState) apply(e Event) {
 		st.applyPolicy(e)
 		return
 	}
-	if e.Kind == KindApproval {
-		// Only the repository's coordinator approves its requests.
-		if co := st.cfg.Repositories[e.Approval.Repository].Coordinator; co == nil || co.Session != e.Session {
-			return
-		}
-		if st.Approvals == nil {
-			st.Approvals = map[string]ApprovalRecord{}
-		}
-		st.Approvals[ciKey(e.Approval.Repository, e.Approval.Ref)] = ApprovalRecord{ApprovalPayload: *e.Approval, By: e.Session, At: e.Time}
+	if e.Kind == KindApproval || e.Kind == KindCoordinator || e.Act != nil && e.Act.Action == ActWake {
+		// An earlier version's coordinator approval, claim, release or
+		// wake: the coordinator is gone (#53), and only the loop approves.
 		return
 	}
 	if e.Kind == KindLoop {
 		st.applyLoop(e)
-		return
-	}
-	if e.Kind == KindCoordinator {
-		if st.Coordinators == nil {
-			st.Coordinators = map[string]string{}
-		}
-		if e.Mode == ModeOwner {
-			delete(st.Coordinators, e.Coordinator.Repository)
-		} else if st.Coordinators[e.Coordinator.Repository] == "" {
-			st.Coordinators[e.Coordinator.Repository] = e.Session // the first claim holds
-		}
 		return
 	}
 	if e.Session == "" {
@@ -386,7 +362,7 @@ func (st *LogState) apply(e Event) {
 				at = *e.Warning.IntentAt
 			}
 			switch a.Action {
-			case ActEscalate, ActUpdate, ActNudge, ActResume, ActTrust, ActRotate, ActDecline, ActWake, ActMerge, ActRetest:
+			case ActEscalate, ActUpdate, ActNudge, ActResume, ActTrust, ActRotate, ActDecline, ActMerge, ActRetest:
 				t.applyAction(a, false, false, at)
 			}
 			// An answer cut short may not have reached the file: it is
@@ -439,8 +415,6 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 			t.launched(a.Transcript, at)
 			t.launchedBrief(a)
 		}
-	case ActWake:
-		t.applyWake(a, taken, counted, at)
 	case ActCIFix, ActFixRound:
 		// Not a restart or a crash: its count is the fix's own. A would-be
 		// fix is recorded too, so shadow mode would start it once. A fix

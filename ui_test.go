@@ -99,12 +99,12 @@ func ownerPost(u *UI, path string, form url.Values) *httptest.ResponseRecorder {
 	return postTo(u, path, "http://"+pageAddr, u.token, form, "192.0.2.20:51000")
 }
 
-// uiFixture is two configs, as the night build and the coordinators run
-// them, each with its own log. The night config's widgets has a working
+// uiFixture is two configs, as a night build and a second run run them,
+// each with its own log. The night config's widgets has a working
 // session, one blocked on a decision, one done, one whose dialog cleared,
 // one whose Questions say "None open.", one asking a text question in
 // STATUS.md, and a new item; its console has a feed post, an instruction
-// and imported history. The coordinators' config has widgets' coordinator
+// and imported history. The second config runs widgets' request loop,
 // with an outside request, a usage-limited session in widgets, and a
 // session of gadgets with a yes/no decision.
 type uiFixture struct {
@@ -147,11 +147,11 @@ func newUIFixture(t *testing.T) *uiFixture {
 	}
 	coord := DefaultConfig()
 	coord.Repositories = repos()
+	// coord runs widgets' request loop, which watches its outside requests.
 	cw := coord.Repositories["widgets"]
-	cw.Coordinator = &Coordinator{Session: "cw"}
+	cw.Sessions = &SessionsPolicy{Root: t.TempDir(), Clone: t.TempDir(), Target: "main"}
 	coord.Repositories["widgets"] = cw
 	coord.Sessions = map[string]Session{
-		"cw":   {Workdir: workdir("cw", ""), Repository: "widgets", Role: RoleCoordinator},
 		"lim1": {Workdir: workdir("lim1", ""), Repository: "widgets"},
 		"g1":   {Workdir: workdir("g1", ""), Repository: "gadgets"},
 	}
@@ -217,9 +217,11 @@ func newUIFixture(t *testing.T) *uiFixture {
 			t.Fatalf("%+v: %v", e, err)
 		}
 	}
+	// An earlier version's coordinator, cw, left its claim and its turn
+	// in the log: read, and shown nowhere (#53).
 	claim := ev(at(6*time.Hour), "cw", KindCoordinator, ModeShared)
 	claim.Coordinator = &CoordinatorPayload{Repository: "widgets"}
-	ci := ev(at(15*time.Minute), "cw", KindCI, ModeLive)
+	ci := ev(at(15*time.Minute), requestsTrack("widgets"), KindCI, ModeLive)
 	ci.CI = &CIPayload{Repository: "widgets", Ref: "!9", URL: "https://gitlab.example/example-org/widgets/-/merge_requests/9", Head: "abc", State: CIPending, Author: "contributor-c", Unresolved: true}
 	ask := ev(at(25*time.Minute), "g1", KindDecision, ModeLive)
 	ask.Decision = &DecisionPayload{Hash: "h3", Decisions: []Decision{{ID: "Q1", Type: DecisionYesNo, Question: "Release gadgets 2.0?", Why: "the changelog is ready"}}}
@@ -301,7 +303,7 @@ func TestUIMergesLogs(t *testing.T) {
 	if got := names(widgets.Working); got != "coord/lim1,night/quiet1,night/s-blocked,night/txt1,night/w17,night/w18" {
 		t.Fatalf("widgets working: %s", got)
 	}
-	if names(widgets.Coordinators) != "coord/cw" || names(widgets.Finished) != "night/done1" || names(gadgets.Working) != "coord/g1" {
+	if names(widgets.Finished) != "night/done1" || names(gadgets.Working) != "coord/g1" {
 		t.Fatalf("widgets %+v, gadgets %+v", widgets, gadgets)
 	}
 	if len(widgets.Requests) != 1 || !widgets.Requests[0].Outside || widgets.Requests[0].Author != "contributor-c" || !widgets.Requests[0].Unresolved {
@@ -397,8 +399,8 @@ func TestUIAnswersByButtonAndBox(t *testing.T) {
 
 // The console shows the repository's messages from every source in time
 // order, imported history first, and a reply is recorded as the owner's
-// instruction from the UI, in the run of the repository's coordinator,
-// which is the run that reads it.
+// instruction from the UI, in the run of the repository's loop, whose
+// sessions read it.
 func TestUIConsoleReply(t *testing.T) {
 	u, f := fixtureUI(t)
 	body := owner(t, u, "/console/widgets")

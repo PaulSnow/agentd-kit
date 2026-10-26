@@ -229,12 +229,6 @@ func TestUsageReadingsLogged(t *testing.T) {
 		t.Fatalf("after a's move: %+v", r)
 	}
 	noToken(t, "the event log", h.buf.String())
-	// The coordinator's pack carries the readings of the accounts its
-	// sessions may fall back to.
-	pack, _ := h.sup.buildPack("widgets", nil, h.clock.Now(), true)
-	if len(pack.Accounts) != 2 || pack.Accounts[0].Account != "a" || pack.Accounts[1].Account != "b" || *pack.Accounts[0].FiveHour != 30 {
-		t.Fatalf("pack accounts %+v", pack.Accounts)
-	}
 	// The UI shows each account.
 	body := owner(t, harnessUI(t, h), "/")
 	for _, want := range []string{"<strong>a</strong>", "5h 30%", "week 20%", "overage off", "internal error for [token]"} {
@@ -254,16 +248,15 @@ func TestUsageShadowReadsNothing(t *testing.T) {
 	}
 }
 
-// A session a coordinator starts with no account goes on the first
+// A session agentd starts with no account goes on the first
 // account of the fallback order with room: a is over the limit, so b.
 func TestPlacementFallsBack(t *testing.T) {
 	h, f := usageHarness(t)
 	f.set(tokenA, 95, 40)
 	h.ticks(1, time.Minute) // the readings
-	reply, refused := h.startSession(map[string]any{"branch": "fix/spin", "issue": 7})
-	name, _ := reply["name"].(string)
-	if refused || reply["account"] == nil {
-		t.Fatalf("start = %v", reply)
+	name := h.startSession("fix/spin", KindWork, 7)
+	if p := h.sup.st.Runtime[name]; !p.Place || p.Account != "" {
+		t.Fatalf("start = %+v", p)
 	}
 	h.ticks(3, time.Minute)
 	var placed []RuntimePayload
@@ -297,8 +290,7 @@ func TestPlacementWaits(t *testing.T) {
 	f.set(tokenA, 95, 40)
 	f.set(tokenB, 20, 99)
 	h.ticks(1, time.Minute)
-	reply, _ := h.startSession(map[string]any{"branch": "fix/spin", "issue": 7})
-	name, _ := reply["name"].(string)
+	name := h.startSession("fix/spin", KindWork, 7)
 	h.ticks(5, time.Minute)
 	if n := h.count(KindAction, ActProvision, name); n != 0 {
 		t.Fatalf("provisioned while waiting")
@@ -319,16 +311,17 @@ func TestPlacementWaits(t *testing.T) {
 	}
 }
 
-// An account the coordinator names is used as before, with no placement.
+// With no fallback order, the repository's first account is used as
+// before, with no placement.
 func TestPlacementNotForANamedAccount(t *testing.T) {
 	h, _ := usageHarness(t)
 	w := h.cfg.Repositories["widgets"]
-	w.Policy.Sessions.Accounts = []string{"c"}
+	w.Policy.Sessions.Accounts, w.Policy.Sessions.Fallback = []string{"c"}, nil
 	h.cfg.Repositories["widgets"] = w
 	h.restart(false)
-	reply, refused := h.startSession(map[string]any{"branch": "fix/spin", "issue": 7, "account": "c"})
-	if refused || reply["account"] != nil {
-		t.Fatalf("start = %v", reply)
+	name := h.startSession("fix/spin", KindWork, 7)
+	if p := h.sup.st.Runtime[name]; p.Place || p.Account != "c" {
+		t.Fatalf("start = %+v", p)
 	}
 	h.ticks(2, time.Minute)
 	for _, p := range h.sessionEvents() {
@@ -408,8 +401,7 @@ func TestUsageSteadyAccountStaysFresh(t *testing.T) {
 // telling the owner, then is placed.
 func TestPlacementNoNoticeBeforeReadings(t *testing.T) {
 	h, _ := usageHarness(t)
-	reply, _ := h.startSession(map[string]any{"branch": "fix/spin", "issue": 7})
-	name, _ := reply["name"].(string)
+	name := h.startSession("fix/spin", KindWork, 7)
 	h.ticks(3, time.Minute)
 	if n := placementNotices(h); len(n) != 0 {
 		t.Fatalf("notices before the readings: %q", n)
@@ -427,8 +419,7 @@ func TestPlacementNeverOnTheDefaultLogin(t *testing.T) {
 	f.set(tokenA, 95, 95)
 	f.set(tokenB, 95, 95)
 	h.ticks(1, time.Minute)
-	reply, _ := h.startSession(map[string]any{"branch": "fix/spin", "issue": 7})
-	name, _ := reply["name"].(string)
+	name := h.startSession("fix/spin", KindWork, 7)
 	w := h.cfg.Repositories["widgets"]
 	w.Policy.Sessions.Fallback = nil
 	h.cfg.Repositories["widgets"] = w
@@ -449,8 +440,7 @@ func TestPlacementSurvivesRestart(t *testing.T) {
 	h, f := usageHarness(t)
 	f.set(tokenA, 95, 40)
 	h.ticks(1, time.Minute)
-	reply, _ := h.startSession(map[string]any{"branch": "fix/spin", "issue": 7})
-	name, _ := reply["name"].(string)
+	name := h.startSession("fix/spin", KindWork, 7)
 	h.ticks(3, time.Minute)
 	f.set(tokenA, 1, 1)
 	h.restart(false)
@@ -531,8 +521,7 @@ func TestPlacementAfterDowntime(t *testing.T) {
 	b.Usage = UsageOff
 	h.cfg.Accounts["b"] = b
 	h.restart(false)
-	reply, _ := h.startSession(map[string]any{"branch": "fix/spin", "issue": 7})
-	name, _ := reply["name"].(string)
+	name := h.startSession("fix/spin", KindWork, 7)
 	h.clock.advance(2 * time.Hour)
 	h.restart(false)
 	h.ticks(3, time.Minute)

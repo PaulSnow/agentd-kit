@@ -8,22 +8,21 @@ import (
 	"io"
 	"math"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 )
 
 // The owner's reply in a console that is neither an answer nor a seen mark
 // is an instruction for the repositories that console feeds (#33). It is
-// due for each one's coordinator, which it wakes once, and its pack shows
-// it until the coordinator has handled a wake that carried it.
+// recorded, and read with agentd console inbox; nothing types it into a
+// session (#53).
 
 // InstructionPayload is an owner instruction: its id, the repositories it
 // is for, and its text, left out when it matches a confidential pattern
-// (Withheld, from 1, says which). Hash is the text's, so the same words
-// sent twice are recorded once; a withheld text has none. Console names
-// a console without a repository (#42) the instruction came from: it is
-// for no repository, so no coordinator, and inbox alone reads it.
+// (Withheld, from 1, says which). Hash is the text's, and makes the id; a
+// withheld text has none.
+// Console names a console without a repository (#42) the instruction came
+// from: it is for no repository.
 type InstructionPayload struct {
 	ID           string   `json:"id"`
 	Repositories []string `json:"repositories"`
@@ -40,8 +39,8 @@ type Instruction struct {
 	At time.Time
 }
 
-// PackInstruction is an instruction as a coordinator's pack shows it.
-type PackInstruction struct {
+// InboxInstruction is an instruction as agentd console inbox shows it.
+type InboxInstruction struct {
 	ID       string    `json:"id"`
 	Text     string    `json:"text,omitempty"`
 	Withheld bool      `json:"withheld,omitempty"`
@@ -49,112 +48,41 @@ type PackInstruction struct {
 	At       time.Time `json:"at"`
 }
 
-// instructionReason begins an instruction's due reason and key.
-const instructionReason = "instruction: "
-
 // decisionLike is a word that reads as a decision's id, with or without
 // the version a fed line names.
 var decisionLike = regexp.MustCompile(`^[A-Za-z]\d+(@\S*)?$`)
 
-// instructionKey is the instruction id a due key names.
-func instructionKey(key string) (string, bool) {
-	rest, ok := strings.CutPrefix(key, instructionReason)
-	if !ok {
-		return "", false
-	}
-	id, _, _ := strings.Cut(rest, "@")
-	return id, true
-}
-
-// instructionsFor is repo's instructions, oldest first.
-func (st *LogState) instructionsFor(repo string) []*Instruction {
-	var out []*Instruction
-	for _, in := range st.Instructions {
-		for _, r := range in.Repositories {
-			if r == repo {
-				out = append(out, in)
-				break
-			}
-		}
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].At.Equal(out[j].At) {
-			return out[i].At.Before(out[j].At)
-		}
-		return out[i].ID < out[j].ID
-	})
-	return out
-}
-
-// instructionHandled says whether repo's coordinator has handled a wake
-// that carried the instruction: one before its latest, or its latest when
-// handled says it was.
-func (st *LogState) instructionHandled(cfg *Config, repo, id string, handled bool) bool {
-	co := cfg.Repositories[repo].Coordinator
-	if co == nil {
-		return false
-	}
-	t := st.Tracks[co.Session]
-	if t == nil {
-		return false
-	}
-	n, ok := t.Carried[id]
-	return ok && (n < t.WakeCount || handled)
-}
-
-// instructionCarried says whether a wake of coordinator session carried
-// the instruction.
-func (st *LogState) instructionCarried(session, id string) bool {
-	t := st.Tracks[session]
-	if t == nil {
-		return false
-	}
-	_, ok := t.Carried[id]
-	return ok
-}
-
-// packInstructions is repo's instructions its coordinator has not handled.
-func (s *Supervisor) packInstructions(repo string, handled bool) []PackInstruction {
-	var out []PackInstruction
-	for _, in := range s.st.instructionsFor(repo) {
-		if !s.st.instructionHandled(s.cfg, repo, in.ID, handled) {
-			out = append(out, PackInstruction{ID: in.ID, Text: in.Text, Withheld: in.Withheld > 0, From: in.From, At: in.At})
-		}
-	}
-	return out
-}
-
 // RecordInstruction records text as the owner's instruction from console,
-// for every repository that console feeds, screened. The same words from
-// the same console, while a coordinator it is for has not yet been woken
-// with an earlier copy, are not recorded again.
-func RecordInstruction(cfg *Config, log *Log, st *LogState, now time.Time, console, text string) error {
+// for every repository that console feeds, screened. Each reply is
+// recorded, the same words twice too: nothing carries an instruction to a
+// session, so no earlier copy is waiting to be carried.
+func RecordInstruction(cfg *Config, log *Log, now time.Time, console, text string) error {
 	if _, ok := cfg.Consoles[console]; ok {
-		return recordInstruction(cfg, log, st, now, nil, console, "console:"+console, text)
+		return recordInstruction(cfg, log, now, nil, console, "console:"+console, text)
 	}
 	repos := cfg.consoleRepos(console)
 	if len(repos) == 0 {
 		return fmt.Errorf("console %q feeds no repository, so it takes no instruction", console)
 	}
-	return recordInstruction(cfg, log, st, now, repos, "", "console:"+console, text)
+	return recordInstruction(cfg, log, now, repos, "", "console:"+console, text)
 }
 
 // UIInstruction records text as the owner's instruction from the UI for
 // one repository (#41), or for a console without one (#42), as a console
 // reply is recorded.
-func UIInstruction(cfg *Config, log *Log, st *LogState, now time.Time, repo, text string) error {
+func UIInstruction(cfg *Config, log *Log, now time.Time, repo, text string) error {
 	if _, ok := cfg.Consoles[repo]; ok {
-		return recordInstruction(cfg, log, st, now, nil, repo, "ui", text)
+		return recordInstruction(cfg, log, now, nil, repo, "ui", text)
 	}
 	if _, ok := cfg.Repositories[repo]; !ok {
 		return fmt.Errorf("no repository %q", repo)
 	}
-	return recordInstruction(cfg, log, st, now, []string{repo}, "", "ui", text)
+	return recordInstruction(cfg, log, now, []string{repo}, "", "ui", text)
 }
 
 // recordInstruction records text as the owner's instruction for repos, or
 // for console when it has none, screened, from where it was typed.
-func recordInstruction(cfg *Config, log *Log, st *LogState, now time.Time, repos []string, console, from, text string) error {
+func recordInstruction(cfg *Config, log *Log, now time.Time, repos []string, console, from, text string) error {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return errors.New("an empty instruction")
@@ -169,19 +97,6 @@ func recordInstruction(cfg *Config, log *Log, st *LogState, now time.Time, repos
 		}
 	}
 	p.ID = "I" + shortHash(HashPane(now.UTC().Format(time.RFC3339Nano) + "\n" + from + "\n" + p.Hash))[:8]
-	for _, in := range st.Instructions {
-		if p.Hash == "" || in.Hash != p.Hash || in.From != from || in.Console != console || strings.Join(in.Repositories, ",") != strings.Join(repos, ",") {
-			continue
-		}
-		// A copy no wake has carried yet is still waiting. A repository
-		// with no coordinator never carries it, so it keeps none waiting;
-		// once a wake carried it, the same words are the owner's again.
-		for _, r := range repos {
-			if co := cfg.Repositories[r].Coordinator; co != nil && !st.instructionCarried(co.Session, in.ID) {
-				return nil // still waiting: recorded once
-			}
-		}
-	}
 	return log.Append(Event{V: EventVersion, Time: now, Kind: KindInstruction, Mode: ModeOwner, Instruction: p})
 }
 

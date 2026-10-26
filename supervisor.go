@@ -45,7 +45,7 @@ type Supervisor struct {
 	// directories Claude Code trusts, for a session with no account; run
 	// sets it, and without it such a session's directory is not looked up.
 	home string
-	// cfg is base with the sessions coordinators started (sessions.go),
+	// cfg is base with the sessions agentd started (sessions.go),
 	// swapped for a new copy whenever one starts or ends.
 	cfg    *Config
 	base   *Config
@@ -430,25 +430,15 @@ func (s *Supervisor) ownerRecords() {
 	s.tailOff = off
 	defer s.refreshRuntime()
 	for _, e := range events {
-		// A coordinator started or ended a session, or the owner ended one.
+		// agentd started or ended a session, or the owner ended one.
 		if e.Kind == KindSession {
 			s.st.apply(e)
 			continue
 		}
 		shared := e.Kind == KindSeen || e.Kind == KindInstruction || e.Kind == KindAccount || e.Kind == KindTriage || e.Kind == KindError && e.Error.Triage != nil ||
-			e.Kind == KindItem && s.st.itemChanged(*e.Item) || e.Kind == KindCase && e.Mode == ModeOwner || e.Kind == KindCoordinator ||
+			e.Kind == KindItem && s.st.itemChanged(*e.Item) || e.Kind == KindCase && e.Mode == ModeOwner ||
 			e.Kind == KindLoop && e.Mode == ModeOwner
 		if e.Session == "" && shared {
-			s.st.apply(e)
-			continue
-		}
-		// Another run's claim on a coordinator holds here too.
-		if e.Kind == KindCoordinator && e.Mode == ModeShared {
-			s.st.apply(e)
-			continue
-		}
-		// A coordinator's approve, which its server logged (#36).
-		if e.Kind == KindApproval {
 			s.st.apply(e)
 			continue
 		}
@@ -723,11 +713,6 @@ func sameObservation(a, b ObservePayload) bool {
 
 func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, state State, now time.Time) State {
 	pol := s.cfg.Policies
-	// A coordinator whose repository another session coordinates is left
-	// alone: not launched, woken or rotated.
-	if sess.Role == RoleCoordinator && !s.claimed(name, sess, t) {
-		return state
-	}
 	// A work session is rotated at the end of its round too, DONE once
 	// its branch is delivered (#48).
 	if (state == Working || state == Idle || state == Done && sess.Kind == KindWork && delivered(name, sess, t)) && !t.Limited && s.rotate(name, sess, t, ev, now) {
@@ -747,13 +732,10 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 	if !typed {
 		typed = s.deliverAnswers(name, sess, t, ev, state)
 	}
-	if !typed && sess.Role == RoleCoordinator {
-		typed = s.wake(name, sess, t, ev, state, now)
-	}
-	if !typed && sess.Role != RoleCoordinator && s.fixCI(name, sess, t, ev, state, now) {
+	if !typed && s.fixCI(name, sess, t, ev, state, now) {
 		return Starting
 	}
-	if !typed && sess.Role != RoleCoordinator && s.fixRound(name, sess, t, ev, state) {
+	if !typed && s.fixRound(name, sess, t, ev, state) {
 		return Starting
 	}
 	switch state {
@@ -794,7 +776,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			why = "answered"
 		}
 		id := newSessionID()
-		cmd, facts := s.launchCommandWith(name, sess, t, id, why, nil, brief.parts())
+		cmd, facts := s.launchCommandWith(name, sess, t, id, why, nil)
 		line, err := s.launchLine(sess, cmd)
 		if err != nil {
 			// Not final, and not a crash: the owner may fix the account.
@@ -873,8 +855,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 				fmt.Sprintf("%s has shown the same screen since %s with a tool call as its last turn; it is probably waiting at a permission prompt. Attach and answer it.", name, t.HashSince.Format(time.RFC3339)), t, now)
 		}
 	case Idle:
-		// A coordinator waits, quiet, for its next wake.
-		if !pol.Nudge.Enabled || typed || sess.Role == RoleCoordinator {
+		if !pol.Nudge.Enabled || typed {
 			return state
 		}
 		if t.turnEnded(ev) && t.lastTurn().At.After(t.LastNudge) && s.continueTurn(name, sess, t, ev, now) {
@@ -1044,10 +1025,6 @@ func (s *Supervisor) typeInto(name, action string, a *ActPayload, t *Track, seen
 			key := "screen-changed:" + action + ":" + shortHash(now)
 			if len(a.Answers) > 0 {
 				key = "screen-changed:" + action + ":" + strings.Join(a.Answers, ",") + ":" + fmt.Sprint(a.AnswersAt[len(a.AnswersAt)-1].Unix())
-			}
-			// So is a wake, for a coordinator still busy with its pack.
-			if action == ActWake {
-				key = "screen-changed:" + a.Key
 			}
 			s.skipOnce(name, key, "the screen changed since it was read this pass; not typing", t,
 				&SkipPayload{Action: action})

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,12 +9,31 @@ import (
 	"time"
 )
 
-// sessionsHarness is coordHarness with widgets' coordinator c allowed to
-// start sessions: each in the harness's directory, from a clone, cut from
-// main.
+// repoHarness is a, b and d, with d in readonly, and the transcripts
+// under the harness's directory.
+func repoHarness(t *testing.T) *harness {
+	t.Helper()
+	h := newHarness(t, false, "a", "b", "d")
+	h.cfg.TranscriptDir = filepath.Join(h.dir, "projects")
+	d := h.cfg.Sessions["d"]
+	d.Repository = "readonly"
+	h.cfg.Sessions["d"] = d
+	if err := h.cfg.finish(h.dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"a", "b", "d"} {
+		h.alive(n, "screen of "+n)
+	}
+	h.restart(false)
+	return h
+}
+
+// sessionsHarness is repoHarness with a sessions entry for widgets, so
+// agentd starts sessions there: each in the harness's directory, from a
+// clone, cut from main.
 func sessionsHarness(t *testing.T) *harness {
 	t.Helper()
-	h := coordHarness(t)
+	h := repoHarness(t)
 	clone := filepath.Join(h.dir, "clone")
 	if err := os.MkdirAll(clone, 0o755); err != nil {
 		t.Fatal(err)
@@ -31,15 +49,21 @@ func sessionsHarness(t *testing.T) *harness {
 	return h
 }
 
-// startSession is c's start_session call; it returns the reply.
-func (h *harness) startSession(args map[string]any) (map[string]any, bool) {
+// startSession is agentd's start of a widgets session of kind on branch,
+// as its loop makes one; it returns the name.
+func (h *harness) startSession(branch, kind string, issue int) string {
 	h.t.Helper()
-	text, refused := callOne(h.t, h.mcpServerFor("c"), ToolStartSession, args)
-	var reply map[string]any
-	if err := json.Unmarshal([]byte(text), &reply); err != nil {
-		h.t.Fatalf("reply %q: %v", text, err)
+	name := runtimeName("widgets", branch, kind)
+	if why := h.sup.startRuntime("widgets", name, RuntimePayload{Kind: kind, Branch: branch, Issue: issue}); why != "" {
+		h.t.Fatalf("start of %s refused: %s", name, why)
 	}
-	return reply, refused
+	h.sup.refreshRuntime()
+	return name
+}
+
+// endSession is the owner's agentd sessions end.
+func (h *harness) endSession(name string) error {
+	return EndSession(h.cfg, NewLogWriter(h.buf), h.events(), h.clock.Now(), name)
 }
 
 func (h *harness) sessionEvents() []RuntimePayload {
@@ -52,17 +76,13 @@ func (h *harness) sessionEvents() []RuntimePayload {
 	return out
 }
 
-// A coordinator's start_session is a shared event; agentd then makes the
-// session's workdir, brief and worktree, launches it under the restart
-// command, and supervises it: its DONE wakes the coordinator.
-func TestCoordinatorStartsSupervisedSession(t *testing.T) {
+// A started session is a shared event; agentd then makes the session's
+// workdir, brief and worktree, launches it under the restart command, and
+// supervises it.
+func TestStartedSessionSupervised(t *testing.T) {
 	h := sessionsHarness(t)
-	reply, refused := h.startSession(map[string]any{"branch": "fix/spin", "issue": 7})
-	name, _ := reply["name"].(string)
-	if refused || reply["started"] != true || name != runtimeName("widgets", "fix/spin", KindWork) {
-		t.Fatalf("start = %v", reply)
-	}
-	if ev := h.sessionEvents(); len(ev) != 1 || ev[0].By != "c" || ev[0].Branch != "fix/spin" || ev[0].Issue != 7 {
+	name := h.startSession("fix/spin", KindWork, 7)
+	if ev := h.sessionEvents(); len(ev) != 1 || ev[0].Branch != "fix/spin" || ev[0].Issue != 7 {
 		t.Fatalf("session events = %+v", ev)
 	}
 	h.ticks(2, time.Minute)
@@ -90,45 +110,32 @@ func TestCoordinatorStartsSupervisedSession(t *testing.T) {
 	h.ticks(2, time.Minute)
 	h.status(name, "# s\n\nDONE\n")
 	h.ticks(3, time.Minute)
-	if w := h.wakes(); len(w) != 1 || w[0].Reason != "finished: "+name {
-		t.Fatalf("wakes = %+v", w)
+	if st := h.state(name); st != Done {
+		t.Fatalf("state = %v, want done", st)
 	}
 }
 
-// One session per branch and kind: a second start is refused and not
-// logged, while a reviewer on the same branch is its own session. Another
-// repository, a target, a branch name git would read otherwise, an account
-// the repository does not allow, and a start over max are refused too.
-func TestStartSessionRefusals(t *testing.T) {
+// One session per name: agentd's second start of a running name is
+// refused and not logged, while a reviewer on the same branch is its own
+// session; a start over max, or under a configured session's name, is
+// refused too.
+func TestStartRuntimeRefusals(t *testing.T) {
 	h := sessionsHarness(t)
-	if _, refused := h.startSession(map[string]any{"branch": "fix-spin"}); refused {
-		t.Fatal("first start refused")
+	work := runtimeName("widgets", "fix-spin", KindWork)
+	if why := h.sup.startRuntime("widgets", work, RuntimePayload{Kind: KindWork, Branch: "fix-spin"}); why != "" {
+		t.Fatalf("first start refused: %s", why)
 	}
-	for _, c := range []struct {
-		args map[string]any
-		want string
-	}{
-		{map[string]any{"branch": "fix-spin"}, "already has a work session"},
-		{map[string]any{"branch": "other", "repository": "readonly"}, `repository "readonly" is not widgets`},
-		{map[string]any{"branch": "main"}, "is a target"},
-		{map[string]any{"branch": "../x"}, "not a plain branch"},
-		{map[string]any{"branch": "-x"}, "not a plain branch"},
-		{map[string]any{"branch": "refs/heads/x"}, "not a plain branch"},
-		{map[string]any{"branch": "x", "kind": "reviewer"}, "needs the issue"},
-		{map[string]any{"branch": "x", "kind": "boss"}, "is not work, reviewer or judge"},
-		{map[string]any{"branch": "x", "account": "other"}, `account "other" is not one`},
-		{map[string]any{"branch": "x", "case": "widgets#7"}, "not the tool's"},
-	} {
-		reply, refused := h.startSession(c.args)
-		if r, _ := reply["refused"].(string); !refused || !strings.Contains(r, c.want) {
-			t.Errorf("%v: reply %v, want refusal %q", c.args, reply, c.want)
-		}
+	if why := h.sup.startRuntime("widgets", work, RuntimePayload{Kind: KindWork, Branch: "fix-spin"}); !strings.Contains(why, "running already") {
+		t.Fatalf("second start = %q", why)
 	}
-	if reply, refused := h.startSession(map[string]any{"branch": "fix-spin", "kind": "reviewer", "issue": 7}); refused || reply["name"] != runtimeName("widgets", "fix-spin", KindReviewer) {
-		t.Fatalf("reviewer start = %v", reply)
+	if why := h.sup.startRuntime("widgets", runtimeName("widgets", "fix-spin", KindReviewer), RuntimePayload{Kind: KindReviewer, Branch: "fix-spin", Issue: 7}); why != "" {
+		t.Fatalf("reviewer start refused: %s", why)
 	}
-	if reply, refused := h.startSession(map[string]any{"branch": "third"}); !refused || !strings.Contains(reply["refused"].(string), "its max") {
-		t.Fatalf("start over max = %v", reply)
+	if why := h.sup.startRuntime("widgets", "a", RuntimePayload{Kind: KindWork, Branch: "a"}); !strings.Contains(why, "configured session") {
+		t.Fatalf("start under a configured name = %q", why)
+	}
+	if why := h.sup.startRuntime("widgets", runtimeName("widgets", "third", KindWork), RuntimePayload{Kind: KindWork, Branch: "third"}); !strings.Contains(why, "its max") {
+		t.Fatalf("start over max = %q", why)
 	}
 	if n := len(h.sessionEvents()); n != 2 {
 		t.Fatalf("%d session events, want the two starts", n)
@@ -140,8 +147,7 @@ func TestStartSessionRefusals(t *testing.T) {
 // ended session is stopped once and left out, its files kept.
 func TestReplayRebuildsStartedSessions(t *testing.T) {
 	h := sessionsHarness(t)
-	reply, _ := h.startSession(map[string]any{"branch": "fix-spin"})
-	name := reply["name"].(string)
+	name := h.startSession("fix-spin", KindWork, 0)
 	h.ticks(2, time.Minute)
 	h.alive(name, "working")
 	h.restart(false)
@@ -160,9 +166,8 @@ func TestReplayRebuildsStartedSessions(t *testing.T) {
 	if !found {
 		t.Fatalf("status lacks %s: %+v", name, rows)
 	}
-	text, refused := callOne(t, h.mcpServerFor("c"), ToolEndSession, map[string]any{"name": name})
-	if refused || !strings.Contains(text, `"ended":true`) {
-		t.Fatalf("end = %s", text)
+	if err := h.endSession(name); err != nil {
+		t.Fatal(err)
 	}
 	h.ticks(2, time.Minute)
 	if n, s := h.count(KindAction, ActEnd, name), h.tmux.count("stop", name); n != 1 || s != 1 {
@@ -179,7 +184,7 @@ func TestReplayRebuildsStartedSessions(t *testing.T) {
 	if _, ok := h.sup.cfg.Sessions[name]; ok || h.tmux.count("stop", name) != 1 {
 		t.Fatal("replay brought an ended session back")
 	}
-	if _, refused := callOne(t, h.mcpServerFor("c"), ToolEndSession, map[string]any{"name": name}); !refused {
+	if err := h.endSession(name); err == nil {
 		t.Fatal("ended twice")
 	}
 }
@@ -189,8 +194,7 @@ func TestReplayRebuildsStartedSessions(t *testing.T) {
 func TestOwnerEndsAndProvisionRetries(t *testing.T) {
 	h := sessionsHarness(t)
 	h.git.worktreeErr = errors.New("fetch failed")
-	reply, _ := h.startSession(map[string]any{"branch": "fix-spin"})
-	name := reply["name"].(string)
+	name := h.startSession("fix-spin", KindWork, 0)
 	h.ticks(1, time.Minute)
 	if h.tmux.count("new-session", name) != 0 || h.count(KindError, "", name) == 0 {
 		t.Fatal("a session without its worktree was launched, or its failure not logged")
@@ -200,10 +204,10 @@ func TestOwnerEndsAndProvisionRetries(t *testing.T) {
 	if h.tmux.count("new-session", name) != 1 {
 		t.Fatal("not launched once its worktree was made")
 	}
-	if err := EndSession(h.cfg, NewLogWriter(h.buf), h.events(), h.clock.Now(), "nobody"); err == nil {
+	if err := h.endSession("nobody"); err == nil {
 		t.Fatal("ended a session nobody started")
 	}
-	if err := EndSession(h.cfg, NewLogWriter(h.buf), h.events(), h.clock.Now(), name); err != nil {
+	if err := h.endSession(name); err != nil {
 		t.Fatal(err)
 	}
 	h.ticks(1, time.Minute)
@@ -212,34 +216,13 @@ func TestOwnerEndsAndProvisionRetries(t *testing.T) {
 	}
 }
 
-// A coordinator gets start_session and end_session only when its
-// repository has a sessions entry, and approve always (#36); an entry
-// without a coordinator is agentd's own to start sessions from (#53).
-func TestCoordinatorServerNeedsSessionsEntry(t *testing.T) {
-	h := coordHarness(t)
-	rs := session(t, h.mcpServerFor("c"), `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
-	if len(rs) != 1 || len(rs[0].Result.Tools) != 1 || rs[0].Result.Tools[0].Name != ToolApprove {
-		t.Fatalf("tools without a sessions entry = %+v", rs)
-	}
-	if got := mcpLaunchConfig(h.cfg, "c", h.cfg.Sessions["c"]); !strings.Contains(got, `"--session","c"`) {
-		t.Fatalf("launch config = %s", got)
-	}
-	h = sessionsHarness(t)
-	if got := mcpLaunchConfig(h.cfg, "c", h.cfg.Sessions["c"]); !strings.Contains(got, `"--session","c"`) {
-		t.Fatalf("launch config = %s", got)
-	}
-	var f restartFacts
-	if err := json.Unmarshal(h.sup.packFacts("c", h.cfg.Sessions["c"], h.sup.track("c"), "restart"), &f); err != nil || strings.Join(f.Tools, ",") != "start_session,end_session,approve" {
-		t.Fatalf("facts tools = %v, %v", f.Tools, err)
-	}
-	rs = session(t, h.mcpServerFor("c"), `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
-	if len(rs) != 1 || len(rs[0].Result.Tools) != 3 || rs[0].Result.Tools[0].Name != ToolStartSession {
-		t.Fatalf("tools = %+v", rs)
-	}
+// A sessions entry needs no other key: agentd starts the sessions itself
+// (#53).
+func TestSessionsEntryAlone(t *testing.T) {
+	dir := t.TempDir()
 	cfg := DefaultConfig()
-	cfg.Repositories = map[string]Repository{"widgets": {Forge: "gitlab", Project: "example-org/widgets", Sessions: &SessionsPolicy{Root: h.dir, Clone: h.dir, Target: "main"}}}
-	// Without a coordinator, agentd starts the sessions itself (#53).
-	if err := cfg.finish(h.dir); err != nil {
+	cfg.Repositories = map[string]Repository{"widgets": {Forge: "gitlab", Project: "example-org/widgets", Sessions: &SessionsPolicy{Root: dir, Clone: dir, Target: "main"}}}
+	if err := cfg.finish(dir); err != nil {
 		t.Fatalf("finish = %v", err)
 	}
 }
@@ -272,28 +255,20 @@ func TestExecGitAddWorktree(t *testing.T) {
 
 // A branch started again after its end is a new session: a fresh Track,
 // a new brief and, where the last one finished, a fresh STATUS.md, so it
-// is launched and not taken for DONE. The coordinator's server, launched
-// while the first ran, starts it again.
+// is launched and not taken for DONE.
 func TestStartAgainAfterEnd(t *testing.T) {
 	h := sessionsHarness(t)
-	reply, _ := h.startSession(map[string]any{"branch": "fix-spin", "issue": 7})
-	name := reply["name"].(string)
+	name := h.startSession("fix-spin", KindWork, 7)
 	h.ticks(2, time.Minute)
 	h.alive(name, "working")
 	h.ticks(1, time.Minute)
 	h.status(name, "# s\n\nDONE\n")
 	h.ticks(2, time.Minute)
-	srv, err := NewMCPServer(projected(h.cfg, h.events()), "c", NewLogWriter(h.buf), func() ([]Event, error) { return h.events(), nil }, h.clock.Now)
-	if err != nil {
+	if err := h.endSession(name); err != nil {
 		t.Fatal(err)
 	}
-	if _, refused := callOne(t, srv, ToolEndSession, map[string]any{"name": name}); refused {
-		t.Fatal("end refused")
-	}
 	h.ticks(1, time.Minute)
-	if text, refused := callOne(t, srv, ToolStartSession, map[string]any{"branch": "fix-spin", "issue": 8}); refused {
-		t.Fatalf("start again = %s", text)
-	}
+	h.startSession("fix-spin", KindWork, 8)
 	h.ticks(3, time.Minute)
 	if n := h.tmux.count("new-session", name); n != 2 {
 		t.Fatalf("launched %d times, want twice", n)
@@ -313,7 +288,7 @@ func TestFoldHoldsMax(t *testing.T) {
 	h := sessionsHarness(t)
 	for i, b := range []string{"a", "b", "c"} {
 		h.sup.emit(runtimeName("widgets", b, KindWork), Event{Kind: KindSession, Mode: ModeShared,
-			Runtime: &RuntimePayload{ID: string(rune('x' + i)), Action: SessionStart, Repository: "widgets", Kind: KindWork, Branch: b, Max: 2, By: "c"}})
+			Runtime: &RuntimePayload{ID: string(rune('x' + i)), Action: SessionStart, Repository: "widgets", Kind: KindWork, Branch: b, Max: 2, By: "test"}})
 	}
 	if rt := projectedRuntime(h.cfg, h.events()); len(rt) != 2 {
 		t.Fatalf("running = %v, want max 2", rt)
@@ -324,8 +299,7 @@ func TestFoldHoldsMax(t *testing.T) {
 // for an instruction.
 func TestConsoleAnswersStartedSession(t *testing.T) {
 	h := sessionsHarness(t)
-	reply, _ := h.startSession(map[string]any{"branch": "fix-spin"})
-	name := reply["name"].(string)
+	name := h.startSession("fix-spin", KindWork, 0)
 	st := NewLogState(h.cfg, ModeLive).Fold(h.events())
 	if !replyForm(st, withRuntime(h.cfg, st.Runtime), []string{name, "D1", "yes"}) {
 		t.Fatal("not an answer form")
@@ -371,19 +345,25 @@ func TestExecGitReviewerBesideWorker(t *testing.T) {
 // A reviewer's worktree is detached.
 func TestEndAndStartInOnePass(t *testing.T) {
 	h := sessionsHarness(t)
-	reply, _ := h.startSession(map[string]any{"branch": "fix-spin", "kind": "reviewer", "issue": 7})
-	name := reply["name"].(string)
+	// The test, not the loop, starts the reviewer, so the loop leaves it.
+	review := func(issue int) string {
+		name := runtimeName("widgets", "fix-spin", KindReviewer)
+		h.sup.emit(name, Event{Kind: KindSession, Mode: ModeShared, Runtime: &RuntimePayload{ID: newIntentID(), Action: SessionStart,
+			Repository: "widgets", Kind: KindReviewer, Branch: "fix-spin", Issue: issue, Max: 2, By: "test"}})
+		h.sup.refreshRuntime()
+		return name
+	}
+	name := review(7)
 	h.ticks(2, time.Minute)
 	if g := h.git.worktrees; len(g) != 1 || !strings.HasSuffix(g[0], " detached") {
 		t.Fatalf("worktrees = %q", g)
 	}
 	h.alive(name, "reviewing")
 	h.ticks(1, time.Minute)
-	srv := h.mcpServerFor("c")
-	callOne(t, srv, ToolEndSession, map[string]any{"name": name})
-	if text, refused := callOne(t, srv, ToolStartSession, map[string]any{"branch": "fix-spin", "kind": "reviewer", "issue": 8}); refused {
-		t.Fatalf("start again = %s", text)
+	if err := h.endSession(name); err != nil {
+		t.Fatal(err)
 	}
+	review(8)
 	h.ticks(3, time.Minute)
 	if s, n := h.tmux.count("stop", name), h.tmux.count("new-session", name); s != 1 || n != 2 {
 		t.Fatalf("stopped %d, launched %d", s, n)
@@ -405,8 +385,7 @@ func TestEndAndStartInOnePass(t *testing.T) {
 // An end whose stop keeps failing goes to the repository's console, once.
 func TestEndThatKeepsFailingEscalates(t *testing.T) {
 	h := sessionsHarness(t)
-	reply, _ := h.startSession(map[string]any{"branch": "fix-spin"})
-	name := reply["name"].(string)
+	name := h.startSession("fix-spin", KindWork, 0)
 	h.ticks(2, time.Minute)
 	h.alive(name, "working")
 	h.ticks(1, time.Minute)
@@ -429,8 +408,8 @@ func TestEndThatKeepsFailingEscalates(t *testing.T) {
 // A start made under max 2 holds after max is lowered to 1.
 func TestStartHeldByItsOwnMax(t *testing.T) {
 	h := sessionsHarness(t)
-	h.startSession(map[string]any{"branch": "a"})
-	h.startSession(map[string]any{"branch": "b"})
+	h.startSession("a", KindWork, 0)
+	h.startSession("b", KindWork, 0)
 	w := h.cfg.Repositories["widgets"]
 	w.Policy.Sessions.Max = 1
 	h.cfg.Repositories["widgets"] = w

@@ -21,7 +21,7 @@ import (
 // Account usage (#39, building on #6). agentd reads each account's plan
 // usage, the five-hour and weekly utilization with their resets and
 // whether overage is on, and logs the numbers as shared account events.
-// A session a coordinator starts with no account is placed on the first
+// A session agentd starts with no account is placed on the first
 // account of its repository's sessions.fallback with room left; when
 // none has, its start waits, and the owner is told once.
 
@@ -594,35 +594,4 @@ func withheldText(cfg *Config, text string) string {
 		return "(withheld: it matched a confidential pattern)"
 	}
 	return text
-}
-
-// PackAccount is an account's latest reading as a coordinator's pack
-// carries it: when the numbers were read, and the latest error since.
-type PackAccount struct {
-	AccountPayload
-	At *time.Time `json:"at,omitempty"`
-}
-
-// packAccounts are the readings of the accounts rules let the sessions
-// use or fall back to, in that order, each once.
-func packAccounts(st *LogState, rules SessionRules) []PackAccount {
-	var out []PackAccount
-	seen := map[string]bool{}
-	for _, a := range append(append([]string{}, rules.Accounts...), rules.Fallback...) {
-		r, ok := st.Accounts[a]
-		if seen[a] || !ok {
-			continue
-		}
-		seen[a] = true
-		out = append(out, PackAccount{AccountPayload: r.AccountPayload})
-		if at := r.At; !at.IsZero() {
-			out[len(out)-1].At = &at
-		}
-		if r.ErrorAt.After(r.At) {
-			out[len(out)-1].Error = r.Error
-		} else {
-			out[len(out)-1].Error = ""
-		}
-	}
-	return out
 }

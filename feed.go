@@ -384,7 +384,7 @@ func ConsoleReply(cfg *Config, log *Log, st *LogState, now time.Time, console, r
 		return errors.New("an empty reply")
 	}
 	if !replyForm(st, cfg, f) {
-		return RecordInstruction(cfg, log, st, now, console, reply)
+		return RecordInstruction(cfg, log, now, console, reply)
 	}
 	if strings.EqualFold(f[0], "seen") {
 		if len(f) == 1 {

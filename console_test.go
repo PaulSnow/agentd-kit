@@ -175,7 +175,7 @@ func TestConsoleInboxOnce(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("inbox = %q", got)
 	}
-	var first PackInstruction
+	var first InboxInstruction
 	if err := json.Unmarshal([]byte(got[0]), &first); err != nil || first.Text != "Paint it **green**" || first.From != "console:widgets" || first.ID == "" {
 		t.Fatalf("first line %q: %+v %v", got[0], first, err)
 	}
@@ -247,7 +247,7 @@ func TestExtraConsoleConfig(t *testing.T) {
 
 // A console without a repository is listed by the UI after the
 // repositories, takes posts and replies, and a reply there is an
-// instruction for no coordinator: it wakes none, and inbox reads it.
+// instruction for no repository, which inbox reads.
 func TestExtraConsoleInUI(t *testing.T) {
 	u, f := fixtureUI(t)
 	f.night.Consoles = map[string]ConsoleConfig{"chat": {Title: "General chat"}}
@@ -293,8 +293,9 @@ func TestExtraConsoleInUI(t *testing.T) {
 	}
 }
 
-// A reply in a console without a repository wakes no coordinator.
-func TestExtraConsoleReplyWakesNoCoordinator(t *testing.T) {
+// A reply in a console without a repository is an instruction for no
+// repository.
+func TestExtraConsoleReplyForNoRepository(t *testing.T) {
 	h := instrHarness(t)
 	h.cfg.Consoles = map[string]ConsoleConfig{"chat": {Title: "General chat"}}
 	h.ticks(2, time.Minute)
@@ -304,10 +305,6 @@ func TestExtraConsoleReplyWakesNoCoordinator(t *testing.T) {
 	ins := instructions(h)
 	if len(ins) != 1 || ins[0].Console != "chat" || len(ins[0].Repositories) != 0 || ins[0].From != "console:chat" {
 		t.Fatalf("instructions = %+v", ins)
-	}
-	h.ticks(3, time.Minute)
-	if w := h.wakes(); len(w) != 0 {
-		t.Fatalf("wakes = %+v", w)
 	}
 }
 

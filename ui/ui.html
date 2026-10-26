@@ -60,7 +60,6 @@
 {{define "row"}}{{$p := .P}}{{with .V}}<li class="row">
 <a class="session" href="/session/{{.Src}}/{{.Name}}">{{.Name}}</a>
 <span class="badge state-{{.State}}">{{.State}}</span>
-{{if .Coordinator}}<span class="meta">{{.Wakes}} wakes{{if not .LastWake.IsZero}}, last {{$p.Ago .LastWake}}{{end}}{{with .WakeTokens}} · {{$p.Tokens .}} per wake{{end}}</span>{{end}}
 {{with .Head}}<span class="head">{{.}}</span>{{end}}
 <span class="meta">{{if .HasContext}}context {{$p.Tokens .Context}}{{end}}{{if .HasSpend}} · spent {{$p.Tokens .Spend}}{{end}}{{if not .LastTurn.IsZero}} · turn {{$p.Ago .LastTurn}}{{end}}</span>
 </li>{{end}}{{end}}
@@ -86,7 +85,7 @@
 <h2 id="repos-h">Repositories</h2>
 {{range $r := .Repos}}<article class="card repo">
 <header class="card-head"><h3>{{.Name}}</h3>{{if .NeedsYou}}<span class="badge alert">{{.NeedsYou}} need{{if eq .NeedsYou 1}}s{{end}} you</span>{{end}}{{if .Console}}<a class="console-link" href="/console/{{.Name}}">Console</a>{{end}}</header>
-{{if or .Coordinators .Working}}<ul class="rows">{{range .Coordinators}}{{template "row" (ctx $ .)}}{{end}}{{range .Working}}{{template "row" (ctx $ .)}}{{end}}</ul>{{else}}<p class="muted">No session working.</p>{{end}}
+{{if .Working}}<ul class="rows">{{range .Working}}{{template "row" (ctx $ .)}}{{end}}</ul>{{else}}<p class="muted">No session working.</p>{{end}}
 {{with .Requests}}<h4>Open requests</h4><ul class="rows">{{range .}}<li class="row">
 {{if .URL}}<a href="{{.URL}}" rel="noreferrer">{{.Ref}}</a>{{else}}<span class="ref">{{.Ref}}</span>{{end}}
 <span class="badge ci-{{if .CI}}{{.CI}}{{else}}unwatched{{end}}">CI {{if .CI}}{{.CI}}{{else}}not watched{{end}}</span>
@@ -124,7 +123,7 @@
 <h2 id="reply-h">Reply</h2>
 {{if .ReplySrc}}<form class="answer" method="post" action="/reply"><input type="hidden" name="token" value="{{.Token}}"><input type="hidden" name="back" value="{{.Back}}"><input type="hidden" name="src" value="{{.ReplySrc}}"><input type="hidden" name="repository" value="{{.Repository}}">
 <textarea name="text" rows="3" maxlength="4000" aria-label="Your instruction" required></textarea>
-<p class="muted">{{if .Other}}Recorded as your instruction in {{.Repository}}; no coordinator is woken, and sessions read it with agentd console inbox.{{else}}Recorded as your instruction for {{.Repository}}; its coordinator reads it at its next wake.{{end}}</p>
+<p class="muted">Recorded as your instruction {{if .Other}}in{{else}}for{{end}} {{.Repository}}; nothing is woken, and sessions read it with agentd console inbox.</p>
 <div class="choices"><button type="submit">Send</button></div></form>
 {{else}}<p class="muted">No live run configures {{.Repository}}, so it takes no reply.</p>{{end}}
 </section>

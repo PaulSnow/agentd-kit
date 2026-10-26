@@ -3,7 +3,6 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,9 +13,10 @@ import (
 	"time"
 )
 
-// Sessions a coordinator starts (#34). A repository whose configuration
-// has a sessions entry lets its coordinator start and end sessions through
-// its MCP server. A start is a shared event in the log, and the sessions
+// Sessions agentd starts (#34, #53). A repository whose configuration has
+// a sessions entry has agentd run its request loop (loop.go), which starts
+// work sessions and judgment sessions and ends them; the owner may end one
+// too (agentd sessions end). A start is a shared event in the log, and the sessions
 // started and not ended are a projection of the log (withRuntime) beside
 // the configured ones: every fold, the supervisor's, agentd mcp's and the
 // views', reads them the same way. Once agentd made its workdir, brief and
@@ -26,8 +26,8 @@ import (
 // SessionsPolicy is where a repository's started sessions live: each in
 // Root/NAME, which holds its BRIEF.md and STATUS.md, its worktree
 // Root/NAME/work added from Clone. A new branch is cut from origin/Target,
-// the branch requests go to. Accounts are those a coordinator may start
-// a session under, by default its own; Max bounds how many run at once.
+// the branch requests go to. The repository's policy names the accounts
+// its sessions run under and how many run at once (SessionRules).
 type SessionsPolicy struct {
 	Root   string `json:"root"`
 	Clone  string `json:"clone"`
@@ -38,7 +38,7 @@ type SessionsPolicy struct {
 // policy sets no sessions.max.
 const DefaultMaxSessions = 4
 
-// Session kinds a coordinator may start.
+// Session kinds agentd starts.
 const (
 	KindWork     = "work"
 	KindReviewer = "reviewer"
@@ -53,8 +53,9 @@ const (
 	SessionPlace = "place"
 )
 
-// RuntimePayload is a session a coordinator started, or its end. Event's
-// Session is the session's name; By is the coordinator, or owner.
+// RuntimePayload is a session agentd started, or its end. Event's Session
+// is the session's name; By is agentd, or owner, or, in an earlier
+// version's event, the coordinator that started or ended it.
 type RuntimePayload struct {
 	ID         string `json:"id"`
 	Action     string `json:"action"`
@@ -76,12 +77,6 @@ type RuntimePayload struct {
 	Max int    `json:"max,omitempty"`
 	By  string `json:"by"`
 }
-
-// Tool names of a coordinator's server.
-const (
-	ToolStartSession = "start_session"
-	ToolEndSession   = "end_session"
-)
 
 // applySession folds a start or an end. The first start of a name holds
 // until it is ended; a start of a running name, and one past the max it
@@ -380,121 +375,6 @@ func EndSession(cfg *Config, log *Log, events []Event, now time.Time, name strin
 		Runtime: &RuntimePayload{ID: newIntentID(), Action: SessionEnd, Repository: p.Repository, By: "owner"}})
 }
 
-// startArgs are start_session's arguments.
-type startArgs struct {
-	Kind       string `json:"kind"`
-	Branch     string `json:"branch"`
-	Issue      int    `json:"issue"`
-	Account    string `json:"account"`
-	Repository string `json:"repository"`
-}
-
-// callSessions checks and records a coordinator's start_session,
-// end_session or approve (requests.go). A refused call is answered and
-// not logged: nothing reached the log. A start is read back, so of two
-// for one name only the one the fold holds is told it started.
-func (srv *MCPServer) callSessions(tool string, args json.RawMessage) (string, bool) {
-	refuse := func(format string, a ...any) (string, bool) {
-		return compact(map[string]any{"refused": fmt.Sprintf(format, a...)}), true
-	}
-	events, err := srv.load()
-	if err != nil {
-		return refuse("agentd could not read its log: %v", err)
-	}
-	st := NewLogState(srv.cfg, ModeLive).Fold(events)
-	own := srv.sess.Repository
-	repo := srv.cfg.Repositories[own]
-	pol := repo.Sessions
-	if tool == ToolApprove {
-		return srv.callApprove(st, args)
-	}
-	if pol == nil {
-		return refuse("repository %s has no sessions entry; agentd starts no sessions for it", own)
-	}
-	if tool == ToolEndSession {
-		var a struct {
-			Name string `json:"name"`
-		}
-		if ps := srv.decodeArgs(args, &a); len(ps) > 0 {
-			return refuse("%s", ps[0].reply())
-		}
-		p, ok := st.Runtime[a.Name]
-		if !ok || p.Repository != own {
-			return refuse("no session %q that a coordinator started for %s is running", a.Name, own)
-		}
-		err := srv.log.Append(Event{V: EventVersion, Time: srv.now(), Session: a.Name, Kind: KindSession, Mode: ModeShared,
-			Runtime: &RuntimePayload{ID: newIntentID(), Action: SessionEnd, Repository: own, By: srv.name}})
-		if err != nil {
-			return refuse("agentd could not record the end: %v", err)
-		}
-		return compact(map[string]any{"ended": true, "name": a.Name}), false
-	}
-	var a startArgs
-	if ps := srv.decodeArgs(args, &a); len(ps) > 0 {
-		return refuse("%s", ps[0].reply())
-	}
-	if a.Kind == "" {
-		a.Kind = KindWork
-	}
-	switch {
-	case a.Repository != "" && a.Repository != own:
-		return refuse("repository %q is not %s, the one this coordinator coordinates", a.Repository, own)
-	case a.Kind != KindWork && a.Kind != KindReviewer && a.Kind != KindJudge:
-		return refuse("kind %q is not work, reviewer or judge", a.Kind)
-	case a.Issue < 0:
-		return refuse("issue %d is not a number of 1 or more", a.Issue)
-	case a.Kind != KindWork && a.Issue == 0:
-		return refuse("a %s session needs the issue it serves", a.Kind)
-	case !plainBranch(a.Branch):
-		return refuse("branch %q is not a plain branch name", a.Branch)
-	case a.Branch == pol.Target || delivers(srv.cfg, own, a.Branch):
-		return refuse("branch %s is a target requests go to; start a session on a branch of its own", a.Branch)
-	}
-	rules, _ := effectivePolicy(srv.cfg, st, own)
-	if rules.Scope.Reserved.matches(a.Issue, nil) {
-		return refuse("issue %d is reserved in %s's policy: agentd starts no session on it", a.Issue, own)
-	}
-	allowed := rules.Sessions.Accounts
-	// With a fallback order and no account named, agentd places the
-	// session by usage before it prepares it (#39).
-	placed := a.Account == "" && len(rules.Sessions.Fallback) > 0
-	if !placed && a.Account == "" && srv.sess.Account != "" && contains(allowed, srv.sess.Account) {
-		a.Account = srv.sess.Account
-	}
-	if !placed && !contains(allowed, a.Account) {
-		return refuse("account %q is not one %s's sessions may use: %s", a.Account, own, strings.Join(allowed, ", "))
-	}
-	name := runtimeName(own, a.Branch, a.Kind)
-	if _, ok := st.Runtime[name]; ok {
-		return refuse("branch %s already has a %s session, %s; end it first", a.Branch, a.Kind, name)
-	}
-	if s, ok := srv.cfg.Sessions[name]; ok && !s.Runtime {
-		return refuse("session %s is configured already", name)
-	}
-	if n := len(sessionsOf(st.Runtime, own)); n >= rules.Sessions.Max {
-		return refuse("%s runs %d started sessions, its max; end one first", own, n)
-	}
-	id := newIntentID()
-	p := RuntimePayload{ID: id, Action: SessionStart, Repository: own, Kind: a.Kind, Branch: a.Branch, Issue: a.Issue, Account: a.Account, Place: placed, Max: rules.Sessions.Max, By: srv.name}
-	if err := srv.log.Append(Event{V: EventVersion, Time: srv.now(), Session: name, Kind: KindSession, Mode: ModeShared, Runtime: &p}); err != nil {
-		return refuse("agentd could not record the start: %v", err)
-	}
-	if events, err = srv.read(); err != nil {
-		return refuse("the start was logged, but agentd could not read its log back to confirm it holds: %v; check agentd status before starting again", err)
-	}
-	if got, ok := projectedRuntime(srv.cfg, events)[name]; !ok {
-		return refuse("other starts reached %s's max first; end one, then start again", own)
-	} else if got.ID != id {
-		return refuse("another start for branch %s came first; it holds", a.Branch)
-	}
-	sess := runtimeSession(name, p, repo)
-	reply := map[string]any{"started": true, "name": name, "workdir": sess.Workdir, "worktree": sess.Cwd, "branch": a.Branch, "kind": a.Kind}
-	if placed {
-		reply["account"] = "placed by agentd on the first account of the fallback order with room"
-	}
-	return compact(reply), false
-}
-
 // projectedRuntime is the started sessions the events leave running.
 func projectedRuntime(cfg *Config, events []Event) map[string]RuntimePayload {
 	st := NewLogState(cfg, ModeLive)
@@ -504,19 +384,4 @@ func projectedRuntime(cfg *Config, events []Event) map[string]RuntimePayload {
 		}
 	}
 	return st.Runtime
-}
-
-// delivers says whether a configured session of repo delivers to branch.
-func delivers(cfg *Config, repo, branch string) bool {
-	for _, s := range cfg.Sessions {
-		if s.Runtime {
-			continue
-		}
-		for _, d := range s.Deliver {
-			if d.Repository == repo && d.Target == branch {
-				return true
-			}
-		}
-	}
-	return false
 }

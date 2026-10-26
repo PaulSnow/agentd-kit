@@ -23,16 +23,13 @@ func modelOf(cmd []string) string {
 // repository's, passed to the launch command; a kind with none runs the
 // command's default (#52).
 func TestModelReachesTheCommandPerKind(t *testing.T) {
-	h := coordHarness(t)
+	h := repoHarness(t)
 	h.cfg.Policies.Restart.Command = []string{"claude", "--model", "{model}", "{prompt}"}
-	h.cfg.Policies.Models = ModelsPolicy{Coordinator: "opus", Work: "sonnet", Reviewer: "sonnet", Judge: "opus"}
+	h.cfg.Policies.Models = ModelsPolicy{Work: "sonnet", Reviewer: "sonnet", Judge: "opus"}
 	w := h.cfg.Repositories["widgets"]
 	w.Policy.Sessions.WorkModel = "haiku"
 	w.Policy.Review.JudgeModel = "sonnet"
 	h.cfg.Repositories["widgets"] = w
-	ro := h.cfg.Repositories["readonly"]
-	ro.Policy.Sessions.CoordinatorModel = "haiku"
-	h.cfg.Repositories["readonly"] = ro
 	started := func(kind, repo string) Session {
 		r := h.cfg.Repositories[repo]
 		r.Sessions = &SessionsPolicy{Root: h.dir}
@@ -48,8 +45,6 @@ func TestModelReachesTheCommandPerKind(t *testing.T) {
 		sess Session
 		want string
 	}{
-		{"coordinator", h.cfg.Sessions["c"], "opus"},
-		{"coordinator elsewhere", sess(RoleCoordinator, "readonly"), "haiku"},
 		{"started work", started(KindWork, "widgets"), "haiku"},
 		{"started reviewer", started(KindReviewer, "readonly"), "sonnet"},
 		{"started judge", started(KindJudge, "widgets"), "sonnet"},
@@ -95,30 +90,12 @@ func TestWithModel(t *testing.T) {
 	}
 }
 
-// The coordinator's pack names the models its review and judge calls
-// run, since a call it makes runs its own model otherwise.
-func TestPackNamesReviewModels(t *testing.T) {
-	h := coordHarness(t)
-	if p, b := h.sup.buildPack("widgets", nil, h.clock.Now(), false); p.Models != nil || strings.Contains(string(b), `"models":{`) {
-		t.Fatalf("pack with no models = %s", b)
-	}
-	h.cfg.Policies.Models = ModelsPolicy{Coordinator: "opus", Reviewer: "sonnet", Judge: "opus"}
-	w := h.cfg.Repositories["widgets"]
-	w.Policy.Review.JudgeModel = "haiku"
-	h.cfg.Repositories["widgets"] = w
-	p, _ := h.sup.buildPack("widgets", nil, h.clock.Now(), false)
-	if p.Models == nil || *p.Models != (PackModels{Reviewer: "sonnet", Judge: "haiku"}) {
-		t.Fatalf("pack models = %+v", p.Models)
-	}
-}
-
 // A repository's own file that narrows sessions.models past a chosen
-// model holds: its sessions and its coordinator's calls run the list's
-// first model instead.
+// model holds: its sessions run the list's first model instead.
 func TestNarrowedModelsHold(t *testing.T) {
-	h := coordHarness(t)
+	h := repoHarness(t)
 	h.cfg.Policies.Restart.Command = []string{"claude", "--model", "{model}", "{prompt}"}
-	h.cfg.Policies.Models = ModelsPolicy{Coordinator: "opus", Work: "opus", Reviewer: "sonnet", Judge: "haiku"}
+	h.cfg.Policies.Models = ModelsPolicy{Work: "opus", Reviewer: "sonnet", Judge: "haiku"}
 	w := h.cfg.Repositories["widgets"]
 	w.Policy.Sessions.Models = []string{"opus", "sonnet", "haiku"}
 	w.Policy.Merge.Targets = []string{"main"}
@@ -131,12 +108,9 @@ func TestNarrowedModelsHold(t *testing.T) {
 	if m := sessionModel(h.cfg, h.sup.st, sess); m != "haiku" {
 		t.Errorf("work model = %q, want haiku", m)
 	}
-	sess.Role = RoleCoordinator
-	if m := sessionModel(h.cfg, h.sup.st, sess); m != "opus" {
-		t.Errorf("coordinator model = %q, want opus", m)
-	}
-	if m := reviewModels(h.cfg, h.sup.st, "widgets"); m == nil || *m != (PackModels{Reviewer: "sonnet", Judge: "haiku"}) {
-		t.Errorf("pack models = %+v", m)
+	sess.Role, sess.Issue = RoleReviewer, 7
+	if m := sessionModel(h.cfg, h.sup.st, sess); m != "sonnet" {
+		t.Errorf("reviewer model = %q, want sonnet", m)
 	}
 }
 
@@ -156,8 +130,7 @@ func TestModelWithRestartOffLoads(t *testing.T) {
 
 // agentd status shows the model each session runs.
 func TestStatusShowsModel(t *testing.T) {
-	h := coordHarness(t)
-	h.cfg.Policies.Models = ModelsPolicy{Coordinator: "opus"}
+	h := repoHarness(t)
 	w := h.cfg.Repositories["widgets"]
 	w.Policy.Sessions.WorkModel = "haiku"
 	h.cfg.Repositories["widgets"] = w
@@ -167,13 +140,13 @@ func TestStatusShowsModel(t *testing.T) {
 	for _, r := range rows {
 		got[r.Name] = r.Model
 	}
-	want := map[string]string{"a": "haiku", "b": "haiku", "c": "opus", "d": "default"}
+	want := map[string]string{"a": "haiku", "b": "haiku", "d": "default"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("models = %v, want %v", got, want)
 	}
 	var out strings.Builder
 	PrintStatus(&out, rows, nil, h.clock.Now())
-	if !strings.Contains(out.String(), "MODEL") || !strings.Contains(out.String(), "opus") || !strings.Contains(out.String(), "default") {
+	if !strings.Contains(out.String(), "MODEL") || !strings.Contains(out.String(), "haiku") || !strings.Contains(out.String(), "default") {
 		t.Fatalf("status:\n%s", out.String())
 	}
 }

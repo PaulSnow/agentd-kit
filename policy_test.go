@@ -238,7 +238,7 @@ func TestNarrowPolicy(t *testing.T) {
 		`{"gate": {"env": []}}`:                                                 true,
 		`{"review": {"others": "review-only"}}`:                                 true,
 		`{"sessions": {"work_model": "haiku"}}`:                                 false,
-		`{"sessions": {"coordinator_model": ""}}`:                               true,
+		`{"sessions": {"coordinator_model": ""}}`:                               false,
 		`{"ci": {"required": true}}`:                                            true,
 		`{"scope": {"reserved": {"numbers": [9]}}}`:                             true,
 		`{"sessions": {"accounts": ["a"]}}`:                                     true,
@@ -265,39 +265,6 @@ func TestNarrowPolicy(t *testing.T) {
 	}
 	if owner.Merge.Approvals != nil || len(owner.Merge.Targets) != 2 {
 		t.Error("narrowing changed the owner's policy")
-	}
-}
-
-// start_session refuses an issue the policy reserves.
-func TestStartSessionRefusesReserved(t *testing.T) {
-	h := sessionsHarness(t)
-	w := h.cfg.Repositories["widgets"]
-	w.Policy.Scope.Reserved.Numbers = []int{7}
-	h.cfg.Repositories["widgets"] = w
-	reply, refused := h.startSession(map[string]any{"branch": "fix-7", "issue": 7})
-	if r, _ := reply["refused"].(string); !refused || !strings.Contains(r, "reserved") {
-		t.Fatalf("reply = %v, refused %v", reply, refused)
-	}
-	if _, refused := h.startSession(map[string]any{"branch": "fix-8", "issue": 8}); refused {
-		t.Fatal("an issue not reserved was refused")
-	}
-}
-
-// The coordinator's pack carries the effective policy, without the
-// confidential patterns.
-func TestPackCarriesPolicy(t *testing.T) {
-	h := coordHarness(t)
-	w := h.cfg.Repositories["widgets"]
-	w.Policy.Merge = MergeRules{Enabled: true, Method: MergeSquash, Targets: []string{"main"}, Authors: []string{"widget-bot"}}
-	w.Policy.ConfidentialPatterns = []string{"secret-[0-9]+"}
-	h.cfg.Repositories["widgets"] = w
-	h.sup.st.applyPolicy(Event{Policy: &PolicyPayload{Repository: "widgets", Target: "main", Tip: "feed1234", File: json.RawMessage(`{"merge":{"exclude":{"numbers":[12]}}}`), Applied: []string{"merge.exclude"}}})
-	p, b := h.sup.buildPack("widgets", nil, h.clock.Now(), false)
-	if p.Policy.Merge.Method != MergeSquash || !reflect.DeepEqual(p.Policy.Merge.Exclude.Numbers, []int{12}) {
-		t.Fatalf("pack policy = %+v", p.Policy.Merge)
-	}
-	if !bytes.Contains(b, []byte(`"policy":{`)) || bytes.Contains(b, []byte("secret-")) {
-		t.Fatalf("pack = %s", b)
 	}
 }
 

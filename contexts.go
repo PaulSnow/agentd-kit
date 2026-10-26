@@ -376,7 +376,7 @@ func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, no
 		return false
 	}
 	id := newSessionID()
-	cmd, facts := s.launchCommandWith(name, sess, t, id, "rotation", nil, brief.parts())
+	cmd, facts := s.launchCommandWith(name, sess, t, id, "rotation", nil)
 	line, err := s.launchLine(sess, cmd)
 	if err != nil {
 		s.skipOnce(name, "account:"+name, "not rotating: "+err.Error(), t, &SkipPayload{Account: sess.Account})
@@ -391,7 +391,7 @@ func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, no
 	}
 	if strings.HasPrefix(mark, "turn:") {
 		// A session waiting at its prompt can be given a line at any time,
-		// by its coordinator: the screen is read again first, as for a
+		// by the owner: the screen is read again first, as for a
 		// typed line, so a turn that started since is not cut off.
 		err = s.typeInto(name, ActRotate, a, t, ev.PaneHash, replace)
 	} else {
@@ -405,14 +405,8 @@ func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, no
 
 // rotationPoint is the checkpoint a session may be rotated at, if it has
 // reached one it has not been rotated at: a merge it reached after it was
-// launched, once Grace has passed, or for a coordinator a wake it was given
-// after it was launched and has handled.
+// launched, once Grace has passed.
 func (s *Supervisor) rotationPoint(sess Session, t *Track, ev Evidence, now time.Time) (string, bool) {
-	if sess.Role == RoleCoordinator {
-		w, ok := t.lastWake()
-		mark := fmt.Sprintf("wake:%d", t.WakeCount)
-		return mark, ok && w.Taken && w.At.After(t.Launched) && t.RotatedFor != mark && s.handled(t, ev, now)
-	}
 	if mark, ok := workTurnMark(sess, t, ev); ok {
 		return mark, true
 	}
@@ -483,7 +477,7 @@ func (s *Supervisor) lastInstruction(t *Track) string {
 func (s *Supervisor) rotationPending(name string, sess Session, t *Track) bool {
 	pol := s.cfg.Policies.Context
 	u, ok := t.current()
-	if !pol.Enabled || !ok || u.Context <= pol.Threshold || u.Guessed && !s.shadow || sess.Role == RoleCoordinator {
+	if !pol.Enabled || !ok || u.Context <= pol.Threshold || u.Guessed && !s.shadow {
 		return false
 	}
 	if sess.Kind == KindWork && t.lastTurn().Role == TurnSummary && t.lastTurn().At.After(t.Launched) {
@@ -668,10 +662,6 @@ type restartFacts struct {
 	// The case's review rounds: the findings by id with their
 	// dispositions, and the latest plan.
 	Rounds *RoundsFact `json:"rounds,omitempty"`
-	// A coordinator: its repository, and the pack it starts from, written
-	// as it is launched.
-	Repository string `json:"repository,omitempty"`
-	Pack       string `json:"pack,omitempty"`
 }
 
 // restartPrompt is the fresh session's prompt: the fixed instruction, then
@@ -711,12 +701,6 @@ func (s *Supervisor) packFactsWith(name string, sess Session, t *Track, why stri
 		// The session keeps its context: it has its case and tools
 		// already, and needs only where its progress stands.
 		return encodeFacts(f)
-	}
-	if sess.Role == RoleCoordinator {
-		f.Repository, f.Pack = sess.Repository, sess.Workdir+"/"+PackFile
-		if servesTools(s.cfg, sess) && s.passesMCP() {
-			f.Tools = sessionTools(s.cfg, sess)
-		}
 	}
 	if id := s.cfg.caseOf(sess); id != "" && s.passesMCP() {
 		f.Tools, f.Items, f.Acknowledge = mcpFacts(s.st, id, sess.Role)
@@ -771,23 +755,14 @@ func (s *Supervisor) passesMCP() bool {
 // document of its case's server, substituted, and the facts the prompt
 // hands it: its case's context pack.
 func (s *Supervisor) launchCommand(name string, sess Session, t *Track, id, why string) ([]string, []byte) {
-	return s.launchCommandWith(name, sess, t, id, why, nil, nil)
+	return s.launchCommandWith(name, sess, t, id, why, nil)
 }
 
 // launchCommandWith is the launch command of a fix session, its CI
-// failure in its facts, or of a coordinator, the brief parts it is
-// launched with in its pack.
-func (s *Supervisor) launchCommandWith(name string, sess Session, t *Track, id, why string, ci *CIFact, brief []BriefPart) ([]string, []byte) {
+// failure in its facts.
+func (s *Supervisor) launchCommandWith(name string, sess Session, t *Track, id, why string, ci *CIFact) ([]string, []byte) {
 	facts := s.packFactsWith(name, sess, t, why, ci)
 	s.noteTrust(name, sess, t)
-	if sess.Role == RoleCoordinator && !s.shadow {
-		// A pack that cannot be written leaves the last one; the
-		// launch goes on.
-		_, pack := s.buildPackWith(sess.Repository, nil, s.clock.Now(), false, brief)
-		if err := writeAtomic(sess.Workdir+"/"+PackFile, pack); err != nil {
-			s.emit(name, Event{Kind: KindError, Error: &ErrorPayload{Step: "writing " + PackFile, Error: err.Error()}})
-		}
-	}
 	r := strings.NewReplacer("{brief}", sess.Workdir+"/BRIEF.md", "{status}", sess.Workdir+"/STATUS.md",
 		"{session_id}", id, "{prompt}", s.promptWith(facts, why), "{mcp}", mcpLaunchConfig(s.cfg, name, sess))
 	cmd := withModel(s.cfg.Policies.Restart.Command, sessionModel(s.cfg, s.st, sess))

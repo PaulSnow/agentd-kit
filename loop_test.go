@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-// loopHarness is mergeHarness with widgets' coordinator gone and a
-// sessions entry in its place, so agentd runs its loop: d works widgets#7,
-// whose goal is recorded, and delivers !1, green on c0ffee.
+// loopHarness is mergeHarness with a sessions entry for widgets, so
+// agentd runs its loop: d works widgets#7, whose goal is recorded, and
+// delivers !1, green on c0ffee.
 func loopHarness(t *testing.T) (*harness, *fakeForgeAPI) {
 	t.Helper()
 	h, api := mergeHarness(t)
