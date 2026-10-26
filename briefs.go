@@ -42,30 +42,45 @@ func assembleBrief(paths []string) ([]byte, []BriefPart, error) {
 	return []byte(b.String()), parts, nil
 }
 
-// writeBrief writes a coordinator's BRIEF.md from its parts before it is
-// started or rotated, so a changed part reaches the next start, and says
-// the parts' hashes. A session with no parts keeps its BRIEF.md as it is.
-// A part that cannot be read refuses the launch: it is skipped, naming
-// the part, and escalated once per cause; the brief written last stays.
-// Shadow mode writes nothing.
-func (s *Supervisor) writeBrief(name string, sess Session, t *Track, now time.Time) ([]BriefPart, bool) {
+// Brief is a coordinator's brief as read from its parts for a launch.
+type Brief struct {
+	Text  []byte
+	Parts []BriefPart
+}
+
+// readBrief reads a coordinator's brief parts before it is started or
+// rotated (verb says which). A session with no parts has none, and its
+// BRIEF.md is left as it is. A part that cannot be read refuses the
+// launch: it is skipped, naming the part, and escalated once per cause;
+// the brief written last stays.
+func (s *Supervisor) readBrief(name string, sess Session, t *Track, now time.Time, verb string) (*Brief, bool) {
 	if len(sess.Brief) == 0 {
 		return nil, true
 	}
-	brief, parts, err := assembleBrief(sess.Brief)
-	if err == nil && !s.shadow {
-		err = writeAtomic(filepath.Join(sess.Workdir, "BRIEF.md"), brief)
-	}
+	text, parts, err := assembleBrief(sess.Brief)
 	if err != nil {
 		key := "brief:" + name + ":" + shortHash(HashPane(err.Error()))
-		s.skipOnce(name, key, "not starting: "+err.Error(), t, nil)
-		s.escalate(name, key, fmt.Sprintf("%s is not started: %v. Fix the part, or the brief listed under its repository's coordinator; agentd starts it once the brief can be written.", name, err), t, now)
+		s.skipOnce(name, key, "not "+verb+": "+err.Error(), t, nil)
+		s.escalate(name, key, fmt.Sprintf("%s is not %s: %v. Fix the part, or the brief listed under its repository's coordinator; agentd goes ahead once the brief can be written.", name, verb, err), t, now)
 		return nil, false
 	}
-	// The pack written just before the launch has the parts too; the
-	// launch's event records them for a replay.
-	if !s.shadow {
-		t.Brief = parts
+	return &Brief{Text: text, Parts: parts}, true
+}
+
+// parts is the brief's parts, none for no brief.
+func (b *Brief) parts() []BriefPart {
+	if b == nil {
+		return nil
 	}
-	return parts, true
+	return b.Parts
+}
+
+// write writes the brief as workdir's BRIEF.md, inside the launch's action
+// so a launch that does not happen leaves the brief as it was. Shadow mode
+// never runs it.
+func (b *Brief) write(workdir string) error {
+	if b == nil {
+		return nil
+	}
+	return writeAtomic(filepath.Join(workdir, "BRIEF.md"), b.Text)
 }

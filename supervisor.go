@@ -770,7 +770,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 				return state
 			}
 		}
-		brief, ok := s.writeBrief(name, sess, t, now)
+		brief, ok := s.readBrief(name, sess, t, now, "started")
 		if !ok {
 			return state
 		}
@@ -782,7 +782,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			why = "answered"
 		}
 		id := newSessionID()
-		cmd, facts := s.launchCommand(name, sess, t, id, why)
+		cmd, facts := s.launchCommandWith(name, sess, t, id, why, nil, brief.parts())
 		line, err := s.launchLine(sess, cmd)
 		if err != nil {
 			// Not final, and not a crash: the owner may fix the account.
@@ -792,7 +792,10 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			return state
 		}
 		answers := t.answersFor(false)
-		err = s.act(name, ActRestart, &ActPayload{Attempt: n + 1, Cwd: sess.Cwd, Respawn: ev.PaneDead, Account: sess.Account, Command: line, Transcript: id, Answers: ids, AnswersAt: at, Brief: brief}, func() error {
+		err = s.act(name, ActRestart, &ActPayload{Attempt: n + 1, Cwd: sess.Cwd, Respawn: ev.PaneDead, Account: sess.Account, Command: line, Transcript: id, Answers: ids, AnswersAt: at, Brief: brief.parts()}, func() error {
+			if err := brief.write(sess.Workdir); err != nil {
+				return err
+			}
 			if len(ids) > 0 {
 				if err := writeAnswers(sess.Workdir, answers); err != nil {
 					return err

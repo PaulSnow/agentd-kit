@@ -371,19 +371,24 @@ func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, no
 	if !s.retryDue(t, key, now) {
 		return false
 	}
-	brief, ok := s.writeBrief(name, sess, t, now)
+	brief, ok := s.readBrief(name, sess, t, now, "rotated")
 	if !ok {
 		return false
 	}
 	id := newSessionID()
-	cmd, facts := s.launchCommand(name, sess, t, id, "rotation")
+	cmd, facts := s.launchCommandWith(name, sess, t, id, "rotation", nil, brief.parts())
 	line, err := s.launchLine(sess, cmd)
 	if err != nil {
 		s.skipOnce(name, "account:"+name, "not rotating: "+err.Error(), t, &SkipPayload{Account: sess.Account})
 		return false
 	}
-	a := &ActPayload{Key: key, Cwd: sess.Cwd, Account: sess.Account, Command: line, Transcript: id, Context: u.Context, Checkpoint: mark, Brief: brief}
-	replace := func() error { return s.tmux.Replace(name, sess.Cwd, line) }
+	a := &ActPayload{Key: key, Cwd: sess.Cwd, Account: sess.Account, Command: line, Transcript: id, Context: u.Context, Checkpoint: mark, Brief: brief.parts()}
+	replace := func() error {
+		if err := brief.write(sess.Workdir); err != nil {
+			return err
+		}
+		return s.tmux.Replace(name, sess.Cwd, line)
+	}
 	if strings.HasPrefix(mark, "turn:") {
 		// A session waiting at its prompt can be given a line at any time,
 		// by its coordinator: the screen is read again first, as for a
@@ -758,18 +763,19 @@ func (s *Supervisor) passesMCP() bool {
 // document of its case's server, substituted, and the facts the prompt
 // hands it: its case's context pack.
 func (s *Supervisor) launchCommand(name string, sess Session, t *Track, id, why string) ([]string, []byte) {
-	return s.launchCommandWith(name, sess, t, id, why, nil)
+	return s.launchCommandWith(name, sess, t, id, why, nil, nil)
 }
 
 // launchCommandWith is the launch command of a fix session, its CI
-// failure in its facts.
-func (s *Supervisor) launchCommandWith(name string, sess Session, t *Track, id, why string, ci *CIFact) ([]string, []byte) {
+// failure in its facts, or of a coordinator, the brief parts it is
+// launched with in its pack.
+func (s *Supervisor) launchCommandWith(name string, sess Session, t *Track, id, why string, ci *CIFact, brief []BriefPart) ([]string, []byte) {
 	facts := s.packFactsWith(name, sess, t, why, ci)
 	s.noteTrust(name, sess, t)
 	if sess.Role == RoleCoordinator && !s.shadow {
 		// A pack that cannot be written leaves the last one; the
 		// launch goes on.
-		_, pack := s.buildPack(sess.Repository, nil, s.clock.Now(), false)
+		_, pack := s.buildPackWith(sess.Repository, nil, s.clock.Now(), false, brief)
 		if err := writeAtomic(sess.Workdir+"/"+PackFile, pack); err != nil {
 			s.emit(name, Event{Kind: KindError, Error: &ErrorPayload{Step: "writing " + PackFile, Error: err.Error()}})
 		}

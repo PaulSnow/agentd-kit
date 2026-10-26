@@ -1021,7 +1021,7 @@ func (s *Supervisor) fixCI(name string, sess Session, t *Track, ev Evidence, sta
 func (s *Supervisor) startCIFix(name string, sess Session, t *Track, ev Evidence, r CIRecord, attempt int, retry string) bool {
 	id := newSessionID()
 	fact := &CIFact{Request: r.Ref, URL: r.URL, Head: r.Head, Target: r.Target, Jobs: r.Jobs, Excerpt: r.Excerpt}
-	cmd, facts := s.launchCommandWith(name, sess, t, id, "ci-fix", fact)
+	cmd, facts := s.launchCommandWith(name, sess, t, id, "ci-fix", fact, nil)
 	line, err := s.launchLine(sess, cmd)
 	if err != nil {
 		s.skipOnce(name, "account:"+name, "not starting a CI fix session: "+err.Error(), t, &SkipPayload{Account: sess.Account})

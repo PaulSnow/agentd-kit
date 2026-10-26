@@ -152,3 +152,102 @@ func TestCoordinatorBriefEmptyPartRefused(t *testing.T) {
 		t.Fatalf("an empty brief part: %v", err)
 	}
 }
+
+// A start refused after the brief is read, here for its account, leaves
+// the brief and the parts the pack shows as the latest launch made them,
+// as a replay of the log has them.
+func TestCoordinatorBriefRefusedLaunchWritesNothing(t *testing.T) {
+	h, _, repo := briefHarness(t)
+	launchCoordinator(t, h)
+	before, parts := h.brief(), lastLaunch(h, "c").Brief
+	writeFile(t, repo, "## widgets\n\nNot yet.\n")
+	h.cfg.Accounts = map[string]Account{"acct": {TokenFile: filepath.Join(h.dir, "no-token")}}
+	c := h.cfg.Sessions["c"]
+	c.Account = "acct"
+	h.cfg.Sessions["c"] = c
+	restarts := h.count(KindAction, ActRestart, "c")
+	h.ticks(1, time.Hour)
+	h.tmux.alive["c"] = false
+	h.ticks(2, time.Minute)
+	if n := h.count(KindAction, ActRestart, "c"); n != restarts {
+		t.Fatalf("restarted without its account: %d restarts, want %d", n, restarts)
+	}
+	if h.brief() != before {
+		t.Fatalf("a refused start wrote the brief: %q", h.brief())
+	}
+	if p, _ := h.sup.buildPack("widgets", nil, h.clock.Now(), false); !reflect.DeepEqual(p.Brief, parts) {
+		t.Fatalf("pack brief = %+v, want the latest launch's %+v", p.Brief, parts)
+	}
+	sameAfterReplay(t, h, "after a refused start")
+}
+
+// Shadow mode reads the parts and records the start it would make, but
+// writes no brief.
+func TestCoordinatorBriefShadowWritesNothing(t *testing.T) {
+	h, _, _ := briefHarness(t)
+	h.restart(true)
+	h.tmux.alive["c"] = false
+	h.ticks(1, time.Minute)
+	if _, err := os.Stat(filepath.Join(h.dir, "c", "BRIEF.md")); !os.IsNotExist(err) {
+		t.Fatalf("shadow mode wrote BRIEF.md: %v", err)
+	}
+	var would *ActPayload
+	for _, e := range h.events() {
+		if e.Kind == KindWould && e.Act.Action == ActRestart && e.Session == "c" {
+			would = e.Act
+		}
+	}
+	if would == nil || len(would.Brief) != 2 {
+		t.Fatalf("shadow launch = %+v, want the parts it would write", would)
+	}
+	if b := h.sup.Tracks()["c"].Brief; b != nil {
+		t.Fatalf("shadow track brief = %+v", b)
+	}
+	sameAfterReplay(t, h, "in shadow mode")
+}
+
+// With no brief listed BRIEF.md is the owner's: a start leaves it and
+// records no parts.
+func TestCoordinatorNoBriefLeavesOwners(t *testing.T) {
+	h := coordHarness(t)
+	writeFile(t, filepath.Join(h.dir, "c", "BRIEF.md"), "the owner's\n")
+	launchCoordinator(t, h)
+	if got := h.brief(); got != "the owner's\n" {
+		t.Fatalf("brief = %q", got)
+	}
+	if a := lastLaunch(h, "c"); a.Brief != nil {
+		t.Fatalf("launch brief = %+v", a.Brief)
+	}
+}
+
+// A rotation refused for a part that cannot be read leaves the
+// coordinator running, with one escalation naming the part.
+func TestCoordinatorBriefMissingPartRefusesRotation(t *testing.T) {
+	h, _, repo := briefHarness(t)
+	id := launchCoordinator(t, h)
+	before := h.brief()
+	if err := os.Remove(repo); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(2, time.Minute)
+	h.transcriptOf("c", id, promptLine("c0", "start", h.clock.Now())+usageLine("m0", 10, 150000, 0, 5, false))
+	h.status("a", "# a\n\nDONE\n")
+	h.ticks(3, time.Minute)
+	h.transcriptOf("c", id, summaryLine("c1", "m1", "Handled.", h.clock.Now(), 150000))
+	h.ticks(3, time.Minute)
+	if n := h.count(KindAction, ActRotate, "c"); n != 0 {
+		t.Fatalf("rotations = %d, want 0", n)
+	}
+	var escalations []string
+	for _, e := range h.events() {
+		if e.Kind == KindAction && e.Act.Action == ActEscalate && e.Session == "c" && strings.HasPrefix(e.Act.Key, "brief:") {
+			escalations = append(escalations, e.Act.Message)
+		}
+	}
+	if len(escalations) != 1 || !strings.Contains(escalations[0], repo) || !strings.Contains(escalations[0], "not rotated") {
+		t.Fatalf("escalations %q", escalations)
+	}
+	if !h.tmux.alive["c"] || h.brief() != before {
+		t.Fatalf("alive %v, brief %q", h.tmux.alive["c"], h.brief())
+	}
+}

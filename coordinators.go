@@ -551,6 +551,12 @@ func (s *Supervisor) packItems(repo string) []PackItem {
 // instructions, each counted in Summarized. Handled says the coordinator
 // has handled its latest wake, as it has when it is woken again.
 func (s *Supervisor) buildPack(repo string, due []string, now time.Time, handled bool) (Pack, []byte) {
+	return s.buildPackWith(repo, due, now, handled, nil)
+}
+
+// buildPackWith is buildPack for a coordinator's launch: brief is the
+// parts it is launched with, none for the latest launch's.
+func (s *Supervisor) buildPackWith(repo string, due []string, now time.Time, handled bool, brief []BriefPart) (Pack, []byte) {
 	pol := s.cfg.Policies.Coordinator
 	p := Pack{Repository: repo, At: now, Due: append([]string(nil), due...), Sessions: []PackSession{}}
 	p.Policy, _ = effectivePolicy(s.cfg, s.st, repo)
@@ -562,6 +568,9 @@ func (s *Supervisor) buildPack(repo string, due []string, now time.Time, handled
 			p.LastWake = &at
 		}
 		p.Brief = s.track(co.Session).Brief
+		if brief != nil {
+			p.Brief = brief
+		}
 	}
 	for _, n := range s.cfg.SessionNames() {
 		sess := s.cfg.Sessions[n]
