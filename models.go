@@ -11,6 +11,17 @@ func orModel(repo, all string) string {
 	return all
 }
 
+// allowedModel is m, or, when the policy's sessions.models leaves it out,
+// the list's first: a repository's own file may narrow the list past a
+// model the owner chose, and the narrowing holds. "" stays the command's
+// default.
+func allowedModel(p RepoPolicy, m string) string {
+	if m == "" || len(p.Sessions.Models) == 0 || contains(p.Sessions.Models, m) {
+		return m
+	}
+	return p.Sessions.Models[0]
+}
+
 // sessionModel is the model a session runs (#52): its repository's
 // policy's for its kind, or else policies.models'. A coordinator runs the
 // coordinator model; a reviewer or a judge, started or configured, the
@@ -26,11 +37,11 @@ func sessionModel(cfg *Config, st *LogState, sess Session) string {
 	case RoleCoordinator:
 		return orModel(p.Sessions.CoordinatorModel, g.Coordinator)
 	case RoleReviewer:
-		return orModel(p.Review.ReviewerModel, g.Reviewer)
+		return allowedModel(p, orModel(p.Review.ReviewerModel, g.Reviewer))
 	case RoleJudge:
-		return orModel(p.Review.JudgeModel, g.Judge)
+		return allowedModel(p, orModel(p.Review.JudgeModel, g.Judge))
 	}
-	return orModel(p.Sessions.WorkModel, g.Work)
+	return allowedModel(p, orModel(p.Sessions.WorkModel, g.Work))
 }
 
 // reviewModels are the models a coordinator hands the review and judge
@@ -38,7 +49,7 @@ func sessionModel(cfg *Config, st *LogState, sess Session) string {
 func reviewModels(cfg *Config, st *LogState, repo string) *PackModels {
 	p, _ := effectivePolicy(cfg, st, repo)
 	g := cfg.Policies.Models
-	m := &PackModels{Reviewer: orModel(p.Review.ReviewerModel, g.Reviewer), Judge: orModel(p.Review.JudgeModel, g.Judge)}
+	m := &PackModels{Reviewer: allowedModel(p, orModel(p.Review.ReviewerModel, g.Reviewer)), Judge: allowedModel(p, orModel(p.Review.JudgeModel, g.Judge))}
 	if *m == (PackModels{}) {
 		return nil
 	}

@@ -112,6 +112,44 @@ func TestPackNamesReviewModels(t *testing.T) {
 	}
 }
 
+// A repository's own file that narrows sessions.models past a chosen
+// model holds: its sessions and its coordinator's calls run the list's
+// first model instead.
+func TestNarrowedModelsHold(t *testing.T) {
+	h := coordHarness(t)
+	h.cfg.Policies.Restart.Command = []string{"claude", "--model", "{model}", "{prompt}"}
+	h.cfg.Policies.Models = ModelsPolicy{Coordinator: "opus", Work: "opus", Reviewer: "sonnet", Judge: "haiku"}
+	w := h.cfg.Repositories["widgets"]
+	w.Policy.Sessions.Models = []string{"opus", "sonnet", "haiku"}
+	w.Policy.Merge.Targets = []string{"main"}
+	h.cfg.Repositories["widgets"] = w
+	h.sup.st.Policies = map[string]PolicyPayload{policyKey("widgets", "main"): {
+		Repository: "widgets", Target: "main", File: []byte(`{"sessions": {"models": ["haiku", "sonnet"]}}`),
+	}}
+	sess := h.cfg.Sessions["a"]
+	sess.Role, sess.Repository = "", "widgets"
+	if m := sessionModel(h.cfg, h.sup.st, sess); m != "haiku" {
+		t.Errorf("work model = %q, want haiku", m)
+	}
+	sess.Role = RoleCoordinator
+	if m := sessionModel(h.cfg, h.sup.st, sess); m != "opus" {
+		t.Errorf("coordinator model = %q, want opus", m)
+	}
+	if m := reviewModels(h.cfg, h.sup.st, "widgets"); m == nil || *m != (PackModels{Reviewer: "sonnet", Judge: "haiku"}) {
+		t.Errorf("pack models = %+v", m)
+	}
+}
+
+// With restarts off nothing is launched, so a model set with no {model}
+// in the command loads.
+func TestModelWithRestartOffLoads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.json")
+	writeFile(t, path, `{"policies": {"restart": {"enabled": false, "command": ["claude", "{prompt}"]}, "models": {"work": "haiku"}}}`)
+	if _, err := LoadConfig(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // agentd status shows the model each session runs.
 func TestStatusShowsModel(t *testing.T) {
 	h := coordHarness(t)
