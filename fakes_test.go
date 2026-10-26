@@ -235,7 +235,9 @@ func (f *fakeTmux) Type(name, text string) error {
 }
 
 // Keys works the trust prompt's menu on the screen as Claude Code does:
-// the option marked ❯ is selected (option 1 when none is), Down and Up
+// numbered options, or, as Claude Code draws them now, a run of lines
+// saying Yes or No; the option marked ❯ is selected (the first when none
+// is), Down and Up
 // move the mark and redraw the screen, Enter chooses. Choosing an option
 // that says No ends the session; any other trusts the folder. A sticky
 // prompt ignores the keys.
@@ -247,10 +249,19 @@ func (f *fakeTmux) Keys(name string, keys ...string) error {
 	lines := strings.Split(f.panes[name], "\n")
 	var opts []int // the lines of the options, in order
 	sel := 0
+	unnumbered := regexp.MustCompile(`^([❯>]\s*)?((Yes|No)\b.*)$`)
 	for i, l := range lines {
 		t := strings.Trim(l, " │")
 		if m := regexp.MustCompile(`^([❯>]\s*)?(\d)\.\s+(.*)$`).FindStringSubmatch(t); m != nil {
 			if m[2] == "1" { // a later menu is the live one
+				opts, sel = nil, 0
+			}
+			if m[1] != "" {
+				sel = len(opts)
+			}
+			opts = append(opts, i)
+		} else if m := unnumbered.FindStringSubmatch(t); m != nil {
+			if len(opts) == 0 || opts[len(opts)-1] != i-1 {
 				opts, sel = nil, 0
 			}
 			if m[1] != "" {
@@ -297,7 +308,7 @@ func (f *fakeTmux) Keys(name string, keys ...string) error {
 			if len(opts) > sel {
 				f.enterOn[name] = append(f.enterOn[name], text(sel))
 			}
-			if len(opts) > sel && strings.HasPrefix(text(sel)[3:], "No") {
+			if len(opts) > sel && strings.HasPrefix(regexp.MustCompile(`^\d\.\s+`).ReplaceAllString(text(sel), ""), "No") {
 				f.alive[name] = false
 				return nil
 			}

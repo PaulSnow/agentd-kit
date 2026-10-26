@@ -48,6 +48,7 @@ type Track struct {
 	ContinueStatus string
 	Limited        bool
 	TrustHash      string // the screen hash the trust keys were last sent for
+	Ready          bool   // seen past the folder-trust prompt since its launch: at its input prompt, or a transcript written
 	// NotClaudeSince is when the pane was first seen running a command
 	// that is not Claude, or zero while it runs Claude.
 	NotClaudeSince time.Time
@@ -341,8 +342,10 @@ func Classify(t *Track, ev Evidence, pol Policies, now time.Time) (State, string
 	// for a session that waits on the owner. The trust prompt is itself a
 	// numbered menu, so in the start phase, since the session was first seen
 	// or last restarted and before it was seen in any other state, it is
-	// recognised before the dialog patterns; after that, a menu is a dialog.
-	startPhase := t.State == "" || t.State == Starting
+	// recognised before the dialog patterns; after that, a menu is a dialog,
+	// unless the session has not been seen ready since its launch and the
+	// screen shows the trust menu's whole frame: it may show late (#43).
+	startPhase := t.State == "" || t.State == Starting || !t.Ready && ev.TrustMenu != nil
 	switch {
 	case ev.Status.Questions != "":
 		return BlockedOnOwner, "STATUS.md has open Questions"

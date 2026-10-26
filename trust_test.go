@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,14 @@ import (
 func newTrustScreen(dir string) string {
 	return "Accessing workspace:\n\n" + dir + "\n\nQuick safety check: Is this a project you created or one you trust?\n\n" +
 		"❯ 1. No, exit\n  2. Yes, I trust this folder\n\nEnter to confirm · Esc to cancel"
+}
+
+// The dialog as Claude Code draws it now: the same menu without numbers
+// (#43), under the link to its security guide.
+func unnumberedTrustScreen(dir string) string {
+	return "Accessing workspace:\n\n" + dir + "\n\nQuick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.\n\n" +
+		"Claude Code'll be able to read, edit, and execute files here.\n\nSecurity guide\n\n" +
+		"❯ No, exit\n  Yes, I trust this folder\n\nEnter to confirm · Esc to cancel"
 }
 
 // The older wording: "Yes, proceed" first and selected.
@@ -299,5 +308,60 @@ func TestTrustAnsweredAgainAfterRelaunch(t *testing.T) {
 	tr.launched("", time.Now())
 	if tr.TrustHash != "" {
 		t.Fatalf("trust hash kept over a launch: %q", tr.TrustHash)
+	}
+}
+
+// The menu without numbers is answered by its accepting option too: the
+// arrow to it, then Enter once it shows selected, never Enter on "No,
+// exit" (#43).
+func TestTrustUnnumberedDialogAnswered(t *testing.T) {
+	h := newHarness(t, false, "s1", "boxed")
+	for _, n := range []string{"s1", "boxed"} {
+		h.status(n, working)
+	}
+	h.alive("s1", unnumberedTrustScreen(h.cfg.Sessions["s1"].Cwd))
+	h.alive("boxed", "╭──────╮\n│ Is this a project you created or one you trust? │\n│ │\n│ Security guide │\n│ │\n│ ❯ No, exit │\n│   Yes, I trust this folder │\n│ │\n│ Enter to confirm · Esc to cancel │\n╰──────╯")
+	h.ticks(3, 5*time.Minute)
+	for _, n := range []string{"s1", "boxed"} {
+		if sent := keysSent(h, n); len(sent) != 2 || strings.Join(sent[0], " ") != "Down" || strings.Join(sent[1], " ") != "Enter" {
+			t.Fatalf("%s: keys %v", n, sent)
+		}
+		if h.tmux.chosen[n] != 2 || !h.tmux.alive[n] {
+			t.Fatalf("%s: chosen %d, alive %v", n, h.tmux.chosen[n], h.tmux.alive[n])
+		}
+		noEnterOnReject(t, h, n)
+	}
+}
+
+// An unnumbered menu agentd cannot read safely gets no keys: two options
+// that say Yes, or no cursor.
+func TestTrustUnnumberedUnclearMenu(t *testing.T) {
+	re := regexp.MustCompile(DefaultConfig().Policies.Trust.Pattern)
+	for _, screen := range []string{
+		"Is this a project you created or one you trust?\n\n❯ Yes, proceed\n  Yes, I trust this folder\n  No, exit\n\nEnter to confirm · Esc to cancel",
+		"Is this a project you created or one you trust?\n\n  No, exit\n  Yes, I trust this folder\n\nEnter to confirm · Esc to cancel",
+	} {
+		if keys, _ := trustKeys(trustMenu(screen, re, ""), []string{"Enter"}); keys != nil {
+			t.Fatalf("keys %v for %q", keys, screen)
+		}
+	}
+}
+
+// A session whose first screens showed no trust prompt, and that has not
+// been seen ready since its launch, still gets its trust prompt answered
+// when it shows: it is starting, not waiting at a dialog (#43).
+func TestTrustAnsweredBeforeReady(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.status("s1", working)
+	h.alive("s1", "Claude Code is loading")
+	h.ticks(3, 5*time.Minute)
+	h.alive("s1", unnumberedTrustScreen(h.cfg.Sessions["s1"].Cwd))
+	h.ticks(3, 5*time.Minute)
+	if sent := keysSent(h, "s1"); len(sent) != 2 || strings.Join(sent[1], " ") != "Enter" || h.tmux.chosen["s1"] != 2 {
+		t.Fatalf("keys %v, chosen %d", sent, h.tmux.chosen["s1"])
+	}
+	noEnterOnReject(t, h, "s1")
+	if n := h.tmux.count("type", "s1"); n != 0 {
+		t.Fatalf("%d lines typed into a session not yet ready", n)
 	}
 }
