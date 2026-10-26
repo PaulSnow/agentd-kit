@@ -187,8 +187,10 @@ func recordInstruction(cfg *Config, log *Log, st *LogState, now time.Time, repos
 
 // ImportLine is one message of the old console's history, as agentd
 // console import reads it: one JSON object per line. The outside console
-// program's lines (#42) give their time as TS, Unix seconds, and a Kind.
-// Repository may name a console without a repository too.
+// program's lines (#42) give their time as TS, Unix seconds, a Kind, and
+// To, the session a line posted with --to was typed to; a field of theirs
+// import does not use, such as edited, is ignored (#44). Repository may
+// name a console without a repository too.
 type ImportLine struct {
 	At         time.Time `json:"at"`
 	TS         *float64  `json:"ts,omitempty"`
@@ -196,6 +198,7 @@ type ImportLine struct {
 	Kind       string    `json:"kind,omitempty"`
 	Text       string    `json:"text"`
 	Repository string    `json:"repository,omitempty"`
+	To         string    `json:"to,omitempty"`
 }
 
 // importKey identifies an imported line, so a second import skips it.
@@ -224,9 +227,7 @@ func ImportConsole(cfg *Config, log *Log, events []Event, now time.Time, repo st
 			continue
 		}
 		var l ImportLine
-		dec := json.NewDecoder(strings.NewReader(text))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&l); err != nil {
+		if err := json.Unmarshal([]byte(text), &l); err != nil {
 			return 0, 0, fmt.Errorf("line %d: %w", n, err)
 		}
 		if l.Repository == "" {
@@ -260,10 +261,10 @@ func ImportConsole(cfg *Config, log *Log, events []Event, now time.Time, repo st
 		}
 		have[key] = true
 		at := l.At
-		p := &FeedPayload{Phase: FeedImported, Key: key, Repository: l.Repository, Text: l.Text, At: &at, From: l.From, Kind: l.Kind}
+		p := &FeedPayload{Phase: FeedImported, Key: key, Repository: l.Repository, Text: l.Text, At: &at, From: l.From, Kind: l.Kind, To: l.To}
 		for i, pat := range pats {
-			if regexp.MustCompile(pat).MatchString(l.Text + "\n" + l.From) {
-				p.Text, p.From, p.Withheld = "", "", i+1
+			if regexp.MustCompile(pat).MatchString(l.Text + "\n" + l.From + "\n" + l.To) {
+				p.Text, p.From, p.To, p.Withheld = "", "", "", i+1
 				break
 			}
 		}

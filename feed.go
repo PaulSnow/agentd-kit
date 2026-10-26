@@ -58,11 +58,13 @@ type FeedPayload struct {
 	Text         string   `json:"text,omitempty"`
 	Withheld     int      `json:"withheld,omitempty"`
 	Error        string   `json:"error,omitempty"`
-	// An imported line: when it was written, by whom, and its kind
-	// when the outside console program's line gave one.
+	// An imported line: when it was written, by whom, its kind when the
+	// outside console program's line gave one, and the session it was
+	// typed to when posted with --to.
 	At   *time.Time `json:"at,omitempty"`
 	From string     `json:"from,omitempty"`
 	Kind string     `json:"kind,omitempty"`
+	To   string     `json:"to,omitempty"`
 }
 
 // FeedState is what the feed events fold to: the repositories the feed
