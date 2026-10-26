@@ -293,6 +293,10 @@ type Session struct {
 	// Runtime marks a session a coordinator started: the event log, not
 	// the configuration, holds it (sessions.go).
 	Runtime bool `json:"-"`
+	// Kind and Branch are a started session's kind (KindWork, ...) and
+	// the branch its worktree has out.
+	Kind   string `json:"-"`
+	Branch string `json:"-"`
 	// Policy is the session's own rules: which of its turns its console
 	// receives (turns.go).
 	Policy SessionPolicy `json:"policy"`
