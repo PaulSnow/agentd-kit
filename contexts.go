@@ -454,7 +454,10 @@ func (s *Supervisor) lastInstruction(t *Track) string {
 		for _, o := range own {
 			// A turn is logged cut at turnText, so a longer line of
 			// agentd's own is matched as cut.
-			mine = mine || o != "" && strings.HasPrefix(tn.Text, strings.TrimSuffix(cutUTF8(o, turnText), "…"))
+			if len(o) > turnText {
+				o = strings.TrimSuffix(cutUTF8(o, turnText), "…")
+			}
+			mine = mine || o != "" && strings.HasPrefix(tn.Text, o)
 		}
 		if !mine {
 			return tn.Text

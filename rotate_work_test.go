@@ -270,3 +270,15 @@ func TestWorkRotationKeepsContextSmall(t *testing.T) {
 		t.Fatalf("average context %d rotated, %d not: under 60%% expected", with/n, without/n)
 	}
 }
+
+// A nudge of agentd's own ending in "…" is not taken for a prefix of the
+// coordinator's instruction (#48).
+func TestLastInstructionOwnLineEndingInEllipsis(t *testing.T) {
+	h, name, _ := workHarness(t)
+	h.sup.cfg.Policies.Nudge.Message = "Carry on…"
+	tr := h.sup.track(name)
+	tr.Turns = append(tr.Turns, TurnRecord{Role: TurnPrompt, Text: "Carry on with the spin fix."}, TurnRecord{Role: TurnPrompt, Text: "Carry on…"})
+	if got := h.sup.lastInstruction(tr); got != "Carry on with the spin fix." {
+		t.Fatalf("instruction = %q", got)
+	}
+}
