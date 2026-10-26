@@ -65,6 +65,9 @@ type RuntimePayload struct {
 	// Request is the request no session delivered that a reviewer or
 	// judge agentd started serves (#53).
 	Request string `json:"request,omitempty"`
+	// Head is the head a reviewer or judge agentd started was started
+	// for: the one its round is credited to.
+	Head    string `json:"head,omitempty"`
 	Account string `json:"account,omitempty"`
 	// Place marks a start agentd places on an account by usage (#39).
 	Place bool `json:"place,omitempty"`
@@ -201,9 +204,9 @@ func plainBranch(b string) bool {
 		!strings.HasSuffix(b, "/") && !strings.HasSuffix(b, ".") && !strings.HasSuffix(b, ".lock") && !strings.Contains(b, "/.") && b != "HEAD"
 }
 
-// checkSessionsPolicies validates each repository's sessions entry: a
-// coordinator to start them, existing directories, a plain target, known
-// accounts.
+// checkSessionsPolicies validates each repository's sessions entry:
+// existing directories, a plain target, known accounts, and, where agentd
+// runs the loop, room for a work session and its reviewer.
 func (c *Config) checkSessionsPolicies(path func(field, p string) string, errs *[]error) {
 	for name, repo := range c.Repositories {
 		p := repo.Sessions
@@ -211,6 +214,9 @@ func (c *Config) checkSessionsPolicies(path func(field, p string) string, errs *
 			continue
 		}
 		field := "repositories." + name + ".sessions"
+		if m := repo.Policy.Sessions.Max; looped(repo) && m > 0 && m < 2 {
+			*errs = append(*errs, fmt.Errorf("repositories.%s.policy.sessions.max is %d: agentd runs this repository's loop, which needs room for a work session and its reviewer, 2 or more", name, m))
+		}
 		if p.Root == "" || p.Clone == "" || p.Target == "" {
 			*errs = append(*errs, fmt.Errorf("%s needs root, clone and target", field))
 			continue

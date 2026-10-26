@@ -208,6 +208,12 @@ func placeOf(cfg *Config, st *LogState, q loopRequest) loopPlace {
 		last = &c.Rounds[n-1]
 	}
 	if c.Closed {
+		switch {
+		case reviewing:
+			return loopPlace{Phase: PlaceOwner, Reason: "its case is closed", Do: "end", Session: reviewer}
+		case judging:
+			return loopPlace{Phase: PlaceOwner, Reason: "its case is closed", Do: "end", Session: judge}
+		}
 		return owner("its case %s is closed", q.Case)
 	}
 	if stop := c.RoundStop; stop != nil {
@@ -218,7 +224,7 @@ func placeOf(cfg *Config, st *LogState, q loopRequest) loopPlace {
 			return loopPlace{Phase: PlaceJudging, Reason: "round disposed", Do: "end", Session: judge}
 		case stop.Reason != RoundsConverged:
 			return owner("review rounds stopped at round %d, %s; agentd cases rounds %s N resets them", stop.Round, stop.Reason, q.Case)
-		case st.approvedAt(q.Repository, q.Ref) != r.Head && L.ReviewHead != r.Head:
+		case L.ReviewHead != r.Head && (!q.Outside || st.approvedAt(q.Repository, q.Ref) != r.Head):
 			// A head no round reviewed, pushed by a CI fix or the
 			// request's author, merges only after the owner resets the
 			// rounds, which reviews it.
@@ -284,6 +290,9 @@ func placeOf(cfg *Config, st *LogState, q loopRequest) loopPlace {
 		return loopPlace{Phase: PlaceReviewing, Reason: fmt.Sprintf("round %d at %s; shadow mode starts no reviewer", next, shortHash(L.ReviewHead))}
 	case !reviewing:
 		return loopPlace{Phase: PlaceReviewing, Do: LoopFailed, Failed: LoopReview, Session: reviewer, Round: next, Reason: fmt.Sprintf("the reviewer of round %d ended without its findings", next)}
+	}
+	if t := st.Tracks[reviewer]; t != nil && (t.State == BlockedOnOwner || t.Questions.Open || t.blocking()) {
+		return owner("the reviewer of round %d asks the owner", next)
 	}
 	if why := judgmentFailed(st.Tracks[reviewer]); why != "" {
 		return loopPlace{Phase: PlaceReviewing, Do: LoopFailed, Failed: LoopReview, Session: reviewer, Round: next, Reason: fmt.Sprintf("the reviewer of round %d %s", next, why)}
@@ -398,12 +407,21 @@ func (s *Supervisor) runLoops(now time.Time) {
 }
 
 // endFinished ends each work session agentd started in a looped
-// repository once every request it delivered is merged or closed, so its
-// room under sessions.max goes to the next case and the judgment sessions.
+// repository once every request it delivered is merged or closed, and
+// each reviewer or judge whose request left the loop, so its room under
+// sessions.max goes to the next case and the judgment sessions.
 func (s *Supervisor) endFinished() {
+	current := map[string]bool{}
+	for _, q := range loopRequests(s.cfg, s.st) {
+		current[q.judgment(KindReviewer)], current[q.judgment(KindJudge)] = true, true
+	}
 	for _, name := range sortedKeys(s.st.Runtime) {
 		p := s.st.Runtime[name]
 		t := s.st.Tracks[name]
+		if (p.Kind == KindReviewer || p.Kind == KindJudge) && p.By == "agentd" && !current[name] && !s.shadow {
+			s.endJudgment(p.Repository, name)
+			continue
+		}
 		if p.Kind != KindWork || !looped(s.cfg.Repositories[p.Repository]) || t == nil || len(t.Deliveries) == 0 || s.shadow {
 			continue
 		}
@@ -425,7 +443,7 @@ func (s *Supervisor) startJudgment(q loopRequest, kind, name string) string {
 	if !q.Outside {
 		issue = s.cfg.Sessions[q.Session].Issue
 	}
-	p := RuntimePayload{Kind: kind, Branch: q.Branch, Issue: issue}
+	p := RuntimePayload{Kind: kind, Branch: q.Branch, Issue: issue, Head: s.st.CI[ciKey(q.Repository, q.Ref)].Head}
 	if q.Outside {
 		p.Request = q.Ref
 	}
@@ -601,8 +619,14 @@ func (s *Supervisor) reviewFact(name string) *ReviewFact {
 		if q.judgment(KindReviewer) != name && q.judgment(KindJudge) != name {
 			continue
 		}
+		// The head the step was recorded for, which its round is
+		// credited to, even when the request moved since.
 		r := s.st.CI[ciKey(q.Repository, q.Ref)]
-		return &ReviewFact{Request: q.Ref, URL: r.URL, Head: r.Head, Target: r.Target}
+		head := r.Head
+		if p, ok := s.st.Runtime[name]; ok && p.Head != "" {
+			head = p.Head
+		}
+		return &ReviewFact{Request: q.Ref, URL: r.URL, Head: head, Target: r.Target}
 	}
 	return nil
 }

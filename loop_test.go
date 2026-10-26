@@ -443,3 +443,34 @@ func TestLoopHeadMovedAfterConvergence(t *testing.T) {
 		t.Fatalf("place = %+v", p)
 	}
 }
+
+// A reviewer that asked the owner waits for the answer, DONE or not; one
+// whose request left the loop, merged by hand, is ended.
+func TestLoopReviewerQuestionAndStrandedJudgment(t *testing.T) {
+	h, api := loopHarness(t)
+	h.ticks(5, 5*time.Minute)
+	reviewer := judgmentName("!1", KindReviewer)
+	tr := h.sup.track(reviewer)
+	tr.State, tr.Questions.Open = Done, true
+	if p := h.place("!1"); p.Phase != PlaceOwner || !strings.Contains(p.Reason, "the reviewer of round 1 asks the owner") {
+		t.Fatalf("place = %+v", p)
+	}
+	api.set(func() {
+		api.gitlab[ciProject+"/merge_requests/1"] = strings.Replace(api.gitlab[ciProject+"/merge_requests/1"], `"state":"opened"`, `"state":"merged"`, 1)
+	})
+	h.ticks(3, 5*time.Minute)
+	if _, ok := h.sup.st.Runtime[reviewer]; ok {
+		t.Fatalf("the reviewer of a merged request still runs; ci %+v", h.sup.st.CI[ciKey("widgets", "!1")])
+	}
+}
+
+// A looped repository needs room for a work session and its reviewer.
+func TestLoopNeedsTwoPlaces(t *testing.T) {
+	h, _ := loopHarness(t)
+	w := h.cfg.Repositories["widgets"]
+	w.Policy.Sessions.Max = 1
+	h.cfg.Repositories["widgets"] = w
+	if err := h.cfg.finish(h.dir); err == nil || !strings.Contains(err.Error(), "2 or more") {
+		t.Fatalf("finish = %v", err)
+	}
+}
