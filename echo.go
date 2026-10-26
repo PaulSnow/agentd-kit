@@ -32,12 +32,23 @@ func (st *LogState) refThread(repo, sigil string, number int) string {
 	return repoKey(r.Forge, r.Project) + sigil + strconv.Itoa(number)
 }
 
+// echoSkew is how far before an act its thread may move and still be its
+// echo: the forge's clock and agentd's differ a little, and a merge is
+// logged after the forge made it. An outsider's move earlier than that is
+// theirs.
+const echoSkew = 30 * time.Second
+
 // noteTouch records the threads e acts on for a coordinator: its
 // approvals, agentd's merges and the sessions it started or ended for an
-// issue. Touches older than the wake margin are dropped.
+// issue, before e is applied. Touches older than the wake margin, or the
+// echo window when that is longer, are dropped.
 func (st *LogState) noteTouch(e Event) {
 	thread := ""
 	switch {
+	case e.Kind == KindSession && e.Runtime != nil && e.Runtime.Action == SessionEnd:
+		if r, ok := st.Runtime[e.Session]; ok {
+			thread = st.refThread(r.Repository, "#", r.Issue)
+		}
 	case e.Kind == KindApproval && e.Approval != nil:
 		n, _ := strconv.Atoi(strings.TrimLeft(e.Approval.Ref, "!#"))
 		thread = st.refThread(e.Approval.Repository, "!", n)
@@ -51,16 +62,23 @@ func (st *LogState) noteTouch(e Event) {
 		return
 	}
 	if st.Touched == nil {
-		st.Touched = map[string]time.Time{}
+		st.Touched = map[string][]time.Time{}
 	}
-	for k, at := range st.Touched {
-		if at.Before(e.Time.Add(-wakeMargin)) {
+	keep := max(wakeMargin, st.cfg.Policies.Coordinator.Echo.Duration)
+	for k, ats := range st.Touched {
+		var live []time.Time
+		for _, at := range ats {
+			if !at.Before(e.Time.Add(-keep)) {
+				live = append(live, at)
+			}
+		}
+		if live == nil {
 			delete(st.Touched, k)
+		} else {
+			st.Touched[k] = live
 		}
 	}
-	if e.Time.After(st.Touched[thread]) {
-		st.Touched[thread] = e.Time
-	}
+	st.Touched[thread] = append(st.Touched[thread], e.Time)
 }
 
 // wakeThreads are the threads of the items a wake covered, from its keys.
@@ -79,28 +97,42 @@ func wakeThreads(keys []string) []string {
 	return out
 }
 
-// turnEnd is when the coordinator's turn after at ended: its first
-// summary after at, else the next wake, else now, the turn still running.
-func (t *Track) turnEnd(at, now time.Time) time.Time {
+// turnEnd is when the coordinator's turn for the wake at at ended: the
+// first summary after its pointer's prompt, or after at when no prompt
+// was read, but no later than the stall after at, as handled has it, nor
+// the next wake. A turn that left no summary, or ran without transcripts,
+// does not keep its threads quiet past that.
+func (t *Track) turnEnd(at time.Time, stall time.Duration) time.Time {
+	end := at.Add(stall)
+	for _, w := range t.Wakes {
+		if w.At.After(at) && w.At.Before(end) {
+			end = w.At
+		}
+	}
+	from := at
 	for _, tn := range t.Turns {
-		if tn.Role == TurnSummary && tn.At.After(at) {
+		if tn.Role == TurnPrompt && !tn.At.Before(at) {
+			from = tn.At
+			break
+		}
+	}
+	for _, tn := range t.Turns {
+		if tn.Role == TurnSummary && tn.At.After(from) && tn.At.Before(end) {
 			return tn.At
 		}
 	}
-	for _, w := range t.Wakes {
-		if w.At.After(at) {
-			return w.At
-		}
-	}
-	return now
+	return end
 }
 
 // echo says whether it is the coordinator's own: written by one of its
 // logins, or a discussion that moved within echo of its act on the
-// thread.
-func (s *Supervisor) echo(co *Coordinator, t *Track, it *Item, now time.Time) bool {
-	if it.Author != "" && contains(co.Logins, it.Author) {
-		return true
+// thread. A discussion names no author, so an outsider's move inside the
+// window is taken for the coordinator's too.
+func (s *Supervisor) echo(co *Coordinator, t *Track, it *Item) bool {
+	for _, l := range co.Logins {
+		if it.Author != "" && strings.EqualFold(it.Author, l) {
+			return true
+		}
 	}
 	if it.Kind != ItemDiscussion {
 		return false
@@ -111,13 +143,14 @@ func (s *Supervisor) echo(co *Coordinator, t *Track, it *Item, now time.Time) bo
 		at = it.FirstSeen
 	}
 	thread := threadOf(it.ID)
-	// The forge's clock and agentd's differ a little, and a merge is
-	// recorded after the forge made it: the window is either side.
-	if touched, ok := s.st.Touched[thread]; ok && !at.Before(touched.Add(-win)) && !at.After(touched.Add(win)) {
-		return true
+	for _, touched := range s.st.Touched[thread] {
+		if !at.Before(touched.Add(-echoSkew)) && !at.After(touched.Add(win)) {
+			return true
+		}
 	}
+	stall := s.cfg.Policies.Nudge.Stall.Duration
 	for _, w := range t.Wakes {
-		if w.Taken && contains(w.Threads, thread) && !at.Before(w.At) && !at.After(t.turnEnd(w.At, now).Add(win)) {
+		if w.Taken && contains(w.Threads, thread) && !at.Before(w.At) && !at.After(t.turnEnd(w.At, stall).Add(win)) {
 			return true
 		}
 	}

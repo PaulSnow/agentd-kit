@@ -148,3 +148,89 @@ func TestStatusShowsSpendPerWake(t *testing.T) {
 		t.Fatalf("status:\n%s", out.String())
 	}
 }
+
+// arriveAt logs a discussion of widgets' thread that moved at.
+func (h *harness) arriveAt(thread string, at time.Time) string {
+	id := thread + "@" + at.UTC().Format(time.RFC3339)
+	it := ItemPayload{ID: "gitlab/example-org/widgets" + id, Kind: ItemDiscussion, Repository: "gitlab/example-org/widgets", Title: "Widget " + thread, SourceTime: at}
+	h.sup.emit("", Event{Kind: KindItem, Mode: ModeShared, Item: &it})
+	return "item: gitlab/example-org/widgets" + id
+}
+
+// agentd's merge of a request, and a session the coordinator started or
+// ended for an issue, are its acts: their threads moving then do not wake
+// it. The same threads moving later do (#49).
+func TestCoordinatorActsDoNotWakeIt(t *testing.T) {
+	h := sessionsHarness(t)
+	h.ticks(2, time.Minute)
+	h.sup.emit("d", Event{Kind: KindAction, Act: &ActPayload{Action: ActMerge, Key: mergeKey("widgets", "!3"), Repository: "widgets", Ref: "!3"}})
+	h.arriveAt("!3", h.clock.Now().Add(20*time.Second))
+	h.ticks(2, time.Minute)
+	reply, refused := h.startSession(map[string]any{"branch": "fix/spin", "issue": 7})
+	if refused {
+		t.Fatalf("start = %v", reply)
+	}
+	h.arriveAt("#7", h.clock.Now())
+	h.ticks(3, time.Minute)
+	if _, refused := callOne(t, h.mcpServerFor("c"), ToolEndSession, map[string]any{"name": reply["name"]}); refused {
+		t.Fatal("end refused")
+	}
+	h.arriveAt("#7", h.clock.Now().Add(-10*time.Second))
+	h.ticks(3, time.Minute)
+	if w := h.wakes(); len(w) != 0 {
+		t.Fatalf("woke for its own acts: %+v", w)
+	}
+	h.ticks(1, 10*time.Minute)
+	merged, issue := h.arriveAt("!3", h.clock.Now()), h.arriveAt("#7", h.clock.Now())
+	h.ticks(2, time.Minute)
+	if w := h.wakes(); len(w) != 1 || w[0].Reason != merged+"; "+issue {
+		t.Fatalf("wakes = %+v", w)
+	}
+}
+
+// An outsider's move on a request well before the coordinator approved it
+// is not its echo: it wakes the coordinator (#49).
+func TestMoveBeforeApprovalWakes(t *testing.T) {
+	h, _ := requestsHarness(t)
+	h.ticks(3, 5*time.Minute)
+	if _, refused := h.approve("!2", "5eed0101"); refused {
+		t.Fatal("approve refused")
+	}
+	before := h.arriveAt("!2", h.clock.Now().Add(-90*time.Second))
+	h.ticks(2, time.Minute)
+	if w := h.wakes(); len(w) != 1 || w[0].Reason != before {
+		t.Fatalf("wakes = %+v", w)
+	}
+}
+
+// A wake's turn that leaves no summary keeps its threads quiet only until
+// the stall after the wake: a later move on them wakes the coordinator
+// (#49).
+func TestTurnWithoutSummaryEndsAtStall(t *testing.T) {
+	h := coordHarness(t)
+	h.arrive("#4", ItemIssue, "someone")
+	h.ticks(2, time.Minute)
+	if w := h.wakes(); len(w) != 1 {
+		t.Fatalf("wakes = %+v", w)
+	}
+	h.ticks(5, 10*time.Minute)
+	later := h.arriveAt("#4", h.clock.Now())
+	h.ticks(2, time.Minute)
+	if w := h.wakes(); len(w) != 2 || w[1].Reason != later {
+		t.Fatalf("wakes = %+v", w)
+	}
+}
+
+// Logins match as the forge has them, whatever their case (#49).
+func TestOwnLoginMatchesAnyCase(t *testing.T) {
+	h := coordHarness(t)
+	w := h.cfg.Repositories["widgets"]
+	w.Coordinator.Logins = []string{"Widget-Coord"}
+	h.cfg.Repositories["widgets"] = w
+	h.restart(false)
+	h.arrive("#5", ItemIssue, "widget-coord")
+	h.ticks(3, time.Minute)
+	if w := h.wakes(); len(w) != 0 {
+		t.Fatalf("woke for its own issue: %+v", w)
+	}
+}

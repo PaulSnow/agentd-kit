@@ -508,11 +508,11 @@ func (s *Supervisor) packItems(repo string) []PackItem {
 		return nil
 	}
 	key := repoKey(r.Forge, r.Project)
-	co, now := r.Coordinator, s.clock.Now()
+	co := r.Coordinator
 	var its []*Item
 	for _, it := range s.st.Items {
 		// The coordinator's own items echo what it did: not for it.
-		if it.Repository == key && !it.Seen && !it.OwnerOnly && (co == nil || !s.echo(co, s.track(co.Session), it, now)) {
+		if it.Repository == key && !it.Seen && !it.OwnerOnly && (co == nil || !s.echo(co, s.track(co.Session), it)) {
 			its = append(its, it)
 		}
 	}

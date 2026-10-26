@@ -49,7 +49,7 @@ type LogState struct {
 	Approvals map[string]ApprovalRecord
 	// Touched is when a coordinator, or agentd for it, last acted on a
 	// forge thread, by thread: its echoes do not wake it (#49).
-	Touched map[string]time.Time
+	Touched map[string][]time.Time
 	// Accounts are each account's latest usage reading (#39), and
 	// StartedAt when each started session was started.
 	Accounts  map[string]AccountRecord
