@@ -152,7 +152,11 @@ func TestConsoleReplyWakesTheLoopAndAnswers(t *testing.T) {
 		if doc, ok := readAnswers(t, h, "s1"); ok && len(doc.Answers) == 1 {
 			return true
 		}
-		h.clock.advance(time.Second)
+		// The clock moves only while the loop waits on it, so a slow
+		// machine's pass does not count as time the reply waited.
+		if h.clock.waiting() == 2 {
+			h.clock.advance(time.Second)
+		}
 		return false
 	})
 	if waited := h.clock.Now().Sub(start); waited > 2*WakeCheck {
