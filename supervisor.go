@@ -72,6 +72,9 @@ type Supervisor struct {
 	// tailOff is how far into the event log this run has read, so each
 	// pass picks up what the owner wrote meanwhile: agentd clear.
 	tailOff int64
+	// jobsLeft is set once this run has ended the scheduled jobs' runs an
+	// earlier agentd left with no end (#51).
+	jobsLeft bool
 
 	st           *LogState
 	limitRe      *regexp.Regexp

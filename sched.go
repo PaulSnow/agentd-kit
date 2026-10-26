@@ -182,15 +182,21 @@ func (j ScheduledJob) slot(r JobRecord, now time.Time) (time.Time, bool) {
 	return slot, slot.After(r.Slot) && now.Sub(slot) <= scheduledLate
 }
 
-// jobTrack is the name of the track a scheduled job's escalations are
-// kept on: no session's, since a session's name has no colon.
-func jobTrack(name string) string { return "job:" + name }
+// jobTrackPrefix begins the name of the track a scheduled job's
+// escalations are kept on: no session's, since a session's name has no
+// colon.
+const jobTrackPrefix = "job:"
+
+// jobTrack is the name of the track job's escalations are kept on.
+func jobTrack(name string) string { return jobTrackPrefix + name }
 
 // runJobs starts each scheduled job whose slot is due, in a worker, and
 // escalates a job that failed scheduledFailures times in a row. A slot
 // due while its job still runs is skipped; shadow mode records the run it
 // would start.
 func (s *Supervisor) runJobs(now time.Time) {
+	left := !s.jobsLeft
+	defer func() { s.jobsLeft = s.jobsLeft || s.halt == nil }()
 	for _, name := range sortedKeys(s.cfg.Jobs.Scheduled) {
 		if s.halt != nil {
 			return
@@ -202,7 +208,7 @@ func (s *Supervisor) runJobs(now time.Time) {
 				name, r.Failures, r.FailedSince.Format("2006-01-02 15:04"), jobFailure(r.End)), s.track(jobTrack(name)), now)
 		}
 		key := jobTrack(name)
-		if r.Running() && !s.work.inFlight[key] && !s.shadow {
+		if left && r.Running() && !s.work.inFlight[key] && !s.shadow {
 			// Started by an earlier agentd, which ended without its end:
 			// its process group may still run, and is not waited for.
 			s.emit("", Event{Kind: KindJob, Job: &JobPayload{Name: name, Phase: JobEnd, Slot: r.Slot, Stopped: true,
@@ -290,7 +296,9 @@ func runScheduled(ctx context.Context, j ScheduledJob, acct Account) JobPayload 
 		exit = 0
 	case errors.As(err, &ee) && ee.ExitCode() >= 0:
 		exit = ee.ExitCode()
-		p.Error = strings.TrimSpace(string(stderr.b))
+		// The tail may begin inside a character; the log keeps valid UTF-8
+		// only, so a replay folds the same text.
+		p.Error = strings.TrimSpace(strings.ToValidUTF8(string(stderr.b), ""))
 	default:
 		p.Error = err.Error()
 	}

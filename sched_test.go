@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // schedHarness is a harness with the scheduled jobs jobs, each running in
@@ -405,4 +406,49 @@ func TestScheduledJobConsole(t *testing.T) {
 	if got := h.cfg.Console(jobTrack("sweep")); got != "infra" {
 		t.Fatalf("console = %q, want the default", got)
 	}
+}
+
+// A stopped run inside a failure streak neither ends nor adds to it, and
+// the streak's escalation reaches the default console, even with a console
+// whose sessions glob matches every name.
+func TestScheduledJobStoppedInStreak(t *testing.T) {
+	h := newHarness(t, false)
+	h.cfg.Consoles = map[string]ConsoleConfig{"ops": {Sessions: []string{"*"}}}
+	h = schedHarnessWith(t, h, map[string]ScheduledJob{
+		"flaky": {Every: Duration{time.Minute}, Argv: []string{"sh", "-c", "echo broken >&2; exit 3"}}})
+	h.ticks(2, time.Minute)
+	first := h.sup.st.Jobs["flaky"].FailedSince
+	slot := h.clock.Now()
+	h.sup.emit("", Event{Kind: KindJob, Job: &JobPayload{Name: "flaky", Phase: JobStart, Slot: slot}})
+	h.sup.emit("", Event{Kind: KindJob, Job: &JobPayload{Name: "flaky", Phase: JobEnd, Slot: slot, Stopped: true, Error: "agentd stopped, and the run was killed"}})
+	if r := h.sup.st.Jobs["flaky"]; r.Failures != 2 || !r.FailedSince.Equal(first) {
+		t.Fatalf("record after a stopped run = %+v", r)
+	}
+	h.clock.advance(time.Minute)
+	h.ticks(2, time.Minute)
+	var consoles []string
+	for _, e := range h.events() {
+		if e.Kind == KindAction && e.Act.Action == ActEscalate && e.Session == jobTrack("flaky") {
+			consoles = append(consoles, e.Act.Console)
+		}
+	}
+	if len(consoles) != 1 || consoles[0] != "infra" {
+		t.Fatalf("escalations to %q, want one to infra", consoles)
+	}
+	if r := h.sup.st.Jobs["flaky"]; !r.FailedSince.Equal(first) {
+		t.Fatalf("streak since %v, want %v", r.FailedSince, first)
+	}
+}
+
+// A failed run's stderr tail that begins inside a character is logged as
+// valid text, and a replay folds the same.
+func TestScheduledJobStderrTailValidUTF8(t *testing.T) {
+	h := schedHarness(t, false, map[string]ScheduledJob{
+		"wide": {Every: Duration{time.Hour}, Argv: []string{"sh", "-c", "i=0; while [ $i -lt 200 ]; do printf 'é' >&2; i=$((i+1)); done; printf x >&2; exit 1"}}})
+	h.ticks(1, time.Minute)
+	e := h.sup.st.Jobs["wide"].End
+	if e == nil || !utf8.ValidString(e.Error) || !strings.HasSuffix(e.Error, "éx") {
+		t.Fatalf("end = %+v", e)
+	}
+	sameAfterReplay(t, h, "after a cut character")
 }
