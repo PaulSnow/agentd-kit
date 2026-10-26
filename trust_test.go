@@ -392,6 +392,9 @@ func TestNothingTypedIntoTrustPrompt(t *testing.T) {
 	// question.
 	h.sup.cfg.Policies.Trust.Enabled, h.sup.cfg.Policies.Trust.Pattern = false, ""
 	h.sup.trustRe = regexp.MustCompile(`^(?:)$`)
+	if questionLine(regexp.MustCompile(`^(?:(Do you trust.*)?)$`), "static\n\n❯ ") {
+		t.Fatal("a blank line read as the trust question")
+	}
 	h.tmux.panes["s1"] = "static\n\n❯ "
 	if err := h.sup.typeInto("s1", ActNudge, &ActPayload{Message: "go on"}, tr, StillHash(h.tmux.panes["s1"]), func() error {
 		return h.tmux.Type("s1", "go on")

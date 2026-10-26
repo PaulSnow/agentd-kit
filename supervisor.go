@@ -500,7 +500,8 @@ func (s *Supervisor) answerTrust(name string, sess Session, t *Track, ev Evidenc
 // diff, a dialog's body or a session's output sit inside other text.
 func questionLine(re *regexp.Regexp, screen string) bool {
 	for _, line := range strings.Split(screen, "\n") {
-		if re.MatchString(strings.Trim(line, " \t│┃|")) {
+		// A blank line is no question, whatever a pattern matches.
+		if line = strings.Trim(line, " \t│┃|"); line != "" && re.MatchString(line) {
 			return true
 		}
 	}
