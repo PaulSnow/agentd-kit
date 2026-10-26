@@ -387,6 +387,10 @@ func TestNoneOpenLines(t *testing.T) {
 		"(none open; the three questions were answered on 2026-10-26: ports, names and the target)",
 		"- (None open: answered in the console (twice).)",
 		"(none yet)\n(none open; see below)",
+		"(none open; answered on\n2026-10-26: ports and names)",
+		"(none open \u2013 answered)",
+		"None open; answered on 2026-10-26.",
+		"(no open questions; answered)",
 	} {
 		if ev := ParseStatus("# T\n\n## Questions\n" + body + "\n\n## Next\nwork\n"); ev.Questions != "" {
 			t.Errorf("%q: questions %q", body, ev.Questions)
@@ -396,8 +400,14 @@ func TestNoneOpenLines(t *testing.T) {
 		"(none open; the earlier ones were answered)\n- Which port?": "- Which port?",
 		"none\nShould the target be main?":                           "Should the target be main?",
 		"None of the ports work: which should I use?":                "None of the ports work: which should I use?",
-		"(none of these is settled: which comes first?":              "(none of these is settled: which comes first?",
 		"(none of these is settled: which comes first?)":             "(none of these is settled: which comes first?)",
+		"(none open, but which port should I use?)":                  "(none open, but which port should I use?)",
+		"(None: should the target be main or release?)":              "(None: should the target be main or release?)",
+		"(none - do you want me to tag v1.2?)":                       "(none - do you want me to tag v1.2?)",
+		"- (none yet; one forthcoming: which port?)":                 "- (none yet; one forthcoming: which port?)",
+		"(none-blocking issues remain)":                              "(none-blocking issues remain)",
+		"(none open; but\nwhich port should I use?)":                 "(none open; but\nwhich port should I use?)",
+		"(none open; see below\n- Tag the release first.":            "- Tag the release first.",
 	} {
 		if ev := ParseStatus("# T\n\n## Questions\n" + body + "\n"); ev.Questions != want {
 			t.Errorf("%q: questions %q, want %q", body, ev.Questions, want)

@@ -101,11 +101,12 @@ var thematicBreak = regexp.MustCompile(`^(-{3,}|\*{3,}|_{3,})$`)
 // "(none yet)", "None.", "None open.", "No open questions", "n/a".
 var noQuestions = regexp.MustCompile(`(?i)^[-*\s]*\(?\s*(none(\s+(yet|open|so\s+far))?|no(\s+open)?\s+questions?(\s+(yet|open))?|n/a)\s*\.?\)?\s*$`)
 
-// noneSaid matches a parenthesised line that says none are open and why:
-// "(none open; the three were answered on ...)", "(None: see the console)"
-// (#54). "(none of these ...)" asks something, so the none must end at
-// punctuation.
-var noneSaid = regexp.MustCompile(`(?i)^[-*\s]*\(\s*none(\s+(yet|open|so\s+far))?\s*[;:,.\x{2014}-].*\)\s*\.?$`)
+// noneSaid matches a line that says none are open and why: "(none open;
+// the three were answered on ...)", "None: see the console", "(no open
+// questions; answered)" (#54). "(none of these ...)" asks something, so the
+// none must end at punctuation, and a line with a question mark asks
+// something whatever it begins with.
+var noneSaid = regexp.MustCompile(`(?i)^[-*\s]*\(?\s*(none(\s+(yet|open|so\s+far))?|no(\s+open)?\s+questions?(\s+(yet|open))?)\s*([;:,.\x{2013}\x{2014}]|\s-\s)[^?]*$`)
 
 // ParseStatus interprets STATUS.md text.
 func ParseStatus(text string) StatusEvidence {
@@ -143,12 +144,31 @@ func parseQuestions(text string, fences bool) (questions string, closed bool) {
 	flush := func() {
 		// A DONE line under the heading is the end of the file, not a
 		// question, and a line that says none are open asks nothing: only
-		// the lines left are the section's questions.
+		// the lines left are the section's questions. That holds for a
+		// line within a question too, such as an option "- none", which
+		// leaves the question asked. A parenthesised reason wrapped onto
+		// the lines after it is judged as the one line it is.
 		var kept []string
-		for _, l := range section {
-			if t := strings.TrimSpace(l); t != "DONE" && !noQuestions.MatchString(t) && !noneSaid.MatchString(t) {
-				kept = append(kept, l)
+		for i := 0; i < len(section); i++ {
+			t, j := strings.TrimSpace(section[i]), i
+			if strings.HasPrefix(strings.TrimLeft(t, "-* "), "(") && !strings.Contains(t, ")") {
+				// Only up to a closing parenthesis: one never closed is
+				// judged alone and swallows nothing after it.
+				for k := i + 1; k < len(section); k++ {
+					if strings.Contains(section[k], ")") {
+						for j < k {
+							j++
+							t += " " + strings.TrimSpace(section[j])
+						}
+						break
+					}
+				}
 			}
+			if t == "DONE" || noQuestions.MatchString(t) || noneSaid.MatchString(t) {
+				i = j
+				continue
+			}
+			kept = append(kept, section[i])
 		}
 		if joined := strings.Join(kept, "\n"); joined != "" {
 			found = append(found, joined)
