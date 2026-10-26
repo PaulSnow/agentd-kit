@@ -401,6 +401,7 @@ func (s *Supervisor) Pass() error {
 		s.pollForges(s.clock.Now())
 		s.watchCI(s.clock.Now())
 		s.mergeGreen(s.clock.Now())
+		s.runLoops(s.clock.Now())
 		s.feedConsoles(s.clock.Now())
 		s.triageItems(s.clock.Now())
 		s.readAccounts(s.clock.Now())
@@ -435,7 +436,8 @@ func (s *Supervisor) ownerRecords() {
 			continue
 		}
 		shared := e.Kind == KindSeen || e.Kind == KindInstruction || e.Kind == KindAccount || e.Kind == KindTriage || e.Kind == KindError && e.Error.Triage != nil ||
-			e.Kind == KindItem && s.st.itemChanged(*e.Item) || e.Kind == KindCase && e.Mode == ModeOwner || e.Kind == KindCoordinator
+			e.Kind == KindItem && s.st.itemChanged(*e.Item) || e.Kind == KindCase && e.Mode == ModeOwner || e.Kind == KindCoordinator ||
+			e.Kind == KindLoop && e.Mode == ModeOwner
 		if e.Session == "" && shared {
 			s.st.apply(e)
 			continue
@@ -749,6 +751,9 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 		typed = s.wake(name, sess, t, ev, state, now)
 	}
 	if !typed && sess.Role != RoleCoordinator && s.fixCI(name, sess, t, ev, state, now) {
+		return Starting
+	}
+	if !typed && sess.Role != RoleCoordinator && s.fixRound(name, sess, t, ev, state) {
 		return Starting
 	}
 	switch state {

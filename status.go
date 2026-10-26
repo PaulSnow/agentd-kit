@@ -126,6 +126,9 @@ func SummarizeState(cfg *Config, st *LogState) ([]SessionStatus, map[string]any)
 		}
 		meta["ci"] = ci
 	}
+	if loops := loopViews(cfg, st); len(loops) > 0 {
+		meta["loops"] = loops
+	}
 	tracks := copyMap(st.Tracks)
 	for _, n := range cfg.SessionNames() {
 		if tracks[n] == nil {
@@ -220,6 +223,16 @@ func PrintStatus(w io.Writer, rows []SessionStatus, meta map[string]any, now tim
 				line += fmt.Sprintf(" (%s: %s)", c.Verdict, strings.Join(c.Jobs, ", "))
 			}
 			fmt.Fprintf(w, "%s, since %s ago\n", line, ago(now, c.At))
+		}
+	}
+	// Each request's place in its repository's loop (#53).
+	if loops, ok := meta["loops"].([]LoopView); ok {
+		for _, l := range loops {
+			line := fmt.Sprintf("loop %s %s: %s", l.Repository, l.Ref, l.Phase)
+			if l.Reason != "" {
+				line += " (" + l.Reason + ")"
+			}
+			fmt.Fprintln(w, line)
 		}
 	}
 	// A quiet poll makes no event, but a source still polled has a record

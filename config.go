@@ -323,6 +323,9 @@ type Session struct {
 	// the branch its worktree has out.
 	Kind   string `json:"-"`
 	Branch string `json:"-"`
+	// Request is the request a started reviewer or judge serves when no
+	// session delivered it (#53): its case is the request's.
+	Request string `json:"-"`
 	// Brief is a coordinator's brief parts (#50).
 	Brief []string `json:"-"`
 	// Policy is the session's own rules: which of its turns its console
@@ -820,6 +823,9 @@ func (c *Config) SessionNames() []string {
 func (c *Config) Console(name string) string {
 	if strings.HasPrefix(name, jobTrackPrefix) { // a scheduled job's, whose name no console's sessions match
 		return c.Policies.Escalate.DefaultConsole
+	}
+	if repo, ok := strings.CutPrefix(name, requestsTrackPrefix); ok { // a repository's requests'
+		return c.RepositoryConsole(repo)
 	}
 	s := c.Sessions[name]
 	if s.Repository != "" {

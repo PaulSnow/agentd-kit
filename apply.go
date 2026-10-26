@@ -56,6 +56,9 @@ type LogState struct {
 	StartedAt map[string]time.Time
 	// Jobs are the scheduled jobs' latest slots and runs (#51).
 	Jobs map[string]JobRecord
+	// Loops are the steps agentd took in each request's loop, by ciKey
+	// (#53).
+	Loops map[string]LoopRecord
 
 	cfg *Config // its policies, read as each event is applied
 }
@@ -149,6 +152,10 @@ func (st *LogState) apply(e Event) {
 			st.Approvals = map[string]ApprovalRecord{}
 		}
 		st.Approvals[ciKey(e.Approval.Repository, e.Approval.Ref)] = ApprovalRecord{ApprovalPayload: *e.Approval, By: e.Session, At: e.Time}
+		return
+	}
+	if e.Kind == KindLoop {
+		st.applyLoop(e)
 		return
 	}
 	if e.Kind == KindCoordinator {
@@ -434,12 +441,13 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 		}
 	case ActWake:
 		t.applyWake(a, taken, counted, at)
-	case ActCIFix:
+	case ActCIFix, ActFixRound:
 		// Not a restart or a crash: its count is the fix's own. A would-be
-		// fix is recorded too, so shadow mode would start it once.
+		// fix is recorded too, so shadow mode would start it once. A fix
+		// round (#53) is delivered and watched as a CI fix is.
 		if counted {
 			t.CIFixes = append(t.CIFixes, CIFixRecord{Ref: a.Ref, Repository: a.Repository, Delivered: a.Delivered, Head: a.Head, Cause: a.Cause,
-				Decision: a.Decision, Transcript: a.Transcript, Taken: taken, At: at})
+				Decision: a.Decision, Transcript: a.Transcript, Taken: taken, At: at, Review: a.Action == ActFixRound})
 		}
 		if taken {
 			// The delivery waits for the fix, and is recorded again after it.

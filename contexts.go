@@ -639,7 +639,7 @@ func ParseProgress(text string) Progress {
 // restartFacts is what agentd hands a fresh session about where it stands,
 // as one compact JSON document: data, not instructions.
 type restartFacts struct {
-	Why       string   `json:"why"` // rotation, restart, answered (restarted with the owner's answers), ci-fix, or continue (typed into a turn that ended)
+	Why       string   `json:"why"` // rotation, restart, answered (restarted with the owner's answers), ci-fix, fix-round, or continue (typed into a turn that ended)
 	Brief     string   `json:"brief"`
 	Progress  string   `json:"progress"`
 	Item      string   `json:"item,omitempty"`
@@ -653,6 +653,9 @@ type restartFacts struct {
 	Instruction string `json:"instruction,omitempty"`
 	// A fix session's: the CI failure it was started for.
 	CI *CIFact `json:"ci,omitempty"`
+	// A reviewer's or judge's agentd started: the request and the head
+	// it reviews (#53).
+	Review *ReviewFact `json:"review,omitempty"`
 	// With the case's server passed at launch: the tools to report
 	// through, the done-when items they name, and the rulings the first
 	// report must acknowledge.
@@ -724,6 +727,9 @@ func (s *Supervisor) packFactsWith(name string, sess Session, t *Track, why stri
 		}
 		f.Rounds = roundsFact(s.st.Cases[id])
 	}
+	if sess.Runtime && (sess.Role == RoleReviewer || sess.Role == RoleJudge) {
+		f.Review = s.reviewFact(name)
+	}
 	return encodeFacts(f)
 }
 
@@ -744,6 +750,8 @@ func (s *Supervisor) promptWith(facts []byte, why string) string {
 		prompt += s.cfg.Policies.Answers.Pointer + " "
 	case "ci-fix":
 		prompt += s.cfg.Policies.CI.Pointer + " "
+	case "fix-round":
+		prompt += FixRoundPointer + " "
 	}
 	return prompt + string(facts)
 }

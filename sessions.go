@@ -62,7 +62,10 @@ type RuntimePayload struct {
 	Kind       string `json:"kind,omitempty"`
 	Branch     string `json:"branch,omitempty"`
 	Issue      int    `json:"issue,omitempty"`
-	Account    string `json:"account,omitempty"`
+	// Request is the request no session delivered that a reviewer or
+	// judge agentd started serves (#53).
+	Request string `json:"request,omitempty"`
+	Account string `json:"account,omitempty"`
 	// Place marks a start agentd places on an account by usage (#39).
 	Place bool `json:"place,omitempty"`
 	// Max is the repository's max when the start was made: the fold
@@ -155,7 +158,7 @@ func projected(cfg *Config, events []Event) *Config {
 func runtimeSession(name string, p RuntimePayload, repo Repository) Session {
 	workdir := filepath.Join(repo.Sessions.Root, name)
 	s := Session{Workdir: workdir, Cwd: filepath.Join(workdir, "work"), Account: p.Account, Repository: p.Repository, Issue: p.Issue, Runtime: true,
-		Kind: p.Kind, Branch: p.Branch}
+		Kind: p.Kind, Branch: p.Branch, Request: p.Request}
 	switch p.Kind {
 	case KindReviewer:
 		s.Role = RoleReviewer
@@ -208,9 +211,6 @@ func (c *Config) checkSessionsPolicies(path func(field, p string) string, errs *
 			continue
 		}
 		field := "repositories." + name + ".sessions"
-		if repo.Coordinator == nil {
-			*errs = append(*errs, fmt.Errorf("%s needs the repository's coordinator, which alone starts them", field))
-		}
 		if p.Root == "" || p.Clone == "" || p.Target == "" {
 			*errs = append(*errs, fmt.Errorf("%s needs root, clone and target", field))
 			continue
