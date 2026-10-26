@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -284,7 +285,7 @@ func TestNodeRefusesUnsafeSessionCommands(t *testing.T) {
 	cmd := NodeCommand{ID: "session-start:x:1", Action: NodeSessionStart, Session: "widgets-x", Repository: "widgets", Path: "github.com/example-org/widgets",
 		Branch: "x", Target: "main", Kind: KindWork, Account: "acct-b", Start: "1"}
 	h.tmuxes["host-b"].alive["widgets-x"] = true
-	if r := n.do(t.Context(), cmd); r.Outcome != NodeRefused || !strings.Contains(r.Error, "already running") {
+	if r := n.do(context.Background(), cmd); r.Outcome != NodeRefused || !strings.Contains(r.Error, "already running") {
 		t.Fatalf("running name: %+v", r)
 	}
 	h.tmuxes["host-b"].alive["widgets-x"] = false
@@ -293,12 +294,12 @@ func TestNodeRefusesUnsafeSessionCommands(t *testing.T) {
 		"plain branch":       func() NodeCommand { c := cmd; c.Branch = "-x"; return c }(),
 		"does not watch":     func() NodeCommand { c := cmd; c.Repository = "gizmos"; return c }(),
 	} {
-		if r := n.do(t.Context(), c); r.Outcome != NodeRefused || !strings.Contains(r.Error, why) {
+		if r := n.do(context.Background(), c); r.Outcome != NodeRefused || !strings.Contains(r.Error, why) {
 			t.Fatalf("%s: %+v", why, r)
 		}
 	}
 	n.cfg.Launch = nil
-	if r := n.do(t.Context(), cmd); r.Outcome != NodeRefused || !strings.Contains(r.Error, "node.launch") {
+	if r := n.do(context.Background(), cmd); r.Outcome != NodeRefused || !strings.Contains(r.Error, "node.launch") {
 		t.Fatalf("no launch: %+v", r)
 	}
 	if n := h.tmuxes["host-b"].count("new-session", ""); n != 0 {
@@ -308,11 +309,11 @@ func TestNodeRefusesUnsafeSessionCommands(t *testing.T) {
 	n.cfg.Launch = []string{"claude"}
 	c := cmd
 	c.Repository, c.Path = "gadgets", "gitlab.com/example-org/tools/gadgets"
-	if r := n.do(t.Context(), c); r.Outcome != NodeRefused || !strings.Contains(r.Error, "no clone") {
+	if r := n.do(context.Background(), c); r.Outcome != NodeRefused || !strings.Contains(r.Error, "no clone") {
 		t.Fatalf("no clone: %+v", r)
 	}
 	// A stop of a session that is not running is done.
-	if r := n.do(t.Context(), NodeCommand{ID: "session-stop:widgets-x:2", Action: NodeSessionStop, Session: "widgets-x"}); r.Outcome != NodeDone {
+	if r := n.do(context.Background(), NodeCommand{ID: "session-stop:widgets-x:2", Action: NodeSessionStop, Session: "widgets-x"}); r.Outcome != NodeDone {
 		t.Fatalf("stop of none: %+v", r)
 	}
 }
@@ -466,7 +467,7 @@ func TestNodeStopsOnlyItsOwnSessions(t *testing.T) {
 	}
 	n := h.nodes["host-b"]
 	h.tmuxes["host-b"].alive["owners-own"] = true
-	if r := n.do(t.Context(), NodeCommand{ID: "session-stop:owners-own:1", Action: NodeSessionStop, Session: "owners-own"}); r.Outcome != NodeRefused {
+	if r := n.do(context.Background(), NodeCommand{ID: "session-stop:owners-own:1", Action: NodeSessionStop, Session: "owners-own"}); r.Outcome != NodeRefused {
 		t.Fatalf("stop of an unwatched session: %+v", r)
 	}
 }
