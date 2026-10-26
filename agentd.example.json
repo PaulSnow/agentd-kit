@@ -92,6 +92,7 @@
       "host": "gitlab.example.com",
       "transport": "ssh",
       "project": "example-org/widgets",
+      "clone_on": ["host-a", "host-b"],
       "console": "widgets",
       "assignee": "123456",
       "policy": {
@@ -121,6 +122,20 @@
         "gate": {"argv": ["make", "test"], "paths": ["Makefile"]}
       }
     }
+  },
+  "hub": {"address": "192.0.2.10:7450", "silent_after": "10m", "retry_after": "30m"},
+  "hosts": {
+    "host-a": {"token_file": "~/.config/agentd-kit/hosts/host-a.token"},
+    "host-b": {"token_file": "~/.config/agentd-kit/hosts/host-b.token"}
+  },
+  "node": {
+    "name": "host-a",
+    "hub": "http://192.0.2.10:7450",
+    "token_file": "~/.config/agentd-kit/node.token",
+    "repos_root": "~/repos",
+    "every": "1m",
+    "clone_timeout": "30m",
+    "open_state": [".kickoff"]
   },
   "accounts": {
     "work": {
