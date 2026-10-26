@@ -134,6 +134,7 @@
     "token_file": "~/.config/agentd-kit/node.token",
     "repos_root": "~/repos",
     "every": "1m",
+    "clone_timeout": "30m",
     "open_state": [".kickoff"]
   },
   "accounts": {

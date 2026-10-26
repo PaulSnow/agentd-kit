@@ -347,7 +347,7 @@ func DefaultConfig() Config {
 		Poll:          PollConfig{Every: Duration{DefaultPollEvery}, CIEvery: Duration{DefaultCIEvery}},
 		Usage:         UsageConfig{Every: Duration{DefaultUsageEvery}, Limit: DefaultUsageLimit, API: DefaultUsageAPI, Model: DefaultUsageModel},
 		Hub:           HubConfig{SilentAfter: Duration{DefaultSilentAfter}, RetryAfter: Duration{DefaultRetryAfter}},
-		Node:          NodeConfig{ReposRoot: "~/repos", Every: Duration{DefaultNodeEvery}, OpenState: []string{".kickoff"}},
+		Node:          NodeConfig{ReposRoot: "~/repos", Every: Duration{DefaultNodeEvery}, CloneTimeout: Duration{DefaultCloneTimeout}, OpenState: []string{".kickoff"}},
 		TranscriptDir: "~/.claude/projects",
 		Timeouts:      Timeouts{Tmux: Duration{10 * time.Second}, Forge: Duration{2 * time.Minute}, Escalate: Duration{2 * time.Minute}},
 		Policies: Policies{

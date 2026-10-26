@@ -61,15 +61,18 @@ type NodeConfig struct {
 	ReposRoot string   `json:"repos_root"`
 	Every     Duration `json:"every"`
 	OpenState []string `json:"open_state"`
+	// CloneTimeout bounds one clone, which takes longer than a scan.
+	CloneTimeout Duration `json:"clone_timeout"`
 }
 
 // Hub and node defaults.
 const (
-	DefaultSilentAfter = 10 * time.Minute
-	DefaultRetryAfter  = 30 * time.Minute
-	DefaultNodeEvery   = time.Minute
-	nodeReportPath     = "/v1/report"
-	nodeBodyMax        = 1 << 20
+	DefaultSilentAfter  = 10 * time.Minute
+	DefaultRetryAfter   = 30 * time.Minute
+	DefaultNodeEvery    = time.Minute
+	DefaultCloneTimeout = 30 * time.Minute
+	nodeReportPath      = "/v1/report"
+	nodeBodyMax         = 1 << 20
 )
 
 // KindNode is a node's event, as the hub appended it.
@@ -420,15 +423,33 @@ type NodeGit interface {
 	Scan(dir string) (CloneState, error)
 }
 
-// ExecNodeGit runs git, each call bounded by Timeout.
-type ExecNodeGit struct{ Timeout time.Duration }
+// ExecNodeGit runs git, each scan's call bounded by Timeout and a clone by
+// CloneTimeout.
+type ExecNodeGit struct{ Timeout, CloneTimeout time.Duration }
 
+// Clone clones url into a new directory beside dir, bounded by
+// CloneTimeout, and renames it to dir only once the clone is whole. A clone
+// that fails or is killed at its timeout leaves no partial checkout at dir
+// for a scan to take as the clone: its directory, which this call made, is
+// removed, and nothing else.
 func (g ExecNodeGit) Clone(url, dir string) error {
-	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+	parent := filepath.Dir(dir)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return err
 	}
-	_, err := gitOut(g.Timeout, filepath.Dir(dir), "clone", "-q", "--", url, dir)
-	return err
+	tmp, err := os.MkdirTemp(parent, ".agentd-clone-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	into := filepath.Join(tmp, "clone")
+	if _, err := gitOut(g.CloneTimeout, tmp, "clone", "-q", "--", url, into); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("something came to %s during the clone", dir)
+	}
+	return os.Rename(into, dir)
 }
 
 // Scan reads dir's branch, head, changes, stashes and distance from its
@@ -445,7 +466,10 @@ func (g ExecNodeGit) Scan(dir string) (CloneState, error) {
 	}
 	top, err := run("rev-parse", "--show-toplevel")
 	if err != nil {
-		return c, nil
+		if strings.Contains(err.Error(), "not a git repository") {
+			return c, nil
+		}
+		return c, err // a checkout git refused or did not answer for
 	}
 	if same, _ := sameDir(top, dir); !same {
 		return c, nil
@@ -633,7 +657,9 @@ func (n *Node) post(ctx context.Context, events []NodePayload) (nodeReply, int, 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, nodeBodyMax))
 	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusConflict {
 		if err := json.Unmarshal(body, &reply); err != nil {
-			return reply, resp.StatusCode, fmt.Errorf("hub: answer is not JSON: %w", err)
+			// Its numbers unknown, the answer is no answer: nothing is
+			// acknowledged or numbered again from it.
+			return nodeReply{}, 0, fmt.Errorf("hub: answer is not JSON: %w", err)
 		}
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -842,8 +868,8 @@ func (c *Config) checkNodeConfig(path func(field, p string) string, errs *[]erro
 		}
 	}
 	n := &c.Node
-	if n.Every.Duration <= 0 {
-		*errs = append(*errs, errors.New("node.every must be positive"))
+	if n.Every.Duration <= 0 || n.CloneTimeout.Duration <= 0 {
+		*errs = append(*errs, errors.New("node.every and node.clone_timeout must be positive"))
 	}
 	n.TokenFile = path("node.token_file", n.TokenFile)
 	n.ReposRoot = path("node.repos_root", n.ReposRoot)
@@ -907,7 +933,7 @@ func nodeCmd(args []string) error {
 	if err != nil {
 		return fmt.Errorf("node.token_file: %w", err)
 	}
-	n := NewNode(nc, string(tok), ExecNodeGit{Timeout: cfg.Timeouts.Forge.Duration}, &http.Client{Timeout: time.Minute}, time.Now)
+	n := NewNode(nc, string(tok), ExecNodeGit{Timeout: cfg.Timeouts.Forge.Duration, CloneTimeout: nc.CloneTimeout.Duration}, &http.Client{Timeout: time.Minute}, time.Now)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	for {

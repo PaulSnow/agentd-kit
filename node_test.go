@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -246,6 +247,85 @@ func (h *hubHarness) post(token string, req nodeRequest) (int, nodeReply) {
 	return resp.StatusCode, reply
 }
 
+// loseReply forwards each request and, while lose is set, loses the
+// hub's answer, as a dropped connection does after the hub took the events.
+type loseReply struct {
+	next http.RoundTripper
+	lose bool
+}
+
+func (l *loseReply) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := l.next.RoundTrip(r)
+	if err == nil && l.lose {
+		resp.Body.Close()
+		return nil, errors.New("connection reset")
+	}
+	return resp, err
+}
+
+// A node whose answers are lost, though the hub took its events, and then
+// heard again, leaves each event in the log once, with no gap; so does one
+// whose hub was down.
+func TestNodeAfterLostReplies(t *testing.T) {
+	h := newHubHarness(t)
+	rt := &loseReply{next: h.srv.Client().Transport}
+	n := NewNode(h.nodes["host-a"].cfg, "token-of-host-a", h.gits["host-a"], &http.Client{Transport: rt}, h.clock)
+	h.nodes["host-a"] = n
+	h.tick("host-a")
+	rt.lose = true
+	for i := 0; i < 3; i++ {
+		h.now = h.now.Add(time.Minute)
+		if err := n.Tick(context.Background()); err == nil {
+			t.Fatal("a lost answer is no error")
+		}
+	}
+	rt.lose = false
+	h.srv.Close()
+	if err := n.Tick(context.Background()); err == nil {
+		t.Fatal("a hub that is down is no error")
+	}
+	h.startHub()
+	h.now = h.now.Add(time.Minute)
+	rt.next = h.srv.Client().Transport
+	h.tick("host-a")
+	h.tick("host-a")
+	ev := h.nodeEvents()
+	for i, p := range ev {
+		if p.Seq != int64(i+1) {
+			t.Fatalf("event %d has number %d", i+1, p.Seq)
+		}
+	}
+	clones := 0
+	for _, p := range ev {
+		if p.Result != nil {
+			clones++
+		}
+	}
+	if clones != 1 || len(h.gits["host-a"].cloned) != 1 {
+		t.Fatalf("%d clone results, %d clones", clones, len(h.gits["host-a"].cloned))
+	}
+	if len(n.pending) != 0 {
+		t.Fatalf("pending after the hub heard all: %+v", n.pending)
+	}
+}
+
+// A batch with an event that names another host stops there: what came
+// before it is taken, it and what follows are not.
+func TestHubRefusesAnotherHostsEvent(t *testing.T) {
+	h := newHubHarness(t)
+	req := nodeRequest{Host: "host-a", Events: []NodePayload{
+		{Host: "host-a", Seq: 1, At: h.now, Report: &NodeReport{}},
+		{Host: "host-b", Seq: 2, At: h.now, Report: &NodeReport{}},
+		{Host: "host-a", Seq: 3, At: h.now, Report: &NodeReport{}},
+	}}
+	if code, reply := h.post("token-of-host-a", req); code != http.StatusBadRequest || reply.Acked != 1 {
+		t.Fatalf("%d acked %d", code, reply.Acked)
+	}
+	if ev := h.nodeEvents(); len(ev) != 1 || ev[0].Host != "host-a" {
+		t.Fatalf("log: %+v", ev)
+	}
+}
+
 // A node with no token, a wrong token, or another host's token for its
 // own name is refused, and nothing it sent reaches the log.
 func TestHubRefusesUnauthenticatedNode(t *testing.T) {
@@ -339,6 +419,22 @@ func TestRequiredMissingCloneIsCreated(t *testing.T) {
 	}
 	if strings.Join(done, ",") != "host-a widgets,host-b gadgets" {
 		t.Fatalf("results: %v", done)
+	}
+	// In the log, host-a's events are in the order it made them: its
+	// report, the clone's result, then the report after it.
+	var order []string
+	for _, p := range h.nodeEvents() {
+		if p.Host != "host-a" {
+			continue
+		}
+		kind := "report"
+		if p.Result != nil {
+			kind = "result"
+		}
+		order = append(order, kind)
+	}
+	if strings.Join(order, ",") != "report,result,report" {
+		t.Fatalf("host-a's events: %v", order)
 	}
 	st := h.status()
 	for _, c := range st["host-a"].Clones {
@@ -454,7 +550,15 @@ func TestExecNodeGitClonesAndScans(t *testing.T) {
 	gitRun(t, seed, "add", "a")
 	gitRun(t, seed, "commit", "-q", "-m", "base")
 	gitRun(t, seed, "push", "-q", "origin", "HEAD")
-	g := ExecNodeGit{Timeout: 10 * time.Second}
+	g := ExecNodeGit{Timeout: 10 * time.Second, CloneTimeout: 10 * time.Second}
+	// A clone that fails leaves nothing at its path, nor beside it.
+	bad := filepath.Join(root, "repos", "host", "bad")
+	if err := g.Clone(filepath.Join(root, "no-such.git"), bad); err == nil {
+		t.Fatal("a clone of nothing succeeded")
+	}
+	if left, _ := os.ReadDir(filepath.Dir(bad)); len(left) != 0 {
+		t.Fatalf("a failed clone left %v", left)
+	}
 	dst := filepath.Join(root, "repos", "host", "clone")
 	if err := g.Clone(origin, dst); err != nil {
 		t.Fatal(err)
