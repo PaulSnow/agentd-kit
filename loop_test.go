@@ -622,7 +622,7 @@ func TestLoopJudgesEachTargetByItsOwnFile(t *testing.T) {
 		{"main", "widget-bot", ""},
 	} {
 		r := CIRecord{CIPayload: CIPayload{Head: "5eed0101", Target: c.target, Author: c.author}}
-		if got := outsideLoop(cfg, st, "widgets", all, r, true, "!2", now); got != c.want {
+		if got := outsideLoop(all, func(target string) RepoPolicy { return effectiveFor(cfg, st, "widgets", target) }, r, true, "!2", now); got != c.want {
 			t.Errorf("%s by %s: %q, want %q", c.target, c.author, got, c.want)
 		}
 	}
@@ -660,6 +660,9 @@ func TestLoopWaitsForAnUnknownUpdate(t *testing.T) {
 	h.sup.endFinished(h.clock.Now())
 	if _, ok := h.sup.st.Runtime[reviewer]; !ok {
 		t.Fatal("the reviewer was ended while the update is unknown")
+	}
+	if f := h.sup.reviewFact(reviewer); f == nil || f.Request != "!2" {
+		t.Fatalf("fact while the update is unknown = %+v", f)
 	}
 }
 

@@ -178,9 +178,9 @@ func loopRequests(cfg *Config, st *LogState, now time.Time) []loopRequest {
 // review-only, updated within review.others_max_age, and its number is
 // neither excluded nor reserved. Its number is matched against pol, the
 // policy narrowed by every target's file; the rest against the policy
-// for its own target, as its merge reads it. One whose head the watcher
-// has not recorded is in, and waits for it.
-func outsideLoop(cfg *Config, st *LogState, repo string, pol RepoPolicy, r CIRecord, ok bool, ref string, now time.Time) string {
+// for its own target (own), as its merge reads it. One whose head the
+// watcher has not recorded is in, and waits for it.
+func outsideLoop(pol RepoPolicy, own func(target string) RepoPolicy, r CIRecord, ok bool, ref string, now time.Time) string {
 	n, _ := strconv.Atoi(ref[1:])
 	switch {
 	case containsInt(pol.Merge.Exclude.Numbers, n) || containsInt(pol.Scope.Reserved.Numbers, n):
@@ -188,7 +188,7 @@ func outsideLoop(cfg *Config, st *LogState, repo string, pol RepoPolicy, r CIRec
 	case !ok || r.Head == "":
 		return ""
 	}
-	pol = effectiveFor(cfg, st, repo, r.Target)
+	pol = own(r.Target)
 	switch {
 	case r.Draft:
 		return LoopOutDraft
@@ -214,7 +214,7 @@ func outsideLoop(cfg *Config, st *LogState, repo string, pol RepoPolicy, r CIRec
 // loop or not, delivered first, in the order the watcher lists them.
 func openLoopRequests(cfg *Config, st *LogState, now time.Time) []loopRequest {
 	delivered := watchedRequestsOf(cfg, st)
-	pols := map[string]RepoPolicy{}
+	pols, owns := map[string]RepoPolicy{}, map[string]RepoPolicy{}
 	var out []loopRequest
 	for i, w := range append(delivered, outsideRequestsOf(cfg, st, delivered)...) {
 		repo := cfg.Repositories[w.Repository]
@@ -226,8 +226,17 @@ func openLoopRequests(cfg *Config, st *LogState, now time.Time) []loopRequest {
 			pol, _ = effectivePolicy(cfg, st, w.Repository)
 			pols[w.Repository] = pol
 		}
+		own := func(target string) RepoPolicy {
+			k := policyKey(w.Repository, target)
+			p, ok := owns[k]
+			if !ok {
+				p = effectiveFor(cfg, st, w.Repository, target)
+				owns[k] = p
+			}
+			return p
+		}
 		r, ok := st.CI[ciKey(w.Repository, w.Ref)]
-		q := loopRequest{ciWatched: w, Outside: i >= len(delivered), Branch: "request-" + w.Ref[1:], Out: outsideLoop(cfg, st, w.Repository, pol, r, ok, w.Ref, now)}
+		q := loopRequest{ciWatched: w, Outside: i >= len(delivered), Branch: "request-" + w.Ref[1:], Out: outsideLoop(pol, own, r, ok, w.Ref, now)}
 		if q.Outside {
 			q.Case = repoKey(repo.Forge, repo.Project) + w.Ref
 		} else {
@@ -705,10 +714,12 @@ type ReviewFact struct {
 	Target  string `json:"target,omitempty"`
 }
 
-// reviewFact is the request the judgment session name serves, or nil.
+// reviewFact is the request the judgment session name serves, or nil. A
+// request held for an unknown update keeps its judgment sessions, so
+// they keep their fact.
 func (s *Supervisor) reviewFact(name string) *ReviewFact {
-	for _, q := range loopRequests(s.cfg, s.st, s.clock.Now()) {
-		if q.judgment(KindReviewer) != name && q.judgment(KindJudge) != name {
+	for _, q := range openLoopRequests(s.cfg, s.st, s.clock.Now()) {
+		if q.Out != "" && q.Out != LoopOutUnknown || q.judgment(KindReviewer) != name && q.judgment(KindJudge) != name {
 			continue
 		}
 		// The head the step was recorded for, which its round is
