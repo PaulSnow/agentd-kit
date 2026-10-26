@@ -254,6 +254,15 @@ func TestEmptyRetestEscalatesOnce(t *testing.T) {
 	if s := h.mergeSkips(); len(s) == 0 || !strings.Contains(s[len(s)-1], "would be empty") {
 		t.Fatalf("skips = %q", s)
 	}
+	marked := 0
+	for _, e := range h.events() {
+		if e.Kind == KindError && e.Error.Act != nil && e.Error.Act.Action == ActRetest && e.Error.EmptyPipeline {
+			marked++
+		}
+	}
+	if marked != 1 {
+		t.Fatalf("retest errors marked empty = %d", marked)
+	}
 	sameAfterReplay(t, h, "after the empty retest")
 	h.restart(false)
 	h.sup.api = api
@@ -526,8 +535,11 @@ func TestOutsideRepeatFailureInNewRunIsDue(t *testing.T) {
 // retest's error from whichever stream carried it (#46).
 func TestRetestErrorKeepsEmptyAnswer(t *testing.T) {
 	const body = `{"message":{"base":["The resulting pipeline would have been empty. Review the rules configuration for the relevant jobs."]}}`
-	if err := retestError("HTTP 400 Bad Request", body); !strings.Contains(err.Error(), emptyPipelineAnswer) {
+	if err := retestError("HTTP 400 Bad Request", body); !emptyPipelineAnswer(err.Error()) {
 		t.Fatalf("error = %v", err)
+	}
+	if err := retestError("HTTP 400", `{"message":{"base":["No stages / jobs for this pipeline."]}}`); !emptyPipelineAnswer(err.Error()) {
+		t.Fatalf("older answer: error = %v", err)
 	}
 	if err := retestError("HTTP 500", `{"message":"oops"}`); err.Error() != "glab: HTTP 500" {
 		t.Fatalf("error = %v", err)
@@ -535,7 +547,7 @@ func TestRetestErrorKeepsEmptyAnswer(t *testing.T) {
 	r := Repository{Forge: "gitlab"}
 	r.Policy.Merge.Enabled = true
 	a := AllowedForge{Forge: &fakeForge{retestErr: errors.New("glab: The resulting pipeline would have been empty. (HTTP 400)")}, Repos: map[string]Repository{"widgets": r}}
-	if err := a.RetestAllowed("widgets", "!2"); !errors.Is(err, errEmptyPipeline) || !strings.HasPrefix(err.Error(), errEmptyPipeline.Error()) {
+	if err := a.RetestAllowed("widgets", "!2"); !errors.Is(err, errEmptyPipeline) {
 		t.Fatalf("error = %v", err)
 	}
 }

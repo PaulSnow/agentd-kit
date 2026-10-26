@@ -329,7 +329,7 @@ func (st *LogState) apply(e Event) {
 			if a.Action == ActRestart {
 				t.Restarts = append(t.Restarts, e.Time)
 			}
-			if a.Action == ActRetest && strings.HasPrefix(e.Error.Error, errEmptyPipeline.Error()) {
+			if a.Action == ActRetest && e.Error.EmptyPipeline {
 				if t.Unretestable == nil {
 					t.Unretestable = map[string]bool{}
 				}

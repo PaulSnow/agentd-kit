@@ -211,13 +211,13 @@ func (a AllowedForge) MergeAllowed(repo, ref, head, target string) error {
 
 // RetestAllowed runs a request's pipeline again if the repository allows
 // merge: it is done only on the way to a merge. An answer that the
-// pipeline would be empty begins its error with errEmptyPipeline.
+// pipeline would be empty wraps errEmptyPipeline.
 func (a AllowedForge) RetestAllowed(repo, ref string) error {
 	if err := a.allowed(repo, "merge"); err != nil {
 		return err
 	}
 	err := a.Forge.Retest(a.Repos[repo], ref)
-	if err != nil && strings.Contains(err.Error(), emptyPipelineAnswer) {
+	if err != nil && emptyPipelineAnswer(err.Error()) {
 		return fmt.Errorf("%w: %v", errEmptyPipeline, err)
 	}
 	return err
@@ -730,8 +730,21 @@ func (f ExecForge) Merge(repo Repository, ref, head, target string) error {
 // pipelines, so asking again cannot help (#46).
 var errEmptyPipeline = errors.New("the request's new pipeline would be empty")
 
-// emptyPipelineAnswer is how GitLab says so.
-const emptyPipelineAnswer = "would have been empty"
+// emptyPipelineAnswers are the ways GitLab's English API answers say so,
+// the current one and an older one. An answer in another wording, or
+// another language, is taken as any failed retest: retried, then given up.
+var emptyPipelineAnswers = []string{"would have been empty", "No stages / jobs for this pipeline"}
+
+// emptyPipelineAnswer reports whether a forge answer says the pipeline
+// would be empty.
+func emptyPipelineAnswer(s string) bool {
+	for _, a := range emptyPipelineAnswers {
+		if strings.Contains(s, a) {
+			return true
+		}
+	}
+	return false
+}
 
 // Retest creates a new pipeline for a GitLab merge request, which runs
 // on its merge result where merged results pipelines are on. GitHub has
@@ -751,7 +764,7 @@ func (f ExecForge) Retest(repo Repository, ref string) error {
 // retestError is a failed retest's error, with the forge's answer from
 // standard output too when only that says the pipeline would be empty.
 func retestError(msg, out string) error {
-	if !strings.Contains(msg, emptyPipelineAnswer) && strings.Contains(out, emptyPipelineAnswer) {
+	if !emptyPipelineAnswer(msg) && emptyPipelineAnswer(out) {
 		msg += ": " + strings.TrimSpace(cutUTF8(out, 500))
 	}
 	return fmt.Errorf("glab: %s", msg)

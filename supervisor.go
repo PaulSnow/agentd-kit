@@ -246,7 +246,7 @@ func (s *Supervisor) perform(name, action string, a *ActPayload, would bool, do 
 		return s.halt
 	}
 	if err := do(); err != nil {
-		s.emit(name, Event{Kind: KindError, Error: &ErrorPayload{Key: a.Key, Error: err.Error(), Act: a}})
+		s.emit(name, Event{Kind: KindError, Error: &ErrorPayload{Key: a.Key, Error: err.Error(), Act: a, EmptyPipeline: errors.Is(err, errEmptyPipeline)}})
 		return err
 	}
 	s.emit(name, Event{Kind: KindAction, Act: a})
