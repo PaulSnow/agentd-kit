@@ -247,7 +247,7 @@ func TestExtraConsoleConfig(t *testing.T) {
 
 // A console without a repository is listed by the UI after the
 // repositories, takes posts and replies, and a reply there is an
-// instruction for no coordinator: it wakes none, and inbox reads it.
+// instruction for no repository, which inbox reads.
 func TestExtraConsoleInUI(t *testing.T) {
 	u, f := fixtureUI(t)
 	f.night.Consoles = map[string]ConsoleConfig{"chat": {Title: "General chat"}}

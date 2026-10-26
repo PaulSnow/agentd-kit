@@ -458,6 +458,9 @@ func (s *Supervisor) startRuntime(repo, name string, p RuntimePayload) string {
 	if _, ok := s.st.Runtime[name]; ok {
 		return "it is running already"
 	}
+	if c, ok := s.cfg.Sessions[name]; ok && !c.Runtime {
+		return "a configured session has the name"
+	}
 	if n := len(sessionsOf(s.st.Runtime, repo)); n >= rules.Sessions.Max {
 		return fmt.Sprintf("%s runs %d started sessions, its max", repo, n)
 	}

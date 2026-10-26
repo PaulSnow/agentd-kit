@@ -19,8 +19,8 @@ import (
 
 // InstructionPayload is an owner instruction: its id, the repositories it
 // is for, and its text, left out when it matches a confidential pattern
-// (Withheld, from 1, says which). Hash is the text's, so the same words
-// sent twice can be told apart from new ones; a withheld text has none.
+// (Withheld, from 1, says which). Hash is the text's, and makes the id; a
+// withheld text has none.
 // Console names a console without a repository (#42) the instruction came
 // from: it is for no repository.
 type InstructionPayload struct {

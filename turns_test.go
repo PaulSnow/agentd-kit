@@ -227,27 +227,6 @@ func (h *harness) transcriptOf(name, id, text string) {
 	appendFile(h.t, filepath.Join(TranscriptDir(h.cfg.TranscriptDir, h.cfg.Sessions[name].Cwd), id+".jsonl"), text)
 }
 
-// launchFacts is the facts of the latest launch of name, read from its
-// command.
-func launchFacts(t *testing.T, h *harness, name string) restartFacts {
-	t.Helper()
-	var line string
-	for _, e := range h.events() {
-		if e.Kind == KindAction && (e.Act.Action == ActRestart || e.Act.Action == ActRotate) && e.Session == name {
-			line = e.Act.Command
-		}
-	}
-	i, j := strings.Index(line, `{"why"`), strings.LastIndex(line, "}")
-	if i < 0 || j < i {
-		t.Fatalf("no facts in the command: %s", line)
-	}
-	var f restartFacts
-	if err := json.Unmarshal([]byte(strings.ReplaceAll(line[i:j+1], `'\''`, `'`)), &f); err != nil {
-		t.Fatalf("facts: %v: %s", err, line[i:j+1])
-	}
-	return f
-}
-
 // A transcript's prompts and end-of-turn summaries become turn events,
 // screened and bounded, once each: a replayed agentd reading the same
 // transcript from its start logs none again. A tool result is no prompt.

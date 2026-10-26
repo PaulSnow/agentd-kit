@@ -377,7 +377,7 @@ func TestNothingTypedIntoTrustPrompt(t *testing.T) {
 	h.ticks(1, 5*time.Minute)
 	tr := h.sup.Tracks()["s1"]
 	h.tmux.panes["s1"] = unnumberedTrustScreen(h.cfg.Sessions["s1"].Cwd)
-	for _, act := range []string{ActNudge, ActResume, ActAnswer, ActWake, ActDecline} {
+	for _, act := range []string{ActNudge, ActResume, ActAnswer, ActDecline} {
 		err := h.sup.typeInto("s1", act, &ActPayload{Message: "go on"}, tr, StillHash(h.tmux.panes["s1"]), func() error {
 			return h.tmux.Type("s1", "go on")
 		})

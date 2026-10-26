@@ -558,7 +558,7 @@ const withheldMessage = "(withheld: it matched a confidential pattern)"
 // consoleView is repo's console, nil when no source knows the repository.
 func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 	v := &uiConsole{uiPage: uiPage{Title: repo + " console", Token: u.token, Back: "/console/" + repo, Now: now, loc: u.loc}, Repository: repo}
-	known := false
+	known, loops := false, false
 	for _, src := range u.sources {
 		err := func() error {
 			src.mu.Lock()
@@ -577,9 +577,12 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 				}
 			} else if _, ok := cfg.Repositories[repo]; ok {
 				known = true
-				// The reply goes to the first live run.
-				if src.st.Mode == ModeLive && v.ReplySrc == "" {
-					v.ReplySrc = src.Name
+				// The reply goes to the run of the repository's loop,
+				// whose sessions read its inbox, else to the first live
+				// run.
+				l := looped(cfg.Repositories[repo])
+				if src.st.Mode == ModeLive && (v.ReplySrc == "" || l && !loops) {
+					v.ReplySrc, loops = src.Name, l
 				}
 			}
 			secret := confidentialMatcher(cfg)

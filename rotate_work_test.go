@@ -160,7 +160,7 @@ func TestWorkSessionNotRotatedUnderThresholdOrBusy(t *testing.T) {
 	}
 }
 
-// An instruction a coordinator posts after the rotation is typed into the
+// An instruction posted after the rotation is typed into the
 // fresh session's pane, and the fresh transcript is the one read from then
 // on (#48). The fake pane keeps whatever is typed; a line lost while the
 // fresh Claude starts is not modelled.
@@ -271,7 +271,7 @@ func TestWorkRotationKeepsContextSmall(t *testing.T) {
 }
 
 // A nudge of agentd's own ending in "…" is not taken for a prefix of the
-// coordinator's instruction (#48).
+// owner's instruction (#48).
 func TestLastInstructionOwnLineEndingInEllipsis(t *testing.T) {
 	h, name, _ := workHarness(t)
 	h.sup.cfg.Policies.Nudge.Message = "Carry on…"

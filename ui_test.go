@@ -99,12 +99,12 @@ func ownerPost(u *UI, path string, form url.Values) *httptest.ResponseRecorder {
 	return postTo(u, path, "http://"+pageAddr, u.token, form, "192.0.2.20:51000")
 }
 
-// uiFixture is two configs, as the night build and the coordinators run
-// them, each with its own log. The night config's widgets has a working
+// uiFixture is two configs, as a night build and a second run run them,
+// each with its own log. The night config's widgets has a working
 // session, one blocked on a decision, one done, one whose dialog cleared,
 // one whose Questions say "None open.", one asking a text question in
 // STATUS.md, and a new item; its console has a feed post, an instruction
-// and imported history. The coordinators' config has widgets' coordinator
+// and imported history. The second config runs widgets' request loop,
 // with an outside request, a usage-limited session in widgets, and a
 // session of gadgets with a yes/no decision.
 type uiFixture struct {
@@ -399,7 +399,8 @@ func TestUIAnswersByButtonAndBox(t *testing.T) {
 
 // The console shows the repository's messages from every source in time
 // order, imported history first, and a reply is recorded as the owner's
-// instruction from the UI, in the first live run.
+// instruction from the UI, in the run of the repository's loop, whose
+// sessions read it.
 func TestUIConsoleReply(t *testing.T) {
 	u, f := fixtureUI(t)
 	body := owner(t, u, "/console/widgets")
@@ -412,15 +413,15 @@ func TestUIConsoleReply(t *testing.T) {
 			t.Fatalf("messages out of order %v:\n%s", at, body)
 		}
 	}
-	if !strings.Contains(body, `<input type="hidden" name="src" value="night"><input type="hidden" name="repository" value="widgets">`) || !strings.Contains(body, `action="/reply"`) || !strings.Contains(body, "Which &lt;b&gt;colour&lt;/b&gt;?") {
+	if !strings.Contains(body, `<input type="hidden" name="src" value="coord"><input type="hidden" name="repository" value="widgets">`) || !strings.Contains(body, `action="/reply"`) || !strings.Contains(body, "Which &lt;b&gt;colour&lt;/b&gt;?") {
 		t.Fatalf("console lacks the reply box or the decision:\n%s", body)
 	}
-	w := ownerPost(u, "/reply", url.Values{"src": {"night"}, "repository": {"widgets"}, "text": {"Paint the **logo** green too"}, "back": {"/console/widgets"}})
+	w := ownerPost(u, "/reply", url.Values{"src": {"coord"}, "repository": {"widgets"}, "text": {"Paint the **logo** green too"}, "back": {"/console/widgets"}})
 	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/console/widgets" {
 		t.Fatalf("reply: %d %s", w.Code, w.Body.String())
 	}
-	st := NewLogState(f.night, ModeLive)
-	events, _, _ := NewLogWriter(f.nightBuf).Tail(0)
+	st := NewLogState(f.coord, ModeLive)
+	events, _, _ := NewLogWriter(f.coordBuf).Tail(0)
 	st.Fold(events)
 	var got *Instruction
 	for _, in := range st.Instructions {

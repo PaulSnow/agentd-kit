@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -290,6 +291,54 @@ func TestOldApprovalIgnored(t *testing.T) {
 	h.ticks(2, 5*time.Minute)
 	if got := h.sup.st.approvedAt("widgets", "!2"); got != "" || len(h.forge.merges) != 0 {
 		t.Fatalf("approved at %q, merges %+v", got, h.forge.merges)
+	}
+}
+
+// An earlier version's coordinator wakes, one with its outcome and one a
+// crash cut short, fold to nothing: no pending action, none cut short.
+func TestOldWakesReplayed(t *testing.T) {
+	cfg := DefaultConfig()
+	at := time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC)
+	wake := func(kind, intent string) Event {
+		return Event{V: EventVersion, Time: at, Session: "c", Kind: kind, Mode: ModeLive, Act: &ActPayload{Action: ActWake, Intent: intent, Attempt: 1, Reason: "finished: a"}}
+	}
+	events := []Event{wake(KindIntent, "i1"), wake(KindAction, "i1"), wake(KindIntent, "i2"),
+		{V: EventVersion, Time: at, Session: "c", Kind: KindCoordinator, Mode: ModeShared, Coordinator: &CoordinatorPayload{Repository: "widgets"}}}
+	for _, e := range events {
+		if err := e.check(); err != nil {
+			t.Fatalf("%+v: %v", e, err)
+		}
+	}
+	st := NewLogState(&cfg, ModeLive).Fold(events)
+	if c := st.CutShort(); len(c) != 0 {
+		t.Fatalf("cut short = %+v", c)
+	}
+	if tr := st.Tracks["c"]; tr != nil && len(tr.CutShort) != 0 {
+		t.Fatalf("track cut short = %v", tr.CutShort)
+	}
+}
+
+// The keys the coordinator's removal took away are refused at load, each
+// naming what replaced it, and a repository's file that still has one is
+// told what replaced it (#53).
+func TestRemovedCoordinatorKeysRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.json")
+	for _, c := range []string{
+		`{"policies": {"coordinator": {"pack_bytes": 2048}}}`,
+		`{"policies": {"models": {"coordinator": "opus"}}}`,
+		`{"repositories": {"widgets": {"forge": "gitlab", "project": "example-org/widgets", "coordinator": {"session": "c", "workdir": "/srv/c"}}}}`,
+		`{"repositories": {"widgets": {"forge": "gitlab", "project": "example-org/widgets", "policy": {"sessions": {"coordinator_model": "opus"}}}}}`,
+	} {
+		writeFile(t, path, c)
+		if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "removed in #53") {
+			t.Errorf("%s: %v", c, err)
+		}
+	}
+	if n := removedNote([]string{"merge.method", "sessions.coordinator_model"}); !strings.Contains(n, "review.judge_model") {
+		t.Errorf("note = %q", n)
+	}
+	if n := removedNote([]string{"merge.method"}); n != "" {
+		t.Errorf("note for another key = %q", n)
 	}
 }
 

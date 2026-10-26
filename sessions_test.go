@@ -117,7 +117,8 @@ func TestStartedSessionSupervised(t *testing.T) {
 
 // One session per name: agentd's second start of a running name is
 // refused and not logged, while a reviewer on the same branch is its own
-// session; a start over max is refused too.
+// session; a start over max, or under a configured session's name, is
+// refused too.
 func TestStartRuntimeRefusals(t *testing.T) {
 	h := sessionsHarness(t)
 	work := runtimeName("widgets", "fix-spin", KindWork)
@@ -129,6 +130,9 @@ func TestStartRuntimeRefusals(t *testing.T) {
 	}
 	if why := h.sup.startRuntime("widgets", runtimeName("widgets", "fix-spin", KindReviewer), RuntimePayload{Kind: KindReviewer, Branch: "fix-spin", Issue: 7}); why != "" {
 		t.Fatalf("reviewer start refused: %s", why)
+	}
+	if why := h.sup.startRuntime("widgets", "a", RuntimePayload{Kind: KindWork, Branch: "a"}); !strings.Contains(why, "configured session") {
+		t.Fatalf("start under a configured name = %q", why)
 	}
 	if why := h.sup.startRuntime("widgets", runtimeName("widgets", "third", KindWork), RuntimePayload{Kind: KindWork, Branch: "third"}); !strings.Contains(why, "its max") {
 		t.Fatalf("start over max = %q", why)
