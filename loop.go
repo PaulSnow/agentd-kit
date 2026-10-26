@@ -53,6 +53,11 @@ const (
 	LoopOutAuthor   = "author"   // its author is not one of merge.authors, and review.others is not review-only
 	LoopOutStale    = "stale"    // by another author, and not updated within review.others_max_age
 	LoopOutExcluded = "excluded" // its number is in merge.exclude or scope.reserved
+	// By another author, and the watcher has not recorded when it was
+	// last updated, as in a record written before #55: no step is
+	// started for it, and its judgment sessions are not ended, until the
+	// watcher records it.
+	LoopOutUnknown = "update unknown"
 )
 
 func validLoopStep(step string) bool {
@@ -167,19 +172,24 @@ func loopRequests(cfg *Config, st *LogState, now time.Time) []loopRequest {
 	return out
 }
 
-// outsideLoop is why request r stays outside its repository's loop under
-// pol at now, or "" (#55). A request enters only when it is no draft,
-// into one of merge.targets, by one of merge.authors or, under
-// review.others review-only, updated within review.others_max_age, and
-// its number is neither excluded nor reserved. One whose head the
-// watcher has not recorded is in, and waits for it.
-func outsideLoop(pol RepoPolicy, r CIRecord, ok bool, ref string, now time.Time) string {
+// outsideLoop is why request r of repo stays outside its loop at now, or
+// "" (#55). A request enters only when it is no draft, into one of
+// merge.targets, by one of merge.authors or, under review.others
+// review-only, updated within review.others_max_age, and its number is
+// neither excluded nor reserved. Its number is matched against pol, the
+// policy narrowed by every target's file; the rest against the policy
+// for its own target, as its merge reads it. One whose head the watcher
+// has not recorded is in, and waits for it.
+func outsideLoop(cfg *Config, st *LogState, repo string, pol RepoPolicy, r CIRecord, ok bool, ref string, now time.Time) string {
 	n, _ := strconv.Atoi(ref[1:])
 	switch {
 	case containsInt(pol.Merge.Exclude.Numbers, n) || containsInt(pol.Scope.Reserved.Numbers, n):
 		return LoopOutExcluded
 	case !ok || r.Head == "":
 		return ""
+	}
+	pol = effectiveFor(cfg, st, repo, r.Target)
+	switch {
 	case r.Draft:
 		return LoopOutDraft
 	case !contains(pol.Merge.Targets, r.Target):
@@ -189,7 +199,10 @@ func outsideLoop(pol RepoPolicy, r CIRecord, ok bool, ref string, now time.Time)
 	case pol.Review.Others != ReviewOnly:
 		return LoopOutAuthor
 	}
-	// A request the forge gave no time for is taken as stale.
+	if r.Updated == "" {
+		return LoopOutUnknown
+	}
+	// A time that does not read is taken as stale.
 	updated, err := time.Parse(time.RFC3339, r.Updated)
 	if err != nil || now.Sub(updated) > pol.Review.OthersMaxAge.Duration {
 		return LoopOutStale
@@ -214,7 +227,7 @@ func openLoopRequests(cfg *Config, st *LogState, now time.Time) []loopRequest {
 			pols[w.Repository] = pol
 		}
 		r, ok := st.CI[ciKey(w.Repository, w.Ref)]
-		q := loopRequest{ciWatched: w, Outside: i >= len(delivered), Branch: "request-" + w.Ref[1:], Out: outsideLoop(pol, r, ok, w.Ref, now)}
+		q := loopRequest{ciWatched: w, Outside: i >= len(delivered), Branch: "request-" + w.Ref[1:], Out: outsideLoop(cfg, st, w.Repository, pol, r, ok, w.Ref, now)}
 		if q.Outside {
 			q.Case = repoKey(repo.Forge, repo.Project) + w.Ref
 		} else {
@@ -480,8 +493,10 @@ func (s *Supervisor) runLoops(now time.Time) {
 // sessions.max goes to the next case and the judgment sessions.
 func (s *Supervisor) endFinished(now time.Time) {
 	current := map[string]bool{}
-	for _, q := range loopRequests(s.cfg, s.st, now) {
-		current[q.judgment(KindReviewer)], current[q.judgment(KindJudge)] = true, true
+	for _, q := range openLoopRequests(s.cfg, s.st, now) {
+		if q.Out == "" || q.Out == LoopOutUnknown {
+			current[q.judgment(KindReviewer)], current[q.judgment(KindJudge)] = true, true
+		}
 	}
 	for _, name := range sortedKeys(s.st.Runtime) {
 		p := s.st.Runtime[name]

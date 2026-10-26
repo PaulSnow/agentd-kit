@@ -306,8 +306,9 @@ func statusCmd(args []string) error {
 	default:
 		return fmt.Errorf("--mode must be live or shadow")
 	}
-	rows, meta := Summarize(cfg, events, mode)
-	PrintStatus(os.Stdout, rows, meta, time.Now())
+	now := time.Now()
+	rows, meta := SummarizeAt(cfg, events, mode, now)
+	PrintStatus(os.Stdout, rows, meta, now)
 	return nil
 }
 
