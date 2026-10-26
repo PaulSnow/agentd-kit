@@ -230,6 +230,10 @@ func TestEmptyRetestEscalatesOnce(t *testing.T) {
 	repo := h.cfg.Repositories["widgets"]
 	repo.Policy.CI.RetestOnBaseMove = true
 	h.cfg.Repositories["widgets"] = repo
+	// The answer's text is withheld from the log; the fact is kept.
+	h.cfg.ConfidentialPatterns = []string{"(?i)rules configuration"}
+	h.restart(false)
+	h.sup.api = api
 	h.ticks(2, 5*time.Minute)
 	h.approve("!2", "5eed0101")
 	h.forge.retestErr = fmt.Errorf("glab: %w", fmt.Errorf("%s (HTTP 400)", "The resulting pipeline would have been empty. Review the rules configuration for the relevant jobs."))
@@ -256,12 +260,12 @@ func TestEmptyRetestEscalatesOnce(t *testing.T) {
 	}
 	marked := 0
 	for _, e := range h.events() {
-		if e.Kind == KindError && e.Error.Act != nil && e.Error.Act.Action == ActRetest && e.Error.EmptyPipeline {
+		if e.Kind == KindError && e.Error.Act != nil && e.Error.Act.Action == ActRetest && e.Error.EmptyPipeline && !strings.Contains(e.Error.Error, "would have been empty") {
 			marked++
 		}
 	}
 	if marked != 1 {
-		t.Fatalf("retest errors marked empty = %d", marked)
+		t.Fatalf("withheld retest errors marked empty = %d", marked)
 	}
 	sameAfterReplay(t, h, "after the empty retest")
 	h.restart(false)
@@ -540,6 +544,9 @@ func TestRetestErrorKeepsEmptyAnswer(t *testing.T) {
 	}
 	if err := retestError("HTTP 400", `{"message":{"base":["No stages / jobs for this pipeline."]}}`); !emptyPipelineAnswer(err.Error()) {
 		t.Fatalf("older answer: error = %v", err)
+	}
+	if err := retestError("HTTP 400", `{"message":{"base":["Pipeline will not run for the selected trigger. The rules configuration prevented any jobs from being added to the pipeline."]}}`); !emptyPipelineAnswer(err.Error()) {
+		t.Fatalf("rules answer: error = %v", err)
 	}
 	if err := retestError("HTTP 500", `{"message":"oops"}`); err.Error() != "glab: HTTP 500" {
 		t.Fatalf("error = %v", err)

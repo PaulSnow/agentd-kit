@@ -730,10 +730,10 @@ func (f ExecForge) Merge(repo Repository, ref, head, target string) error {
 // pipelines, so asking again cannot help (#46).
 var errEmptyPipeline = errors.New("the request's new pipeline would be empty")
 
-// emptyPipelineAnswers are the ways GitLab's English API answers say so,
-// the current one and an older one. An answer in another wording, or
+// emptyPipelineAnswers are the ways GitLab's English API answers say so:
+// the merge request's own, the rules' and an older one. An answer in another wording, or
 // another language, is taken as any failed retest: retried, then given up.
-var emptyPipelineAnswers = []string{"would have been empty", "No stages / jobs for this pipeline"}
+var emptyPipelineAnswers = []string{"would have been empty", "rules configuration prevented any jobs", "No stages / jobs for this pipeline"}
 
 // emptyPipelineAnswer reports whether a forge answer says the pipeline
 // would be empty.
