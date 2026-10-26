@@ -277,3 +277,38 @@ func TestLoopShadowStartsNothing(t *testing.T) {
 		t.Fatalf("shadow steps = %v", got)
 	}
 }
+
+// agentd starts the top queued case, in a repository the week's priorities
+// list, as a work session on its own branch: not a reserved one, not one
+// a session works, and one a pass.
+func TestLoopStartsNextQueuedCase(t *testing.T) {
+	h, _ := loopHarness(t)
+	w := h.cfg.Repositories["widgets"]
+	w.Policy.Scope.Reserved.Numbers = []int{9}
+	h.cfg.Repositories["widgets"] = w
+	h.cfg.Tracking.Priorities = filepath.Join(h.dir, "priorities.json")
+	writeFile(t, h.cfg.Tracking.Priorities, `{"week":"2026-W43","repositories":[{"repository":"gitlab/example-org/widgets","priority":1}]}`)
+	log := NewLogWriter(h.buf)
+	for _, n := range []string{"7", "9", "10", "11"} {
+		log.Append(Event{V: EventVersion, Time: h.clock.Now(), Kind: KindItem, Mode: ModeShared, Item: &ItemPayload{ID: "gitlab/example-org/widgets#" + n,
+			Kind: ItemIssue, Repository: "gitlab/example-org/widgets", Title: "Widgets " + n}})
+	}
+	h.restart(false)
+	h.ticks(1, 5*time.Minute)
+	var started []RuntimePayload
+	for _, p := range h.sessionEvents() {
+		if p.Kind == KindWork {
+			started = append(started, p)
+		}
+	}
+	if len(started) != 1 || started[0].Issue != 10 || started[0].Branch != "issue-10" || started[0].By != "agentd" {
+		t.Fatalf("started = %+v", started)
+	}
+	h.ticks(1, 5*time.Minute)
+	if n := len(h.sessionEvents()); n != 2 {
+		t.Fatalf("session events = %+v", h.sessionEvents())
+	}
+	if p := h.sessionEvents()[1]; p.Issue != 11 {
+		t.Fatalf("second start = %+v", p)
+	}
+}

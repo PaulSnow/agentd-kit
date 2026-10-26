@@ -496,7 +496,12 @@ func (s *Supervisor) startNext(now time.Time) {
 		return
 	}
 	pr, err := LoadPriorities(s.cfg.Tracking.Priorities)
-	if err != nil || pr == nil {
+	if err != nil {
+		name := room[sortedKeys(room)[0]]
+		s.skipOnce(requestsTrack(name), "loop-priorities:"+err.Error(), "not starting queued cases: "+err.Error(), s.track(requestsTrack(name)), nil)
+		return
+	}
+	if pr == nil {
 		return
 	}
 	cs := CasesFrom(s.cfg, s.st)
