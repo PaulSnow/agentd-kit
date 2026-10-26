@@ -64,6 +64,10 @@ type JobPayload struct {
 	Exit       *int   `json:"exit,omitempty"`
 	DurationMS int64  `json:"duration_ms,omitempty"`
 	Error      string `json:"error,omitempty"`
+	// Stopped: agentd stopped during the run and killed it, or a restarted
+	// agentd found it with no end. Such a run neither failed nor
+	// succeeded, and leaves the failure streak as it was.
+	Stopped bool `json:"stopped,omitempty"`
 }
 
 // Took is how long the run took, to the tenth of a second.
@@ -97,6 +101,9 @@ func (st *LogState) applyJob(e Event) {
 		r.Slot = p.Slot
 	case JobEnd:
 		r.End, r.Ended = &p, e.Time
+		if p.Stopped {
+			break
+		}
 		if p.Exit != nil && *p.Exit == 0 && p.Error == "" {
 			r.Failures, r.FailedSince = 0, time.Time{}
 		} else {
@@ -194,11 +201,21 @@ func (s *Supervisor) runJobs(now time.Time) {
 			s.escalate(jobTrack(name), key, fmt.Sprintf("Scheduled job %s failed %d times in a row since %s; the latest: %s. agentd keeps running it on its schedule.",
 				name, r.Failures, r.FailedSince.Format("2006-01-02 15:04"), jobFailure(r.End)), s.track(jobTrack(name)), now)
 		}
+		key := jobTrack(name)
+		if r.Running() && !s.work.inFlight[key] && !s.shadow {
+			// Started by an earlier agentd, which ended without its end:
+			// its process group may still run, and is not waited for.
+			s.emit("", Event{Kind: KindJob, Job: &JobPayload{Name: name, Phase: JobEnd, Slot: r.Slot, Stopped: true,
+				Error: "agentd restarted while it ran; how it ended is not known, and it may still run"}})
+			if s.halt != nil {
+				return
+			}
+			r = s.st.Jobs[name]
+		}
 		slot, due := j.slot(r, now)
 		if !due {
 			continue
 		}
-		key := "job:" + name
 		switch {
 		case s.shadow:
 			s.emit("", Event{Kind: KindJob, Job: &JobPayload{Name: name, Phase: JobWould, Slot: slot}})
@@ -212,8 +229,8 @@ func (s *Supervisor) runJobs(now time.Time) {
 			name, slot := name, slot
 			s.spawnShared(key, func(w *Supervisor) {
 				end := runScheduled(w.runCtx, j, acct)
-				if w.runCtx.Err() != nil {
-					end.Error = "agentd stopped, and the run was killed"
+				if w.runCtx.Err() != nil && (end.Exit == nil || *end.Exit != 0) {
+					end.Error, end.Stopped = "agentd stopped, and the run was killed", true
 				}
 				end.Name, end.Phase, end.Slot = name, JobEnd, slot
 				w.emit("", Event{Kind: KindJob, Job: &end})
@@ -254,7 +271,7 @@ func runScheduled(ctx context.Context, j ScheduledJob, acct Account) JobPayload 
 	}
 	script := `exec "$@"`
 	if acct.TokenFile != "" {
-		script = `t=$(cat "$AGENTD_TOKEN_FILE") && case $t in *[![:space:]]*) true ;; *) false ;; esac || { echo "token file is empty" >&2; exit 1; }; CLAUDE_CODE_OAUTH_TOKEN=$t exec "$@"`
+		script = tokenExecScript
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -301,7 +318,7 @@ func (src *uiSource) addJobs(v *uiIndex, cfg *Config) {
 		if j.Every.Duration > 0 {
 			u.Schedule = "every " + j.Every.Duration.String()
 		}
-		if r.End != nil && r.Failures > 0 && !secret(jobFailure(r.End)) {
+		if r.End != nil && (r.Failures > 0 || r.End.Stopped) && !secret(jobFailure(r.End)) {
 			u.Error = jobFailure(r.End)
 		}
 		i := sort.Search(len(v.Jobs), func(i int) bool { return v.Jobs[i].Name >= name })

@@ -171,7 +171,7 @@ func (j Job) Run(ctx context.Context, system string, schema, input []byte) (json
 		if err := checkTokenFile(j.Account.TokenFile); err != nil {
 			return nil, JobUsage{}, err
 		}
-		script = `t=$(cat "$AGENTD_TOKEN_FILE") && case $t in *[![:space:]]*) true ;; *) false ;; esac || { echo "token file is empty" >&2; exit 1; }; CLAUDE_CODE_OAUTH_TOKEN=$t exec "$@"`
+		script = tokenExecScript
 	}
 	ctx, cancel := context.WithTimeout(ctx, j.Timeout)
 	defer cancel()
@@ -256,6 +256,11 @@ func jobEnv(env []string, acct Account) []string {
 	}
 	return out
 }
+
+// tokenExecScript execs its arguments with the token read from
+// AGENTD_TOKEN_FILE, refusing a blank one, so the token is on no command
+// line.
+const tokenExecScript = `t=$(cat "$AGENTD_TOKEN_FILE") && case $t in *[![:space:]]*) true ;; *) false ;; esac || { echo "token file is empty" >&2; exit 1; }; CLAUDE_CODE_OAUTH_TOKEN=$t exec "$@"`
 
 // oneLine is s on one line, cut to at most max bytes.
 func oneLine(s string, max int) string {

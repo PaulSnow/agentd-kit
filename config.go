@@ -818,6 +818,9 @@ func (c *Config) SessionNames() []string {
 
 // Console returns the console an escalation about session name goes to.
 func (c *Config) Console(name string) string {
+	if strings.HasPrefix(name, "job:") { // a scheduled job's, whose name no console's sessions match
+		return c.Policies.Escalate.DefaultConsole
+	}
 	s := c.Sessions[name]
 	if s.Repository != "" {
 		if r, ok := c.Repositories[s.Repository]; ok && r.Console != "" {

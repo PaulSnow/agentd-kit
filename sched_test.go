@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +13,13 @@ import (
 // its own directory under h.dir unless it names one.
 func schedHarness(t *testing.T, shadow bool, jobs map[string]ScheduledJob) *harness {
 	t.Helper()
-	h := newHarness(t, shadow)
+	return schedHarnessWith(t, newHarness(t, shadow), jobs)
+}
+
+// schedHarnessWith is schedHarness over h, as it is configured.
+func schedHarnessWith(t *testing.T, h *harness, jobs map[string]ScheduledJob) *harness {
+	t.Helper()
+	shadow := h.sup.shadow
 	for name, j := range jobs {
 		if j.Cwd == "" {
 			j.Cwd = filepath.Join(h.dir, name)
@@ -279,5 +286,123 @@ func TestScheduledJobsInUI(t *testing.T) {
 	}
 	if out := b.String(); !strings.Contains(out, "<strong>flaky</strong>") || !strings.Contains(out, "exit 3") || !strings.Contains(out, "every 1m0s") {
 		t.Fatalf("index:\n%s", out)
+	}
+}
+
+// Slots an every job missed while agentd was down run once, late, at the
+// latest of them.
+func TestScheduledJobMissedSlotsRunOnce(t *testing.T) {
+	h := schedHarness(t, false, map[string]ScheduledJob{
+		"sweep": {Every: Duration{10 * time.Minute}, Argv: []string{"sh", "-c", "echo run >> runs"}}})
+	first := h.clock.Now()
+	h.ticks(1, time.Minute)
+	h.clock.advance(34 * time.Minute)
+	h.restart(false)
+	h.ticks(2, time.Minute)
+	starts := jobEvents(h, "sweep", JobStart)
+	if got := readJobFile(t, h, "sweep", "runs"); got != "run\nrun\n" || len(starts) != 2 || !starts[1].Slot.Equal(first.Add(30*time.Minute)) {
+		t.Fatalf("runs %q, starts %+v", got, starts)
+	}
+}
+
+// A failed run's end keeps the last scheduledStderr bytes of its standard
+// error, screened against the confidential patterns.
+func TestScheduledJobStderrCutAndScreened(t *testing.T) {
+	h := schedHarness(t, false, map[string]ScheduledJob{
+		"long":   {Every: Duration{time.Hour}, Argv: []string{"sh", "-c", "printf '%0500d' 0 >&2; echo tail-end >&2; exit 1"}},
+		"secret": {Every: Duration{time.Hour}, Argv: []string{"sh", "-c", "echo leaked-widget-key >&2; exit 1"}}})
+	h.cfg.ConfidentialPatterns = []string{`widget-key`}
+	if err := h.cfg.finish(h.dir); err != nil {
+		t.Fatal(err)
+	}
+	h.restart(false)
+	h.ticks(1, time.Minute)
+	if e := jobEvents(h, "long", JobEnd); len(e) != 1 || len(e[0].Error) > scheduledStderr || !strings.HasSuffix(e[0].Error, "tail-end") {
+		t.Fatalf("long end = %+v", e)
+	}
+	if e := jobEvents(h, "secret", JobEnd); len(e) != 1 || !strings.HasPrefix(e[0].Error, "(withheld") {
+		t.Fatalf("secret end = %+v", e)
+	}
+	if strings.Contains(h.buf.String(), "widget-key") {
+		t.Fatal("the confidential text is in the log")
+	}
+}
+
+// A token file made readable by others after load is refused at the run:
+// its end says why, and the command does not run.
+func TestScheduledJobTokenFileRefused(t *testing.T) {
+	tok := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tok, []byte("tok-123\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, false)
+	h.cfg.Accounts = map[string]Account{"b": {TokenFile: tok}}
+	h = schedHarnessWith(t, h, map[string]ScheduledJob{
+		"report": {Every: Duration{time.Hour}, Account: "b", Argv: []string{"sh", "-c", "echo run >> runs"}}})
+	if err := os.Chmod(tok, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(1, time.Minute)
+	if e := jobEvents(h, "report", JobEnd); len(e) != 1 || *e[0].Exit != -1 || e[0].Error == "" {
+		t.Fatalf("end = %+v", e)
+	}
+	if got := readJobFile(t, h, "report", "runs"); got != "" {
+		t.Fatalf("ran with a refused token file: %q", got)
+	}
+}
+
+// A run killed because agentd stopped ends as stopped, and does not count
+// toward the failure streak.
+func TestScheduledJobStoppedRun(t *testing.T) {
+	h := schedHarness(t, false, map[string]ScheduledJob{
+		"slow": {Every: Duration{time.Hour}, Argv: []string{"sh", "-c", "echo run >> runs; sleep 30"}}})
+	ctx, cancel := context.WithCancel(context.Background())
+	h.sup.runCtx = ctx
+	start := time.Now()
+	h.sup.Pass()
+	waitFor(t, "the run to start", func() bool { return readJobFile(t, h, "slow", "runs") != "" })
+	cancel()
+	h.sup.Wait()
+	if time.Since(start) > 10*time.Second {
+		t.Fatal("the run was not killed when agentd stopped")
+	}
+	e := jobEvents(h, "slow", JobEnd)
+	if len(e) != 1 || !e[0].Stopped || !strings.Contains(e[0].Error, "agentd stopped") {
+		t.Fatalf("end = %+v", e)
+	}
+	if r := h.sup.st.Jobs["slow"]; r.Failures != 0 || r.Running() {
+		t.Fatalf("record = %+v", r)
+	}
+}
+
+// A run an earlier agentd started and never ended is ended as stopped by
+// the next one, which then runs the job's next slot.
+func TestScheduledJobLeftByEarlierAgentd(t *testing.T) {
+	h := schedHarness(t, false, map[string]ScheduledJob{
+		"sweep": {Every: Duration{10 * time.Minute}, Argv: []string{"sh", "-c", "echo run >> runs"}}})
+	h.sup.emit("", Event{Kind: KindJob, Job: &JobPayload{Name: "sweep", Phase: JobStart, Slot: h.clock.Now()}})
+	h.restart(false)
+	h.ticks(1, time.Minute)
+	e := jobEvents(h, "sweep", JobEnd)
+	if len(e) != 1 || !e[0].Stopped || !strings.Contains(e[0].Error, "agentd restarted") {
+		t.Fatalf("end = %+v", e)
+	}
+	if r := h.sup.st.Jobs["sweep"]; r.Failures != 0 || r.Running() {
+		t.Fatalf("record = %+v", r)
+	}
+	h.ticks(10, time.Minute)
+	if got := readJobFile(t, h, "sweep", "runs"); got != "run\n" {
+		t.Fatalf("runs after the next slot: %q", got)
+	}
+	sameAfterReplay(t, h, "after a left run")
+}
+
+// A scheduled job's escalations go to the default console, even when a
+// console's sessions glob matches every name.
+func TestScheduledJobConsole(t *testing.T) {
+	h := newHarness(t, false)
+	h.cfg.Consoles = map[string]ConsoleConfig{"ops": {Sessions: []string{"*"}}}
+	if got := h.cfg.Console(jobTrack("sweep")); got != "infra" {
+		t.Fatalf("console = %q, want the default", got)
 	}
 }
