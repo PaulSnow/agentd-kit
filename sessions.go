@@ -134,8 +134,8 @@ func (st *LogState) applySession(e Event) {
 
 // withRuntime is cfg with the started sessions of runtime added, each as
 // runtimeSession makes it; cfg itself is not changed. A name configured
-// already, and a session whose repository no longer has a sessions entry,
-// are left out.
+// already, a session whose repository no longer has a sessions entry, and
+// a session on another host are left out.
 func withRuntime(cfg *Config, runtime map[string]RuntimePayload) *Config {
 	if len(runtime) == 0 {
 		return cfg
@@ -147,7 +147,8 @@ func withRuntime(cfg *Config, runtime map[string]RuntimePayload) *Config {
 	}
 	for n, p := range runtime {
 		repo, ok := cfg.Repositories[p.Repository]
-		if _, configured := cfg.Sessions[n]; configured || !ok || repo.Sessions == nil {
+		// A session on another host is its node's (placement.go).
+		if _, configured := cfg.Sessions[n]; configured || !ok || repo.Sessions == nil || p.Host != "" {
 			continue
 		}
 		c.Sessions[n] = runtimeSession(n, p, repo)

@@ -579,9 +579,6 @@ func (s *Supervisor) step(name string, sess Session) {
 	if sess.Runtime && s.st.Ended[name] != "" {
 		return // the end of an earlier session of the name stops it first
 	}
-	if sess.Runtime && s.st.Runtime[name].Host != "" {
-		return // its host's node runs it, as the hub asks (placement.go)
-	}
 	if p := s.st.Runtime[name]; sess.Runtime && unplaced(p) && t.Provisioned != provisionKey(name, p) {
 		if s.place(name, t, now); s.st.Runtime[name].Account == "" {
 			return

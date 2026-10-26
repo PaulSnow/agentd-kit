@@ -468,6 +468,9 @@ func (s *Supervisor) startRuntime(repo, name string, p RuntimePayload) string {
 	if sp := s.cfg.Repositories[repo].Sessions; sp != nil {
 		p.Host = sp.Host
 	}
+	if p.Host != "" && len(rules.Sessions.Accounts) == 0 {
+		return repo + " places its sessions on " + p.Host + " and names no account for them"
+	}
 	switch {
 	case len(rules.Sessions.Fallback) > 0 && p.Host == "":
 		p.Place = true

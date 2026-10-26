@@ -324,6 +324,7 @@ func TestRunLeavesRemoteSessionToItsNode(t *testing.T) {
 	h := sessionsHarness(t)
 	w := h.cfg.Repositories["widgets"]
 	w.Sessions.Host = "host-b"
+	w.Policy.Sessions.Accounts = []string{"acct-b"}
 	h.cfg.Repositories["widgets"] = w
 	h.restart(false)
 	name := h.startSession("fix/spin", KindWork, 7)
@@ -354,20 +355,22 @@ func TestSessionsHostConfig(t *testing.T) {
 	cases := map[string]struct {
 		host     string
 		cloneOn  []string
+		accounts []string
 		fallback []string
 		want     string
 	}{
-		"ok":         {host: "host-b", cloneOn: []string{"host-b"}},
-		"not a host": {host: "host-z", cloneOn: []string{"host-b"}, want: `sessions.host "host-z" is not in hosts`},
-		"no clone":   {host: "host-a", cloneOn: []string{"host-b"}, want: "clone_on"},
-		"fallback":   {host: "host-b", cloneOn: []string{"host-b"}, fallback: []string{"acct-c"}, want: "fallback"},
+		"ok":         {host: "host-b", cloneOn: []string{"host-b"}, accounts: []string{"acct-b"}},
+		"not a host": {host: "host-z", cloneOn: []string{"host-b"}, accounts: []string{"acct-b"}, want: `sessions.host "host-z" is not in hosts`},
+		"no clone":   {host: "host-a", cloneOn: []string{"host-b"}, accounts: []string{"acct-b"}, want: "clone_on"},
+		"no account": {host: "host-b", cloneOn: []string{"host-b"}, want: "needs policy.sessions.accounts"},
+		"fallback":   {host: "host-b", cloneOn: []string{"host-b"}, accounts: []string{"acct-b"}, fallback: []string{"acct-c"}, want: "fallback"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
 			cfg := DefaultConfig()
 			cfg.Hosts = map[string]HostConfig{"host-a": {}, "host-b": {}}
 			r := Repository{CloneOn: c.cloneOn, Sessions: &SessionsPolicy{Host: c.host}}
-			r.Policy.Sessions.Fallback = c.fallback
+			r.Policy.Sessions.Accounts, r.Policy.Sessions.Fallback = c.accounts, c.fallback
 			cfg.Repositories = map[string]Repository{"widgets": r}
 			var errs []error
 			cfg.checkNodeConfig(func(_, p string) string { return p }, &errs)
@@ -379,5 +382,97 @@ func TestSessionsHostConfig(t *testing.T) {
 				t.Fatalf("errors = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// A start of a name whose ended session the node has not yet stopped waits
+// for the stop, while the host is away and after it is back; then the
+// node stops the old session and starts the new one, in that order.
+func TestStartWaitsForItsNamesStop(t *testing.T) {
+	h := placementHarness(t)
+	name, _ := h.start("fix-spin", "host-b", "acct-b")
+	h.tick("host-b")
+	h.end(name)
+	h.start("fix-spin", "host-b", "acct-b")
+	if r := h.sessionRows()[name]; r.State != SessionStopping {
+		t.Fatalf("row = %+v", r)
+	}
+	h.tick("host-b")
+	var ops []string
+	for _, c := range h.tmuxes["host-b"].calls {
+		if c.op == "new-session" || c.op == "stop" {
+			ops = append(ops, c.op)
+		}
+	}
+	if strings.Join(ops, ",") != "new-session,stop" {
+		t.Fatalf("ops = %v", ops)
+	}
+	h.tick("host-b")
+	if n := h.tmuxes["host-b"].count("new-session", name); n != 2 {
+		t.Fatalf("started %d times", n)
+	}
+	if r := h.sessionRows()[name]; r.State != SessionRunning {
+		t.Fatalf("row = %+v", r)
+	}
+}
+
+// A start that failed is asked again after retry_after; one whose tmux
+// came up though its start reported an error is done, not refused as
+// running already.
+func TestFailedStartIsRetried(t *testing.T) {
+	h := placementHarness(t)
+	name, _ := h.start("fix-spin", "host-b", "acct-b")
+	h.tmuxes["host-b"].newErr[name] = errors.New("tmux timed out")
+	h.tick("host-b")
+	if r := h.sessionRows()[name]; r.State != SessionFailed || !strings.Contains(r.Error, "timed out") {
+		t.Fatalf("row = %+v", r)
+	}
+	delete(h.tmuxes["host-b"].newErr, name)
+	h.tmuxes["host-b"].alive[name] = true // it came up after all
+	h.now = h.now.Add(h.cfg.Hub.RetryAfter.Duration)
+	h.tick("host-b")
+	if r := h.sessionResults(); len(r) != 2 || r[1].Outcome != NodeDone {
+		t.Fatalf("results = %+v", r)
+	}
+	if r := h.sessionRows()[name]; r.State != SessionRunning {
+		t.Fatalf("row = %+v", r)
+	}
+}
+
+// A node stops only a session it started: a stop of a running tmux
+// session with no mark of this node's in its workdir, such as the owner's
+// own, is refused, and the row says why.
+func TestNodeStopsOnlyItsOwnSessions(t *testing.T) {
+	h := placementHarness(t)
+	name, _ := h.start("fix-spin", "host-b", "acct-b")
+	h.tick("host-b")
+	if err := os.Remove(filepath.Join(h.nodes["host-b"].cfg.SessionsRoot, name, nodeMark)); err != nil {
+		t.Fatal(err)
+	}
+	h.end(name)
+	h.tick("host-b")
+	if n := h.tmuxes["host-b"].count("stop", ""); n != 0 {
+		t.Fatalf("stopped %d", n)
+	}
+	if r := h.sessionRows()[name]; r.State != SessionStopping || !strings.Contains(r.Error, "not a session this node started") {
+		t.Fatalf("row = %+v", r)
+	}
+	n := h.nodes["host-b"]
+	h.tmuxes["host-b"].alive["owners-own"] = true
+	if r := n.do(t.Context(), NodeCommand{ID: "session-stop:owners-own:1", Action: NodeSessionStop, Session: "owners-own"}); r.Outcome != NodeRefused {
+		t.Fatalf("stop of an unwatched session: %+v", r)
+	}
+}
+
+// A session whose host cannot say whether it runs is unknown, not gone.
+func TestTmuxErrorShowsUnknown(t *testing.T) {
+	h := placementHarness(t)
+	name, _ := h.start("fix-spin", "host-b", "acct-b")
+	h.tick("host-b")
+	h.tmuxes["host-b"].hasErr = errors.New("no server")
+	h.now = h.now.Add(time.Minute)
+	h.tick("host-b")
+	if r := h.sessionRows()[name]; r.State != NodeUnknown || !strings.Contains(r.Error, "no server") {
+		t.Fatalf("row = %+v", r)
 	}
 }

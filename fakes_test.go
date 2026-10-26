@@ -96,6 +96,7 @@ type fakeTmux struct {
 	paths      map[string]string // #{pane_current_path}
 	newErr     map[string]error  // NewSession fails with this
 	stopErr    map[string]error  // Stop fails with this
+	hasErr     error             // HasSession fails with this
 	replaceErr error             // Replace fails with this
 	calls      []call
 	mutations  int
@@ -111,6 +112,9 @@ func (f *fakeTmux) HasSession(name string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, call{op: "has-session", name: name})
+	if f.hasErr != nil {
+		return false, f.hasErr
+	}
 	return f.alive[name], nil
 }
 

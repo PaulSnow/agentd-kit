@@ -55,6 +55,9 @@ func newPlacements(cfg *Config) *placements {
 // apply folds a session event, and a repository's policy, which its
 // sessions' models come from.
 func (p *placements) apply(e Event) {
+	if e.Mode != ModeLive && e.Mode != ModeOwner && e.Mode != ModeShared && e.Mode != "" {
+		return // as LogState.apply: a shadow run's records are its own
+	}
 	switch e.Kind {
 	case KindSession:
 		r, running := p.st.Runtime[e.Session]
@@ -169,14 +172,21 @@ func (n *Node) startSession(c NodeCommand, r *NodeResult, refuse func(string) *N
 	if info, err := os.Stat(clone); err != nil || !info.IsDir() {
 		return refuse("no clone of " + c.Repository + " at " + c.Path)
 	}
+	workdir := filepath.Join(n.cfg.SessionsRoot, c.Session)
+	mark := filepath.Join(workdir, nodeMark)
 	if alive, err := n.tmux.HasSession(c.Session); err != nil || alive {
 		if err != nil {
 			r.Outcome, r.Error = NodeFailed, err.Error()
 			return r
 		}
+		// This start's own session, whose start reported an error after
+		// tmux came up: it is done.
+		if b, err := os.ReadFile(mark); err == nil && strings.TrimSpace(string(b)) == c.Start && c.Start != "" {
+			r.Outcome = NodeDone
+			return r
+		}
 		return refuse("a session named " + c.Session + " is already running")
 	}
-	workdir := filepath.Join(n.cfg.SessionsRoot, c.Session)
 	work := filepath.Join(workdir, "work")
 	brief, status := filepath.Join(workdir, "BRIEF.md"), filepath.Join(workdir, "STATUS.md")
 	rep := strings.NewReplacer("{brief}", brief, "{status}", status)
@@ -194,6 +204,9 @@ func (n *Node) startSession(c NodeCommand, r *NodeResult, refuse func(string) *N
 	}
 	err = os.MkdirAll(workdir, 0o755)
 	if err == nil {
+		err = writeAtomic(mark, []byte(c.Start+"\n"))
+	}
+	if err == nil {
 		err = writeStartFiles(workdir, facts)
 	}
 	if _, serr := os.Stat(work); err == nil && errors.Is(serr, os.ErrNotExist) {
@@ -210,16 +223,20 @@ func (n *Node) startSession(c NodeCommand, r *NodeResult, refuse func(string) *N
 	return r
 }
 
-// stopSession stops a session the hub placed here: one this node started,
-// whose workdir is under its sessions root. One not running is stopped
-// already.
+// nodeMark is the file in a session's workdir that says this node started
+// it, holding the start's id: the node stops no session without it.
+const nodeMark = ".agentd-node"
+
+// stopSession stops a session the hub placed here: one the hub has it
+// watch and this node started, its mark in its workdir. One not running
+// is stopped already.
 func (n *Node) stopSession(c NodeCommand, r *NodeResult, refuse func(string) *NodeResult) *NodeResult {
 	if !sessionName.MatchString(c.Session) {
 		return refuse(fmt.Sprintf("%q is not a session name", c.Session))
 	}
 	alive, err := n.tmux.HasSession(c.Session)
 	if err == nil && alive {
-		if _, serr := os.Stat(filepath.Join(n.cfg.SessionsRoot, c.Session)); n.cfg.SessionsRoot == "" || serr != nil {
+		if _, serr := os.Stat(filepath.Join(n.cfg.SessionsRoot, c.Session, nodeMark)); n.cfg.SessionsRoot == "" || serr != nil || !contains(n.tmuxes, c.Session) {
 			return refuse(c.Session + " is not a session this node started")
 		}
 		err = n.tmux.Stop(c.Session)
@@ -284,12 +301,21 @@ func RemoteSessionStatus(cfg *Config, events []Event, now time.Time) []SessionRo
 		if rec != nil {
 			last = rec.Last[name]
 		}
+		t := TmuxState{}
+		if rec != nil {
+			t = rec.Sessions[name]
+		}
 		switch {
 		case rec == nil:
 			row.State = NodeUnknown
 		case stopping:
 			row.State = SessionStopping
-		case rec.Done[startID(name, r)] && rec.Sessions[name].Alive:
+			if last.Command == stopID(name, s) && last.Outcome != NodeDone {
+				row.Error = last.Error
+			}
+		case t.Error != "":
+			row.State, row.Error = NodeUnknown, t.Error
+		case rec.Done[startID(name, r)] && t.Alive:
 			row.State = SessionRunning
 		case rec.Done[startID(name, r)]:
 			row.State = SessionGone
@@ -339,6 +365,9 @@ func (c *Config) checkPlacement(errs *[]error) {
 			*errs = append(*errs, fmt.Errorf("repositories.%s.sessions.host %q is not in hosts", name, h))
 		case !contains(r.CloneOn, h):
 			*errs = append(*errs, fmt.Errorf("repositories.%s.sessions.host %q is not in its clone_on: the node adds sessions' worktrees from its clone", name, h))
+		}
+		if len(r.Policy.Sessions.Accounts) == 0 {
+			*errs = append(*errs, fmt.Errorf("repositories.%s: sessions.host needs policy.sessions.accounts: a session on a host runs under an account logged in there", name))
 		}
 		if len(r.Policy.Sessions.Fallback) > 0 {
 			*errs = append(*errs, fmt.Errorf("repositories.%s: sessions.host and policy.sessions.fallback do not go together: placement by usage reads accounts on this machine", name))
