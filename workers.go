@@ -183,6 +183,7 @@ func (t *Track) clone() *Track {
 	c.Merges = copyMap(t.Merges)
 	c.Merged = copyMap(t.Merged)
 	c.Retests = copyMap(t.Retests)
+	c.Unretestable = copyMap(t.Unretestable)
 	if t.WakeBase != nil {
 		b := *t.WakeBase
 		c.WakeBase = &b

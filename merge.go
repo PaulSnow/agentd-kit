@@ -293,6 +293,16 @@ func (s *Supervisor) mergeRequest(name string, t *Track, w ciWatched, r CIRecord
 		}
 		rkey := mergeKey(w.Repository, w.Ref) + ":retest:" + v.head + ":" + tip
 		switch {
+		case t.Unretestable[rkey]:
+			// The forge cannot test the merge result, so asking again
+			// before the tip moves is no use: the owner is told once per
+			// head what would let it merge (#46).
+			s.escalate(name, mergeKey(w.Repository, w.Ref)+":empty:"+v.head, fmt.Sprintf("%s in %s cannot merge: %s, and GitLab answers that a new pipeline for it would be empty, "+
+				"so its CI rules make no merge-request pipelines and the merge result cannot be tested. "+
+				"To let it merge, merge %s into its branch as a merge commit (its branch pipeline then runs on the new tip), "+
+				"add merge-request pipeline rules to its CI, or turn off ci.retest_on_base_move.", w.Ref, w.Repository, moved, v.target), t, s.clock.Now())
+			skip("retest-empty", moved+"; a new pipeline for it would be empty, and the owner is told")
+			return
 		case t.Retests[rkey]:
 			skip("retest-waiting", moved+"; waiting for the new pipeline")
 			return

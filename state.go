@@ -133,6 +133,9 @@ type Track struct {
 	// Retests: each retest of a request agentd asked, or would have, by
 	// its key, which names the head and the target's tip (#36).
 	Retests map[string]bool
+	// Unretestable: each retest the forge answered with an empty pipeline,
+	// by its key; it is not asked again (#46).
+	Unretestable map[string]bool
 }
 
 // DeliveryRecord is one request a delivery opened, found, or was told of.
