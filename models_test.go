@@ -140,13 +140,17 @@ func TestNarrowedModelsHold(t *testing.T) {
 	}
 }
 
-// With restarts off nothing is launched, so a model set with no {model}
-// in the command loads.
+// With restarts and rotation off nothing is launched, so a model set with
+// no {model} in the command loads; with rotation on it is refused.
 func TestModelWithRestartOffLoads(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "c.json")
-	writeFile(t, path, `{"policies": {"restart": {"enabled": false, "command": ["claude", "{prompt}"]}, "models": {"work": "haiku"}}}`)
+	writeFile(t, path, `{"policies": {"restart": {"enabled": false, "command": ["claude", "{prompt}"]}, "context": {"enabled": false}, "models": {"work": "haiku"}}}`)
 	if _, err := LoadConfig(path); err != nil {
 		t.Fatal(err)
+	}
+	writeFile(t, path, `{"policies": {"restart": {"enabled": false, "command": ["claude", "{prompt}"]}, "models": {"work": "haiku"}}}`)
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("a model rotation would not run was accepted")
 	}
 }
 

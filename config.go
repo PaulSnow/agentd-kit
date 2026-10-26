@@ -497,7 +497,7 @@ func (c *Config) finish(base string) error {
 	if r.Enabled && len(r.Command) == 0 {
 		errs = append(errs, errors.New("policies.restart.command must not be empty"))
 	}
-	if m := c.modelsSet(); r.Enabled && m != "" && !strings.Contains(strings.Join(r.Command, " "), "{model}") {
+	if m := c.modelsSet(); (r.Enabled || c.Policies.Context.Enabled) && m != "" && !strings.Contains(strings.Join(r.Command, " "), "{model}") {
 		errs = append(errs, fmt.Errorf("%s is set, but policies.restart.command has no {model}, so no session would run it", m))
 	}
 	if x := c.Policies.Context; x.Enabled && (x.Threshold <= 0 || x.Grace.Duration < 0) {
