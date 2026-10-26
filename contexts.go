@@ -414,6 +414,17 @@ func (s *Supervisor) rotationPoint(sess Session, t *Track, ev Evidence, now time
 	return cp.SHA, true
 }
 
+// delivered says whether every delivery of the session is recorded: a
+// DONE session is not rotated while its branch is being pushed.
+func delivered(name string, sess Session, t *Track) bool {
+	for _, d := range sess.Deliver {
+		if t.Delivered[name+":"+d.Worktree] == "" {
+			return false
+		}
+	}
+	return true
+}
+
 // workTurnMark is a work session's other checkpoint: the end of a turn it
 // took since it was launched and was not rotated at, so the next
 // instruction lands in a fresh context. The turn has ended, never mid-turn:
@@ -428,8 +439,9 @@ func workTurnMark(sess Session, t *Track, ev Evidence) (string, bool) {
 }
 
 // lastInstruction is the latest prompt the session was given that agentd
-// did not type itself, cut to instructionCell, or "": withheld text, the
-// restart prompt and agentd's own lines are not instructions.
+// did not type itself, as its turn was logged (cut at turnText), or "":
+// withheld text, the restart prompt and agentd's own lines are not
+// instructions.
 func (s *Supervisor) lastInstruction(t *Track) string {
 	pol := s.cfg.Policies
 	own := []string{DefaultRestartPrompt, pol.Nudge.Message, pol.Nudge.ContinueMessage, pol.Nudge.ResumeMessage, pol.Answers.Pointer, pol.CI.Pointer}
@@ -440,10 +452,12 @@ func (s *Supervisor) lastInstruction(t *Track) string {
 		}
 		mine := false
 		for _, o := range own {
-			mine = mine || o != "" && strings.HasPrefix(tn.Text, o)
+			// A turn is logged cut at turnText, so a longer line of
+			// agentd's own is matched as cut.
+			mine = mine || o != "" && strings.HasPrefix(tn.Text, strings.TrimSuffix(cutUTF8(o, turnText), "…"))
 		}
 		if !mine {
-			return cutUTF8(tn.Text, instructionCell)
+			return tn.Text
 		}
 	}
 	return ""
@@ -561,9 +575,6 @@ var finishedState = regexp.MustCompile(`(?i)^(merged|done|deferred|closed|droppe
 // progressCell bounds a cell carried into a prompt.
 const progressCell = 120
 
-// instructionCell is the longest instruction a work session's facts carry.
-const instructionCell = 2000
-
 // ParseProgress reads the first markdown table of text whose header has a
 // State column; its first column names the item. Items whose state starts
 // with merged, done, deferred, closed, dropped or skipped are finished.
@@ -677,7 +688,7 @@ func (s *Supervisor) packFactsWith(name string, sess Session, t *Track, why stri
 	}
 	if sess.Kind == KindWork {
 		f.Branch = sess.Branch
-		if why != "continue" {
+		if why == "rotation" {
 			f.Instruction = s.lastInstruction(t)
 		}
 	}

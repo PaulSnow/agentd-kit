@@ -39,6 +39,17 @@ func (h *harness) workTranscript(name, id, text string) {
 	appendFile(h.t, filepath.Join(TranscriptDir(h.cfg.TranscriptDir, filepath.Join(h.dir, name, "work")), id+".jsonl"), text)
 }
 
+// delivered records the work session's branch delivered, with the event
+// mark-delivered writes.
+func (h *harness) delivered(name string) {
+	h.t.Helper()
+	wt := filepath.Join(h.dir, name, "work")
+	if err := h.sup.log.Append(Event{V: EventVersion, Time: h.clock.Now(), Session: name, Kind: KindAction, Mode: ModeOwner,
+		Act: &ActPayload{Action: ActOpen, Delivered: name + ":" + wt, Ref: "!1", By: "mark-delivered"}}); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
 // rotations are the work session's rotate actions.
 func (h *harness) rotations(name string) []*ActPayload {
 	var out []*ActPayload
@@ -80,7 +91,13 @@ func TestDoneWorkSessionRotated(t *testing.T) {
 	h.alive(name, idleScreen)
 	at := h.clock.Now()
 	h.workTranscript(name, id, promptLine("u1", "Fix the spin test; CI fails on it.", at)+summaryLine("u2", "m1", "Fixed; DONE.", at, 150000))
+	// Not while its branch is being delivered.
 	h.ticks(3, time.Minute)
+	if n := len(h.rotations(name)); n != 0 {
+		t.Fatalf("rotated before the delivery was recorded: %d", n)
+	}
+	h.delivered(name)
+	h.ticks(2, time.Minute)
 	rots := h.rotations(name)
 	if len(rots) != 1 || rots[0].Context <= h.cfg.Policies.Context.Threshold || rots[0].Transcript == id {
 		t.Fatalf("rotations = %+v, want one", rots)
@@ -145,13 +162,16 @@ func TestWorkSessionNotRotatedUnderThresholdOrBusy(t *testing.T) {
 }
 
 // An instruction a coordinator posts after the rotation is typed into the
-// fresh session, and its transcript is the one read from then on (#48).
+// fresh session's pane, and the fresh transcript is the one read from then
+// on (#48). The fake pane keeps whatever is typed; a line lost while the
+// fresh Claude starts is not modelled.
 func TestInstructionAfterRotationReachesNewSession(t *testing.T) {
 	h, name, id := workHarness(t)
 	h.status(name, doneStatus)
 	h.alive(name, idleScreen)
 	at := h.clock.Now()
 	h.workTranscript(name, id, promptLine("u1", "Fix the spin test.", at)+summaryLine("u2", "m1", "Fixed; DONE.", at, 150000))
+	h.delivered(name)
 	h.ticks(3, time.Minute)
 	rots := h.rotations(name)
 	if len(rots) != 1 {
@@ -190,6 +210,7 @@ func TestWorkRotationWaitsForMovingScreen(t *testing.T) {
 	h.alive(name, idleScreen)
 	at := h.clock.Now()
 	h.workTranscript(name, id, promptLine("u1", "Fix the spin test.", at)+summaryLine("u2", "m1", "Fixed; DONE.", at, 150000))
+	h.delivered(name)
 	// A pass reads the pane once to observe it; the line lands before the
 	// pass reads it again to act.
 	var last time.Time
@@ -213,7 +234,8 @@ func TestWorkRotationWaitsForMovingScreen(t *testing.T) {
 // threshold keeps the context the rounds' calls carry near the threshold,
 // where without rotation it grows the whole run (#48). The round sizes are
 // the measured ones: 588 calls over the largest session, 30 calls a round,
-// each adding about 1k tokens to a 20k start.
+// each adding about 1k tokens to a 20k start. The averages are modelled
+// from those sizes; only where the rotations fall comes from agentd.
 func TestWorkRotationKeepsContextSmall(t *testing.T) {
 	const rounds, calls, base, step = 20, 30, 20000, 1000
 	h, name, id := workHarness(t)
