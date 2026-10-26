@@ -154,7 +154,8 @@ func projected(cfg *Config, events []Event) *Config {
 // a draft request on the target when the repository allows push.
 func runtimeSession(name string, p RuntimePayload, repo Repository) Session {
 	workdir := filepath.Join(repo.Sessions.Root, name)
-	s := Session{Workdir: workdir, Cwd: filepath.Join(workdir, "work"), Account: p.Account, Repository: p.Repository, Issue: p.Issue, Runtime: true}
+	s := Session{Workdir: workdir, Cwd: filepath.Join(workdir, "work"), Account: p.Account, Repository: p.Repository, Issue: p.Issue, Runtime: true,
+		Kind: p.Kind, Branch: p.Branch}
 	switch p.Kind {
 	case KindReviewer:
 		s.Role = RoleReviewer

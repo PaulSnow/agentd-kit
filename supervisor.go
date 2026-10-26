@@ -719,7 +719,9 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 	if sess.Role == RoleCoordinator && !s.claimed(name, sess, t) {
 		return state
 	}
-	if (state == Working || state == Idle) && !t.Limited && s.rotate(name, sess, t, ev, now) {
+	// A work session is rotated at the end of its round too, DONE once
+	// its branch is delivered (#48).
+	if (state == Working || state == Idle || state == Done && sess.Kind == KindWork && delivered(name, sess, t)) && !t.Limited && s.rotate(name, sess, t, ev, now) {
 		return Starting
 	}
 	// The limit has cleared. Only a session that can take a line is told to

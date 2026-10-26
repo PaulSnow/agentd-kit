@@ -378,10 +378,16 @@ func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, no
 		s.skipOnce(name, "account:"+name, "not rotating: "+err.Error(), t, &SkipPayload{Account: sess.Account})
 		return false
 	}
-	err = s.act(name, ActRotate, &ActPayload{Key: key, Cwd: sess.Cwd, Account: sess.Account, Command: line, Transcript: id,
-		Context: u.Context, Checkpoint: mark}, func() error {
-		return s.tmux.Replace(name, sess.Cwd, line)
-	})
+	a := &ActPayload{Key: key, Cwd: sess.Cwd, Account: sess.Account, Command: line, Transcript: id, Context: u.Context, Checkpoint: mark}
+	replace := func() error { return s.tmux.Replace(name, sess.Cwd, line) }
+	if strings.HasPrefix(mark, "turn:") {
+		// A session waiting at its prompt can be given a line at any time,
+		// by its coordinator: the screen is read again first, as for a
+		// typed line, so a turn that started since is not cut off.
+		err = s.typeInto(name, ActRotate, a, t, ev.PaneHash, replace)
+	} else {
+		err = s.act(name, ActRotate, a, replace)
+	}
 	if err == nil && s.halt == nil && !s.shadow {
 		s.notePack(name, sess, facts)
 	}
@@ -398,11 +404,66 @@ func (s *Supervisor) rotationPoint(sess Session, t *Track, ev Evidence, now time
 		mark := fmt.Sprintf("wake:%d", t.WakeCount)
 		return mark, ok && w.Taken && w.At.After(t.Launched) && t.RotatedFor != mark && s.handled(t, ev, now)
 	}
+	if mark, ok := workTurnMark(sess, t, ev); ok {
+		return mark, true
+	}
 	cp := t.Checkpoint
 	if cp.SHA == "" || cp.Baseline || !cp.At.After(t.Launched) || t.RotatedFor == cp.SHA || now.Sub(cp.At) < s.cfg.Policies.Context.Grace.Duration {
 		return "", false
 	}
 	return cp.SHA, true
+}
+
+// delivered says whether every delivery of the session is recorded: a
+// DONE session is not rotated while its branch is being pushed.
+func delivered(name string, sess Session, t *Track) bool {
+	for _, d := range sess.Deliver {
+		if t.Delivered[name+":"+d.Worktree] == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// workTurnMark is a work session's other checkpoint: the end of a turn it
+// took since it was launched and was not rotated at, so the next
+// instruction lands in a fresh context. The turn has ended, never mid-turn:
+// whether DONE or a fix round with work left, the session waits at its
+// prompt (#48).
+func workTurnMark(sess Session, t *Track, ev Evidence) (string, bool) {
+	if sess.Kind != KindWork || !t.turnEnded(ev) {
+		return "", false
+	}
+	mark := fmt.Sprintf("turn:%d", t.lastTurn().At.UnixNano())
+	return mark, t.RotatedFor != mark
+}
+
+// lastInstruction is the latest prompt the session was given that agentd
+// did not type itself, as its turn was logged (cut at turnText), or "":
+// withheld text, the restart prompt and agentd's own lines are not
+// instructions.
+func (s *Supervisor) lastInstruction(t *Track) string {
+	pol := s.cfg.Policies
+	own := []string{DefaultRestartPrompt, pol.Nudge.Message, pol.Nudge.ContinueMessage, pol.Nudge.ResumeMessage, pol.Answers.Pointer, pol.CI.Pointer}
+	for i := len(t.Turns) - 1; i >= 0; i-- {
+		tn := t.Turns[i]
+		if tn.Role != TurnPrompt || tn.Withheld || strings.TrimSpace(tn.Text) == "" {
+			continue
+		}
+		mine := false
+		for _, o := range own {
+			// A turn is logged cut at turnText, so a longer line of
+			// agentd's own is matched as cut.
+			if len(o) > turnText {
+				o = strings.TrimSuffix(cutUTF8(o, turnText), "…")
+			}
+			mine = mine || o != "" && strings.HasPrefix(tn.Text, o)
+		}
+		if !mine {
+			return tn.Text
+		}
+	}
+	return ""
 }
 
 // rotationPending says whether the session will be rotated at a
@@ -415,6 +476,12 @@ func (s *Supervisor) rotationPending(name string, sess Session, t *Track) bool {
 	u, ok := t.current()
 	if !pol.Enabled || !ok || u.Context <= pol.Threshold || u.Guessed && !s.shadow || sess.Role == RoleCoordinator {
 		return false
+	}
+	if sess.Kind == KindWork && t.lastTurn().Role == TurnSummary && t.lastTurn().At.After(t.Launched) {
+		mark := fmt.Sprintf("turn:%d", t.lastTurn().At.UnixNano())
+		if t.RotatedFor != mark && !s.failed(t, "rotate:"+name+":"+mark) && !t.Skipped["account:"+name] {
+			return true
+		}
 	}
 	cp := t.Checkpoint
 	return cp.SHA != "" && !cp.Baseline && cp.At.After(t.Launched) && t.RotatedFor != cp.SHA &&
@@ -571,6 +638,10 @@ type restartFacts struct {
 	LastMerge string   `json:"last_merge,omitempty"`
 	Next      []string `json:"next,omitempty"`
 	Answers   string   `json:"answers,omitempty"` // the owner's answers, when restarted with them
+	// A work session's: its branch, and the instruction it was last
+	// given, which the fresh session goes on from.
+	Branch      string `json:"branch,omitempty"`
+	Instruction string `json:"instruction,omitempty"`
 	// A fix session's: the CI failure it was started for.
 	CI *CIFact `json:"ci,omitempty"`
 	// With the case's server passed at launch: the tools to report
@@ -617,6 +688,12 @@ func (s *Supervisor) packFactsWith(name string, sess Session, t *Track, why stri
 	}
 	if cp := t.Checkpoint; cp.SHA != "" {
 		f.LastMerge = cutUTF8(shortHash(cp.SHA)+" "+cp.Subject, progressCell)
+	}
+	if sess.Kind == KindWork {
+		f.Branch = sess.Branch
+		if why == "rotation" {
+			f.Instruction = s.lastInstruction(t)
+		}
 	}
 	if why == "continue" {
 		// The session keeps its context: it has its case and tools
