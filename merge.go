@@ -72,10 +72,14 @@ func (s *Supervisor) mergeGreen(now time.Time) {
 		// approve at its head; a delivered one by its case's rounds too.
 		reviewed := ok && r.Head != "" && s.st.approvedAt(w.Repository, w.Ref) == r.Head || !out && s.reviewConverged(w.Session)
 		require := requireOf(pol, pol.Merge.Require, out)
-		if looped(s.cfg.Repositories[w.Repository]) && !contains(require, RequireReview) {
+		if looped(s.cfg.Repositories[w.Repository]) {
 			// agentd reviews every request of a repository it runs the
-			// loop for, and merges none before its rounds converge (#53).
-			require = append(append([]string(nil), require...), RequireReview)
+			// loop for, and merges none before its rounds converge on
+			// the head it merges (#53).
+			if !contains(require, RequireReview) {
+				require = append(append([]string(nil), require...), RequireReview)
+			}
+			reviewed = reviewed && (out || s.st.Loops[key].ReviewHead == r.Head)
 		}
 		code, why := s.mergeBlocked(t, w, r, ok, require, reviewed, out, now)
 		if code != "" {

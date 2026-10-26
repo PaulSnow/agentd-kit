@@ -74,6 +74,7 @@ type LoopRecord struct {
 	FixRound    int
 	FixHead     string
 	Failed      *LoopPayload
+	Failures    int // every failed step, so each is told to the owner
 }
 
 // requestsTrackPrefix begins the name of the track a repository's
@@ -109,6 +110,7 @@ func (st *LogState) applyLoop(e Event) {
 	case LoopFailed:
 		f := *p
 		r.Failed = &f
+		r.Failures++
 	case LoopRetry:
 		// The failed step is due again: its round counts as not taken.
 		if f := r.Failed; f != nil {
@@ -216,8 +218,11 @@ func placeOf(cfg *Config, st *LogState, q loopRequest) loopPlace {
 			return loopPlace{Phase: PlaceJudging, Reason: "round disposed", Do: "end", Session: judge}
 		case stop.Reason != RoundsConverged:
 			return owner("review rounds stopped at round %d, %s; agentd cases rounds %s N resets them", stop.Round, stop.Reason, q.Case)
-		case q.Outside && st.approvedAt(q.Repository, q.Ref) != r.Head && L.ReviewHead != r.Head:
-			return owner("its head moved to %s after review converged at %s", shortHash(r.Head), shortHash(L.ReviewHead))
+		case st.approvedAt(q.Repository, q.Ref) != r.Head && L.ReviewHead != r.Head:
+			// A head no round reviewed, pushed by a CI fix or the
+			// request's author, merges only after the owner resets the
+			// rounds, which reviews it.
+			return owner("its head moved to %s after review converged at %s; agentd cases rounds %s N reviews it", shortHash(r.Head), shortHash(L.ReviewHead), q.Case)
 		case q.Outside && st.approvedAt(q.Repository, q.Ref) != r.Head:
 			return loopPlace{Phase: PlaceMerging, Reason: "review converged", Do: LoopApprove, Head: r.Head}
 		case r.State == CIPending || r.State == CIUnknown:
@@ -237,15 +242,18 @@ func placeOf(cfg *Config, st *LogState, q loopRequest) loopPlace {
 			return loopPlace{Phase: PlaceJudging, Reason: "an earlier judge is still running", Do: "end", Session: judge}
 		case L.JudgeRound < last.N:
 			return loopPlace{Phase: PlaceJudging, Reason: fmt.Sprintf("round %d's findings await a judge", last.N), Do: LoopJudge, Session: judge, Round: last.N, Head: r.Head}
+		case !judging && st.Mode == ModeShadow:
+			return loopPlace{Phase: PlaceJudging, Reason: fmt.Sprintf("round %d; shadow mode starts no judge", last.N)}
 		case !judging:
 			return loopPlace{Phase: PlaceJudging, Do: LoopFailed, Failed: LoopJudge, Session: judge, Round: last.N,
 				Reason: fmt.Sprintf("the judge of round %d ended without its dispositions", last.N)}
 		}
-		if why := judgmentFailed(st.Tracks[judge]); why != "" {
-			return loopPlace{Phase: PlaceJudging, Do: LoopFailed, Failed: LoopJudge, Session: judge, Round: last.N, Reason: fmt.Sprintf("the judge of round %d %s", last.N, why)}
-		}
+		// A judge that asked the owner waits for the answer, DONE or not.
 		if t := st.Tracks[judge]; t != nil && (t.State == BlockedOnOwner || t.Questions.Open || t.blocking()) {
 			return owner("the judge of round %d asks the owner", last.N)
+		}
+		if why := judgmentFailed(st.Tracks[judge]); why != "" {
+			return loopPlace{Phase: PlaceJudging, Do: LoopFailed, Failed: LoopJudge, Session: judge, Round: last.N, Reason: fmt.Sprintf("the judge of round %d %s", last.N, why)}
 		}
 		return loopPlace{Phase: PlaceJudging, Reason: fmt.Sprintf("round %d", last.N)}
 	}
@@ -260,7 +268,7 @@ func placeOf(cfg *Config, st *LogState, q loopRequest) loopPlace {
 			return loopPlace{Phase: PlaceFixing, Reason: fmt.Sprintf("round %d adopted findings; the work session is relaunched once it is done", last.N),
 				Do: LoopFix, Session: q.Session, Round: last.N, Head: r.Head}
 		case r.Head == L.FixHead:
-			if t := st.Tracks[q.Session]; t != nil && t.Delivered[q.Delivered] != "" && t.Head == L.FixHead {
+			if f, ok := lastFixRound(st.Tracks[q.Session], q); ok && f.Redelivered && f.Pushed == L.FixHead {
 				return owner("the fix round of round %d delivered no new commit", last.N)
 			}
 			return loopPlace{Phase: PlaceFixing, Reason: fmt.Sprintf("fix round %d: waiting for the work session's next delivery", last.N)}
@@ -272,6 +280,8 @@ func placeOf(cfg *Config, st *LogState, q loopRequest) loopPlace {
 		return loopPlace{Phase: PlaceReviewing, Reason: "an earlier reviewer is still running", Do: "end", Session: reviewer}
 	case L.ReviewRound < next:
 		return loopPlace{Phase: PlaceReviewing, Reason: fmt.Sprintf("round %d is due at %s", next, shortHash(r.Head)), Do: LoopReview, Session: reviewer, Round: next, Head: r.Head}
+	case !reviewing && st.Mode == ModeShadow:
+		return loopPlace{Phase: PlaceReviewing, Reason: fmt.Sprintf("round %d at %s; shadow mode starts no reviewer", next, shortHash(L.ReviewHead))}
 	case !reviewing:
 		return loopPlace{Phase: PlaceReviewing, Do: LoopFailed, Failed: LoopReview, Session: reviewer, Round: next, Reason: fmt.Sprintf("the reviewer of round %d ended without its findings", next)}
 	}
@@ -279,6 +289,21 @@ func placeOf(cfg *Config, st *LogState, q loopRequest) loopPlace {
 		return loopPlace{Phase: PlaceReviewing, Do: LoopFailed, Failed: LoopReview, Session: reviewer, Round: next, Reason: fmt.Sprintf("the reviewer of round %d %s", next, why)}
 	}
 	return loopPlace{Phase: PlaceReviewing, Reason: fmt.Sprintf("round %d at %s", next, shortHash(L.ReviewHead))}
+}
+
+// lastFixRound is the latest fix round the work session was relaunched
+// for on q.
+func lastFixRound(t *Track, q loopRequest) (CIFixRecord, bool) {
+	if t == nil {
+		return CIFixRecord{}, false
+	}
+	fixes := t.ciFixes(q.Repository, q.Ref)
+	for i := len(fixes) - 1; i >= 0; i-- {
+		if fixes[i].Review {
+			return fixes[i], true
+		}
+	}
+	return CIFixRecord{}, false
 }
 
 // judgmentFailed is why a running reviewer or judge will not make its
@@ -336,11 +361,6 @@ func (s *Supervisor) runLoops(now time.Time) {
 			return
 		}
 		p := placeOf(s.cfg, s.st, q)
-		if s.shadow && p.Do == LoopFailed {
-			// Shadow mode starts no judgment session: one it would have
-			// started has not failed.
-			continue
-		}
 		lp := LoopPayload{Repository: q.Repository, Ref: q.Ref, Case: q.Case, Head: p.Head, Step: p.Do, Session: p.Session, Round: p.Round}
 		switch p.Do {
 		case "end":
@@ -355,7 +375,7 @@ func (s *Supervisor) runLoops(now time.Time) {
 				continue
 			}
 			if why := s.startJudgment(q, kind, p.Session); why != "" {
-				s.skipOnce(requestsTrack(q.Repository), "loop:"+ciKey(q.Repository, q.Ref)+":"+p.Do, fmt.Sprintf("not starting the %s of %s in %s: %s", kind, q.Ref, q.Repository, why), s.track(requestsTrack(q.Repository)), nil)
+				s.skipOnce(requestsTrack(q.Repository), fmt.Sprintf("loop:%s:%s:%d", ciKey(q.Repository, q.Ref), p.Do, p.Round), fmt.Sprintf("not starting the %s of %s in %s: %s", kind, q.Ref, q.Repository, why), s.track(requestsTrack(q.Repository)), nil)
 				continue
 			}
 			s.emit("", Event{Kind: KindLoop, Loop: &lp})
@@ -368,12 +388,34 @@ func (s *Supervisor) runLoops(now time.Time) {
 			}
 			s.endJudgment(q.Repository, p.Session)
 			t := s.track(requestsTrack(q.Repository))
-			s.escalate(requestsTrack(q.Repository), "loop-failed:"+ciKey(q.Repository, q.Ref)+":"+lp.Failed+":"+fmt.Sprint(p.Round),
+			s.escalate(requestsTrack(q.Repository), fmt.Sprintf("loop-failed:%s:%d", ciKey(q.Repository, q.Ref), s.st.Loops[ciKey(q.Repository, q.Ref)].Failures),
 				fmt.Sprintf("%s in %s: %s. The rest of %s's requests go on; agentd loop retry %s %s takes the step again.",
 					q.Ref, q.Repository, p.Reason, q.Repository, q.Repository, q.Ref), t, now)
 		}
 	}
+	s.endFinished()
 	s.startNext(now)
+}
+
+// endFinished ends each work session agentd started in a looped
+// repository once every request it delivered is merged or closed, so its
+// room under sessions.max goes to the next case and the judgment sessions.
+func (s *Supervisor) endFinished() {
+	for _, name := range sortedKeys(s.st.Runtime) {
+		p := s.st.Runtime[name]
+		t := s.st.Tracks[name]
+		if p.Kind != KindWork || !looped(s.cfg.Repositories[p.Repository]) || t == nil || len(t.Deliveries) == 0 || s.shadow {
+			continue
+		}
+		open := false
+		for _, d := range t.Deliveries {
+			r, ok := s.st.CI[ciKey(p.Repository, d.Ref)]
+			open = open || !ok || r.State != CIMerged && r.State != CIClosed
+		}
+		if !open {
+			s.emit(name, Event{Kind: KindSession, Mode: ModeShared, Runtime: &RuntimePayload{ID: newIntentID(), Action: SessionEnd, Repository: p.Repository, By: "agentd"}})
+		}
+	}
 }
 
 // startJudgment records the start of a reviewer or judge for q under the
@@ -480,7 +522,8 @@ func (s *Supervisor) fixRound(name string, sess Session, t *Track, ev Evidence, 
 }
 
 // startNext starts a work session, one a pass, on the top-ranked case the
-// owner queued in a looped repository with room under its max: pinned, or
+// owner queued in a looped repository with room under its max, less one
+// place kept for judgment sessions: pinned, or
 // in a repository the week's priorities list; not started, not reserved
 // and with no session.
 func (s *Supervisor) startNext(now time.Time) {
@@ -488,7 +531,8 @@ func (s *Supervisor) startNext(now time.Time) {
 	for _, name := range sortedKeys(s.cfg.Repositories) {
 		repo := s.cfg.Repositories[name]
 		rules, _ := effectivePolicy(s.cfg, s.st, name)
-		if looped(repo) && len(sessionsOf(s.st.Runtime, name)) < rules.Sessions.Max {
+		// One place is kept for the judgment sessions the work asks for.
+		if looped(repo) && len(sessionsOf(s.st.Runtime, name))+1 < rules.Sessions.Max {
 			room[repoKey(repo.Forge, repo.Project)] = name
 		}
 	}
@@ -520,6 +564,7 @@ func (s *Supervisor) startNext(now time.Time) {
 		session := runtimeName(name, branch, KindWork)
 		if why := s.startRuntime(name, session, RuntimePayload{Kind: KindWork, Branch: branch, Issue: c.Issue}); why != "" {
 			s.skipOnce(requestsTrack(name), "loop-start:"+c.ID, fmt.Sprintf("not starting %s: %s", c.ID, why), s.track(requestsTrack(name)), nil)
+			continue
 		}
 		return
 	}

@@ -130,7 +130,8 @@ restarted again. coordinator release lets the session a repository's
 configuration names claim its coordinator, which another session held:
 there is one coordinator per repository. sessions end stops a session a
 coordinator started and takes it off the supervised sessions, keeping its
-files. loop retry takes a request's failed review or judge step again. policy show prints a repository's effective policy, each key with
+files. loop retry takes a request's failed review or judge step again.
+policy show prints a repository's effective policy, each key with
 where it came from: the owner's configuration, a default, or the
 repository's own .agentd/policy.json as last read. console reply applies the owner's
 reply in a console, as its tool hands it on: "SESSION ID ANSWER" answers a

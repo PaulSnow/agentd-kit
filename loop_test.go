@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -310,5 +311,135 @@ func TestLoopStartsNextQueuedCase(t *testing.T) {
 	}
 	if p := h.sessionEvents()[1]; p.Issue != 11 {
 		t.Fatalf("second start = %+v", p)
+	}
+	// With three places, two work sessions leave the last for the
+	// judgment sessions their requests need.
+	w = h.cfg.Repositories["widgets"]
+	w.Policy.Sessions.Max = 3
+	h.cfg.Repositories["widgets"] = w
+	log.Append(Event{V: EventVersion, Time: h.clock.Now(), Kind: KindItem, Mode: ModeShared, Item: &ItemPayload{ID: "gitlab/example-org/widgets#12",
+		Kind: ItemIssue, Repository: "gitlab/example-org/widgets", Title: "Widgets 12"}})
+	h.ticks(2, 5*time.Minute)
+	for _, p := range h.sessionEvents() {
+		if p.Issue == 12 {
+			t.Fatalf("started #12 into the judgment sessions' place: %+v", h.sessionEvents())
+		}
+	}
+}
+
+// A work session agentd started is ended once every request it delivered
+// is merged or closed, so its place goes to the next case.
+func TestLoopEndsFinishedWorkSession(t *testing.T) {
+	h, _ := loopHarness(t)
+	name := runtimeName("widgets", "issue-10", KindWork)
+	if why := h.sup.startRuntime("widgets", name, RuntimePayload{Kind: KindWork, Branch: "issue-10", Issue: 10}); why != "" {
+		t.Fatal(why)
+	}
+	tr := h.sup.track(name)
+	tr.Deliveries = []DeliveryRecord{{Ref: "!5", Repository: "widgets"}}
+	h.sup.st.CI[ciKey("widgets", "!5")] = CIRecord{CIPayload: CIPayload{Repository: "widgets", Ref: "!5", State: CIPending}}
+	h.sup.endFinished()
+	if _, ok := h.sup.st.Runtime[name]; !ok {
+		t.Fatal("ended while its request is open")
+	}
+	h.sup.st.CI[ciKey("widgets", "!5")] = CIRecord{CIPayload: CIPayload{Repository: "widgets", Ref: "!5", State: CIMerged}}
+	h.sup.endFinished()
+	if _, ok := h.sup.st.Runtime[name]; ok {
+		t.Fatal("not ended after its request merged")
+	}
+}
+
+// reviewAndAdopt runs !1 through a review with one finding and a judge
+// that adopts it, to the fix round.
+func reviewAndAdopt(t *testing.T, h *harness) {
+	t.Helper()
+	h.ticks(5, 5*time.Minute)
+	if text, refused := h.callAs(judgmentName("!1", KindReviewer), ToolReviewFindings, map[string]any{"findings": []any{finding("Spin is untested")}}); refused {
+		t.Fatalf("review refused: %s", text)
+	}
+	h.ticks(3, 5*time.Minute)
+	if text, refused := h.callAs(judgmentName("!1", KindJudge), ToolJudgeDispositions, map[string]any{"dispositions": []any{
+		map[string]any{"finding_id": "F1", "disposition": DispositionAdopt, "reason": "A spin test is cheap."}}}); refused {
+		t.Fatalf("judge refused: %s", text)
+	}
+	h.ticks(3, 5*time.Minute)
+	if n := h.count(KindAction, ActFixRound, "d"); n != 1 {
+		t.Fatalf("fix rounds = %d; steps %v", n, h.loopSteps("!1"))
+	}
+}
+
+// A fix round that delivers no new commit waits for the owner, and a
+// replay of the log puts every request where the live run has it.
+func TestLoopFixRoundWithoutCommitWaitsAndReplayAgrees(t *testing.T) {
+	h, api := loopHarness(t)
+	reviewAndAdopt(t, h)
+	h.status("d", "# Nothing to change\n\nDONE\n")
+	h.ticks(12, 5*time.Minute)
+	if p := h.place("!1"); p.Phase != PlaceOwner || !strings.Contains(p.Reason, "delivered no new commit") {
+		t.Fatalf("place = %+v", p)
+	}
+	live := loopViews(h.sup.cfg, h.sup.st)
+	h.restart(false)
+	h.sup.api = api
+	h.sup.refreshRuntime()
+	if got := loopViews(h.sup.cfg, h.sup.st); !reflect.DeepEqual(got, live) {
+		t.Fatalf("replayed %+v, live %+v", got, live)
+	}
+}
+
+// A judge that crash-loops fails its step; the owner's retry starts a
+// judge again. One that asked the owner waits for the answer even when
+// it wrote DONE.
+func TestLoopJudgeCrashAndOwnerQuestion(t *testing.T) {
+	h, _ := loopHarness(t)
+	h.ticks(5, 5*time.Minute)
+	if text, refused := h.callAs(judgmentName("!1", KindReviewer), ToolReviewFindings, map[string]any{"findings": []any{finding("Spin is untested")}}); refused {
+		t.Fatalf("review refused: %s", text)
+	}
+	h.ticks(3, 5*time.Minute)
+	judge := judgmentName("!1", KindJudge)
+	tr := h.sup.track(judge)
+	tr.State, tr.Questions.Open = Done, true
+	if p := h.place("!1"); p.Phase != PlaceOwner || !strings.Contains(p.Reason, "asks the owner") {
+		t.Fatalf("place = %+v", p)
+	}
+	tr.Questions.Open, tr.State, tr.Parked, tr.Crashes = false, CrashLooping, true, []Crash{{Exit: 1}}
+	h.ticks(1, 5*time.Minute)
+	if p := h.place("!1"); p.Phase != PlaceOwner || !strings.Contains(p.Reason, "the judge of round 1 crash-loops") {
+		t.Fatalf("place = %+v", p)
+	}
+	if err := RetryLoop(h.cfg, NewLogWriter(h.buf), h.events(), h.clock.Now(), "widgets", "!1"); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(2, 5*time.Minute)
+	if got := strings.Join(h.loopSteps("!1"), ","); got != "review,judge,failed,retry,judge" {
+		t.Fatalf("steps = %s", got)
+	}
+	// A second failure of the same round is told to the owner again.
+	tr = h.sup.track(judge)
+	tr.State, tr.Stopped = Stopped, "its spend cap"
+	h.ticks(3, 5*time.Minute)
+	if n := h.count(KindAction, ActEscalate, requestsTrack("widgets")); n != 2 {
+		t.Fatalf("escalations = %d, want 2", n)
+	}
+}
+
+// A head that moves after the rounds converged, as a CI fix moves it, is
+// not merged unreviewed: the request waits for the owner's reset.
+func TestLoopHeadMovedAfterConvergence(t *testing.T) {
+	h, api := loopHarness(t)
+	api.pipelines("c0ffee", "running", nil, "success", nil)
+	h.ticks(5, 5*time.Minute)
+	if text, refused := h.callAs(judgmentName("!1", KindReviewer), ToolReviewFindings, map[string]any{"findings": []any{}}); refused {
+		t.Fatalf("review refused: %s", text)
+	}
+	h.ticks(2, 5*time.Minute)
+	api.pipelines("c0ffe3", "success", nil, "success", nil)
+	h.ticks(4, 5*time.Minute)
+	if len(h.forge.merges) != 0 {
+		t.Fatalf("merged an unreviewed head: %+v", h.forge.merges)
+	}
+	if p := h.place("!1"); p.Phase != PlaceOwner || !strings.Contains(p.Reason, "head moved to c0ffe3") || !strings.Contains(p.Reason, "agentd cases rounds") {
+		t.Fatalf("place = %+v", p)
 	}
 }
