@@ -451,6 +451,14 @@ func CasesFrom(cfg *Config, st *LogState) []CaseView {
 			sessions[id] = append(sessions[id], name)
 		}
 	}
+	// A session on another host is not one run supervises here, but it
+	// works its case all the same.
+	for _, name := range sortedKeys(st.Runtime) {
+		p := st.Runtime[name]
+		if id := cfg.caseOf(Session{Repository: p.Repository, Issue: p.Issue, Request: p.Request}); p.Host != "" && id != "" {
+			sessions[id] = append(sessions[id], name)
+		}
+	}
 	ids := map[string]bool{}
 	for id := range st.Cases {
 		ids[id] = true

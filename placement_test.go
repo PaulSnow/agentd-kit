@@ -319,7 +319,7 @@ func TestNodeRefusesUnsafeSessionCommands(t *testing.T) {
 
 // agentd run does not supervise a session on another host: it neither
 // prepares nor launches it here, and its loop records the start's host
-// from the repository's sessions entry.
+// from the repository's sessions entry. Its case still lists it.
 func TestRunLeavesRemoteSessionToItsNode(t *testing.T) {
 	h := sessionsHarness(t)
 	w := h.cfg.Repositories["widgets"]
@@ -337,6 +337,13 @@ func TestRunLeavesRemoteSessionToItsNode(t *testing.T) {
 	}
 	if n := h.tmux.count("new-session", name); n != 0 {
 		t.Fatalf("launched %d times here", n)
+	}
+	found := false
+	for _, c := range CasesFrom(h.sup.cfg, h.sup.st) {
+		found = found || contains(c.Sessions, name)
+	}
+	if !found {
+		t.Fatalf("no case lists %s", name)
 	}
 	if err := h.endSession(name); err != nil {
 		t.Fatal(err)
