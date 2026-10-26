@@ -289,6 +289,9 @@ type Coordinator struct {
 	Logins []string `json:"logins"`
 	// Policy is the coordinator's own rules, as a session's are.
 	Policy SessionPolicy `json:"policy"`
+	// Brief is the parts agentd writes its BRIEF.md from, in order, at
+	// each start and rotation (#50).
+	Brief []string `json:"brief"`
 }
 
 // RoleCoordinator is the role of a repository's coordinator session.
@@ -320,6 +323,8 @@ type Session struct {
 	// the branch its worktree has out.
 	Kind   string `json:"-"`
 	Branch string `json:"-"`
+	// Brief is a coordinator's brief parts (#50).
+	Brief []string `json:"-"`
 	// Policy is the session's own rules: which of its turns its console
 	// receives (turns.go).
 	Policy SessionPolicy `json:"policy"`
@@ -705,10 +710,18 @@ func (c *Config) addCoordinators(path func(field, p string) string, errs *[]erro
 		if !sessionName.MatchString(co.Session) {
 			*errs, bad = append(*errs, fmt.Errorf("%s.session: %q is not a plain tmux session name", field, co.Session)), true
 		}
+		var brief []string
+		for i, p := range co.Brief {
+			if strings.TrimSpace(p) == "" {
+				*errs, bad = append(*errs, fmt.Errorf("%s.brief[%d] is empty; a part is a file's path", field, i)), true
+				continue
+			}
+			brief = append(brief, path(fmt.Sprintf("%s.brief[%d]", field, i), p))
+		}
 		if bad {
 			continue
 		}
-		want := Session{Workdir: workdir, Cwd: workdir, Account: co.Account, Repository: repo, Role: RoleCoordinator, Policy: co.Policy}
+		want := Session{Workdir: workdir, Cwd: workdir, Account: co.Account, Repository: repo, Role: RoleCoordinator, Policy: co.Policy, Brief: brief}
 		if s, ok := c.Sessions[co.Session]; ok && !reflect.DeepEqual(s, want) {
 			*errs = append(*errs, fmt.Errorf("sessions.%s is %s's coordinator; configure it there alone", co.Session, repo))
 			continue

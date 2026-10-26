@@ -59,12 +59,13 @@ type Track struct {
 	Transcript string
 	Measured   string
 	Usage      map[string]UsagePayload
-	Checkpoint Checkpoint // the latest merge seen at the worktree's head
-	Launched   time.Time  // the latest restart or rotation started
-	RotatedFor string     // the merge the latest rotation was at
-	Rotations  int        // rotations, taken or would-be, ever
-	Stopped    string     // why the session was stopped, until the owner clears it
-	SpendBase  int64      // the spend when the owner last cleared it, which its cap counts from
+	Checkpoint Checkpoint  // the latest merge seen at the worktree's head
+	Launched   time.Time   // the latest restart or rotation started
+	Brief      []BriefPart // a coordinator's brief parts as its latest launch wrote them
+	RotatedFor string      // the merge the latest rotation was at
+	Rotations  int         // rotations, taken or would-be, ever
+	Stopped    string      // why the session was stopped, until the owner clears it
+	SpendBase  int64       // the spend when the owner last cleared it, which its cap counts from
 
 	Posted    map[string]bool        // escalation keys already posted, or given up on
 	Questions QuestionsEscalation    // the escalation of the Questions section

@@ -167,6 +167,7 @@ func (t *Track) clone() *Track {
 	for k, v := range t.Failures {
 		c.Failures[k] = append([]time.Time(nil), v...)
 	}
+	c.Brief = append([]BriefPart(nil), t.Brief...)
 	c.DeliveredRefs = append([]string(nil), t.DeliveredRefs...)
 	c.GaveUp = append([]string(nil), t.GaveUp...)
 	c.CutShort = append([]string(nil), t.CutShort...)

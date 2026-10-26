@@ -415,6 +415,7 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 			t.Hash, t.HashSince, t.Observed, t.Live = "", at, true, true
 			t.Nudges, t.LastNudge, t.Limited = 0, time.Time{}, false
 			t.launched(a.Transcript, at)
+			t.launchedBrief(a)
 		}
 	case ActRotate:
 		// Not a restart: the backoff, the restart count and the crash
@@ -425,6 +426,7 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 			t.Hash, t.HashSince, t.Observed = "", at, true
 			t.Nudges, t.LastNudge, t.Limited = 0, time.Time{}, false
 			t.launched(a.Transcript, at)
+			t.launchedBrief(a)
 		}
 	case ActWake:
 		t.applyWake(a, taken, counted, at)
@@ -576,5 +578,13 @@ func (t *Track) launched(transcript string, at time.Time) {
 	t.Continues, t.ContinueStatus = 0, ""
 	if transcript != "" {
 		t.Transcript, t.Measured = transcript, ""
+	}
+}
+
+// launchedBrief keeps the brief parts a launch wrote; a launch that wrote
+// none leaves the last ones, since its BRIEF.md is as they made it.
+func (t *Track) launchedBrief(a *ActPayload) {
+	if a.Brief != nil {
+		t.Brief = a.Brief
 	}
 }

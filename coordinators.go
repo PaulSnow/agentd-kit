@@ -460,6 +460,9 @@ type Pack struct {
 	// repository's sessions may use and fall back to (#39).
 	Accounts   []PackAccount `json:"accounts,omitempty"`
 	Summarized PackCounts    `json:"summarized"`
+	// Brief is the coordinator's brief parts, by path and hash, as its
+	// latest start or rotation wrote them (#50).
+	Brief []BriefPart `json:"brief,omitempty"`
 }
 
 // PackModels are the models a coordinator passes to the review and judge
@@ -558,6 +561,7 @@ func (s *Supervisor) buildPack(repo string, due []string, now time.Time, handled
 			at := w.At
 			p.LastWake = &at
 		}
+		p.Brief = s.track(co.Session).Brief
 	}
 	for _, n := range s.cfg.SessionNames() {
 		sess := s.cfg.Sessions[n]

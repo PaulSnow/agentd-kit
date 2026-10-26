@@ -371,6 +371,10 @@ func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, no
 	if !s.retryDue(t, key, now) {
 		return false
 	}
+	brief, ok := s.writeBrief(name, sess, t, now)
+	if !ok {
+		return false
+	}
 	id := newSessionID()
 	cmd, facts := s.launchCommand(name, sess, t, id, "rotation")
 	line, err := s.launchLine(sess, cmd)
@@ -378,7 +382,7 @@ func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, no
 		s.skipOnce(name, "account:"+name, "not rotating: "+err.Error(), t, &SkipPayload{Account: sess.Account})
 		return false
 	}
-	a := &ActPayload{Key: key, Cwd: sess.Cwd, Account: sess.Account, Command: line, Transcript: id, Context: u.Context, Checkpoint: mark}
+	a := &ActPayload{Key: key, Cwd: sess.Cwd, Account: sess.Account, Command: line, Transcript: id, Context: u.Context, Checkpoint: mark, Brief: brief}
 	replace := func() error { return s.tmux.Replace(name, sess.Cwd, line) }
 	if strings.HasPrefix(mark, "turn:") {
 		// A session waiting at its prompt can be given a line at any time,
