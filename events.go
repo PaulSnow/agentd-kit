@@ -320,6 +320,9 @@ type ErrorPayload struct {
 	Key   string      `json:"key,omitempty"`
 	Error string      `json:"error"`
 	Act   *ActPayload `json:"act,omitempty"`
+	// EmptyPipeline: the forge answered that the action's pipeline would be
+	// empty, so asking again for the same head and tip cannot help (#46).
+	EmptyPipeline bool `json:"empty_pipeline,omitempty"`
 	// Triage is a failed triage: the items it failed for, and what its
 	// calls cost.
 	Triage *TriagePayload `json:"triage,omitempty"`

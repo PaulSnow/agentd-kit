@@ -329,6 +329,12 @@ func (st *LogState) apply(e Event) {
 			if a.Action == ActRestart {
 				t.Restarts = append(t.Restarts, e.Time)
 			}
+			if a.Action == ActRetest && e.Error.EmptyPipeline {
+				if t.Unretestable == nil {
+					t.Unretestable = map[string]bool{}
+				}
+				t.Unretestable[a.Key] = true
+			}
 		}
 	case KindIntent:
 		if e.Act.Intent != "" {

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -218,6 +219,71 @@ func TestOutsideMovedBaseRetestedBeforeMerge(t *testing.T) {
 		t.Fatalf("merges %+v, retests %v (skips %q)", h.forge.merges, h.forge.retests, h.mergeSkips())
 	}
 	sameAfterReplay(t, h, "after the retest")
+}
+
+// GitLab answers a retest of a project whose CI rules make no
+// merge-request pipelines with an empty pipeline. agentd asks once, then
+// escalates once, saying so and what would unstick the request, instead
+// of retrying and stopping silently (#46).
+func TestEmptyRetestEscalatesOnce(t *testing.T) {
+	h, api := requestsHarness(t)
+	repo := h.cfg.Repositories["widgets"]
+	repo.Policy.CI.RetestOnBaseMove = true
+	h.cfg.Repositories["widgets"] = repo
+	// The answer's text is withheld from the log; the fact is kept.
+	h.cfg.ConfidentialPatterns = []string{"(?i)rules configuration"}
+	h.restart(false)
+	h.sup.api = api
+	h.ticks(2, 5*time.Minute)
+	h.approve("!2", "5eed0101")
+	h.forge.retestErr = fmt.Errorf("glab: %w", fmt.Errorf("%s (HTTP 400)", "The resulting pipeline would have been empty. Review the rules configuration for the relevant jobs."))
+	const moved = "abad1dea"
+	api.set(func() {
+		api.gitlab[ciProject+"/repository/branches/main"] = `{"name":"main","commit":{"id":"` + moved + `"}}`
+		api.gitlab[ciProject+"/repository/merge_base"] = `{"id":"` + moved + `"}`
+	})
+	h.ticks(8, 5*time.Minute)
+	if len(h.forge.merges) != 0 || len(h.forge.retests) != 1 {
+		t.Fatalf("merges %+v, retests %v", h.forge.merges, h.forge.retests)
+	}
+	var esc []string
+	for _, e := range h.events() {
+		if e.Kind == KindAction && e.Act.Action == ActEscalate {
+			esc = append(esc, e.Act.Message)
+		}
+	}
+	if len(esc) != 1 || !strings.Contains(esc[0], "no merge-request pipelines") || !strings.Contains(esc[0], "merge main into its branch") {
+		t.Fatalf("escalations = %q", esc)
+	}
+	if s := h.mergeSkips(); len(s) == 0 || !strings.Contains(s[len(s)-1], "would be empty") {
+		t.Fatalf("skips = %q", s)
+	}
+	marked := 0
+	for _, e := range h.events() {
+		if e.Kind == KindError && e.Error.Act != nil && e.Error.Act.Action == ActRetest && e.Error.EmptyPipeline && !strings.Contains(e.Error.Error, "would have been empty") {
+			marked++
+		}
+	}
+	if marked != 1 {
+		t.Fatalf("withheld retest errors marked empty = %d", marked)
+	}
+	sameAfterReplay(t, h, "after the empty retest")
+	h.restart(false)
+	h.sup.api = api
+	h.ticks(3, 5*time.Minute)
+	if len(h.forge.retests) != 1 {
+		t.Fatalf("retests after restart = %v", h.forge.retests)
+	}
+	// The target moves again: the forge is asked once more, in case its
+	// rules changed, and the owner is not told twice about the same head.
+	api.set(func() {
+		api.gitlab[ciProject+"/repository/branches/main"] = `{"name":"main","commit":{"id":"abad1deb"}}`
+		api.gitlab[ciProject+"/repository/merge_base"] = `{"id":"abad1deb"}`
+	})
+	h.ticks(6, 5*time.Minute)
+	if len(h.forge.retests) != 2 || h.count(KindAction, ActEscalate, "") != 1 {
+		t.Fatalf("retests %v, escalations %d, skips %q", h.forge.retests, h.count(KindAction, ActEscalate, ""), h.mergeSkips())
+	}
 }
 
 // A request by an author the policy does not list is watched and in the
@@ -466,5 +532,29 @@ func TestOutsideRepeatFailureInNewRunIsDue(t *testing.T) {
 	h.ticks(3, 5*time.Minute)
 	if w := h.wakes(); len(w) != 2 || w[1].Reason != "ci: !2 failed at 5eed0101" {
 		t.Fatalf("wakes = %+v", w)
+	}
+}
+
+// GitLab's answer that a pipeline would be empty is kept in a failed
+// retest's error from whichever stream carried it (#46).
+func TestRetestErrorKeepsEmptyAnswer(t *testing.T) {
+	const body = `{"message":{"base":["The resulting pipeline would have been empty. Review the rules configuration for the relevant jobs."]}}`
+	if err := retestError("HTTP 400 Bad Request", body); !emptyPipelineAnswer(err.Error()) {
+		t.Fatalf("error = %v", err)
+	}
+	if err := retestError("HTTP 400", `{"message":{"base":["No stages / jobs for this pipeline."]}}`); !emptyPipelineAnswer(err.Error()) {
+		t.Fatalf("older answer: error = %v", err)
+	}
+	if err := retestError("HTTP 400", `{"message":{"base":["Pipeline will not run for the selected trigger. The rules configuration prevented any jobs from being added to the pipeline."]}}`); !emptyPipelineAnswer(err.Error()) {
+		t.Fatalf("rules answer: error = %v", err)
+	}
+	if err := retestError("HTTP 500", `{"message":"oops"}`); err.Error() != "glab: HTTP 500" {
+		t.Fatalf("error = %v", err)
+	}
+	r := Repository{Forge: "gitlab"}
+	r.Policy.Merge.Enabled = true
+	a := AllowedForge{Forge: &fakeForge{retestErr: errors.New("glab: The resulting pipeline would have been empty. (HTTP 400)")}, Repos: map[string]Repository{"widgets": r}}
+	if err := a.RetestAllowed("widgets", "!2"); !errors.Is(err, errEmptyPipeline) {
+		t.Fatalf("error = %v", err)
 	}
 }

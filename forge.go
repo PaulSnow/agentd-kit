@@ -210,12 +210,17 @@ func (a AllowedForge) MergeAllowed(repo, ref, head, target string) error {
 }
 
 // RetestAllowed runs a request's pipeline again if the repository allows
-// merge: it is done only on the way to a merge.
+// merge: it is done only on the way to a merge. An answer that the
+// pipeline would be empty wraps errEmptyPipeline.
 func (a AllowedForge) RetestAllowed(repo, ref string) error {
 	if err := a.allowed(repo, "merge"); err != nil {
 		return err
 	}
-	return a.Forge.Retest(a.Repos[repo], ref)
+	err := a.Forge.Retest(a.Repos[repo], ref)
+	if err != nil && emptyPipelineAnswer(err.Error()) {
+		return fmt.Errorf("%w: %v", errEmptyPipeline, err)
+	}
+	return err
 }
 
 // runTimed runs a command in dir and returns its standard output, or its
@@ -720,6 +725,27 @@ func (f ExecForge) Merge(repo Repository, ref, head, target string) error {
 	return fmt.Errorf("unknown forge %q", repo.Forge)
 }
 
+// errEmptyPipeline begins the error of a retest the forge answered with
+// an empty pipeline: the project's CI rules make no merge-request
+// pipelines, so asking again cannot help (#46).
+var errEmptyPipeline = errors.New("the request's new pipeline would be empty")
+
+// emptyPipelineAnswers are the ways GitLab's English API answers say so:
+// the merge request's own, the rules' and an older one. An answer in another wording, or
+// another language, is taken as any failed retest: retried, then given up.
+var emptyPipelineAnswers = []string{"would have been empty", "rules configuration prevented any jobs", "No stages / jobs for this pipeline"}
+
+// emptyPipelineAnswer reports whether a forge answer says the pipeline
+// would be empty.
+func emptyPipelineAnswer(s string) bool {
+	for _, a := range emptyPipelineAnswers {
+		if strings.Contains(s, a) {
+			return true
+		}
+	}
+	return false
+}
+
 // Retest creates a new pipeline for a GitLab merge request, which runs
 // on its merge result where merged results pipelines are on. GitHub has
 // no such call.
@@ -729,10 +755,19 @@ func (f ExecForge) Retest(repo Repository, ref string) error {
 	}
 	proj := strings.ReplaceAll(repo.Project, "/", "%2F")
 	args := glabArgs(repo, "-X", "POST", "projects/"+proj+"/merge_requests/"+strings.TrimPrefix(ref, "!")+"/pipelines")
-	if _, err := runTimed(f.Timeout, "", forgeEnv, false, "glab", args...); err != nil {
-		return fmt.Errorf("glab: %s", exitMessage(err))
+	if out, err := runTimed(f.Timeout, "", forgeEnv, false, "glab", args...); err != nil {
+		return retestError(exitMessage(err), string(out))
 	}
 	return nil
+}
+
+// retestError is a failed retest's error, with the forge's answer from
+// standard output too when only that says the pipeline would be empty.
+func retestError(msg, out string) error {
+	if !emptyPipelineAnswer(msg) && emptyPipelineAnswer(out) {
+		msg += ": " + strings.TrimSpace(cutUTF8(out, 500))
+	}
+	return fmt.Errorf("glab: %s", msg)
 }
 
 // mergeByCommand runs the policy's merge command, with no shell, its
