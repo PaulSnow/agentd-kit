@@ -68,12 +68,12 @@ func (h *harness) loopSteps(ref string) []string {
 // place is where ref stands, as agentd status shows it.
 func (h *harness) place(ref string) LoopView {
 	h.t.Helper()
-	for _, l := range loopViews(h.sup.cfg, h.sup.st) {
+	for _, l := range loopViews(h.sup.cfg, h.sup.st, h.clock.Now()) {
 		if l.Ref == ref {
 			return l
 		}
 	}
-	h.t.Fatalf("no loop view of %s: %+v", ref, loopViews(h.sup.cfg, h.sup.st))
+	h.t.Fatalf("no loop view of %s: %+v", ref, loopViews(h.sup.cfg, h.sup.st, h.clock.Now()))
 	return LoopView{}
 }
 
@@ -338,12 +338,12 @@ func TestLoopEndsFinishedWorkSession(t *testing.T) {
 	tr := h.sup.track(name)
 	tr.Deliveries = []DeliveryRecord{{Ref: "!5", Repository: "widgets"}}
 	h.sup.st.CI[ciKey("widgets", "!5")] = CIRecord{CIPayload: CIPayload{Repository: "widgets", Ref: "!5", State: CIPending}}
-	h.sup.endFinished()
+	h.sup.endFinished(h.clock.Now())
 	if _, ok := h.sup.st.Runtime[name]; !ok {
 		t.Fatal("ended while its request is open")
 	}
 	h.sup.st.CI[ciKey("widgets", "!5")] = CIRecord{CIPayload: CIPayload{Repository: "widgets", Ref: "!5", State: CIMerged}}
-	h.sup.endFinished()
+	h.sup.endFinished(h.clock.Now())
 	if _, ok := h.sup.st.Runtime[name]; ok {
 		t.Fatal("not ended after its request merged")
 	}
@@ -378,11 +378,11 @@ func TestLoopFixRoundWithoutCommitWaitsAndReplayAgrees(t *testing.T) {
 	if p := h.place("!1"); p.Phase != PlaceOwner || !strings.Contains(p.Reason, "delivered no new commit") {
 		t.Fatalf("place = %+v", p)
 	}
-	live := loopViews(h.sup.cfg, h.sup.st)
+	live := loopViews(h.sup.cfg, h.sup.st, h.clock.Now())
 	h.restart(false)
 	h.sup.api = api
 	h.sup.refreshRuntime()
-	if got := loopViews(h.sup.cfg, h.sup.st); !reflect.DeepEqual(got, live) {
+	if got := loopViews(h.sup.cfg, h.sup.st, h.clock.Now()); !reflect.DeepEqual(got, live) {
 		t.Fatalf("replayed %+v, live %+v", got, live)
 	}
 }
@@ -473,4 +473,226 @@ func TestLoopNeedsTwoPlaces(t *testing.T) {
 	if err := h.cfg.finish(h.dir); err == nil || !strings.Contains(err.Error(), "2 or more") {
 		t.Fatalf("finish = %v", err)
 	}
+}
+
+// A request enters the loop only when it is no draft, into one of
+// merge.targets, by one of merge.authors or, under review.others
+// review-only, updated within review.others_max_age, and not excluded or
+// reserved (#55). One outside is still watched for CI, and agentd status
+// lists it once with why.
+func TestLoopSkipsRequestsOutsideIt(t *testing.T) {
+	for _, c := range []struct {
+		name, why string
+		mr        outsideMRState
+		policy    func(p *RepoPolicy)
+	}{
+		{"draft", LoopOutDraft, outsideMRState{draft: true}, nil},
+		{"target", LoopOutTarget, outsideMRState{target: "release"}, nil},
+		{"author", LoopOutAuthor, outsideMRState{author: "someone-else"}, nil},
+		{"stale", LoopOutStale, outsideMRState{author: "someone-else", updated: "2026-10-01T00:00:00Z"},
+			func(p *RepoPolicy) { p.Review.Others = ReviewOnly }},
+		{"shorter max age", LoopOutStale, outsideMRState{author: "someone-else", updated: "2026-10-19T00:00:00Z"},
+			func(p *RepoPolicy) { p.Review.Others, p.Review.OthersMaxAge = ReviewOnly, Duration{48 * time.Hour} }},
+		{"excluded", LoopOutExcluded, outsideMRState{}, func(p *RepoPolicy) { p.Merge.Exclude.Numbers = []int{2} }},
+		{"reserved", LoopOutExcluded, outsideMRState{}, func(p *RepoPolicy) { p.Scope.Reserved.Numbers = []int{2} }},
+		{"recent other author", "", outsideMRState{author: "someone-else"}, func(p *RepoPolicy) { p.Review.Others = ReviewOnly }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h, api := loopHarness(t)
+			if c.policy != nil {
+				w := h.sup.cfg.Repositories["widgets"]
+				c.policy(&w.Policy)
+				h.sup.cfg.Repositories["widgets"] = w
+			}
+			api.set(func() { api.gitlab[ciProject+"/merge_requests|state=opened"] = `[{"iid":1},{"iid":2}]` })
+			c.mr.head, c.mr.pipeline, c.mr.status = "5eed0101", 60, "success"
+			outsideMR(api, c.mr)
+			h.ticks(3, 5*time.Minute)
+			if _, ok := h.sup.st.CI[ciKey("widgets", "!2")]; !ok {
+				t.Fatal("!2 is not watched for CI")
+			}
+			reviewed := contains(h.loopSteps("!2"), LoopReview)
+			if c.why == "" {
+				if !reviewed {
+					t.Fatalf("!2 not reviewed; place %+v", h.place("!2"))
+				}
+				return
+			}
+			if reviewed {
+				t.Fatalf("!2 reviewed though %s; steps %v", c.why, h.loopSteps("!2"))
+			}
+			if p := h.place("!2"); p.Phase != PlaceOutside || p.Reason != c.why {
+				t.Fatalf("place = %+v, want %s", p, c.why)
+			}
+			if !contains(h.loopSteps("!1"), LoopReview) {
+				t.Fatalf("!1 not reviewed: steps %v", h.loopSteps("!1"))
+			}
+			rows, meta := SummarizeState(h.sup.cfg, h.sup.st)
+			var b bytes.Buffer
+			PrintStatus(&b, rows, meta, h.clock.Now())
+			if line := "loop widgets !2: " + PlaceOutside + " (" + c.why + ")"; strings.Count(b.String(), line) != 1 {
+				t.Fatalf("status has not %q once:\n%s", line, b.String())
+			}
+		})
+	}
+}
+
+// A draft enters the loop on the pass after it leaves draft.
+func TestLoopDraftEntersWhenReady(t *testing.T) {
+	h, api := loopHarness(t)
+	api.set(func() { api.gitlab[ciProject+"/merge_requests|state=opened"] = `[{"iid":1},{"iid":2}]` })
+	mr := outsideMRState{head: "5eed0101", pipeline: 60, status: "success", draft: true}
+	outsideMR(api, mr)
+	h.ticks(3, 5*time.Minute)
+	if steps := h.loopSteps("!2"); len(steps) > 0 {
+		t.Fatalf("draft took steps %v", steps)
+	}
+	mr.draft = false
+	outsideMR(api, mr)
+	h.ticks(3, 5*time.Minute)
+	if !contains(h.loopSteps("!2"), LoopReview) {
+		t.Fatalf("!2 not reviewed after leaving draft; place %+v", h.place("!2"))
+	}
+}
+
+// A request a work session delivered is filtered the same way: one that
+// turns draft leaves the loop, and its reviewer is ended.
+func TestLoopFiltersDeliveredRequest(t *testing.T) {
+	h, api := loopHarness(t)
+	h.ticks(3, 5*time.Minute)
+	reviewer := judgmentName("!1", KindReviewer)
+	if _, ok := h.sup.st.Runtime[reviewer]; !ok {
+		t.Fatalf("no reviewer of !1; steps %v", h.loopSteps("!1"))
+	}
+	api.set(func() {
+		k := ciProject + "/merge_requests/1"
+		api.gitlab[k] = strings.Replace(api.gitlab[k], `"target_branch":"main"`, `"draft":true,"target_branch":"main"`, 1)
+	})
+	h.ticks(3, 5*time.Minute)
+	if p := h.place("!1"); p.Phase != PlaceOutside || p.Reason != LoopOutDraft {
+		t.Fatalf("place = %+v", p)
+	}
+	if _, ok := h.sup.st.Runtime[reviewer]; ok {
+		t.Fatal("the reviewer of a request that left the loop still runs")
+	}
+	if steps := h.loopSteps("!1"); len(steps) != 1 {
+		t.Fatalf("steps after leaving the loop %v", steps)
+	}
+}
+
+// review.others_max_age defaults to 14 days, takes a day count, and a
+// repository's own file may only shorten it.
+func TestOthersMaxAgePolicy(t *testing.T) {
+	var d Duration
+	if err := json.Unmarshal([]byte(`"14d"`), &d); err != nil || d.Duration != 14*24*time.Hour {
+		t.Fatalf("14d = %v, %v", d.Duration, err)
+	}
+	h, _ := loopHarness(t)
+	w := h.sup.cfg.Repositories["widgets"]
+	if w.Policy.Review.OthersMaxAge.Duration != DefaultOthersMaxAge || DefaultOthersMaxAge != 14*24*time.Hour {
+		t.Fatalf("default = %v", w.Policy.Review.OthersMaxAge)
+	}
+	eff := w.Policy
+	if !narrowKey(&eff, "review.others_max_age", json.RawMessage(`"7d"`)) || eff.Review.OthersMaxAge.Duration != 7*24*time.Hour {
+		t.Fatalf("7d not taken: %v", eff.Review.OthersMaxAge)
+	}
+	if narrowKey(&eff, "review.others_max_age", json.RawMessage(`"30d"`)) || narrowKey(&eff, "review.others_max_age", json.RawMessage(`"0s"`)) {
+		t.Fatal("a longer or zero age was taken")
+	}
+	var errs []error
+	w.Policy.Review.OthersMaxAge = Duration{-time.Hour}
+	h.cfg.checkPolicy("widgets", &w, &errs)
+	if len(errs) == 0 {
+		t.Fatal("a negative age was accepted")
+	}
+}
+
+// A request into a target is judged by that target's own file, as its
+// merge is, never by another target's.
+func TestLoopJudgesEachTargetByItsOwnFile(t *testing.T) {
+	pol := RepoPolicy{Merge: MergeRules{Targets: []string{"main", "release"}, Authors: []string{"widget-bot", "gadget-bot"}}}
+	cfg := &Config{Repositories: map[string]Repository{"widgets": {Policy: pol}}}
+	st := &LogState{Policies: map[string]PolicyPayload{policyKey("widgets", "main"): {
+		Repository: "widgets", Target: "main", File: json.RawMessage(`{"merge":{"targets":["main"],"authors":["widget-bot"]}}`)}}}
+	now := time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)
+	all, _ := effectivePolicy(cfg, st, "widgets")
+	for _, c := range []struct{ target, author, want string }{
+		{"release", "gadget-bot", ""},
+		{"main", "gadget-bot", LoopOutAuthor},
+		{"main", "widget-bot", ""},
+	} {
+		r := CIRecord{CIPayload: CIPayload{Head: "5eed0101", Target: c.target, Author: c.author}}
+		if got := outsideLoop(all, func(target string) RepoPolicy { return effectiveFor(cfg, st, "widgets", target) }, r, true, "!2", now); got != c.want {
+			t.Errorf("%s by %s: %q, want %q", c.target, c.author, got, c.want)
+		}
+	}
+}
+
+// A request by another author whose update the watcher has not recorded,
+// as in a record written before #55, starts nothing and does not end its
+// running reviewer; once recorded, it is judged by its age.
+func TestLoopWaitsForAnUnknownUpdate(t *testing.T) {
+	h, api := loopHarness(t)
+	w := h.sup.cfg.Repositories["widgets"]
+	w.Policy.Review.Others = ReviewOnly
+	h.sup.cfg.Repositories["widgets"] = w
+	api.set(func() { api.gitlab[ciProject+"/merge_requests|state=opened"] = `[{"iid":1},{"iid":2}]` })
+	mr := outsideMRState{author: "someone-else", head: "5eed0101", pipeline: 60, status: "success", updated: "none"}
+	outsideMR(api, mr)
+	h.ticks(3, 5*time.Minute)
+	if p := h.place("!2"); p.Phase != PlaceOutside || p.Reason != LoopOutUnknown {
+		t.Fatalf("place = %+v", p)
+	}
+	if steps := h.loopSteps("!2"); len(steps) > 0 {
+		t.Fatalf("steps %v", steps)
+	}
+	mr.updated = ""
+	outsideMR(api, mr)
+	h.ticks(3, 5*time.Minute)
+	reviewer := judgmentName("!2", KindReviewer)
+	if _, ok := h.sup.st.Runtime[reviewer]; !ok {
+		t.Fatalf("no reviewer of !2; place %+v", h.place("!2"))
+	}
+	k := ciKey("widgets", "!2")
+	r := h.sup.st.CI[k]
+	r.Updated = ""
+	h.sup.st.CI[k] = r
+	h.sup.endFinished(h.clock.Now())
+	if _, ok := h.sup.st.Runtime[reviewer]; !ok {
+		t.Fatal("the reviewer was ended while the update is unknown")
+	}
+	if f := h.sup.reviewFact(reviewer); f == nil || f.Request != "!2" {
+		t.Fatalf("fact while the update is unknown = %+v", f)
+	}
+}
+
+// agentd status judges a request's age at the reader's clock, as the live
+// loop does, though no event was written as it crossed
+// review.others_max_age.
+func TestStatusJudgesAgeAtTheReadersClock(t *testing.T) {
+	h, api := loopHarness(t)
+	w := h.sup.cfg.Repositories["widgets"]
+	w.Policy.Review.Others = ReviewOnly
+	h.sup.cfg.Repositories["widgets"] = w
+	api.set(func() { api.gitlab[ciProject+"/merge_requests|state=opened"] = `[{"iid":1},{"iid":2}]` })
+	outsideMR(api, outsideMRState{author: "someone-else", head: "5eed0101", pipeline: 60, status: "success"})
+	h.ticks(3, 5*time.Minute)
+	later := h.clock.Now().Add(DefaultOthersMaxAge)
+	if got := loopViews(h.sup.cfg, h.sup.st, later); !containsView(got, "!2", LoopOutStale) {
+		t.Fatalf("live at a later pass: %+v", got)
+	}
+	_, meta := SummarizeAt(h.sup.cfg, h.events(), ModeLive, later)
+	if got, _ := meta["loops"].([]LoopView); !containsView(got, "!2", LoopOutStale) {
+		t.Fatalf("status at a later clock: %+v", meta["loops"])
+	}
+}
+
+// containsView says whether views put ref outside the loop for why.
+func containsView(views []LoopView, ref, why string) bool {
+	for _, v := range views {
+		if v.Ref == ref && v.Phase == PlaceOutside && v.Reason == why {
+			return true
+		}
+	}
+	return false
 }

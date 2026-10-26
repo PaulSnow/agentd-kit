@@ -93,6 +93,9 @@ type CIPayload struct {
 	Unresolved bool   `json:"unresolved,omitempty"`
 	Run        string `json:"run,omitempty"`
 	Base       string `json:"base,omitempty"`
+	// Updated is when the forge says the request last changed, RFC 3339
+	// in UTC, or "" when it did not say (#55).
+	Updated string `json:"updated,omitempty"`
 }
 
 // CIRecord is a request's latest CI, as the state holds it: which session
@@ -151,7 +154,7 @@ func ciKey(repo, ref string) string { return repo + " " + ref }
 func (p CIPayload) same(q CIPayload) bool {
 	return p.State == q.State && p.Head == q.Head && p.TargetState == q.TargetState && p.Verdict == q.Verdict &&
 		p.Cause == q.Cause && p.Error == q.Error && p.URL == q.URL && p.Delivered == q.Delivered &&
-		p.Author == q.Author && p.Draft == q.Draft && p.Unresolved == q.Unresolved && p.Run == q.Run && p.Base == q.Base
+		p.Author == q.Author && p.Draft == q.Draft && p.Unresolved == q.Unresolved && p.Run == q.Run && p.Base == q.Base && p.Updated == q.Updated
 }
 
 // applyCI folds a request's CI.
@@ -399,6 +402,9 @@ func (s *Supervisor) askCI(r ciWatched, prev CIRecord) CIPayload {
 	}
 	p.URL, p.Head, p.Target, p.State = c.url, c.head, c.target, c.state
 	p.Author, p.Draft, p.Unresolved, p.Run = s.withheld(c.author), c.draft, c.unresolved, c.run
+	if !c.updated.IsZero() {
+		p.Updated = c.updated.UTC().Format(time.RFC3339)
+	}
 	// The base a run tests against: the target's tip when the run was
 	// first seen, running or settled. A run first seen settled took its
 	// base from a tip that may have moved since it started, so one that
@@ -499,9 +505,11 @@ type ciCheck struct {
 	targetCI                func() (ciCheck, error)
 	jobLog                  func(id string) (string, error)
 	// The request's author, whether it is a draft or has an open
-	// discussion, the run that judged its head, and the target's tip.
+	// discussion, when it last changed, the run that judged its head,
+	// and the target's tip.
 	author     string
 	draft      bool
+	updated    time.Time
 	unresolved bool
 	run        string
 	base       string // the base a merged-results run tested, when its commit says
@@ -546,13 +554,14 @@ func gitlabCI(api ForgeAPI, project, ref string) (ciCheck, error) {
 		return ciGet(func() (APIResponse, error) { return api.GitLab(path) }, "glab api "+path, v)
 	}
 	var mr struct {
-		State        string `json:"state"`
-		Title        string `json:"title"`
-		Description  string `json:"description"`
-		WebURL       string `json:"web_url"`
-		SHA          string `json:"sha"`
-		TargetBranch string `json:"target_branch"`
-		Draft        bool   `json:"draft"`
+		State        string    `json:"state"`
+		Title        string    `json:"title"`
+		Description  string    `json:"description"`
+		WebURL       string    `json:"web_url"`
+		SHA          string    `json:"sha"`
+		TargetBranch string    `json:"target_branch"`
+		Draft        bool      `json:"draft"`
+		UpdatedAt    time.Time `json:"updated_at"`
 		Author       struct {
 			Username string `json:"username"`
 		} `json:"author"`
@@ -568,7 +577,7 @@ func gitlabCI(api ForgeAPI, project, ref string) (ciCheck, error) {
 		return ciCheck{}, err
 	}
 	c := ciCheck{url: mr.WebURL, head: mr.SHA, target: mr.TargetBranch, text: mr.Title + "\n" + mr.Description,
-		author: mr.Author.Username, draft: mr.Draft}
+		author: mr.Author.Username, draft: mr.Draft, updated: mr.UpdatedAt}
 	if mr.State == "opened" {
 		var err error
 		if c.unresolved, err = gitlabUnresolved(get, base, ref[1:], mr.BlockingDiscussionsResolved); err != nil {
@@ -706,13 +715,14 @@ func githubCI(api ForgeAPI, project, ref string) (ciCheck, error) {
 		return ciGet(func() (APIResponse, error) { return api.GitHub(path, nil) }, "gh api "+path, v)
 	}
 	var pr struct {
-		State   string `json:"state"`
-		Merged  bool   `json:"merged"`
-		Draft   bool   `json:"draft"`
-		Title   string `json:"title"`
-		Body    string `json:"body"`
-		HTMLURL string `json:"html_url"`
-		User    struct {
+		State     string    `json:"state"`
+		Merged    bool      `json:"merged"`
+		Draft     bool      `json:"draft"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Title     string    `json:"title"`
+		Body      string    `json:"body"`
+		HTMLURL   string    `json:"html_url"`
+		User      struct {
 			Login string `json:"login"`
 		} `json:"user"`
 		Head struct {
@@ -725,7 +735,7 @@ func githubCI(api ForgeAPI, project, ref string) (ciCheck, error) {
 	if err := get(base+"/pulls/"+ref[1:], &pr); err != nil {
 		return ciCheck{}, err
 	}
-	c := ciCheck{url: pr.HTMLURL, head: pr.Head.SHA, target: pr.Base.Ref, text: pr.Title + "\n" + pr.Body, author: pr.User.Login, draft: pr.Draft}
+	c := ciCheck{url: pr.HTMLURL, head: pr.Head.SHA, target: pr.Base.Ref, text: pr.Title + "\n" + pr.Body, author: pr.User.Login, draft: pr.Draft, updated: pr.UpdatedAt}
 	c.tip = func() (string, error) {
 		var r struct {
 			Object struct {

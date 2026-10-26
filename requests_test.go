@@ -42,6 +42,11 @@ type outsideMRState struct {
 	pipeline             int
 	jobs                 []string
 	unresolved           bool
+	// The request's target, main when "", whether it is a draft, and
+	// when it was last updated, a day before the harness's clock when "",
+	// and not given when "none".
+	target, updated string
+	draft           bool
 }
 
 // outsideMR sets request !2, its pipeline and the pipeline's jobs; a job
@@ -50,10 +55,20 @@ func outsideMR(api *fakeForgeAPI, s outsideMRState) {
 	if s.author == "" {
 		s.author = "widget-bot"
 	}
+	if s.target == "" {
+		s.target = "main"
+	}
+	if s.updated == "" {
+		s.updated = "2026-10-21T00:00:00.000Z"
+	}
+	updated := `,"updated_at":"` + s.updated + `"`
+	if s.updated == "none" {
+		updated = ""
+	}
 	id := strconv.Itoa(s.pipeline)
 	api.set(func() {
 		api.gitlab[ciProject+"/merge_requests/2"] = `{"iid":2,"state":"opened","title":"Fix the squeak","description":"","web_url":"https://gitlab.example.com/example-org/widgets/-/merge_requests/2","sha":"` + s.head +
-			`","target_branch":"main","author":{"username":"` + s.author + `"},"blocking_discussions_resolved":` + strconv.FormatBool(!s.unresolved) +
+			`","target_branch":"` + s.target + `","draft":` + strconv.FormatBool(s.draft) + updated + `,"author":{"username":"` + s.author + `"},"blocking_discussions_resolved":` + strconv.FormatBool(!s.unresolved) +
 			`,"head_pipeline":{"id":` + id + `,"status":"` + s.status + `","sha":"` + s.head + `"}}`
 		api.gitlab[ciProject+"/pipelines/"+id+"/jobs"] = gitlabJobs(s.pipeline*10, s.jobs)
 		api.gitlab[ciProject+"/merge_requests/2/discussions"] = `[]`

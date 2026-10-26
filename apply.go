@@ -21,6 +21,7 @@ type LogState struct {
 	Started time.Time
 	Stopped time.Time
 	Events  int                   // events of this mode, the owner's and the shared ones, applied
+	Last    time.Time             // the latest time of those events
 	Items   map[string]*Item      // new items by id, and whether the owner saw them
 	Cursors map[string]time.Time  // how far each source of items has been read
 	Polls   map[string]PollRecord // each forge source's latest poll record
@@ -120,6 +121,9 @@ func (st *LogState) apply(e Event) {
 		return
 	}
 	st.Events++
+	if e.Time.After(st.Last) {
+		st.Last = e.Time
+	}
 	if e.Kind == KindCase {
 		st.applyCase(e)
 		return

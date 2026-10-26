@@ -38,13 +38,24 @@ type SessionStatus struct {
 // row per session: every configured session, whether or not it has events
 // yet, and any other session the log names.
 func Summarize(cfg *Config, events []Event, mode string) ([]SessionStatus, map[string]any) {
+	return SummarizeAt(cfg, events, mode, time.Time{})
+}
+
+// SummarizeAt is Summarize read at now: whether a request is too old for
+// its loop is judged at now, as the live loop judges it at its pass (#55);
+// a zero now judges it at the log's latest event.
+func SummarizeAt(cfg *Config, events []Event, mode string, now time.Time) ([]SessionStatus, map[string]any) {
 	st := NewLogState(cfg, mode).Fold(events)
-	return SummarizeState(withRuntime(cfg, st.Runtime), st)
+	return summarizeState(withRuntime(cfg, st.Runtime), st, now)
 }
 
 // SummarizeState is Summarize over a state already folded, which it reads
 // and does not change.
 func SummarizeState(cfg *Config, st *LogState) ([]SessionStatus, map[string]any) {
+	return summarizeState(cfg, st, time.Time{})
+}
+
+func summarizeState(cfg *Config, st *LogState, now time.Time) ([]SessionStatus, map[string]any) {
 	mode := st.Mode
 	meta := map[string]any{"events": st.Events, "mode": mode}
 	if !st.Started.IsZero() {
@@ -75,7 +86,10 @@ func SummarizeState(cfg *Config, st *LogState) ([]SessionStatus, map[string]any)
 		}
 		meta["ci"] = ci
 	}
-	if loops := loopViews(cfg, st); len(loops) > 0 {
+	if now.IsZero() {
+		now = st.Last
+	}
+	if loops := loopViews(cfg, st, now); len(loops) > 0 {
 		meta["loops"] = loops
 	}
 	tracks := copyMap(st.Tracks)

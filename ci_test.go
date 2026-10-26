@@ -298,7 +298,7 @@ func TestCIShownOnStatusReportPageAndCase(t *testing.T) {
 // job's log.
 func TestCIGitHubPullRequest(t *testing.T) {
 	api := &fakeForgeAPI{github: map[string]string{
-		"/repos/example-org/gadgets/pulls/4":                                    `{"state":"open","merged":false,"title":"Gadgets","body":"","html_url":"https://github.com/example-org/gadgets/pull/4","head":{"sha":"abc1234def"},"base":{"ref":"main"}}`,
+		"/repos/example-org/gadgets/pulls/4":                                    `{"state":"open","merged":false,"title":"Gadgets","body":"","html_url":"https://github.com/example-org/gadgets/pull/4","updated_at":"2026-10-21T09:30:00Z","head":{"sha":"abc1234def"},"base":{"ref":"main"}}`,
 		"/repos/example-org/gadgets/pulls/4/reviews?per_page=100":               `[]`,
 		"/repos/example-org/gadgets/commits/abc1234def/check-runs?per_page=100": `{"check_runs":[{"id":9,"name":"test","status":"completed","conclusion":"failure"},{"id":10,"name":"lint","status":"completed","conclusion":"success"}]}`,
 		"/repos/example-org/gadgets/commits/main/check-runs?per_page=100":       `{"check_runs":[{"id":7,"name":"test","status":"completed","conclusion":"success","head_sha":"0123456789"}]}`,
@@ -308,7 +308,8 @@ func TestCIGitHubPullRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.state != CIFailed || c.head != "abc1234def" || c.target != "main" || len(c.failed) != 1 || c.failed[0] != "test" || c.failedIDs[0] != "9" {
+	if c.state != CIFailed || c.head != "abc1234def" || c.target != "main" || len(c.failed) != 1 || c.failed[0] != "test" || c.failedIDs[0] != "9" ||
+		!c.updated.Equal(time.Date(2026, 10, 21, 9, 30, 0, 0, time.UTC)) {
 		t.Fatalf("check = %+v", c)
 	}
 	tgt, err := c.targetCI()
