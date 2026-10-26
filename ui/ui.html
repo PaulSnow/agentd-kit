@@ -73,6 +73,9 @@
 </li>{{end}}{{range .Accounts}}<li class="chip{{if .Over}} chip-over{{end}}">
 <strong>{{.Name}}</strong> <span class="badge{{if .Over}} alert{{else if .Stale}} kind-stopped{{else}} state-working{{end}}">{{if .Stale}}stale{{else if .Over}}over limit{{else}}room{{end}}</span>
 <span class="meta">{{if .FiveHour}}5h {{pct .FiveHour}}{{with .FiveHourReset}} until {{$.When .}}{{end}}{{end}}{{if .Weekly}} · week {{pct .Weekly}}{{with .WeeklyReset}} until {{$.When .}}{{end}}{{end}}{{if .Overage}} · overage {{if yes .Overage}}on{{else}}off{{end}}{{end}}{{if not .At.IsZero}} · read {{$.Ago .At}}{{end}}{{with .Error}} · {{.}}{{end}}</span>
+</li>{{end}}{{range .Jobs}}<li class="chip{{if .Failing}} chip-over{{end}}">
+<strong>{{.Name}}</strong> <span class="badge{{if .Failing}} alert{{else if .Running}} state-working{{else}} kind-stopped{{end}}">{{if .Running}}running{{else if .Failing}}failing{{else}}job{{end}}</span>
+<span class="meta">{{.Schedule}}{{if not .Started.IsZero}} · started {{$.Ago .Started}}{{end}}{{with .End}}{{if .Exit}} · exit {{.Exit}}{{end}} · took {{.Took}}{{end}}{{with .Error}} · {{.}}{{end}}</span>
 </li>{{end}}</ul>
 </section>
 <section id="needs" data-refresh aria-labelledby="needs-h">

@@ -62,6 +62,7 @@ type Event struct {
 	Account     *AccountPayload     `json:"account,omitempty"`
 	Message     *MessagePayload     `json:"message,omitempty"`
 	Inbox       *InboxPayload       `json:"inbox,omitempty"`
+	Job         *JobPayload         `json:"job,omitempty"`
 }
 
 // Event kinds.
@@ -100,6 +101,7 @@ const (
 	KindAccount     = "account"     // a reading of an account's usage: its utilization, resets and overage
 	KindMessage     = "message"     // a post to a console: a session's or a coordinator's report (agentd console post)
 	KindInbox       = "inbox"       // a reader read the owner's instructions for a console (agentd console inbox)
+	KindJob         = "job"         // a scheduled job's run started, ended or was skipped
 )
 
 // Modes, in the mode every event carries. A run reads only the events of
@@ -351,7 +353,7 @@ func (e Event) check() error {
 		KindSkip: e.Skip != nil, KindCrash: e.Crash != nil, KindClear: e.Clear != nil, KindError: e.Error != nil, KindWarning: e.Warning != nil,
 		KindItem: e.Item != nil, KindSeen: e.Seen != nil, KindCursor: e.Cursor != nil, KindUsage: e.Usage != nil,
 		KindCheckpoint: e.Checkpoint != nil, KindPoll: e.Poll != nil, KindTriage: e.Triage != nil, KindDecision: e.Decision != nil,
-		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, KindApproval: e.Approval != nil, KindAccount: e.Account != nil, KindMessage: e.Message != nil, KindInbox: e.Inbox != nil, "act": e.Act != nil,
+		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, KindApproval: e.Approval != nil, KindAccount: e.Account != nil, KindMessage: e.Message != nil, KindInbox: e.Inbox != nil, KindJob: e.Job != nil, "act": e.Act != nil,
 	}
 	want := e.Kind
 	switch e.Kind {
@@ -374,6 +376,8 @@ func (e Event) check() error {
 		return errors.New("a message is a shared fact, for no one session, and names its id, console and kind")
 	case e.Kind == KindInbox && (e.Session != "" || e.Mode != ModeShared || e.Inbox.Console == "" || e.Inbox.Reader == "" || len(e.Inbox.IDs) == 0):
 		return errors.New("an inbox event is a shared fact, for no one session, and names its console, reader and the ids read")
+	case e.Kind == KindJob && (e.Session != "" || e.Mode != ModeLive && e.Mode != ModeShadow || e.Job.Name == "" || !validJobPhase(e.Job.Phase)):
+		return errors.New("a job event is a run's, for no one session, and names its job and a phase")
 	case e.Kind == KindAccount && (e.Session != "" || e.Mode != ModeShared || e.Account.Account == ""):
 		return errors.New("an account reading is a shared fact, for no one session, and names its account")
 	case e.Kind == KindApproval && (e.Session == "" || e.Mode != ModeShared || e.Approval.Repository == "" || e.Approval.Ref == "" || e.Approval.SHA == ""):

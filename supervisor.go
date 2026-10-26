@@ -72,6 +72,9 @@ type Supervisor struct {
 	// tailOff is how far into the event log this run has read, so each
 	// pass picks up what the owner wrote meanwhile: agentd clear.
 	tailOff int64
+	// jobsLeft is set once this run has ended the scheduled jobs' runs an
+	// earlier agentd left with no end (#51).
+	jobsLeft bool
 
 	st           *LogState
 	limitRe      *regexp.Regexp
@@ -171,6 +174,9 @@ func (s *Supervisor) screen(e *Event) {
 	}
 	if e.Account != nil {
 		e.Account.Error = s.withheld(e.Account.Error)
+	}
+	if e.Job != nil {
+		e.Job.Error = s.withheld(e.Job.Error)
 	}
 }
 
@@ -398,6 +404,7 @@ func (s *Supervisor) Pass() error {
 		s.feedConsoles(s.clock.Now())
 		s.triageItems(s.clock.Now())
 		s.readAccounts(s.clock.Now())
+		s.runJobs(s.clock.Now())
 	}
 	return s.halt
 }

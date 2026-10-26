@@ -330,6 +330,7 @@ type uiIndex struct {
 	uiPage
 	Runs     []uiRun
 	Accounts []uiAccount
+	Jobs     []uiJob
 	Needs    []uiNeed
 	Repos    []*uiRepo
 	Consoles []*uiOtherConsole // listed after the repositories, by name
@@ -463,6 +464,7 @@ func (src *uiSource) addIndex(v *uiIndex, get func(string) *uiRepo, now time.Tim
 	}
 	v.Runs = append(v.Runs, run)
 	src.addAccounts(v, cfg, now)
+	src.addJobs(v, cfg)
 	v.Needs = append(v.Needs, src.needs(cfg, rep, src.askedAt)...)
 	for _, rr := range rep.Repositories {
 		r := get(uiRepoName(rr))

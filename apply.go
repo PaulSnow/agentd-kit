@@ -54,6 +54,8 @@ type LogState struct {
 	// StartedAt when each started session was started.
 	Accounts  map[string]AccountRecord
 	StartedAt map[string]time.Time
+	// Jobs are the scheduled jobs' latest slots and runs (#51).
+	Jobs map[string]JobRecord
 
 	cfg *Config // its policies, read as each event is applied
 }
@@ -164,6 +166,8 @@ func (st *LogState) apply(e Event) {
 		switch e.Kind {
 		case KindAccount:
 			st.applyAccount(e)
+		case KindJob:
+			st.applyJob(e)
 		case KindFeed:
 			st.applyFeed(e)
 		case KindStart:

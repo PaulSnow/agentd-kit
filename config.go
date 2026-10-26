@@ -474,6 +474,7 @@ func (c *Config) finish(base string) error {
 		}
 		c.UI.Logs[i] = path(fmt.Sprintf("ui.logs[%d]", i), l)
 	}
+	errs = append(errs, c.checkScheduled(base, path, isDir)...)
 	if _, ok := c.Accounts[c.Jobs.Account]; c.Jobs.Account != "" && !ok {
 		errs = append(errs, fmt.Errorf("jobs.account %q is not in accounts", c.Jobs.Account))
 	}
@@ -817,6 +818,9 @@ func (c *Config) SessionNames() []string {
 
 // Console returns the console an escalation about session name goes to.
 func (c *Config) Console(name string) string {
+	if strings.HasPrefix(name, jobTrackPrefix) { // a scheduled job's, whose name no console's sessions match
+		return c.Policies.Escalate.DefaultConsole
+	}
 	s := c.Sessions[name]
 	if s.Repository != "" {
 		if r, ok := c.Repositories[s.Repository]; ok && r.Console != "" {
