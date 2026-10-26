@@ -68,12 +68,14 @@ type CoordinatorPayload struct {
 
 // WakeRecord is one wake of a coordinator: when, why, whether the pointer
 // was typed or, in shadow mode, would have been (a wake cut short may have
-// typed nothing, so nothing is outstanding), and its spend then.
+// typed nothing, so nothing is outstanding), its spend then, and the
+// threads of the items it carried.
 type WakeRecord struct {
-	At     time.Time
-	Reason string
-	Taken  bool
-	Spend  *int64
+	At      time.Time
+	Reason  string
+	Taken   bool
+	Spend   *int64
+	Threads []string
 }
 
 // turnOf reads a transcript line as a turn: a main-chain user prompt in
@@ -190,7 +192,7 @@ func (t *Track) applyWake(a *ActPayload, taken, counted bool, at time.Time) {
 	}
 	// A wake cut short may never have typed its pointer, so it is not
 	// outstanding; a second pointer is harmless.
-	w := WakeRecord{At: at, Reason: a.Reason, Taken: counted, Spend: a.Spend}
+	w := WakeRecord{At: at, Reason: a.Reason, Taken: counted, Spend: a.Spend, Threads: wakeThreads(a.Covered)}
 	// What it covered is not due again; what is older than the margin
 	// before it cannot be due anyway.
 	if t.Woken == nil {
@@ -392,6 +394,9 @@ func (s *Supervisor) wake(name string, sess Session, t *Track, ev Evidence, stat
 	if len(due) == 0 || !ev.Alive || t.Limited || ev.Dialog != "" || ev.TrustPrompt || state != Working && state != Idle || !s.handled(t, ev, now) {
 		return false
 	}
+	if !s.settled(keys, now) {
+		return false
+	}
 	key := fmt.Sprintf("wake:%s:%d", sess.Repository, t.WakeCount+1)
 	if !s.retryDue(t, key, now) {
 		return false
@@ -409,6 +414,23 @@ func (s *Supervisor) wake(name string, sess Session, t *Track, ev Evidence, stat
 		return s.tmux.Type(name, pointer)
 	})
 	return true
+}
+
+// settled says whether what is due may wake the coordinator now: an owner
+// instruction at once, anything else once the oldest of it is the settle
+// window old, so what arrives within the window wakes it once (#49).
+func (s *Supervisor) settled(keys []string, now time.Time) bool {
+	settle := s.cfg.Policies.Coordinator.Settle.Duration
+	oldest := now
+	for _, k := range keys {
+		if _, ok := instructionKey(k); ok {
+			return true
+		}
+		if at, ok := dueTime(k); ok && at.Before(oldest) {
+			oldest = at
+		}
+	}
+	return now.Sub(oldest) >= settle
 }
 
 // Pack is a repository's state as its coordinator reads it: data, not
@@ -486,9 +508,11 @@ func (s *Supervisor) packItems(repo string) []PackItem {
 		return nil
 	}
 	key := repoKey(r.Forge, r.Project)
+	co := r.Coordinator
 	var its []*Item
 	for _, it := range s.st.Items {
-		if it.Repository == key && !it.Seen && !it.OwnerOnly {
+		// The coordinator's own items echo what it did: not for it.
+		if it.Repository == key && !it.Seen && !it.OwnerOnly && (co == nil || !s.echo(co, s.track(co.Session), it)) {
 			its = append(its, it)
 		}
 	}

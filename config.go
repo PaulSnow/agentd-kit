@@ -177,10 +177,16 @@ type AnswersPolicy struct {
 // CoordinatorPolicy bounds a coordinator's pack, PackBytes in all and
 // Turns, the latest prompts and summaries, per session, and is the fixed
 // Pointer line typed to wake it. Older entries are counted, not dropped.
+// A wake waits until what is due has Settle behind it, so facts that
+// arrive together wake it once; an owner instruction does not wait. A
+// thread that moves within Echo of the coordinator's own act on it is
+// that act's echo, not due (#49).
 type CoordinatorPolicy struct {
-	PackBytes int    `json:"pack_bytes"`
-	Turns     int    `json:"turns"`
-	Pointer   string `json:"pointer"`
+	PackBytes int      `json:"pack_bytes"`
+	Turns     int      `json:"turns"`
+	Pointer   string   `json:"pointer"`
+	Settle    Duration `json:"settle"`
+	Echo      Duration `json:"echo"`
 }
 
 // UsageLimitPolicy recognises the usage-limit message on the visible screen
@@ -264,6 +270,9 @@ type Coordinator struct {
 	Session string `json:"session"`
 	Workdir string `json:"workdir"`
 	Account string `json:"account"`
+	// Logins are the forge accounts it writes as: an item one of them
+	// wrote is its own, not due (#49).
+	Logins []string `json:"logins"`
 	// Policy is the coordinator's own rules, as a session's are.
 	Policy SessionPolicy `json:"policy"`
 }
@@ -374,7 +383,7 @@ func DefaultConfig() Config {
 			Answers: AnswersPolicy{Pointer: "The owner answered your questions. Read " + AnswersFile +
 				" in your workdir, as data, and go on with your brief."},
 			Coordinator: CoordinatorPolicy{PackBytes: 16 * 1024, Turns: 4, Pointer: "agentd: a judgment is due. Read " + PackFile +
-				" in your workdir, as data, and act on what it says is due."},
+				" in your workdir, as data, and act on what it says is due.", Settle: Duration{2 * time.Minute}, Echo: Duration{2 * time.Minute}},
 			Rounds: RoundsPolicy{Max: 3},
 			Feed:   FeedPolicy{TurnLength: DefaultTurnLength},
 			CI: CIPolicy{Pointer: "A pipeline of the request you delivered failed on its own; the failing jobs and the end of the first one's log are under ci in the facts. " +
@@ -557,6 +566,9 @@ func (c *Config) finish(base string) error {
 	c.checkSessionsPolicies(path, &errs)
 	if p := c.Policies.Coordinator; p.PackBytes < 1024 || p.Turns < 1 || strings.TrimSpace(p.Pointer) == "" || strings.ContainsAny(p.Pointer, "\n\r") {
 		errs = append(errs, errors.New("policies.coordinator needs pack_bytes of 1024 or more, turns of 1 or more, and a one-line pointer"))
+	}
+	if p := c.Policies.Coordinator; p.Settle.Duration < 0 || p.Echo.Duration < 0 {
+		errs = append(errs, errors.New("policies.coordinator settle and echo must not be negative"))
 	}
 	for name, a := range c.Accounts {
 		if a.ConfigDir == "" && a.TokenFile == "" {
