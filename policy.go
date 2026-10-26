@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Repository policy (#35, #3 sections 4 and 7). Each repository's rules
@@ -112,12 +113,14 @@ func (m Matches) matches(number int, labels []string) bool {
 
 // ReviewRules: the models review rounds use, their Rounds.Max, and Others,
 // review-only for requests by other authors, which merge.authors
-// already keeps from merging.
+// already keeps from merging: the loop reviews one updated within
+// OthersMaxAge (#55).
 type ReviewRules struct {
 	ReviewerModel string      `json:"reviewer_model"`
 	JudgeModel    string      `json:"judge_model"`
 	Rounds        RoundsRules `json:"rounds"`
 	Others        string      `json:"others"`
+	OthersMaxAge  Duration    `json:"others_max_age"`
 }
 
 // RoundsRules caps a case's review rounds; 0 leaves policies.rounds.max.
@@ -127,6 +130,9 @@ type RoundsRules struct {
 
 // ReviewOnly is ReviewRules.Others for requests reviewed, never merged.
 const ReviewOnly = "review-only"
+
+// DefaultOthersMaxAge is review.others_max_age when the policy sets none.
+const DefaultOthersMaxAge = 14 * 24 * time.Hour
 
 // CIRules: Required adds ci to every request's merge.require, and
 // RetestOnBaseMove retests a request whose target moved (#36).
@@ -252,6 +258,13 @@ func (c *Config) checkPolicy(name string, repo *Repository, errs *[]error) {
 	}
 	if o := p.Review.Others; o != "" && o != ReviewOnly {
 		bad("review.others %q is not review-only", o)
+	}
+	if p.Review.OthersMaxAge.Duration < 0 {
+		bad("review.others_max_age must not be negative")
+	}
+	if p.Review.OthersMaxAge.Duration == 0 {
+		p.Review.OthersMaxAge = Duration{DefaultOthersMaxAge}
+		def("review.others_max_age")
 	}
 	s := &p.Sessions
 	if s.Max < 0 || s.Budget.SessionTokens < 0 || s.Budget.RunTokens < 0 {
@@ -527,6 +540,13 @@ func narrowKey(eff *RepoPolicy, key string, raw json.RawMessage) bool {
 			return false
 		}
 		eff.Review.Others = o
+		return true
+	case "review.others_max_age":
+		var d Duration
+		if strictJSON(raw, &d) != nil || d.Duration <= 0 || eff.Review.OthersMaxAge.Duration > 0 && d.Duration > eff.Review.OthersMaxAge.Duration {
+			return false
+		}
+		eff.Review.OthersMaxAge = d
 		return true
 	case "ci.required", "ci.retest_on_base_move":
 		have := &eff.CI.Required

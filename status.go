@@ -75,7 +75,9 @@ func SummarizeState(cfg *Config, st *LogState) ([]SessionStatus, map[string]any)
 		}
 		meta["ci"] = ci
 	}
-	if loops := loopViews(cfg, st); len(loops) > 0 {
+	// Whether a request is stale is judged at the state's latest event:
+	// a status of a log is the same whenever it is read.
+	if loops := loopViews(cfg, st, st.Last); len(loops) > 0 {
 		meta["loops"] = loops
 	}
 	tracks := copyMap(st.Tracks)

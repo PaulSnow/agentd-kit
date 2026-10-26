@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"time"
 )
 
@@ -41,6 +42,17 @@ const (
 	PlaceCI        = "waiting for CI"
 	PlaceMerging   = "merging"
 	PlaceOwner     = "waiting for the owner"
+	PlaceOutside   = "outside the loop"
+)
+
+// Why a request is outside the loop (#55): it is watched for CI, and
+// nothing else is done with it.
+const (
+	LoopOutDraft    = "draft"    // it is a draft
+	LoopOutTarget   = "target"   // its target is not one of merge.targets
+	LoopOutAuthor   = "author"   // its author is not one of merge.authors, and review.others is not review-only
+	LoopOutStale    = "stale"    // by another author, and not updated within review.others_max_age
+	LoopOutExcluded = "excluded" // its number is in merge.exclude or scope.reserved
 )
 
 func validLoopStep(step string) bool {
@@ -134,24 +146,75 @@ func looped(repo Repository) bool {
 
 // loopRequest is one open request of a looped repository: the work
 // session that delivered it, or none, and the case its rounds are in.
+// Out is why it is outside the loop, or "".
 type loopRequest struct {
 	ciWatched
 	Outside bool
 	Case    string
 	Branch  string // the branch its judgment sessions are named for
+	Out     string
 }
 
-// loopRequests is every open request of a looped repository, delivered
-// first, in the order the watcher lists them.
-func loopRequests(cfg *Config, st *LogState) []loopRequest {
+// loopRequests is every open request in a looped repository's loop,
+// delivered first, in the order the watcher lists them.
+func loopRequests(cfg *Config, st *LogState, now time.Time) []loopRequest {
+	var out []loopRequest
+	for _, q := range openLoopRequests(cfg, st, now) {
+		if q.Out == "" {
+			out = append(out, q)
+		}
+	}
+	return out
+}
+
+// outsideLoop is why request r stays outside its repository's loop under
+// pol at now, or "" (#55). A request enters only when it is no draft,
+// into one of merge.targets, by one of merge.authors or, under
+// review.others review-only, updated within review.others_max_age, and
+// its number is neither excluded nor reserved. One whose head the
+// watcher has not recorded is in, and waits for it.
+func outsideLoop(pol RepoPolicy, r CIRecord, ok bool, ref string, now time.Time) string {
+	n, _ := strconv.Atoi(ref[1:])
+	switch {
+	case containsInt(pol.Merge.Exclude.Numbers, n) || containsInt(pol.Scope.Reserved.Numbers, n):
+		return LoopOutExcluded
+	case !ok || r.Head == "":
+		return ""
+	case r.Draft:
+		return LoopOutDraft
+	case !contains(pol.Merge.Targets, r.Target):
+		return LoopOutTarget
+	case contains(pol.Merge.Authors, r.Author):
+		return ""
+	case pol.Review.Others != ReviewOnly:
+		return LoopOutAuthor
+	}
+	// A request the forge gave no time for is taken as stale.
+	updated, err := time.Parse(time.RFC3339, r.Updated)
+	if err != nil || now.Sub(updated) > pol.Review.OthersMaxAge.Duration {
+		return LoopOutStale
+	}
+	return ""
+}
+
+// openLoopRequests is every open request of a looped repository, in the
+// loop or not, delivered first, in the order the watcher lists them.
+func openLoopRequests(cfg *Config, st *LogState, now time.Time) []loopRequest {
 	delivered := watchedRequestsOf(cfg, st)
+	pols := map[string]RepoPolicy{}
 	var out []loopRequest
 	for i, w := range append(delivered, outsideRequestsOf(cfg, st, delivered)...) {
 		repo := cfg.Repositories[w.Repository]
 		if !looped(repo) {
 			continue
 		}
-		q := loopRequest{ciWatched: w, Outside: i >= len(delivered), Branch: "request-" + w.Ref[1:]}
+		pol, ok := pols[w.Repository]
+		if !ok {
+			pol, _ = effectivePolicy(cfg, st, w.Repository)
+			pols[w.Repository] = pol
+		}
+		r, ok := st.CI[ciKey(w.Repository, w.Ref)]
+		q := loopRequest{ciWatched: w, Outside: i >= len(delivered), Branch: "request-" + w.Ref[1:], Out: outsideLoop(pol, r, ok, w.Ref, now)}
 		if q.Outside {
 			q.Case = repoKey(repo.Forge, repo.Project) + w.Ref
 		} else {
@@ -351,10 +414,15 @@ type LoopView struct {
 	Reason     string `json:"reason,omitempty"`
 }
 
-// loopViews is every looped request's place.
-func loopViews(cfg *Config, st *LogState) []LoopView {
+// loopViews is every looped request's place at now, and why each one
+// outside the loop is.
+func loopViews(cfg *Config, st *LogState, now time.Time) []LoopView {
 	var out []LoopView
-	for _, q := range loopRequests(cfg, st) {
+	for _, q := range openLoopRequests(cfg, st, now) {
+		if q.Out != "" {
+			out = append(out, LoopView{Repository: q.Repository, Ref: q.Ref, Phase: PlaceOutside, Reason: q.Out})
+			continue
+		}
 		p := placeOf(cfg, st, q)
 		out = append(out, LoopView{Repository: q.Repository, Ref: q.Ref, Phase: p.Phase, Reason: p.Reason})
 	}
@@ -365,7 +433,7 @@ func loopViews(cfg *Config, st *LogState) []LoopView {
 // next queued case where there is room. A fix round is the work session's
 // own step (fixRound), taken when it is done.
 func (s *Supervisor) runLoops(now time.Time) {
-	for _, q := range loopRequests(s.cfg, s.st) {
+	for _, q := range loopRequests(s.cfg, s.st, now) {
 		if s.halt != nil {
 			return
 		}
@@ -402,7 +470,7 @@ func (s *Supervisor) runLoops(now time.Time) {
 					q.Ref, q.Repository, p.Reason, q.Repository, q.Repository, q.Ref), t, now)
 		}
 	}
-	s.endFinished()
+	s.endFinished(now)
 	s.startNext(now)
 }
 
@@ -410,9 +478,9 @@ func (s *Supervisor) runLoops(now time.Time) {
 // repository once every request it delivered is merged or closed, and
 // each reviewer or judge whose request left the loop, so its room under
 // sessions.max goes to the next case and the judgment sessions.
-func (s *Supervisor) endFinished() {
+func (s *Supervisor) endFinished(now time.Time) {
 	current := map[string]bool{}
-	for _, q := range loopRequests(s.cfg, s.st) {
+	for _, q := range loopRequests(s.cfg, s.st, now) {
 		current[q.judgment(KindReviewer)], current[q.judgment(KindJudge)] = true, true
 	}
 	for _, name := range sortedKeys(s.st.Runtime) {
@@ -504,7 +572,7 @@ func (s *Supervisor) fixRound(name string, sess Session, t *Track, ev Evidence, 
 	if state != Done && state != Idle || t.Limited {
 		return false
 	}
-	for _, q := range loopRequests(s.cfg, s.st) {
+	for _, q := range loopRequests(s.cfg, s.st, s.clock.Now()) {
 		if q.Outside || q.Session != name {
 			continue
 		}
@@ -624,7 +692,7 @@ type ReviewFact struct {
 
 // reviewFact is the request the judgment session name serves, or nil.
 func (s *Supervisor) reviewFact(name string) *ReviewFact {
-	for _, q := range loopRequests(s.cfg, s.st) {
+	for _, q := range loopRequests(s.cfg, s.st, s.clock.Now()) {
 		if q.judgment(KindReviewer) != name && q.judgment(KindJudge) != name {
 			continue
 		}

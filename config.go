@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -311,7 +312,8 @@ type Deliver struct {
 	Draft      bool   `json:"draft"`
 }
 
-// Duration is a time.Duration that reads and writes as a string such as "40m".
+// Duration is a time.Duration that reads and writes as a string such as
+// "40m"; a whole number of days, such as "14d", reads too.
 type Duration struct{ time.Duration }
 
 func (d Duration) MarshalJSON() ([]byte, error) { return json.Marshal(d.String()) }
@@ -320,6 +322,12 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	var s string
 	if err := json.Unmarshal(b, &s); err != nil {
 		return fmt.Errorf("duration must be a string such as \"40m\": %w", err)
+	}
+	if days, ok := strings.CutSuffix(s, "d"); ok {
+		if n, err := strconv.Atoi(days); err == nil && n >= 0 && n <= 10000 {
+			d.Duration = time.Duration(n) * 24 * time.Hour
+			return nil
+		}
 	}
 	v, err := time.ParseDuration(s)
 	if err != nil {
