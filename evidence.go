@@ -88,7 +88,7 @@ func readStatusRegular(path string) (StatusEvidence, error) {
 }
 
 // A STATUS.md may hold several Questions sections (one per issue the session
-// works through). Each is judged on its own: a section that says "none" asks
+// works through). Each is judged on its own: a line that says "none" asks
 // nothing, a section ends only at a heading of its own level or higher (a
 // subheading under it is part of the question), and rules and blank lines
 // around the text do not change the escalation key. Lines inside a fenced
@@ -100,6 +100,12 @@ var thematicBreak = regexp.MustCompile(`^(-{3,}|\*{3,}|_{3,})$`)
 // noQuestions matches the ways a session says it has none: "none", "- none",
 // "(none yet)", "None.", "None open.", "No open questions", "n/a".
 var noQuestions = regexp.MustCompile(`(?i)^[-*\s]*\(?\s*(none(\s+(yet|open|so\s+far))?|no(\s+open)?\s+questions?(\s+(yet|open))?|n/a)\s*\.?\)?\s*$`)
+
+// noneSaid matches a parenthesised line that says none are open and why:
+// "(none open; the three were answered on ...)", "(None: see the console)"
+// (#54). "(none of these ...)" asks something, so the none must end at
+// punctuation.
+var noneSaid = regexp.MustCompile(`(?i)^[-*\s]*\(\s*none(\s+(yet|open|so\s+far))?\s*[;:,.\x{2014}-].*\)\s*\.?$`)
 
 // ParseStatus interprets STATUS.md text.
 func ParseStatus(text string) StatusEvidence {
@@ -136,14 +142,15 @@ func parseQuestions(text string, fences bool) (questions string, closed bool) {
 	fence := "" // the fence the line is inside, such as "```", or ""
 	flush := func() {
 		// A DONE line under the heading is the end of the file, not a
-		// question.
+		// question, and a line that says none are open asks nothing: only
+		// the lines left are the section's questions.
 		var kept []string
 		for _, l := range section {
-			if strings.TrimSpace(l) != "DONE" {
+			if t := strings.TrimSpace(l); t != "DONE" && !noQuestions.MatchString(t) && !noneSaid.MatchString(t) {
 				kept = append(kept, l)
 			}
 		}
-		if joined := strings.Join(kept, "\n"); joined != "" && !noQuestions.MatchString(joined) {
+		if joined := strings.Join(kept, "\n"); joined != "" {
 			found = append(found, joined)
 		}
 		section = nil

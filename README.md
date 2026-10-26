@@ -71,7 +71,7 @@ A session is `starting`, `working`, `idle`, `blocked-on-owner`, `usage-limited`,
 - the hash of the visible screen plus the 40 lines of history above it, and how long since it changed, with a nudge's own echo not counted as change;
 - the patterns (usage limit, trust prompt, dialogs) matched against the visible screen only, so a prompt that has scrolled away is never answered;
 - what tmux says the pane is running, asked before anything is typed;
-- `STATUS.md`: its first line, whether its last line is `DONE`, and whether its Questions section asks anything; a line inside a ```` ``` ```` or `~~~` fenced code block is content, never a heading, so a `# comment` in a snippet neither ends nor starts a section (a fence still open at the end of the file is taken as a typo, and the file is read without fences);
+- `STATUS.md`: its first line, whether its last line is `DONE`, and whether its Questions section asks anything: a line that says none are open (`none`, `(none)`, `none open`, `No open questions`, `n/a`, or a parenthesised line such as `(none open; answered on ...)`) asks nothing, and every other line under the heading counts; a line inside a ```` ``` ```` or `~~~` fenced code block is content, never a heading, so a `# comment` in a snippet neither ends nor starts a section (a fence still open at the end of the file is taken as a typo, and the file is read without fences);
 - the transcript's last turn, role and stop reason, read from the tail of the newest transcript for the session's directory when one exists. A fresh transcript keeps a static screen from counting as idle, as during a long tool call. Sessions sharing a directory share transcripts, so this is supporting evidence only.
 
 ## Context and spend
