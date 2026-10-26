@@ -447,6 +447,15 @@ type MCPServer struct {
 	now          func() time.Time
 	confidential []*regexp.Regexp
 	st           *LogState // the log as folded for the call being checked
+	// replaced says whether the binary on disk is no longer the one the
+	// server runs, and restart re-executes it with the input not yet
+	// answered, returning only when it cannot (upgrade.go). Nil: never.
+	replaced   func() bool
+	restart    func(pending []byte, why string) error
+	restarting string        // why the call just handled is left to the binary on disk
+	restartErr error         // why re-executing it failed
+	note       string        // said in the next tool reply: the server restarted
+	held       *bytes.Reader // the handover input, which Serve reads before its own
 }
 
 // NewMCPServer is the server for the named session, which must work a
@@ -530,6 +539,19 @@ func (srv *MCPServer) Serve(r io.Reader, w io.Writer) error {
 				}
 			} else if len(req.ID) > 0 { // a notification is not acted on, nor answered
 				result, rerr := srv.handle(req)
+				if why := srv.restarting; why != "" {
+					srv.restarting = ""
+					pending := append(append(line, '\n'), buffered(br)...)
+					if srv.held != nil { // copied, not read: a failed restart serves it still
+						rest := make([]byte, srv.held.Len())
+						srv.held.ReadAt(rest, srv.held.Size()-int64(len(rest)))
+						pending = append(pending, rest...)
+					}
+					if srv.restartErr = srv.restart(pending, why); srv.restartErr == nil {
+						return nil
+					}
+					result, rerr = srv.handle(req)
+				}
 				reply := map[string]any{"jsonrpc": "2.0", "id": req.ID}
 				if rerr != nil {
 					reply["error"] = rerr
@@ -604,6 +626,9 @@ func (srv *MCPServer) handle(req rpcRequest) (any, *rpcError) {
 			return nil, &rpcError{rpcInvalidParams, fmt.Sprintf("no tool %q: %s", p.Name, strings.Join(tools, ", "))}
 		}
 		reply, refused := srv.call(p.Name, p.Arguments)
+		if srv.note != "" && srv.restarting == "" {
+			reply, srv.note = withField(reply, "restarted", srv.note), ""
+		}
 		return map[string]any{"content": []map[string]string{{"type": "text", "text": reply}}, "isError": refused}, nil
 	case "notifications/initialized", "notifications/cancelled":
 		return nil, nil
@@ -617,7 +642,7 @@ func (srv *MCPServer) call(tool string, args json.RawMessage) (string, bool) {
 	if srv.sess.Role == RoleCoordinator {
 		return srv.callSessions(tool, args)
 	}
-	events, err := srv.read()
+	events, err := srv.load()
 	if err != nil {
 		return compact(map[string]any{"refused": "agentd could not read its log: " + err.Error()}), true
 	}
@@ -1211,6 +1236,12 @@ func mcpFacts(st *LogState, id, role string) ([]string, []GoalItem, []FactRuling
 
 // mcpCmd is agentd mcp --session NAME: the session's server on stdio.
 func mcpCmd(args []string, r io.Reader, w io.Writer) error {
+	// A re-executed server's handover is taken first, so it is removed
+	// whatever follows; one it cannot read is said and left.
+	pending, why, err := takeHandover()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "agentd mcp:", err)
+	}
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	session := fs.String("session", "", "the session the server reports for")
 	cfg, _, err := loadConfigFlag(fs, args)
@@ -1237,6 +1268,18 @@ func mcpCmd(args []string, r io.Reader, w io.Writer) error {
 	srv, err := NewMCPServer(projected(cfg, events), *session, log, read, time.Now)
 	if err != nil {
 		return err
+	}
+	if pending != nil {
+		srv.note = restartNote(why)
+		fmt.Fprintln(os.Stderr, "agentd mcp:", srv.note)
+		srv.held = bytes.NewReader(pending)
+		r = io.MultiReader(srv.held, r)
+	}
+	if exe, err := os.Executable(); err == nil {
+		srv.replaced = replacedSince(exe, "/proc/self/exe")
+		srv.restart = func(pending []byte, why string) error {
+			return reexecMCP(exe, append([]string{"mcp"}, args...), pending, why)
+		}
 	}
 	return srv.Serve(r, w)
 }

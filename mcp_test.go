@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -86,8 +89,14 @@ type rpcReply struct {
 // server's standard input and reads the replies from its standard output.
 func session(t *testing.T, srv *MCPServer, requests ...string) []rpcReply {
 	t.Helper()
+	return sessionOver(t, srv, strings.NewReader(strings.Join(requests, "\n")+"\n"))
+}
+
+// sessionOver is session with its input as r.
+func sessionOver(t *testing.T, srv *MCPServer, r io.Reader) []rpcReply {
+	t.Helper()
 	var out bytes.Buffer
-	if err := srv.Serve(strings.NewReader(strings.Join(requests, "\n")+"\n"), &out); err != nil {
+	if err := srv.Serve(r, &out); err != nil {
 		t.Fatal(err)
 	}
 	var replies []rpcReply
@@ -640,5 +649,192 @@ func TestReview2Edges(t *testing.T) {
 	}
 	if _, ok := alike("tests pass", "docs pass"); ok {
 		t.Fatal("tests pass and docs pass are alike")
+	}
+}
+
+// staleServer is s1's server as a build older than its log runs it: every
+// read fails as the old reader fails on a field it does not know.
+func staleServer(h *harness, replaced bool) *MCPServer {
+	srv := h.mcpServerFor("s1")
+	srv.read = func() ([]Event, error) {
+		return nil, errors.New(`event log line 2 is malformed (json: unknown field "kind")`)
+	}
+	srv.replaced = func() bool { return replaced }
+	return srv
+}
+
+// A server whose log it cannot read, once the binary it runs was
+// replaced, re-executes the binary on disk with the call it has not
+// answered and the input after it; the new server answers them, and its
+// first tool reply says it restarted (#45).
+func TestMCPRestartsOnReplacedBuild(t *testing.T) {
+	h, head := mcpHarness(t)
+	srv := staleServer(h, true)
+	var pending []byte
+	var why string
+	srv.restart = func(p []byte, w string) error { pending, why = p, w; return nil }
+	args := validReport(head)
+	args["acknowledged"] = []any{}
+	report, ping := toolCall(1, "report_progress", args), `{"jsonrpc":"2.0","id":2,"method":"ping"}`
+	if rs := session(t, srv, report, ping); len(rs) != 0 {
+		t.Fatalf("the old server answered: %+v", rs)
+	}
+	if string(pending) != report+"\n"+ping+"\n" || !strings.Contains(why, `unknown field "kind"`) {
+		t.Fatalf("handed over %q, why %q", pending, why)
+	}
+	if n := h.count(KindCase, "", "s1"); n != 0 {
+		t.Fatalf("the old server logged %d calls", n)
+	}
+	next := h.mcpServerFor("s1")
+	next.note = restartNote(why)
+	rs := session(t, next, strings.Split(strings.TrimSuffix(string(pending), "\n"), "\n")...)
+	if len(rs) != 2 || rs[0].Result.IsError || string(rs[1].ID) != "2" {
+		t.Fatalf("replies %+v", rs)
+	}
+	text := rs[0].Result.Content[0].Text
+	if !strings.Contains(text, `"accepted":true`) || !strings.Contains(text, `"restarted":"agentd's tool server was on an older build`) {
+		t.Fatalf("first reply %s", text)
+	}
+	if text, _ := callOne(t, next, "report_progress", args); strings.Contains(text, "restarted") {
+		t.Fatalf("a later reply says it restarted: %s", text)
+	}
+}
+
+// A re-executed server that restarts again, before it has read all it
+// was handed, hands on the rest of it too, ahead of its own input.
+func TestMCPRestartHandsOnHeldInput(t *testing.T) {
+	h, _ := mcpHarness(t)
+	srv := staleServer(h, true)
+	var pending []byte
+	srv.restart = func(p []byte, _ string) error { pending = p; return nil }
+	call := toolCall(1, ToolRequestStep, map[string]any{"kind": StepReview})
+	held := call + "\n" + `{"jsonrpc":"2.0","id":2,"method":"ping","params":{"pad":"` + strings.Repeat("x", 200<<10) + `"}}` + "\n"
+	own := `{"jsonrpc":"2.0","id":3,"method":"ping"}` + "\n"
+	srv.held = bytes.NewReader([]byte(held))
+	var out bytes.Buffer
+	if err := srv.Serve(io.MultiReader(srv.held, strings.NewReader(own)), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 || string(pending) != held {
+		t.Fatalf("replied %q; handed on %d bytes, want the %d held", out.String(), len(pending), len(held))
+	}
+	// A restart that fails serves all of it still.
+	srv = staleServer(h, true)
+	srv.restart = func([]byte, string) error { return errors.New("exec format error") }
+	srv.held = bytes.NewReader([]byte(held))
+	rs := sessionOver(t, srv, io.MultiReader(srv.held, strings.NewReader(own)))
+	if len(rs) != 3 || string(rs[1].ID) != "2" || string(rs[2].ID) != "3" {
+		t.Fatalf("%d replies after a failed restart", len(rs))
+	}
+}
+
+// A server whose binary is unchanged refuses as before, and says what to
+// do; one whose re-execution fails says that, and goes on serving.
+func TestMCPStaleWithoutRestart(t *testing.T) {
+	h, head := mcpHarness(t)
+	text, refused := callOne(t, staleServer(h, false), "report_progress", validReport(head))
+	if !refused || !strings.Contains(text, `unknown field \"kind\"`) || !strings.Contains(text, "restart this session") {
+		t.Fatalf("unchanged binary: %s", text)
+	}
+	srv := staleServer(h, true)
+	tries := 0
+	srv.restart = func([]byte, string) error { tries++; return errors.New("exec format error") }
+	rs := session(t, srv, toolCall(1, "report_progress", validReport(head)), toolCall(2, "report_progress", validReport(head)))
+	if len(rs) != 2 || tries != 1 {
+		t.Fatalf("%d replies, %d tries", len(rs), tries)
+	}
+	for _, r := range rs {
+		if text := r.Result.Content[0].Text; !r.Result.IsError || !strings.Contains(text, "exec format error") || !strings.Contains(text, "restart this session") {
+			t.Fatalf("reply %s", text)
+		}
+	}
+}
+
+// agentd mcp started with a handed-over input answers it before its own
+// standard input, removes the file and says it restarted.
+func TestMCPCommandResumesHandover(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "s1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "agentd.json")
+	b, _ := json.Marshal(map[string]any{"event_log": filepath.Join(dir, "events.jsonl"), "policies": map[string]any{"escalate": map[string]any{"command": []string{"route", "{message}"}}},
+		"repositories": map[string]any{"widgets": map[string]any{"forge": "gitlab", "host": "gitlab.example.com", "project": "example-org/widgets"}},
+		"sessions":     map[string]any{"s1": map[string]any{"workdir": filepath.Join(dir, "s1"), "cwd": dir, "repository": "widgets", "issue": 7}}})
+	writeFile(t, cfgPath, string(b))
+	handover := filepath.Join(dir, "handover.json")
+	call := toolCall(1, ToolRequestStep, map[string]any{"kind": StepReview})
+	hb, _ := json.Marshal(mcpHandover{Input: []byte(call + "\n"), Why: "line 2 is malformed"})
+	writeFile(t, handover, string(hb))
+	t.Setenv(mcpHandoverEnv, handover)
+	var out bytes.Buffer
+	if err := mcpCmd([]string{"--config", cfgPath, "--session", "s1"}, strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"ping"}`+"\n"), &out); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], `\"restarted\":`) || !strings.Contains(lines[1], `"id":2`) {
+		t.Fatalf("replies %s", out.String())
+	}
+	if _, err := os.Stat(handover); !os.IsNotExist(err) {
+		t.Fatalf("the handover file is left: %v", err)
+	}
+	if os.Getenv(mcpHandoverEnv) != "" {
+		t.Fatal("the handover is still in the environment")
+	}
+}
+
+// reexecMCP replaces the process with the binary given, which reads the
+// handover the variable names and then the same standard input.
+func TestMCPReexec(t *testing.T) {
+	if os.Getenv("AGENTD_TEST_REEXEC") != "" {
+		err := reexecMCP(os.Getenv("AGENTD_TEST_REEXEC"), []string{"mcp", "--session", "s1"}, []byte("pending\n"), "why")
+		fmt.Fprintln(os.Stderr, "reexec returned:", err)
+		os.Exit(3)
+	}
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "agentd")
+	writeFile(t, exe, "#!/bin/sh\necho \"args $*\"\ncat \"$"+mcpHandoverEnv+"\"; echo\ncat\n")
+	if err := os.Chmod(exe, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestMCPReexec$")
+	cmd.Env = append(os.Environ(), "AGENTD_TEST_REEXEC="+exe, "TMPDIR="+dir)
+	cmd.Stdin = strings.NewReader("rest of the input\n")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	hb, _ := json.Marshal(mcpHandover{Input: []byte("pending\n"), Why: "why"})
+	if want := "args mcp --session s1\n" + string(hb) + "\nrest of the input\n"; string(out) != want {
+		t.Fatalf("output %q, want %q", out, want)
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, "agentd-mcp-*.json")); len(left) != 1 {
+		t.Fatalf("handover files %v, want the one the new binary takes", left)
+	}
+}
+
+// replacedSince says a binary moved over the one noted is replaced, and
+// the one noted is not.
+func TestReplacedSince(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "agentd")
+	writeFile(t, exe, "old")
+	replaced := replacedSince(exe, filepath.Join(dir, "no image"))
+	if replaced == nil || replaced() {
+		t.Fatal("the binary noted is replaced")
+	}
+	writeFile(t, exe+".new", "new build")
+	if err := os.Rename(exe+".new", exe); err != nil {
+		t.Fatal(err)
+	}
+	if !replaced() {
+		t.Fatal("a binary moved over it is not replaced")
+	}
+	writeFile(t, filepath.Join(dir, "elsewhere"), "another build")
+	if image := replacedSince(filepath.Join(dir, "elsewhere"), exe); image == nil || !image() {
+		t.Fatal("the running image is not compared with the binary on disk")
+	}
+	if replacedSince(filepath.Join(dir, "missing"), filepath.Join(dir, "missing")) != nil {
+		t.Fatal("a binary that cannot be read is watched")
 	}
 }
