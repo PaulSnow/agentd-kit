@@ -147,11 +147,11 @@ func newUIFixture(t *testing.T) *uiFixture {
 	}
 	coord := DefaultConfig()
 	coord.Repositories = repos()
+	// coord runs widgets' request loop, which watches its outside requests.
 	cw := coord.Repositories["widgets"]
-	cw.Coordinator = &Coordinator{Session: "cw"}
+	cw.Sessions = &SessionsPolicy{Root: t.TempDir(), Clone: t.TempDir(), Target: "main"}
 	coord.Repositories["widgets"] = cw
 	coord.Sessions = map[string]Session{
-		"cw":   {Workdir: workdir("cw", ""), Repository: "widgets", Role: RoleCoordinator},
 		"lim1": {Workdir: workdir("lim1", ""), Repository: "widgets"},
 		"g1":   {Workdir: workdir("g1", ""), Repository: "gadgets"},
 	}
@@ -217,9 +217,11 @@ func newUIFixture(t *testing.T) *uiFixture {
 			t.Fatalf("%+v: %v", e, err)
 		}
 	}
+	// An earlier version's coordinator, cw, left its claim and its turn
+	// in the log: read, and shown nowhere (#53).
 	claim := ev(at(6*time.Hour), "cw", KindCoordinator, ModeShared)
 	claim.Coordinator = &CoordinatorPayload{Repository: "widgets"}
-	ci := ev(at(15*time.Minute), "cw", KindCI, ModeLive)
+	ci := ev(at(15*time.Minute), requestsTrack("widgets"), KindCI, ModeLive)
 	ci.CI = &CIPayload{Repository: "widgets", Ref: "!9", URL: "https://gitlab.example/example-org/widgets/-/merge_requests/9", Head: "abc", State: CIPending, Author: "contributor-c", Unresolved: true}
 	ask := ev(at(25*time.Minute), "g1", KindDecision, ModeLive)
 	ask.Decision = &DecisionPayload{Hash: "h3", Decisions: []Decision{{ID: "Q1", Type: DecisionYesNo, Question: "Release gadgets 2.0?", Why: "the changelog is ready"}}}
@@ -301,7 +303,7 @@ func TestUIMergesLogs(t *testing.T) {
 	if got := names(widgets.Working); got != "coord/lim1,night/quiet1,night/s-blocked,night/txt1,night/w17,night/w18" {
 		t.Fatalf("widgets working: %s", got)
 	}
-	if names(widgets.Coordinators) != "coord/cw" || names(widgets.Finished) != "night/done1" || names(gadgets.Working) != "coord/g1" {
+	if names(widgets.Finished) != "night/done1" || names(gadgets.Working) != "coord/g1" {
 		t.Fatalf("widgets %+v, gadgets %+v", widgets, gadgets)
 	}
 	if len(widgets.Requests) != 1 || !widgets.Requests[0].Outside || widgets.Requests[0].Author != "contributor-c" || !widgets.Requests[0].Unresolved {
@@ -397,8 +399,7 @@ func TestUIAnswersByButtonAndBox(t *testing.T) {
 
 // The console shows the repository's messages from every source in time
 // order, imported history first, and a reply is recorded as the owner's
-// instruction from the UI, in the run of the repository's coordinator,
-// which is the run that reads it.
+// instruction from the UI, in the first live run.
 func TestUIConsoleReply(t *testing.T) {
 	u, f := fixtureUI(t)
 	body := owner(t, u, "/console/widgets")
@@ -411,15 +412,15 @@ func TestUIConsoleReply(t *testing.T) {
 			t.Fatalf("messages out of order %v:\n%s", at, body)
 		}
 	}
-	if !strings.Contains(body, `<input type="hidden" name="src" value="coord"><input type="hidden" name="repository" value="widgets">`) || !strings.Contains(body, `action="/reply"`) || !strings.Contains(body, "Which &lt;b&gt;colour&lt;/b&gt;?") {
+	if !strings.Contains(body, `<input type="hidden" name="src" value="night"><input type="hidden" name="repository" value="widgets">`) || !strings.Contains(body, `action="/reply"`) || !strings.Contains(body, "Which &lt;b&gt;colour&lt;/b&gt;?") {
 		t.Fatalf("console lacks the reply box or the decision:\n%s", body)
 	}
-	w := ownerPost(u, "/reply", url.Values{"src": {"coord"}, "repository": {"widgets"}, "text": {"Paint the **logo** green too"}, "back": {"/console/widgets"}})
+	w := ownerPost(u, "/reply", url.Values{"src": {"night"}, "repository": {"widgets"}, "text": {"Paint the **logo** green too"}, "back": {"/console/widgets"}})
 	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/console/widgets" {
 		t.Fatalf("reply: %d %s", w.Code, w.Body.String())
 	}
-	st := NewLogState(f.coord, ModeLive)
-	events, _, _ := NewLogWriter(f.coordBuf).Tail(0)
+	st := NewLogState(f.night, ModeLive)
+	events, _, _ := NewLogWriter(f.nightBuf).Tail(0)
 	st.Fold(events)
 	var got *Instruction
 	for _, in := range st.Instructions {

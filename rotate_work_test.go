@@ -12,14 +12,13 @@ import (
 // doneStatus is a work session's progress at the end of its round.
 const doneStatus = "# fix/spin\n\n| Item | State |\n|---|---|\n| K #8 spin | fixed |\n\n## Questions\n\nnone\n\nDONE\n"
 
-// workHarness is a live harness with one work session a coordinator
+// workHarness is a live harness with one work session agentd
 // started, launched under a transcript agentd named: its name and the
 // transcript's id.
 func workHarness(t *testing.T) (*harness, string, string) {
 	t.Helper()
 	h := sessionsHarness(t)
-	reply, _ := h.startSession(map[string]any{"branch": "fix/spin"})
-	name := reply["name"].(string)
+	name := h.startSession("fix/spin", KindWork, 0)
 	h.ticks(2, time.Minute) // provisioned, then found gone and launched
 	id := ""
 	for _, e := range h.events() {

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -11,14 +10,14 @@ import (
 	"time"
 )
 
-// requestsHarness is coordHarness with the CI watcher on and widgets'
+// requestsHarness is sessionsHarness with the CI watcher on and widgets'
 // policy merging widget-bot's requests into main as a fast-forward; the
 // forge lists one open request, !2, which no session delivered, by
 // widget-bot, green on 5eed0101 at the target's tip: due to merge once
-// its coordinator, c, approves it.
+// the loop approves it.
 func requestsHarness(t *testing.T) (*harness, *fakeForgeAPI) {
 	t.Helper()
-	h := coordHarness(t)
+	h := sessionsHarness(t)
 	h.cfg.Poll.CI = true
 	api := &fakeForgeAPI{gitlab: map[string]string{}}
 	h.sup.api = api
@@ -61,58 +60,43 @@ func outsideMR(api *fakeForgeAPI, s outsideMRState) {
 	})
 }
 
-// approve is c's approve call; it returns the reply and whether it was
-// refused.
-func (h *harness) approve(ref, sha string) (map[string]any, bool) {
+// approve is the loop's approval of widgets' ref at sha, as it records
+// one when the request's review converged there.
+func (h *harness) approve(ref, sha string) {
 	h.t.Helper()
-	text, refused := callOne(h.t, h.mcpServerFor("c"), ToolApprove, map[string]any{"request": ref, "sha": sha})
-	var reply map[string]any
-	if err := json.Unmarshal([]byte(text), &reply); err != nil {
-		h.t.Fatalf("reply %q: %v", text, err)
-	}
-	return reply, refused
+	h.sup.emit("", Event{Kind: KindLoop, Loop: &LoopPayload{Repository: "widgets", Ref: ref, Head: sha, Step: LoopApprove}})
 }
 
-// A request no session delivered is watched for its coordinator; its own
-// red pipeline is due for the coordinator, once, and the pack names the
-// failing job with the tail of its log.
-func TestOutsideRedPipelineWakesCoordinator(t *testing.T) {
+// A request no session delivered is watched on its repository's requests
+// track; its own red pipeline is recorded, with the failing job, and no
+// session is relaunched to fix it.
+func TestOutsideRedPipelineRecorded(t *testing.T) {
 	h, api := requestsHarness(t)
 	outsideMR(api, outsideMRState{head: "5eed0101", pipeline: 60, status: "failed", jobs: []string{"test:failed", "lint:success"}})
 	h.ticks(3, 5*time.Minute)
 	r := h.sup.st.CI[ciKey("widgets", "!2")]
-	if r.Session != "c" || r.State != CIFailed || r.Verdict != CIOwn || r.Author != "widget-bot" || r.Run != "60" {
+	if r.Session != requestsTrack("widgets") || r.State != CIFailed || r.Verdict != CIOwn || r.Author != "widget-bot" || r.Run != "60" {
 		t.Fatalf("record = %+v", r)
 	}
-	w := h.wakes()
-	if len(w) != 1 || w[0].Reason != "ci: !2 failed at 5eed0101" {
-		t.Fatalf("wakes = %+v", w)
+	if !reflect.DeepEqual(r.Jobs, []string{"test"}) || !strings.Contains(r.Excerpt, "FAIL: TestSqueak") {
+		t.Fatalf("jobs %v, excerpt %q", r.Jobs, r.Excerpt)
 	}
-	p := h.pack(t)
-	if len(p.Requests) != 1 || p.Requests[0].Ref != "!2" || !reflect.DeepEqual(p.Requests[0].Jobs, []string{"test"}) ||
-		!strings.Contains(p.Requests[0].Excerpt, "FAIL: TestSqueak") || p.Requests[0].Approved {
-		t.Fatalf("pack requests = %+v", p.Requests)
+	if n := h.count(KindAction, ActCIFix, ""); n != 0 {
+		t.Fatalf("ci fixes = %d", n)
 	}
-	// The coordinator is never restarted to fix it: it starts a session.
-	if n := h.count(KindAction, ActCIFix, "c"); n != 0 {
-		t.Fatalf("ci fixes on the coordinator = %d", n)
-	}
-	h.transcriptOf("c", "t1", summaryLine("c1", "m1", "Started a fix.", h.clock.Now(), 100))
-	h.ticks(3, 5*time.Minute)
-	// The same failure, though a forge error and a new thread changed
-	// its record in between, is not due again.
+	// A forge error and a new thread in between change nothing else.
 	api.set(func() { api.gitlabErr = errors.New("connection refused") })
 	h.ticks(2, 5*time.Minute)
 	api.set(func() { api.gitlabErr = nil })
 	outsideMR(api, outsideMRState{head: "5eed0101", pipeline: 60, status: "failed", jobs: []string{"test:failed", "lint:success"}, unresolved: true})
 	h.ticks(3, 5*time.Minute)
-	if n := len(h.wakes()); n != 1 {
-		t.Fatalf("woke again for the same failure: %d", n)
+	if r := h.sup.st.CI[ciKey("widgets", "!2")]; r.State != CIFailed || !r.Unresolved {
+		t.Fatalf("record = %+v", r)
 	}
 	sameAfterReplay(t, h, "after the red request")
 }
 
-// A green request no session delivered merges only once its coordinator
+// A green request no session delivered merges only once the loop
 // approves it, at the approved head, by the policy's method.
 func TestOutsideApprovedGreenMergesAtApprovedHead(t *testing.T) {
 	h, _ := requestsHarness(t)
@@ -120,42 +104,33 @@ func TestOutsideApprovedGreenMergesAtApprovedHead(t *testing.T) {
 	if len(h.forge.merges) != 0 {
 		t.Fatalf("merged unapproved: %+v", h.forge.merges)
 	}
-	if s := h.mergeSkips(); len(s) != 1 || !strings.Contains(s[0], "approved it at 5eed0101") {
+	if s := h.mergeSkips(); len(s) != 1 || !strings.Contains(s[0], "not converged at 5eed0101") {
 		t.Fatalf("skips = %q", s)
 	}
-	if reply, refused := h.approve("!2", "5eed0101"); refused || reply["sha"] != "5eed0101" {
-		t.Fatalf("approve = %v, %v", reply, refused)
-	}
+	h.approve("!2", "5eed0101")
 	h.ticks(3, 5*time.Minute)
 	want := []mergedRequest{{ref: "!2", target: "main", head: "5eed0101", method: MergeFastForward}}
 	if !reflect.DeepEqual(h.forge.merges, want) {
 		t.Fatalf("merges = %+v, want %+v (skips %q)", h.forge.merges, want, h.mergeSkips())
 	}
-	if got := h.sup.Tracks()["c"].Merges[ciKey("widgets", "!2")]; got != "5eed0101" {
-		t.Fatalf("merges recorded = %v", h.sup.Tracks()["c"].Merges)
+	if got := h.sup.Tracks()[requestsTrack("widgets")].Merges[ciKey("widgets", "!2")]; got != "5eed0101" {
+		t.Fatalf("merges recorded = %v", h.sup.Tracks()[requestsTrack("widgets")].Merges)
 	}
 	sameAfterReplay(t, h, "after the outside merge")
 }
 
 // A push after the approval holds the merge until the new head is
-// approved; the old head cannot be approved again.
+// approved.
 func TestOutsidePushAfterApprovalNeedsNewApproval(t *testing.T) {
 	h, api := requestsHarness(t)
 	h.ticks(2, 5*time.Minute)
-	if _, refused := h.approve("!2", "5eed0101"); refused {
-		t.Fatal("approve refused")
-	}
+	h.approve("!2", "5eed0101")
 	outsideMR(api, outsideMRState{head: "5eed0202", pipeline: 61, status: "success"})
 	h.ticks(3, 5*time.Minute)
 	if len(h.forge.merges) != 0 {
 		t.Fatalf("merged a head never approved: %+v", h.forge.merges)
 	}
-	if reply, refused := h.approve("!2", "5eed0101"); !refused || !strings.Contains(reply["refused"].(string), "head is 5eed0202") {
-		t.Fatalf("approve of the old head = %v, %v", reply, refused)
-	}
-	if _, refused := h.approve("!2", "5eed0202"); refused {
-		t.Fatal("approve of the new head refused")
-	}
+	h.approve("!2", "5eed0202")
 	h.ticks(3, 5*time.Minute)
 	if len(h.forge.merges) != 1 || h.forge.merges[0].head != "5eed0202" {
 		t.Fatalf("merges = %+v (skips %q)", h.forge.merges, h.mergeSkips())
@@ -175,8 +150,8 @@ func TestOutsideOpenThreadHoldsMerge(t *testing.T) {
 	if s := h.mergeSkips(); len(s) == 0 || !strings.Contains(s[len(s)-1], "open discussion") {
 		t.Fatalf("skips = %q", s)
 	}
-	if p, _ := h.sup.buildPack("widgets", nil, h.clock.Now(), true); len(p.Requests) != 1 || !p.Requests[0].Unresolved || !p.Requests[0].Approved {
-		t.Fatalf("pack requests = %+v", p.Requests)
+	if r := h.sup.st.CI[ciKey("widgets", "!2")]; !r.Unresolved || h.sup.st.approvedAt("widgets", "!2") != "5eed0101" {
+		t.Fatalf("record = %+v", r)
 	}
 	outsideMR(api, outsideMRState{head: "5eed0101", pipeline: 60, status: "success"})
 	h.ticks(3, 5*time.Minute)
@@ -286,8 +261,8 @@ func TestEmptyRetestEscalatesOnce(t *testing.T) {
 	}
 }
 
-// A request by an author the policy does not list is watched and in the
-// pack, approved or not, and never merged.
+// A request by an author the policy does not list is watched, approved
+// or not, and never merged.
 func TestOutsideOtherAuthorNeverMerged(t *testing.T) {
 	h, api := requestsHarness(t)
 	outsideMR(api, outsideMRState{head: "5eed0101", pipeline: 60, status: "success", author: "someone-else"})
@@ -301,32 +276,20 @@ func TestOutsideOtherAuthorNeverMerged(t *testing.T) {
 	if len(s) != 2 || !strings.Contains(s[1], "author someone-else") {
 		t.Fatalf("skips = %q", s)
 	}
-	if p, _ := h.sup.buildPack("widgets", nil, h.clock.Now(), true); len(p.Requests) != 1 || p.Requests[0].Author != "someone-else" {
-		t.Fatalf("pack requests = %+v", p.Requests)
+	if r := h.sup.st.CI[ciKey("widgets", "!2")]; r.Author != "someone-else" {
+		t.Fatalf("record = %+v", r)
 	}
 }
 
-// approve takes only a recorded request of the coordinator's own
-// repository at its head, whole or by a prefix of 7 or more.
-func TestApproveRefusals(t *testing.T) {
+// An approval event of an earlier version, by a coordinator, is read and
+// counts for nothing (#53).
+func TestOldApprovalIgnored(t *testing.T) {
 	h, _ := requestsHarness(t)
-	if reply, refused := h.approve("!2", "5eed0101"); !refused || !strings.Contains(reply["refused"].(string), "no record") {
-		t.Fatalf("approve before a record = %v", reply)
-	}
 	h.ticks(2, 5*time.Minute)
-	for _, c := range [][2]string{{"2", "5eed0101"}, {"!2", "5eed"}, {"!2", "5EED0101"}, {"!9", "5eed0101"}, {"!2", "5eed01011"}} {
-		if reply, refused := h.approve(c[0], c[1]); !refused {
-			t.Errorf("approve %v = %v", c, reply)
-		}
-	}
-	if n := len(h.sup.st.Approvals); n != 0 {
-		t.Fatalf("approvals logged by refused calls: %d", n)
-	}
-	// An approval only the repository's coordinator logged counts.
-	h.sup.emit("a", Event{Kind: KindApproval, Mode: ModeShared, Approval: &ApprovalPayload{Repository: "widgets", Ref: "!2", SHA: "5eed0101"}})
-	h.ticks(1, 5*time.Minute)
-	if n := len(h.sup.st.Approvals); n != 0 {
-		t.Fatalf("a worker's approval counted: %v", h.sup.st.Approvals)
+	h.sup.emit("c", Event{Kind: KindApproval, Mode: ModeShared, Approval: &ApprovalPayload{Repository: "widgets", Ref: "!2", SHA: "5eed0101"}})
+	h.ticks(2, 5*time.Minute)
+	if got := h.sup.st.approvedAt("widgets", "!2"); got != "" || len(h.forge.merges) != 0 {
+		t.Fatalf("approved at %q, merges %+v", got, h.forge.merges)
 	}
 }
 
@@ -362,7 +325,7 @@ func TestOutsideUnresolvedThreadReadAtMerge(t *testing.T) {
 	if r.Unresolved {
 		t.Fatal("recorded unresolved before the thread")
 	}
-	h.sup.mergeRequest("c", h.sup.track("c"), ciWatched{Session: "c", Repository: "widgets", Ref: "!2"}, r, true, true)
+	h.sup.mergeRequest(requestsTrack("widgets"), h.sup.track(requestsTrack("widgets")), ciWatched{Session: requestsTrack("widgets"), Repository: "widgets", Ref: "!2"}, r, true, true)
 	if len(h.forge.merges) != 0 {
 		t.Fatalf("merged with an open thread: %+v", h.forge.merges)
 	}
@@ -436,7 +399,7 @@ func TestOutsideFailingRetestGivesUp(t *testing.T) {
 // GitHub cannot test a pull request's merge result again: one green on a
 // base the target moved from is skipped with that reason, not merged.
 func TestOutsideGitHubMovedBaseSkipped(t *testing.T) {
-	h := coordHarness(t)
+	h := sessionsHarness(t)
 	h.cfg.Poll.CI = true
 	repo := h.cfg.Repositories["widgets"]
 	repo.Forge = "github"
@@ -455,7 +418,7 @@ func TestOutsideGitHubMovedBaseSkipped(t *testing.T) {
 	}}
 	h.sup.api = api
 	h.ticks(2, 5*time.Minute)
-	if r := h.sup.st.CI[ciKey("widgets", "#2")]; r.Session != "c" || r.State != CISuccess || r.Base != mergeTip || r.Run != "21" {
+	if r := h.sup.st.CI[ciKey("widgets", "#2")]; r.Session != requestsTrack("widgets") || r.State != CISuccess || r.Base != mergeTip || r.Run != "21" {
 		t.Fatalf("record = %+v", r)
 	}
 	h.approve("#2", "5eed0101")
@@ -514,24 +477,6 @@ func TestOutsideUnknownBaseRetested(t *testing.T) {
 	// No new run comes: the wait is said once.
 	if s := h.mergeSkips(); len(s) == 0 || !strings.Contains(s[len(s)-1], "waiting for the new pipeline") {
 		t.Fatalf("skips = %q", s)
-	}
-}
-
-// The same failure in a new run, after a green one, is due again.
-func TestOutsideRepeatFailureInNewRunIsDue(t *testing.T) {
-	h, api := requestsHarness(t)
-	red := func(run int) {
-		outsideMR(api, outsideMRState{head: "5eed0101", pipeline: run, status: "failed", jobs: []string{"test:failed"}})
-	}
-	red(60)
-	h.ticks(3, 5*time.Minute)
-	h.transcriptOf("c", "t1", summaryLine("c1", "m1", "Looked.", h.clock.Now(), 100))
-	outsideMR(api, outsideMRState{head: "5eed0101", pipeline: 61, status: "success"})
-	h.ticks(2, 5*time.Minute)
-	red(62)
-	h.ticks(3, 5*time.Minute)
-	if w := h.wakes(); len(w) != 2 || w[1].Reason != "ci: !2 failed at 5eed0101" {
-		t.Fatalf("wakes = %+v", w)
 	}
 }
 

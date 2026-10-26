@@ -344,11 +344,10 @@ func TestRoundsFindingEvidence(t *testing.T) {
 	}
 }
 
-// A role is read from the file: reviewer or judge; coordinator is made by
-// a repository's coordinator entry alone.
+// A role is read from the file: reviewer or judge, and no other.
 func TestRoundsRoleFromConfig(t *testing.T) {
 	dir := t.TempDir()
-	for role, ok := range map[string]bool{RoleReviewer: true, RoleJudge: true, RoleCoordinator: false, "boss": false} {
+	for role, ok := range map[string]bool{RoleReviewer: true, RoleJudge: true, "coordinator": false, "boss": false} {
 		cfg := DefaultConfig()
 		cfg.Policies.Escalate.Command = []string{"route", "{message}"}
 		cfg.Repositories = map[string]Repository{"widgets": {Forge: "gitlab", Host: "gitlab.example.com", Project: "example-org/widgets"}}

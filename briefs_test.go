@@ -46,10 +46,15 @@ func launchSession(t *testing.T, h *harness, name string) string {
 }
 
 // rotateAt gives c, launched under transcript id, a context over the
-// threshold and a merge since its launch, and lets the grace pass.
+// threshold and a merge since its launch, after the one its checkout was
+// first seen at, and lets the grace pass.
 func rotateAt(h *harness, id, merge string) {
 	h.t.Helper()
 	appendFile(h.t, filepath.Join(TranscriptDir(h.cfg.TranscriptDir, h.cfg.Sessions["c"].Cwd), id+".jsonl"), usageLine("u-"+merge, 10, 150000, 0, 5, false))
+	if h.git.merge == "" {
+		h.git.merge, h.git.mergeSubject = "base", "Merge #20: base"
+		h.ticks(1, time.Minute)
+	}
 	h.git.merge, h.git.mergeSubject = merge, "Merge #21: "+merge
 	h.ticks(8, time.Minute)
 }
