@@ -465,8 +465,14 @@ func (s *Supervisor) startRuntime(repo, name string, p RuntimePayload) string {
 		return fmt.Sprintf("%s runs %d started sessions, its max", repo, n)
 	}
 	p.ID, p.Action, p.Repository, p.Max, p.By = newIntentID(), SessionStart, repo, rules.Sessions.Max, "agentd"
+	if sp := s.cfg.Repositories[repo].Sessions; sp != nil {
+		p.Host = sp.Host
+	}
+	if p.Host != "" && len(rules.Sessions.Accounts) == 0 {
+		return repo + " places its sessions on " + p.Host + " and names no account for them"
+	}
 	switch {
-	case len(rules.Sessions.Fallback) > 0:
+	case len(rules.Sessions.Fallback) > 0 && p.Host == "":
 		p.Place = true
 	case len(rules.Sessions.Accounts) > 0:
 		p.Account = rules.Sessions.Accounts[0]

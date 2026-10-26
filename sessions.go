@@ -32,6 +32,9 @@ type SessionsPolicy struct {
 	Root   string `json:"root"`
 	Clone  string `json:"clone"`
 	Target string `json:"target"`
+	// Host is the host the sessions run on, through its node (#15), and
+	// not here; Root and Clone are then the node's.
+	Host string `json:"host"`
 }
 
 // DefaultMaxSessions bounds a repository's started sessions when its
@@ -70,6 +73,9 @@ type RuntimePayload struct {
 	// for: the one its round is credited to.
 	Head    string `json:"head,omitempty"`
 	Account string `json:"account,omitempty"`
+	// Host is the host the session runs on, through its node, when not
+	// here (#15). A start keeps its host: nothing moves a session.
+	Host string `json:"host,omitempty"`
 	// Place marks a start agentd places on an account by usage (#39).
 	Place bool `json:"place,omitempty"`
 	// Max is the repository's max when the start was made: the fold
@@ -114,18 +120,22 @@ func (st *LogState) applySession(e Event) {
 			st.Runtime[e.Session] = r
 		}
 	case SessionEnd:
-		if _, ok := st.Runtime[e.Session]; ok {
+		if r, ok := st.Runtime[e.Session]; ok {
 			delete(st.Runtime, e.Session)
 			delete(st.StartedAt, e.Session)
-			st.Ended[e.Session] = p.Repository
+			// A session on another host is stopped by its node, which the
+			// hub asks (placement.go), not here.
+			if r.Host == "" {
+				st.Ended[e.Session] = p.Repository
+			}
 		}
 	}
 }
 
 // withRuntime is cfg with the started sessions of runtime added, each as
 // runtimeSession makes it; cfg itself is not changed. A name configured
-// already, and a session whose repository no longer has a sessions entry,
-// are left out.
+// already, a session whose repository no longer has a sessions entry, and
+// a session on another host are left out.
 func withRuntime(cfg *Config, runtime map[string]RuntimePayload) *Config {
 	if len(runtime) == 0 {
 		return cfg
@@ -137,7 +147,8 @@ func withRuntime(cfg *Config, runtime map[string]RuntimePayload) *Config {
 	}
 	for n, p := range runtime {
 		repo, ok := cfg.Repositories[p.Repository]
-		if _, configured := cfg.Sessions[n]; configured || !ok || repo.Sessions == nil {
+		// A session on another host is its node's (placement.go).
+		if _, configured := cfg.Sessions[n]; configured || !ok || repo.Sessions == nil || p.Host != "" {
 			continue
 		}
 		c.Sessions[n] = runtimeSession(n, p, repo)
@@ -211,6 +222,13 @@ func (c *Config) checkSessionsPolicies(path func(field, p string) string, errs *
 		field := "repositories." + name + ".sessions"
 		if m := repo.Policy.Sessions.Max; looped(repo) && m > 0 && m < 2 {
 			*errs = append(*errs, fmt.Errorf("repositories.%s.policy.sessions.max is %d: agentd runs this repository's loop, which needs room for a work session and its reviewer, 2 or more", name, m))
+		}
+		if p.Host != "" {
+			// Its node keeps the sessions and the clone (checkNodeConfig).
+			if !plainBranch(p.Target) {
+				*errs = append(*errs, fmt.Errorf("%s.target %q is not a plain branch name", field, p.Target))
+			}
+			continue
 		}
 		if p.Root == "" || p.Clone == "" || p.Target == "" {
 			*errs = append(*errs, fmt.Errorf("%s needs root, clone and target", field))
@@ -293,12 +311,23 @@ func (s *Supervisor) provisionFiles(sess Session, p RuntimePayload, pol Sessions
 	if len(sess.Deliver) > 0 {
 		facts["mr_file"], facts["draft"] = sess.Deliver[0].MRFile, true
 	}
-	if err := writeAtomic(filepath.Join(sess.Workdir, "BRIEF.md"), []byte(briefInstruction+"\n\n"+compact(facts)+"\n")); err != nil {
+	if err := writeStartFiles(sess.Workdir, facts); err != nil {
 		return err
 	}
-	// The progress an earlier session of the name left stays; only its
-	// DONE goes, since a new start has work to do.
-	status := filepath.Join(sess.Workdir, "STATUS.md")
+	if _, err := os.Stat(sess.Cwd); err == nil {
+		return nil // the worktree an earlier start left
+	}
+	return s.git.AddWorktree(pol.Clone, sess.Cwd, p.Branch, pol.Target, p.Kind != KindWork)
+}
+
+// writeStartFiles writes a started session's BRIEF.md from facts, and its
+// STATUS.md unless there is one. The progress an earlier session of the
+// name left stays; only its DONE goes, since a new start has work to do.
+func writeStartFiles(workdir string, facts map[string]any) error {
+	if err := writeAtomic(filepath.Join(workdir, "BRIEF.md"), []byte(briefInstruction+"\n\n"+compact(facts)+"\n")); err != nil {
+		return err
+	}
+	status := filepath.Join(workdir, "STATUS.md")
 	b, err := os.ReadFile(status)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -306,13 +335,7 @@ func (s *Supervisor) provisionFiles(sess Session, p RuntimePayload, pol Sessions
 	case err == nil && ParseStatus(string(b)).Done:
 		err = writeAtomic(status, []byte(undone(string(b))))
 	}
-	if err != nil {
-		return err
-	}
-	if _, err := os.Stat(sess.Cwd); err == nil {
-		return nil // the worktree an earlier start left
-	}
-	return s.git.AddWorktree(pol.Clone, sess.Cwd, p.Branch, pol.Target, p.Kind != KindWork)
+	return err
 }
 
 // undone is STATUS.md text without its last DONE line, noting the new start.

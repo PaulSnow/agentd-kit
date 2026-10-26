@@ -17,9 +17,19 @@ import (
 // URL it was asked for; it scans with the real git, so a test's checkouts
 // are read as a node reads them.
 type fakeNodeGit struct {
-	t      *testing.T
-	cloned []string // url -> dir, as "url dir"
-	fail   error
+	t         *testing.T
+	cloned    []string // url -> dir, as "url dir"
+	worktrees []string // as "clone dir branch target"
+	fail      error
+}
+
+func (g *fakeNodeGit) AddWorktree(clone, dir, branch, target string, detach bool) error {
+	w := clone + " " + dir + " " + branch + " " + target
+	if detach {
+		w += " detached"
+	}
+	g.worktrees = append(g.worktrees, w)
+	return os.MkdirAll(dir, 0o755)
 }
 
 func (g *fakeNodeGit) Clone(_ context.Context, url, dir string) error {
@@ -41,14 +51,15 @@ func (g *fakeNodeGit) Scan(dir string) (CloneState, error) {
 // hubHarness is a hub on a test server and the nodes that report to it,
 // each with its own token and repos root.
 type hubHarness struct {
-	t     *testing.T
-	cfg   *Config
-	log   *Log
-	hub   *Hub
-	srv   *httptest.Server
-	now   time.Time
-	nodes map[string]*Node
-	gits  map[string]*fakeNodeGit
+	t      *testing.T
+	cfg    *Config
+	log    *Log
+	hub    *Hub
+	srv    *httptest.Server
+	now    time.Time
+	nodes  map[string]*Node
+	gits   map[string]*fakeNodeGit
+	tmuxes map[string]*fakeTmux
 }
 
 // newHubHarness configures hosts host-a and host-b, and widgets, which
@@ -76,12 +87,12 @@ func newHubHarness(t *testing.T) *hubHarness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { log.Close() })
-	h := &hubHarness{t: t, cfg: &cfg, log: log, now: time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC), nodes: map[string]*Node{}, gits: map[string]*fakeNodeGit{}}
+	h := &hubHarness{t: t, cfg: &cfg, log: log, now: time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC), nodes: map[string]*Node{}, gits: map[string]*fakeNodeGit{}, tmuxes: map[string]*fakeTmux{}}
 	h.startHub()
 	for _, name := range []string{"host-a", "host-b"} {
-		h.gits[name] = &fakeNodeGit{t: t}
+		h.gits[name], h.tmuxes[name] = &fakeNodeGit{t: t}, newFakeTmux()
 		nc := NodeConfig{Name: name, Hub: h.srv.URL, ReposRoot: filepath.Join(dir, name, "repos"), OpenState: []string{".kickoff"}}
-		h.nodes[name] = NewNode(nc, "token-of-"+name, h.gits[name], h.srv.Client(), h.clock)
+		h.nodes[name] = NewNode(nc, "token-of-"+name, h.gits[name], h.tmuxes[name], h.srv.Client(), h.clock)
 	}
 	return h
 }
@@ -269,7 +280,7 @@ func (l *loseReply) RoundTrip(r *http.Request) (*http.Response, error) {
 func TestNodeAfterLostReplies(t *testing.T) {
 	h := newHubHarness(t)
 	rt := &loseReply{next: h.srv.Client().Transport}
-	n := NewNode(h.nodes["host-a"].cfg, "token-of-host-a", h.gits["host-a"], &http.Client{Transport: rt}, h.clock)
+	n := NewNode(h.nodes["host-a"].cfg, "token-of-host-a", h.gits["host-a"], h.tmuxes["host-a"], &http.Client{Transport: rt}, h.clock)
 	h.nodes["host-a"] = n
 	h.tick("host-a")
 	rt.lose = true
@@ -340,7 +351,7 @@ func TestHubRefusesUnauthenticatedNode(t *testing.T) {
 	if code, _ := h.post("token-of-host-b", req); code != http.StatusForbidden {
 		t.Fatalf("host-b's token for host-a: %d", code)
 	}
-	stranger := NewNode(NodeConfig{Name: "host-a", Hub: h.srv.URL, ReposRoot: t.TempDir()}, "not-a-token", &fakeNodeGit{t: t}, h.srv.Client(), h.clock)
+	stranger := NewNode(NodeConfig{Name: "host-a", Hub: h.srv.URL, ReposRoot: t.TempDir()}, "not-a-token", &fakeNodeGit{t: t}, newFakeTmux(), h.srv.Client(), h.clock)
 	if err := stranger.Tick(context.Background()); err == nil || !strings.Contains(err.Error(), "401") {
 		t.Fatalf("a node with a wrong token: %v", err)
 	}

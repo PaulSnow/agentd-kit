@@ -1637,6 +1637,13 @@ func (s *Supervisor) launchLine(sess Session, argv []string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("account %q is not configured", sess.Account)
 	}
+	return accountLine(sess.Account, acct, line)
+}
+
+// accountLine runs line under acct: its config directory, and its token
+// read from its file at launch, so the token is never in a command line
+// agentd logs.
+func accountLine(name string, acct Account, line string) (string, error) {
 	var pre string
 	var env []string
 	if acct.ConfigDir != "" {
@@ -1644,7 +1651,7 @@ func (s *Supervisor) launchLine(sess Session, argv []string) (string, error) {
 	}
 	if acct.TokenFile != "" {
 		if err := checkTokenFile(acct.TokenFile); err != nil {
-			return "", fmt.Errorf("account %s: token file: %w", sess.Account, err)
+			return "", fmt.Errorf("account %s: token file: %w", name, err)
 		}
 		pre = `t=$(cat ` + shellJoin([]string{acct.TokenFile}) + `) && case $t in *[![:space:]]*) true ;; *) false ;; esac && `
 		env = append(env, `CLAUDE_CODE_OAUTH_TOKEN="$t"`)

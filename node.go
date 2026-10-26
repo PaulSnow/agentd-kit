@@ -63,6 +63,12 @@ type NodeConfig struct {
 	OpenState []string `json:"open_state"`
 	// CloneTimeout bounds one clone, which takes longer than a scan.
 	CloneTimeout Duration `json:"clone_timeout"`
+	// Sessions the hub places here (#15): each in SessionsRoot/NAME, run
+	// by Launch ({brief}, {status} and {model} filled in) under one of
+	// Accounts, the accounts logged in on this host.
+	SessionsRoot string             `json:"sessions_root"`
+	Launch       []string           `json:"launch"`
+	Accounts     map[string]Account `json:"accounts"`
 }
 
 // Hub and node defaults.
@@ -91,7 +97,8 @@ type NodePayload struct {
 
 // NodeReport is the state of the clones a node watches, as it scanned them.
 type NodeReport struct {
-	Clones []CloneState `json:"clones"`
+	Clones   []CloneState `json:"clones"`
+	Sessions []TmuxState  `json:"sessions,omitempty"`
 }
 
 // CloneState is one watched clone. Path is relative to the node's repos
@@ -114,10 +121,18 @@ type CloneState struct {
 	Error      string   `json:"error,omitempty"`
 }
 
+// TmuxState is whether a session the hub placed here is running.
+type TmuxState struct {
+	Name  string `json:"name"`
+	Alive bool   `json:"alive"`
+	Error string `json:"error,omitempty"`
+}
+
 // NodeResult is what a node did with one command.
 type NodeResult struct {
 	Command    string `json:"command"`
 	Action     string `json:"action"`
+	Session    string `json:"session,omitempty"`
 	Repository string `json:"repository"`
 	Path       string `json:"path"`
 	Outcome    string `json:"outcome"`
@@ -126,10 +141,12 @@ type NodeResult struct {
 
 // Node command actions and outcomes.
 const (
-	NodeClone   = "clone"
-	NodeDone    = "done"
-	NodeRefused = "refused" // the node's own check declined it
-	NodeFailed  = "failed"
+	NodeClone        = "clone"
+	NodeSessionStart = "session-start"
+	NodeSessionStop  = "session-stop"
+	NodeDone         = "done"
+	NodeRefused      = "refused" // the node's own check declined it
+	NodeFailed       = "failed"
 )
 
 // nodeRequest is a node's report to the hub: its events, oldest first.
@@ -144,6 +161,7 @@ type nodeRequest struct {
 type nodeReply struct {
 	Acked    int64         `json:"acked"`
 	Watch    []NodeWatch   `json:"watch"`
+	Sessions []string      `json:"sessions,omitempty"`
 	Commands []NodeCommand `json:"commands"`
 	Error    string        `json:"error,omitempty"`
 }
@@ -161,6 +179,16 @@ type NodeCommand struct {
 	Repository string `json:"repository"`
 	Path       string `json:"path"`
 	URL        string `json:"url,omitempty"`
+	// A session's start: its name, the start it is, what it works on and
+	// the account it runs under; a stop names the session alone.
+	Session string `json:"session,omitempty"`
+	Start   string `json:"start,omitempty"`
+	Kind    string `json:"kind,omitempty"`
+	Branch  string `json:"branch,omitempty"`
+	Target  string `json:"target,omitempty"`
+	Issue   int    `json:"issue,omitempty"`
+	Account string `json:"account,omitempty"`
+	Model   string `json:"model,omitempty"`
 }
 
 func (p *NodePayload) check() error {
@@ -201,10 +229,19 @@ type NodeRecord struct {
 	// Tried is when each repository's last clone that was not done
 	// came back, by the hub's time.
 	Tried map[string]time.Time
+	// Sessions are the placed sessions the latest report names, by name.
+	Sessions map[string]TmuxState
+	// Done are the session commands done, by id; Failed is when each
+	// that was not came back, by the hub's time; Last is each session's
+	// latest result.
+	Done   map[string]bool
+	Failed map[string]time.Time
+	Last   map[string]NodeResult
 }
 
 func newNodeRecord(host string) *NodeRecord {
-	return &NodeRecord{Host: host, Clones: map[string]CloneState{}, Tried: map[string]time.Time{}}
+	return &NodeRecord{Host: host, Clones: map[string]CloneState{}, Tried: map[string]time.Time{}, Sessions: map[string]TmuxState{},
+		Done: map[string]bool{}, Failed: map[string]time.Time{}, Last: map[string]NodeResult{}}
 }
 
 func (r *NodeRecord) apply(e Event) {
@@ -216,6 +253,17 @@ func (r *NodeRecord) apply(e Event) {
 		r.Clones = map[string]CloneState{}
 		for _, c := range p.Report.Clones {
 			r.Clones[c.Repository] = c
+		}
+		r.Sessions = map[string]TmuxState{}
+		for _, t := range p.Report.Sessions {
+			r.Sessions[t.Name] = t
+		}
+	case p.Result != nil && p.Result.Session != "":
+		r.Last[p.Result.Session] = *p.Result
+		if p.Result.Outcome == NodeDone {
+			r.Done[p.Result.Command] = true
+		} else {
+			r.Failed[p.Result.Command] = e.Time
 		}
 	case p.Result != nil && p.Result.Action == NodeClone:
 		if p.Result.Outcome == NodeDone {
@@ -272,6 +320,9 @@ type Hub struct {
 
 	mu    sync.Mutex
 	nodes map[string]*NodeRecord
+	// places are the log's started sessions on hosts, read to off.
+	places *placements
+	off    int64
 }
 
 // NewHub is a hub over log, which already holds events. Its address must
@@ -306,7 +357,11 @@ func NewHub(cfg *Config, log *Log, events []Event, now func() time.Time) (*Hub, 
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
 	}
-	return &Hub{cfg: cfg, log: log, now: now, tokens: tokens, nodes: foldNodes(events)}, nil
+	h := &Hub{cfg: cfg, log: log, now: now, tokens: tokens, nodes: foldNodes(events), places: newPlacements(cfg)}
+	if err := h.refresh(); err != nil {
+		return nil, err
+	}
+	return h, nil
 }
 
 // readToken is the token in path, which checkTokenFile accepts.
@@ -386,6 +441,9 @@ func (h *Hub) take(host string, events []NodePayload) (int, nodeReply) {
 		h.nodes[host] = rec
 	}
 	code, msg := http.StatusOK, ""
+	if err := h.refresh(); err != nil {
+		return http.StatusInternalServerError, nodeReply{Acked: rec.Seq, Error: "the hub could not read its log"}
+	}
 	for _, p := range events {
 		if p.Seq <= rec.Seq {
 			continue
@@ -409,9 +467,10 @@ func (h *Hub) take(host string, events []NodePayload) (int, nodeReply) {
 		}
 		rec.apply(e)
 	}
-	reply := nodeReply{Acked: rec.Seq, Watch: watchList(h.cfg, host), Error: msg}
+	h.places.settle(h.nodes)
+	reply := nodeReply{Acked: rec.Seq, Watch: watchList(h.cfg, host), Sessions: h.places.on(host), Error: msg}
 	if code == http.StatusOK {
-		reply.Commands = commands(h.cfg, rec, h.now())
+		reply.Commands = append(commands(h.cfg, rec, h.now()), h.places.commands(h.cfg, rec, h.now())...)
 	}
 	return code, reply
 }
@@ -421,11 +480,18 @@ func (h *Hub) take(host string, events []NodePayload) (int, nodeReply) {
 type NodeGit interface {
 	Clone(ctx context.Context, url, dir string) error
 	Scan(dir string) (CloneState, error)
+	AddWorktree(clone, dir, branch, target string, detach bool) error
 }
 
 // ExecNodeGit runs git, each scan's call bounded by Timeout and a clone by
 // CloneTimeout.
 type ExecNodeGit struct{ Timeout, CloneTimeout time.Duration }
+
+// AddWorktree adds a started session's worktree from a clone, as agentd
+// run does.
+func (g ExecNodeGit) AddWorktree(clone, dir, branch, target string, detach bool) error {
+	return ExecGit{Timeout: g.Timeout}.AddWorktree(clone, dir, branch, target, detach)
+}
 
 // Clone clones url into a new directory beside dir, bounded by
 // CloneTimeout, and renames it to dir only once the clone is whole. A clone
@@ -537,19 +603,24 @@ type Node struct {
 	cfg    NodeConfig
 	token  string
 	git    NodeGit
+	tmux   Tmux
 	client *http.Client
 	now    func() time.Time
+	// width and height are a new session's window, as the restart
+	// policy has it.
+	width, height int
 
 	known   bool          // acked is the hub's: no post since has failed
 	acked   int64         // the last of the host's events the hub holds
 	seq     int64         // the last number given to an event
 	pending []NodePayload // the events the hub does not hold, in order
 	watch   []NodeWatch
+	tmuxes  []string // the sessions the hub placed here
 }
 
 // NewNode is a node reporting to cfg.Hub with token.
-func NewNode(cfg NodeConfig, token string, git NodeGit, client *http.Client, now func() time.Time) *Node {
-	return &Node{cfg: cfg, token: token, git: git, client: client, now: now}
+func NewNode(cfg NodeConfig, token string, git NodeGit, tmux Tmux, client *http.Client, now func() time.Time) *Node {
+	return &Node{cfg: cfg, token: token, git: git, tmux: tmux, client: client, now: now}
 }
 
 // Tick reports what the node watches and does the commands the hub
@@ -563,7 +634,7 @@ func (n *Node) Tick(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		n.known, n.watch = true, reply.Watch
+		n.known, n.watch, n.tmuxes = true, reply.Watch, reply.Sessions
 		n.ack(reply.Acked)
 		n.renumber(reply.Acked)
 	}
@@ -597,7 +668,7 @@ func (n *Node) queueReport() {
 	}
 	n.pending = kept
 	n.renumber(n.acked)
-	n.queue(NodePayload{Report: &NodeReport{Clones: n.scan()}})
+	n.queue(NodePayload{Report: &NodeReport{Clones: n.scan(), Sessions: n.scanSessions()}})
 }
 
 func (n *Node) queue(p NodePayload) {
@@ -632,7 +703,7 @@ func (n *Node) send(ctx context.Context) (nodeReply, error) {
 		n.known = code == http.StatusConflict
 		return reply, err
 	}
-	n.watch = reply.Watch
+	n.watch, n.tmuxes = reply.Watch, reply.Sessions
 	return reply, nil
 }
 
@@ -713,6 +784,23 @@ func (n *Node) scan() []CloneState {
 	return out
 }
 
+// scanSessions is whether each session the hub placed here runs.
+func (n *Node) scanSessions() []TmuxState {
+	var out []TmuxState
+	for _, name := range n.tmuxes {
+		s := TmuxState{Name: name}
+		if !sessionName.MatchString(name) {
+			s.Error = "not a session name"
+		} else if alive, err := n.tmux.HasSession(name); err != nil {
+			s.Error = err.Error()
+		} else {
+			s.Alive = alive
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
 // local is a layout path under the node's root, refusing one that would
 // leave it.
 func (n *Node) local(rel string) (string, error) {
@@ -726,12 +814,18 @@ func (n *Node) local(rel string) (string, error) {
 // node watches at that path, into a path where nothing is. Anything else
 // is refused and nothing is done.
 func (n *Node) do(ctx context.Context, c NodeCommand) *NodeResult {
-	r := &NodeResult{Command: c.ID, Action: c.Action, Repository: c.Repository, Path: c.Path}
+	r := &NodeResult{Command: c.ID, Action: c.Action, Session: c.Session, Repository: c.Repository, Path: c.Path}
 	refuse := func(why string) *NodeResult {
 		r.Outcome, r.Error = NodeRefused, why
 		return r
 	}
-	if c.Action != NodeClone {
+	switch c.Action {
+	case NodeSessionStart:
+		return n.startSession(c, r, refuse)
+	case NodeSessionStop:
+		return n.stopSession(c, r, refuse)
+	case NodeClone:
+	default:
 		return refuse("the node does no " + c.Action)
 	}
 	watched := false
@@ -883,8 +977,21 @@ func (c *Config) checkNodeConfig(path func(field, p string) string, errs *[]erro
 	if n.Every.Duration <= 0 || n.CloneTimeout.Duration <= 0 {
 		*errs = append(*errs, errors.New("node.every and node.clone_timeout must be positive"))
 	}
+	c.checkPlacement(errs)
 	n.TokenFile = path("node.token_file", n.TokenFile)
 	n.ReposRoot = path("node.repos_root", n.ReposRoot)
+	if n.SessionsRoot != "" {
+		n.SessionsRoot = path("node.sessions_root", n.SessionsRoot)
+	}
+	for name, a := range n.Accounts {
+		if a.ConfigDir != "" {
+			a.ConfigDir = path("node.accounts."+name+".config_dir", a.ConfigDir)
+		}
+		if a.TokenFile != "" {
+			a.TokenFile = path("node.accounts."+name+".token_file", a.TokenFile)
+		}
+		n.Accounts[name] = a
+	}
 	for _, o := range n.OpenState {
 		if !filepath.IsLocal(o) {
 			*errs = append(*errs, fmt.Errorf("node.open_state: %q is not a path inside a checkout", o))
@@ -945,7 +1052,9 @@ func nodeCmd(args []string) error {
 	if err != nil {
 		return fmt.Errorf("node.token_file: %w", err)
 	}
-	n := NewNode(nc, string(tok), ExecNodeGit{Timeout: cfg.Timeouts.Forge.Duration, CloneTimeout: nc.CloneTimeout.Duration}, &http.Client{Timeout: time.Minute}, time.Now)
+	n := NewNode(nc, string(tok), ExecNodeGit{Timeout: cfg.Timeouts.Forge.Duration, CloneTimeout: nc.CloneTimeout.Duration},
+		ExecTmux{Timeout: cfg.Timeouts.Tmux.Duration}, &http.Client{Timeout: time.Minute}, time.Now)
+	n.width, n.height = cfg.Policies.Restart.Width, cfg.Policies.Restart.Height
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	for {
@@ -981,5 +1090,6 @@ func nodesCmd(args []string, w io.Writer) error {
 	}
 	now := time.Now()
 	PrintNodes(w, NodeStatus(cfg, events, now), now)
+	PrintSessions(w, RemoteSessionStatus(cfg, events, now))
 	return nil
 }
