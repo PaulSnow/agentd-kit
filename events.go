@@ -200,6 +200,8 @@ type ActPayload struct {
 	Transcript string `json:"transcript,omitempty"`
 	Context    int64  `json:"context,omitempty"`
 	Checkpoint string `json:"checkpoint,omitempty"`
+	// A coordinator's restart or rotation: the brief parts it wrote.
+	Brief []BriefPart `json:"brief,omitempty"`
 	// A stop: why. A wake: what is due.
 	Reason string `json:"reason,omitempty"`
 	// A wake: the coordinator's spend when it was woken, when known, and
