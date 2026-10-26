@@ -109,9 +109,11 @@ func (t *Track) turnEnd(at time.Time, stall time.Duration) time.Time {
 			end = w.At
 		}
 	}
+	// The wake is logged once its pointer is typed, so the transcript may
+	// date the pointer a little before it.
 	from := at
 	for _, tn := range t.Turns {
-		if tn.Role == TurnPrompt && !tn.At.Before(at) {
+		if tn.Role == TurnPrompt && !tn.At.Before(at.Add(-echoSkew)) {
 			from = tn.At
 			break
 		}

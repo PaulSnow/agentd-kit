@@ -234,3 +234,41 @@ func TestOwnLoginMatchesAnyCase(t *testing.T) {
 		t.Fatalf("woke for its own issue: %+v", w)
 	}
 }
+
+// A pointer the transcript dates a little before its wake still begins
+// the wake's turn: its summary ends it, though a later prompt follows
+// (#49).
+func TestPointerDatedBeforeWakeBeginsItsTurn(t *testing.T) {
+	h := coordHarness(t)
+	h.arrive("#4", ItemIssue, "someone")
+	h.ticks(2, time.Minute)
+	w := h.wakes()
+	if len(w) != 1 {
+		t.Fatalf("wakes = %+v", w)
+	}
+	at := h.lastWakeAt(t)
+	h.transcriptOf("c", "t1", promptLine("p1", h.cfg.Policies.Coordinator.Pointer, at.Add(-time.Second))+
+		summaryLine("c1", "m1", "Handled #4.", at.Add(2*time.Minute), 100)+
+		promptLine("p2", "Something else.", at.Add(3*time.Minute))+summaryLine("c2", "m2", "Done.", at.Add(9*time.Minute), 100))
+	h.ticks(1, 10*time.Minute)
+	later := h.arriveAt("#4", h.clock.Now())
+	h.ticks(2, time.Minute)
+	if w := h.wakes(); len(w) != 2 || w[1].Reason != later {
+		t.Fatalf("wakes = %+v", w)
+	}
+}
+
+// lastWakeAt is the time of c's latest wake action.
+func (h *harness) lastWakeAt(t *testing.T) time.Time {
+	t.Helper()
+	var at time.Time
+	for _, e := range h.events() {
+		if e.Kind == KindAction && actionOf(e) == ActWake {
+			at = e.Time
+		}
+	}
+	if at.IsZero() {
+		t.Fatal("no wake")
+	}
+	return at
+}
