@@ -389,7 +389,7 @@ func (srv *MCPServer) callSessions(tool string, args json.RawMessage) (string, b
 	refuse := func(format string, a ...any) (string, bool) {
 		return compact(map[string]any{"refused": fmt.Sprintf(format, a...)}), true
 	}
-	events, err := srv.read()
+	events, err := srv.load()
 	if err != nil {
 		return refuse("agentd could not read its log: %v", err)
 	}
