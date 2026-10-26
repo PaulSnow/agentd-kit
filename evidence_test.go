@@ -374,3 +374,48 @@ func TestNoQuestionsForms(t *testing.T) {
 		t.Fatalf("questions %q, done %v", ev.Questions, ev.Done)
 	}
 }
+
+// A line that says nothing is open is not a question, however it is put:
+// "none", "(none)", "none open", or a parenthesised line that begins with
+// none and says why (#54). A real question after such a line still counts,
+// and a line that only mentions none is a question.
+func TestNoneOpenLines(t *testing.T) {
+	for _, body := range []string{
+		"none",
+		"(none)",
+		"none open",
+		"(none open; the three questions were answered on 2026-10-26: ports, names and the target)",
+		"- (None open: answered in the console (twice).)",
+		"(none yet)\n(none open; see below)",
+		"(none open; answered on\n2026-10-26: ports and names)",
+		"(none open \u2013 answered)",
+		"(no open questions; answered)",
+	} {
+		if ev := ParseStatus("# T\n\n## Questions\n" + body + "\n\n## Next\nwork\n"); ev.Questions != "" {
+			t.Errorf("%q: questions %q", body, ev.Questions)
+		}
+	}
+	for body, want := range map[string]string{
+		"(none open; the earlier ones were answered)\n- Which port?":              "- Which port?",
+		"none\nShould the target be main?":                                        "Should the target be main?",
+		"None of the ports work: which should I use?":                             "None of the ports work: which should I use?",
+		"(none of these is settled: which comes first?)":                          "(none of these is settled: which comes first?)",
+		"(none open, but which port should I use?)":                               "(none open, but which port should I use?)",
+		"(None: should the target be main or release?)":                           "(None: should the target be main or release?)",
+		"(none - do you want me to tag v1.2?)":                                    "(none - do you want me to tag v1.2?)",
+		"- (none yet; one forthcoming: which port?)":                              "- (none yet; one forthcoming: which port?)",
+		"(none-blocking issues remain)":                                           "(none-blocking issues remain)",
+		"(none open; but\nwhich port should I use?)":                              "(none open; but\nwhich port should I use?)",
+		"(none open; see below\n- Tag the release first.":                         "(none open; see below\n- Tag the release first.",
+		"No questions, but I need the deploy key added to the repo.":              "No questions, but I need the deploy key added to the repo.",
+		"None open; but the owner must approve the release.":                      "None open; but the owner must approve the release.",
+		"None. Please choose port 8080 or 9090.":                                  "None. Please choose port 8080 or 9090.",
+		"None: blocked until you merge #12":                                       "None: blocked until you merge #12",
+		"(none open; but please add the deploy key)":                              "(none open; but please add the deploy key)",
+		"(none open; see below\n- Tag the release first.\n- Merge it (after CI).": "(none open; see below\n- Tag the release first.\n- Merge it (after CI).",
+	} {
+		if ev := ParseStatus("# T\n\n## Questions\n" + body + "\n"); ev.Questions != want {
+			t.Errorf("%q: questions %q, want %q", body, ev.Questions, want)
+		}
+	}
+}

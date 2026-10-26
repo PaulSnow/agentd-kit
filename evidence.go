@@ -88,7 +88,7 @@ func readStatusRegular(path string) (StatusEvidence, error) {
 }
 
 // A STATUS.md may hold several Questions sections (one per issue the session
-// works through). Each is judged on its own: a section that says "none" asks
+// works through). Each is judged on its own: a line that says "none" asks
 // nothing, a section ends only at a heading of its own level or higher (a
 // subheading under it is part of the question), and rules and blank lines
 // around the text do not change the escalation key. Lines inside a fenced
@@ -100,6 +100,15 @@ var thematicBreak = regexp.MustCompile(`^(-{3,}|\*{3,}|_{3,})$`)
 // noQuestions matches the ways a session says it has none: "none", "- none",
 // "(none yet)", "None.", "None open.", "No open questions", "n/a".
 var noQuestions = regexp.MustCompile(`(?i)^[-*\s]*\(?\s*(none(\s+(yet|open|so\s+far))?|no(\s+open)?\s+questions?(\s+(yet|open))?|n/a)\s*\.?\)?\s*$`)
+
+// noneSaid matches a parenthesised line that says none are open and why:
+// "(none open; the three were answered on ...)", "(no open questions;
+// answered)" (#54). "(none of these ...)" asks something, so the none must
+// end at punctuation; a question mark, or a word that asks the owner for
+// something (noneAsks), makes it a question whatever it begins with.
+var noneSaid = regexp.MustCompile(`(?i)^[-*\s]*\(\s*(none(\s+(yet|open|so\s+far))?|no(\s+open)?\s+questions?(\s+(yet|open))?)\s*([;:,.\x{2013}\x{2014}]|\s-\s)[^?]*\)\s*\.?$`)
+var listOrFence = regexp.MustCompile("^\\s*([-*+]\\s|\\d+[.)]\\s|```|~~~)")
+var noneAsks = regexp.MustCompile(`(?i)\b(but|need|needs|please|must|until|block|blocked|blocking|waiting|approve)\b`)
 
 // ParseStatus interprets STATUS.md text.
 func ParseStatus(text string) StatusEvidence {
@@ -136,14 +145,38 @@ func parseQuestions(text string, fences bool) (questions string, closed bool) {
 	fence := "" // the fence the line is inside, such as "```", or ""
 	flush := func() {
 		// A DONE line under the heading is the end of the file, not a
-		// question.
+		// question, and a line that says none are open asks nothing: only
+		// the lines left are the section's questions. That holds for a
+		// line within a question too, such as an option "- none", which
+		// leaves the question asked. A parenthesised reason wrapped onto
+		// the lines after it is judged as the one line it is.
 		var kept []string
-		for _, l := range section {
-			if strings.TrimSpace(l) != "DONE" {
-				kept = append(kept, l)
+		for i := 0; i < len(section); i++ {
+			t, j := strings.TrimSpace(section[i]), i
+			if strings.HasPrefix(strings.TrimLeft(t, "-* "), "(") && !strings.Contains(t, ")") {
+				// Only up to a closing parenthesis, over plain lines: one
+				// never closed, or a list item or fence before the close,
+				// leaves it judged alone, swallowing nothing after it.
+				for k := i + 1; k < len(section); k++ {
+					if listOrFence.MatchString(section[k]) {
+						break
+					}
+					if strings.Contains(section[k], ")") {
+						for j < k {
+							j++
+							t += " " + strings.TrimSpace(section[j])
+						}
+						break
+					}
+				}
 			}
+			if t == "DONE" || noQuestions.MatchString(t) || noneSaid.MatchString(t) && !noneAsks.MatchString(t) {
+				i = j
+				continue
+			}
+			kept = append(kept, section[i])
 		}
-		if joined := strings.Join(kept, "\n"); joined != "" && !noQuestions.MatchString(joined) {
+		if joined := strings.Join(kept, "\n"); joined != "" {
 			found = append(found, joined)
 		}
 		section = nil
