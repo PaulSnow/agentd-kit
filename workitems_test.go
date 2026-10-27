@@ -36,7 +36,7 @@ func (p *versionPage) serve(t *testing.T) string {
 
 // askWork is the owner asking for work on widgets' console and a thread
 // agent reading it as w, handed to handTo when set: the item Go opens.
-func (h *harness) askWork(text string, w WorkRequest, handTo string) *WorkItem {
+func (h *harness) askWork(text string, w ThreadWork, handTo string) *WorkItem {
 	h.t.Helper()
 	if err := reply(h, "widgets", text); err != nil {
 		h.t.Fatal(err)
@@ -86,28 +86,30 @@ func (h *harness) noticesAbout(id string) []string {
 	return out
 }
 
-func deployWork(page string) WorkRequest {
-	return WorkRequest{Title: "Deploy v3.38.2", Brief: "Deploy v3.38.2 to production, step 1b.", DoneWhen: EndCheck{Kind: DoneURL, URL: page, Contains: "3.38.2"}}
+func deployWork(page string) ThreadWork {
+	return ThreadWork{Title: "Deploy v3.38.2", Brief: "Deploy v3.38.2 to production, step 1b.", DoneWhen: EndCheck{Kind: DoneURL, URL: page, Contains: "3.38.2"}}
 }
 
-// The owner's instruction is a work item: Go starts a session for it,
-// whose brief and items.json hold the item and the owner's words; the
-// session naming it acknowledges it, and only the check of done_when
-// closes it. A claim the check refutes is posted back to the session and
+// The owner's instruction is a work item: the session Go starts for it
+// (#65) is assigned it and typed its id, its items.json holding the item
+// and the owner's words; the session naming it acknowledges it, and only
+// the check of done_when closes it. A claim the check refutes is posted back to the session and
 // the owner, and closes nothing.
 func TestWorkItemClosedOnlyByItsCheck(t *testing.T) {
 	h := sessionsHarness(t)
 	page := &versionPage{version: "3.38.1"}
 	url := page.serve(t)
 	it := h.askWork("Deploy v3.38.2 to production now.", deployWork(url), "")
-	if it.State != WorkAssigned || !it.Started || !strings.Contains(it.Session, "widgets-owner-deploy-v3-38-2-"+strings.ToLower(it.ID)) {
+	in := h.sup.st.Instructions[it.Instruction]
+	if it.State != WorkAssigned || it.Started || it.Session == "" || it.Session != in.Session || !in.Started {
 		t.Fatalf("item = %+v", it)
 	}
 	name := it.Session
 	h.ticks(1, time.Minute)
-	brief, err := os.ReadFile(filepath.Join(h.dir, name, "BRIEF.md"))
-	if err != nil || !strings.HasPrefix(string(brief), briefItem) || !strings.Contains(string(brief), it.ID) || !strings.Contains(string(brief), "Deploy v3.38.2 to production now.") {
-		t.Fatalf("brief = %q, %v", brief, err)
+	h.alive(name, "launched\n"+idleScreen)
+	h.ticks(2, time.Minute)
+	if typed := h.typed(name); len(typed) != 1 || !strings.HasPrefix(typed[0], itemPointerHead+it.ID) {
+		t.Fatalf("typed = %q", typed)
 	}
 	b, err := os.ReadFile(filepath.Join(h.dir, name, ItemsFile))
 	var doc struct{ Items []itemDoc }
@@ -125,7 +127,7 @@ func TestWorkItemClosedOnlyByItsCheck(t *testing.T) {
 	// A claim the page refutes.
 	h.status(name, "# Status\n\n## Now\n"+it.ID+" done: deployed v3.38.2\n")
 	h.alive(name, "deployed, I think")
-	h.ticks(2, time.Minute)
+	h.ticks(3, time.Minute)
 	if it = h.item(it.ID); it.State == WorkDone || it.Refuted != "deployed v3.38.2" || it.Check == nil || it.Check.OK || !it.Check.Claim {
 		t.Fatalf("a refuted claim: item = %+v, check %+v", it, it.Check)
 	}
@@ -141,8 +143,14 @@ func TestWorkItemClosedOnlyByItsCheck(t *testing.T) {
 		h.alive(name, "deploying "+itoa(i))
 		h.ticks(1, time.Minute)
 	}
-	if n := len(h.typed(name)); n != 1 {
-		t.Fatalf("typed %d lines: %q", n, h.typed(name))
+	told := 0
+	for _, l := range h.typed(name) {
+		if strings.HasPrefix(l, itemRefutedHead) {
+			told++
+		}
+	}
+	if told != 1 {
+		t.Fatalf("told %d times: %q", told, h.typed(name))
 	}
 
 	// The deploy lands: the next check closes it, with its evidence.
@@ -152,7 +160,7 @@ func TestWorkItemClosedOnlyByItsCheck(t *testing.T) {
 		t.Fatalf("item = %+v", it)
 	}
 	steps := strings.Join(h.workSteps(it.ID), " ")
-	if steps != "open assign check ack working claim check escalate told check" {
+	if steps != "open assign check typed ack working claim check escalate told check" {
 		t.Fatalf("steps = %s", steps)
 	}
 }
@@ -179,6 +187,13 @@ func TestWorkItemReopenedWhenSessionFinishesEarly(t *testing.T) {
 	if _, ok := h.sup.st.Runtime[first]; ok {
 		t.Fatalf("%s, started for the item and taken off it, still holds a place", first)
 	}
+	// The session started anew is briefed with the item and the owner's
+	// words.
+	h.ticks(1, time.Minute)
+	brief, err := os.ReadFile(filepath.Join(h.dir, it.Session, "BRIEF.md"))
+	if err != nil || !strings.HasPrefix(string(brief), briefItem) || !strings.Contains(string(brief), it.ID) || !strings.Contains(string(brief), "Deploy v3.38.2.") || !strings.Contains(string(brief), "WAITING for go 1b") {
+		t.Fatalf("brief = %q, %v", brief, err)
+	}
 }
 
 // An item handed to a running session is typed into it with its id; one
@@ -187,7 +202,7 @@ func TestWorkItemReopenedWhenSessionFinishesEarly(t *testing.T) {
 func TestWorkItemUnacknowledgedRetypedThenReassigned(t *testing.T) {
 	h := sessionsHarness(t)
 	h.alive("a", "a works")
-	it := h.askWork("Bump the version to 3.38.2.", WorkRequest{Title: "Bump the version", Brief: "Bump it.", DoneWhen: EndCheck{Kind: DoneOwner}}, "a")
+	it := h.askWork("Bump the version to 3.38.2.", ThreadWork{Title: "Bump the version", Brief: "Bump it.", DoneWhen: EndCheck{Kind: DoneOwner}}, "a")
 	if it.Session != "a" || it.Started {
 		t.Fatalf("item = %+v", it)
 	}
@@ -235,7 +250,7 @@ func TestWorkItemUnacknowledgedRetypedThenReassigned(t *testing.T) {
 func TestWorkItemNeverToUnreachableSession(t *testing.T) {
 	h := sessionsHarness(t)
 	h.alive("laptop-deploy", "❯ ")
-	it := h.askWork("Go 1b.", WorkRequest{Title: "Go 1b", Brief: "Deploy 1b.", DoneWhen: EndCheck{Kind: DoneOwner}}, "laptop-deploy")
+	it := h.askWork("Go 1b.", ThreadWork{Title: "Go 1b", Brief: "Deploy 1b.", DoneWhen: EndCheck{Kind: DoneOwner}}, "laptop-deploy")
 	if it.Session == "laptop-deploy" || !it.Started {
 		t.Fatalf("item = %+v", it)
 	}
@@ -248,7 +263,7 @@ func TestWorkItemNeverToUnreachableSession(t *testing.T) {
 // owner once, at the deadline.
 func TestWorkItemEscalatedOnceAtDeadline(t *testing.T) {
 	h := sessionsHarness(t)
-	it := h.askWork("Tag v3.38.2.", WorkRequest{Title: "Tag it", Brief: "Tag v3.38.2.", DoneWhen: EndCheck{Kind: DoneForge, Ref: "v3.38.2", State: "tagged"}}, "")
+	it := h.askWork("Tag v3.38.2.", ThreadWork{Title: "Tag it", Brief: "Tag v3.38.2.", DoneWhen: EndCheck{Kind: DoneForge, Ref: "v3.38.2", State: "tagged"}}, "")
 	name := it.Session
 	h.alive(name, "tagging")
 	h.status(name, "# Status\n\n"+it.ID+": tagging\n")
@@ -291,7 +306,7 @@ func TestWorkItemEscalatedOnceAtDeadline(t *testing.T) {
 func TestWorkItemOwnerAnswers(t *testing.T) {
 	h := sessionsHarness(t)
 	h.alive("a", "a works")
-	it := h.askWork("Write the release notes.", WorkRequest{Title: "Release notes", Brief: "Write them.", DoneWhen: EndCheck{Kind: DoneOwner}}, "a")
+	it := h.askWork("Write the release notes.", ThreadWork{Title: "Release notes", Brief: "Write them.", DoneWhen: EndCheck{Kind: DoneOwner}}, "a")
 	respond := func(choice, text string) {
 		t.Helper()
 		var a *EntryAnswer
@@ -306,7 +321,7 @@ func TestWorkItemOwnerAnswers(t *testing.T) {
 		h.ticks(2, time.Minute)
 	}
 	respond("", "Use the short form.")
-	if docs := readInstructions(t, h.sup.cfg.Sessions["a"].Workdir); len(docs) != 1 || docs[0].Text != "Use the short form." {
+	if docs := readInstructions(t, h.sup.cfg.Sessions["a"].Workdir); len(docs) != 2 || docs[1].Text != "Use the short form." {
 		t.Fatalf("the owner's words did not reach a: %+v", docs)
 	}
 	respond(WorkAnswerReassign, "a is busy")
@@ -328,7 +343,7 @@ func TestWorkItemOwnerAnswers(t *testing.T) {
 // asked again.
 func TestWorkItemOwnerJudgesClaim(t *testing.T) {
 	h := sessionsHarness(t)
-	it := h.askWork("Make the logo bigger.", WorkRequest{Title: "Bigger logo", Brief: "Make it bigger.", DoneWhen: EndCheck{Kind: DoneOwner}}, "")
+	it := h.askWork("Make the logo bigger.", ThreadWork{Title: "Bigger logo", Brief: "Make it bigger.", DoneWhen: EndCheck{Kind: DoneOwner}}, "")
 	name := it.Session
 	h.alive(name, "resizing")
 	h.status(name, "# Status\n\n"+it.ID+" done: the logo is 2x\n")
@@ -400,7 +415,7 @@ func TestEndCheckKinds(t *testing.T) {
 // gives on the page settle them.
 func TestWorkItemOnThePage(t *testing.T) {
 	h := sessionsHarness(t)
-	it := h.askWork("Deploy v3.38.2 to production now.", WorkRequest{Title: "Deploy v3.38.2", Brief: "Deploy it.", DoneWhen: EndCheck{Kind: DoneForge, Ref: "v3.38.2", State: "tagged"}}, "")
+	it := h.askWork("Deploy v3.38.2 to production now.", ThreadWork{Title: "Deploy v3.38.2", Brief: "Deploy it.", DoneWhen: EndCheck{Kind: DoneForge, Ref: "v3.38.2", State: "tagged"}}, "")
 	u := harnessUI(t, h)
 	body := owner(t, u, "/console/widgets")
 	items, box := strings.Index(body, `class="work-items"`), strings.Index(body, `id="box"`)
@@ -459,10 +474,10 @@ func TestThreadAgentWorkOpensItem(t *testing.T) {
 	}
 	in := h.instruction(t)
 	it := h.sup.st.Work[workID(in.ID)]
-	if it == nil || it.Session != "a" || it.DoneWhen.Ref != "v3.38.2" || in.Session != "" || in.Replied.IsZero() {
+	if it == nil || it.Session != "a" || it.DoneWhen.Ref != "v3.38.2" || in.Session != "a" {
 		t.Fatalf("instruction = %+v; item = %+v", in, it)
 	}
-	if typed := h.typed("a"); len(typed) != 1 || !strings.Contains(typed[0], it.ID) {
+	if typed := h.typed("a"); len(typed) != 2 || !strings.Contains(typed[1], it.ID) {
 		t.Fatalf("typed into a: %q", typed)
 	}
 	x := agentInput(t, dir, 1)

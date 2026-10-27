@@ -83,8 +83,6 @@ const (
 	DefaultItemEscalateAfter = 2 * time.Hour
 	itemTries                = 3       // sessions an item is assigned to before the owner says
 	itemNoteMax              = 600     // bytes of a STATUS.md kept as a note
-	itemTitleMax             = 120     // characters of a title
-	itemBriefMax             = 4000    // characters of the agent's brief
 	itemContainsMax          = 200     // bytes of a check's string
 	itemBodyMax              = 1 << 20 // bytes of a page a url check reads
 	itemCheckTimeout         = 15 * time.Second
@@ -194,14 +192,6 @@ func (d EndCheck) String() string {
 	return "the owner says so"
 }
 
-// WorkRequest is the work a thread agent read in the owner's message.
-type WorkRequest struct {
-	Title    string   `json:"title"`
-	Brief    string   `json:"brief"`
-	Issue    int      `json:"issue,omitempty"`
-	DoneWhen EndCheck `json:"done_when"`
-}
-
 // WorkCheck is one check of an item's done_when: whether it held, what
 // was seen, and whether a claim of done asked for it.
 type WorkCheck struct {
@@ -220,18 +210,18 @@ func (c WorkCheck) evidence(at time.Time) string {
 // STATUS.md a session left, why the owner was told), a check, and the
 // owner's instruction that made a step.
 type WorkPayload struct {
-	ID          string       `json:"id"`
-	Step        string       `json:"step"`
-	Repository  string       `json:"repository,omitempty"`
-	Instruction string       `json:"instruction,omitempty"`
-	Work        *WorkRequest `json:"work,omitempty"`
-	HandTo      string       `json:"hand_to,omitempty"`
-	Session     string       `json:"session,omitempty"`
-	Started     bool         `json:"started,omitempty"`
-	Note        string       `json:"note,omitempty"`
-	Key         string       `json:"key,omitempty"` // an escalation's: one per key
-	Check       *WorkCheck   `json:"check,omitempty"`
-	By          string       `json:"by,omitempty"`
+	ID          string      `json:"id"`
+	Step        string      `json:"step"`
+	Repository  string      `json:"repository,omitempty"`
+	Instruction string      `json:"instruction,omitempty"`
+	Work        *ThreadWork `json:"work,omitempty"`
+	HandTo      string      `json:"hand_to,omitempty"`
+	Session     string      `json:"session,omitempty"`
+	Started     bool        `json:"started,omitempty"`
+	Note        string      `json:"note,omitempty"`
+	Key         string      `json:"key,omitempty"` // an escalation's: one per key
+	Check       *WorkCheck  `json:"check,omitempty"`
+	By          string      `json:"by,omitempty"`
 }
 
 // check says what a work item step lacks.
@@ -260,7 +250,7 @@ type WorkItem struct {
 	ID          string
 	Repository  string
 	Instruction string
-	WorkRequest
+	ThreadWork
 	HandTo string
 	State  string
 	Opened time.Time
@@ -311,7 +301,7 @@ func (st *LogState) applyWork(e Event) {
 	it := st.Work[p.ID]
 	if p.Step == WorkStepOpen {
 		if it == nil {
-			st.Work[p.ID] = &WorkItem{ID: p.ID, Repository: p.Repository, Instruction: p.Instruction, WorkRequest: *p.Work, HandTo: p.HandTo,
+			st.Work[p.ID] = &WorkItem{ID: p.ID, Repository: p.Repository, Instruction: p.Instruction, ThreadWork: *p.Work, HandTo: p.HandTo,
 				State: WorkOpen, Opened: e.Time, Progress: e.Time, Escalated: map[string]bool{}}
 		}
 		return
@@ -425,11 +415,15 @@ func (s *Supervisor) driveItems(now time.Time) {
 	}
 	for _, id := range sortedKeys(s.st.Instructions) {
 		in := s.st.Instructions[id]
-		if a := in.AgentLast; a != nil && a.Work != nil && len(in.Repositories) > 0 && s.st.Work[workID(in.ID)] == nil {
-			w := *a.Work
-			if s.workEmit(WorkPayload{ID: workID(in.ID), Step: WorkStepOpen, Repository: in.Repositories[0], Instruction: in.ID, Work: &w, HandTo: a.HandTo}); s.halt != nil {
-				return
-			}
+		// Once its route settles: the session the agent handed it to, the
+		// one Go started for it (#65), or none, when that failed.
+		a := in.AgentLast
+		if a == nil || a.Work == nil || len(in.Repositories) == 0 || s.st.Work[workID(in.ID)] != nil || in.Session == "" && in.Failed == "" {
+			continue
+		}
+		w := *a.Work
+		if s.workEmit(WorkPayload{ID: workID(in.ID), Step: WorkStepOpen, Repository: in.Repositories[0], Instruction: in.ID, Work: &w, HandTo: in.Session}); s.halt != nil {
+			return
 		}
 	}
 	for _, id := range s.st.sortedWork() {
@@ -462,6 +456,8 @@ func (s *Supervisor) driveItem(it *WorkItem, now time.Time) {
 		// Gone, stopped or parked: it is not doing the work.
 		s.reopenItem(it, fmt.Sprintf("%s stopped with %s not done", it.Session, it.ID), string(status))
 		return
+	case t != nil && t.State == Done && s.reopening(it):
+		return // #65 reopens it with the owner's message first
 	case t != nil && t.State == Done:
 		s.finishedItem(it, string(status), now)
 		return
@@ -502,6 +498,13 @@ func (s *Supervisor) driveItem(it *WorkItem, now time.Time) {
 	if s.halt == nil {
 		s.stalledItem(it, sess.Workdir, now)
 	}
+}
+
+// reopening says whether the item's message waits on its finished
+// session, which #65 reopens to take it.
+func (s *Supervisor) reopening(it *WorkItem) bool {
+	in := s.st.Instructions[it.Instruction]
+	return in != nil && in.Session == it.Session && s.reopens(in)
 }
 
 // itemMarksOf is what a session's STATUS.md says of an item: that it
@@ -634,13 +637,13 @@ func (s *Supervisor) reopenItem(it *WorkItem, why, status string) {
 }
 
 // letGo takes session off an item it no longer holds: a session started
-// for the item alone is ended, so it holds no place and does the work no
+// for the item or its message alone is ended, so it holds no place and does the work no
 // more; any other has its items.json written without it.
 func (s *Supervisor) letGo(it *WorkItem, session string) {
 	if session == "" {
 		return
 	}
-	if p, ok := s.st.Runtime[session]; ok && p.Item == it.ID {
+	if p, ok := s.st.Runtime[session]; ok && (p.Item == it.ID || p.Owner == it.Instruction) {
 		s.emit(session, Event{Kind: KindSession, Mode: ModeShared, Runtime: &RuntimePayload{ID: newIntentID(), Action: SessionEnd, Repository: p.Repository, By: "agentd"}})
 		s.refreshRuntime()
 		return
@@ -668,18 +671,31 @@ func (s *Supervisor) assignItem(it *WorkItem, now time.Time) {
 			it.ID, len(it.Tried), strings.Join(it.Tried, ", "), lastNote(it)))
 		return
 	}
-	if h := it.HandTo; h != "" && !tried[h] && s.takesInstructions(h) && s.reachable(h) {
-		s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepAssign, Session: h})
-		return
+	// The session its message went to: the one the agent handed it to,
+	// one finished whose tmux runs, which #65 reopens, or the one the
+	// owner's next step sent it to.
+	cands := []string{it.HandTo}
+	if in := s.st.Instructions[it.Instruction]; in != nil && in.Failed == "" {
+		cands = append(cands, in.Session)
+	}
+	for _, h := range cands {
+		if h != "" && !tried[h] && (s.takesInstructions(h) || s.doneAlive(h)) && s.reachable(h) {
+			s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepAssign, Session: h})
+			return
+		}
 	}
 	repo := it.Repository
-	if s.cfg.Repositories[repo].Sessions == nil {
+	switch sp := s.cfg.Repositories[repo].Sessions; {
+	case sp == nil:
 		s.escalateItem(it, "start:none", fmt.Sprintf("agentd cannot start a session for %s: %s has no sessions entry here, so agentd starts none for it. Configure one, or re-assign it.", it.ID, repo))
+		return
+	case sp.Host != "":
+		s.escalateItem(it, "start:host", fmt.Sprintf("agentd cannot start a session for %s: %s places its sessions on %s, whose node cannot brief one with the owner's words yet. Re-assign it once a session of its runs here.", it.ID, repo, sp.Host))
 		return
 	}
 	branch := fmt.Sprintf("owner/%s-%s-%d", itemSlug(it.Title), strings.ToLower(it.ID), len(it.Tried)+1)
 	name := runtimeName(repo, branch, KindWork)
-	why := s.startRuntime(repo, name, RuntimePayload{Kind: KindWork, Branch: branch, Issue: it.Issue, Item: it.ID})
+	why := s.startRuntime(repo, name, RuntimePayload{Kind: KindWork, Branch: branch, Issue: it.Issue, Owner: it.Instruction, Item: it.ID})
 	if s.halt != nil {
 		return
 	}
@@ -781,6 +797,8 @@ func (s *Supervisor) checkItem(it *WorkItem, now time.Time, claim bool) {
 	if s.work.busy(key) {
 		return
 	}
+	// A claim not yet checked makes any check its own.
+	claim = claim || it.Claim != "" && it.Claim != it.Refuted && !it.Checked.After(it.Claimed)
 	if last, ok := s.checkedAt[it.ID]; !claim && ok && now.Sub(last) < s.cfg.PollInterval.Duration {
 		return
 	}
@@ -1023,7 +1041,7 @@ func (s *Supervisor) deliverItems(name string, sess Session, t *Track, ev Eviden
 			return false
 		}
 		docs := s.itemDocs(name, sess.Workdir)
-		err := s.typeInto(name, ActInstruct, &ActPayload{Key: key, Message: line}, t, ev.PaneHash, func() error {
+		err := s.typeInto(name, ActItem, &ActPayload{Key: key, Message: line}, t, ev.PaneHash, func() error {
 			if err := writeItems(sess.Workdir, docs); err != nil {
 				return err
 			}

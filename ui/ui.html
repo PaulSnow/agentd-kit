@@ -172,7 +172,7 @@
 
 {{define "attach"}}<div class="attach"><label class="attach-button" title="Attach screenshots, PDFs or text files; or paste or drop them here">📎<input type="file" name="file" multiple accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/plain,.txt,.log"></label><ul class="attach-list"></ul></div>{{end}}
 
-{{define "thread"}}{{$p := .P}}{{with .V}}{{with .Steps}}<ol class="steps">{{range .}}<li class="step{{if .Failed}} step-failed{{else if .Wait}} step-wait{{end}}">{{.Text}}{{if not .At.IsZero}} <time class="muted">{{$p.When .At}}</time>{{end}}</li>{{end}}</ol>{{end}}
+{{define "thread"}}{{$p := .P}}{{with .V}}{{with .Steps}}<ol class="steps">{{range .}}<li class="step{{if .Failed}} step-failed{{else if .Wait}} step-wait{{end}}">{{.Text}}{{with .Session}} <a href="/session/{{$.V.Src}}/{{.}}">{{.}}</a>{{end}}{{if not .At.IsZero}} <time class="muted">{{$p.When .At}}</time>{{end}}</li>{{end}}</ol>{{end}}
 {{if .Activity}}<details class="tools" data-key="a-{{.Entry}}"><summary>{{.ToolsLine}}</summary><ol class="activity">{{range .Activity}}<li class="tool{{if .Failed}} tool-failed{{end}}"><code>{{.Text}}</code>{{if .Failed}} <span class="badge">failed{{with .Exit}}, exit {{.}}{{end}}</span>{{end}}</li>{{end}}</ol></details>{{end}}
 {{if .ReplyBy}}<div class="msg msg-reply thread"><div class="msg-head">{{if .ReplyAgent}}<span class="from">{{.ReplyBy}}</span>{{else}}<a href="/session/{{.Src}}/{{.ReplyBy}}">{{.ReplyBy}}</a>{{end}} <span class="badge">reply</span> <time class="muted">{{$p.When .Replied}}</time></div><div class="md">{{.Reply}}</div></div>{{end}}{{end}}{{end}}
 

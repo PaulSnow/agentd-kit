@@ -123,7 +123,7 @@ func (st *LogState) opsChangeFacts() []opsChangeFact {
 	for _, r := range st.Ops {
 		rs = append(rs, r)
 	}
-	sort.Slice(rs, func(i, j int) bool { return rs[i].Proposed.Before(rs[j].Proposed) })
+	sort.Slice(rs, func(i, j int) bool { return rs[i].before(rs[j]) })
 	if n := len(rs) - opsChangesKept; n > 0 {
 		rs = rs[n:]
 	}
@@ -273,7 +273,7 @@ func (s *Supervisor) checkOpsAnswer(raw json.RawMessage, p *AgentPayload) error 
 		return fmt.Errorf("the agent's answer does not read: %v", err)
 	}
 	b, _ := json.Marshal(threadAnswer{Answer: a.Answer})
-	_, err := s.checkThreadAnswer(b, nil, p)
+	_, err := s.checkThreadAnswer(b, nil, nil, p)
 	return err
 }
 
@@ -294,7 +294,7 @@ func (s *Supervisor) runOps(now time.Time) {
 			rs = append(rs, r)
 		}
 	}
-	sort.Slice(rs, func(i, j int) bool { return rs[i].Proposed.Before(rs[j].Proposed) })
+	sort.Slice(rs, func(i, j int) bool { return rs[i].before(rs[j]) })
 	for _, r := range rs {
 		// While this process restarts itself to finish a change, it
 		// starts no other: the Ctrl-C would cut it short.
@@ -444,4 +444,13 @@ func opsNote(r *OpsRecord) string {
 		return "agentd is carrying it out"
 	}
 	return "agentd carries it out at its next pass"
+}
+
+// before says whether r was proposed before o: by time, then by the
+// log's order, as two proposed at one time came.
+func (r *OpsRecord) before(o *OpsRecord) bool {
+	if !r.Proposed.Equal(o.Proposed) {
+		return r.Proposed.Before(o.Proposed)
+	}
+	return r.Seq < o.Seq
 }
