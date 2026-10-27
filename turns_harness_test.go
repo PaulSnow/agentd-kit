@@ -22,7 +22,8 @@ func injectedLine(uuid, text string, at time.Time, extra map[string]any) string 
 // Only real prompts are turns: a task notification, a system reminder, a
 // shell escape's input and output and a slash command are the harness's,
 // not anyone's prompt; a compaction's summary is posted as one, linked to
-// its text (#58). A long reply is posted whole, and the page folds it.
+// its text (#58). A long reply is posted whole; the console shows it
+// whole (#59 §4), and the session's page folds it.
 func TestOnlyRealPromptsAndWholeReplies(t *testing.T) {
 	h := turnsHarness(t)
 	at := h.clock.Now()
@@ -49,7 +50,7 @@ func TestOnlyRealPromptsAndWholeReplies(t *testing.T) {
 	}
 	u, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
 	page := owner(t, u, "/console/widgets")
-	if strings.Contains(page, "task-notification") || !strings.Contains(page, `<details class="more" data-key="m-e-`) || !strings.Contains(page, "Show all") ||
+	if strings.Contains(page, "task-notification") || strings.Contains(page, `<details class="more" data-key="m-e-`) || strings.Count(page, "every check passes.") != 60 ||
 		!strings.Contains(page, `<a href="/session/night/a/prompt/t1.7">Context compacted →</a>`) || strings.Contains(page, "being continued") {
 		t.Fatalf("console:\n%s", page)
 	}

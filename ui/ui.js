@@ -4,6 +4,8 @@
 // A console (#59) polls its box instead: new entries come in at the
 // bottom, a changed one is swapped in, a response is sent without
 // leaving the page, and an entry opens its response form when clicked.
+// The page carries the latest entries; older ones are fetched as the
+// owner scrolls up, and the poll touches only the latest.
 // Without this script the page is complete; a reload shows what is new.
 (function () {
   "use strict";
@@ -162,10 +164,37 @@
     var prev = null;
     var empty = list.querySelector(".empty");
     var keep = {};
+    for (var w = 0; w < doc.entries.length; w++) {
+      keep[doc.entries[w].id] = true;
+    }
+    // The first of the window shown: what is before it, fetched on
+    // scrolling up, the poll leaves alone.
+    var shown0 = list.querySelectorAll(".entry");
+    var first = null;
+    for (var f = 0; f < shown0.length && !first; f++) {
+      if (keep[shown0[f].id]) {
+        first = shown0[f];
+      }
+    }
+    // None of the window shown: more came than a window while the page
+    // slept, and the box starts again from the latest.
+    if (!first && shown0.length > 0 && doc.entries.length > 0) {
+      for (var g = 0; g < shown0.length; g++) {
+        shown0[g].remove();
+      }
+      hashes = {};
+      olderLink(doc.more, null);
+      bottom = true;
+    }
     for (var i = 0; i < doc.entries.length; i++) {
       var d = doc.entries[i];
-      keep[d.id] = true;
       var el = document.getElementById(d.id);
+      if (!d.html) {
+        if (el) {
+          prev = el; // as the page has it
+        }
+        continue;
+      }
       if (el) {
         // Unknown until now, an entry is compared as the page parsed it.
         var changed = hashes[d.id] === undefined ? !element(d.html).isEqualNode(el) : hashes[d.id] !== d.hash;
@@ -189,8 +218,10 @@
           list.insertBefore(el, prev.nextSibling);
         } else if (prev) {
           list.appendChild(el);
+        } else if (first) {
+          list.insertBefore(el, first);
         } else {
-          list.insertBefore(el, list.firstChild);
+          list.appendChild(el);
         }
         if (!bottom) {
           unseen++;
@@ -198,10 +229,13 @@
       }
       prev = el;
     }
-    // An entry the console no longer holds goes, unless the owner is in it.
+    // An entry of the window the console no longer holds goes, unless
+    // the owner is in it.
     var shown = list.querySelectorAll(".entry");
+    var inWindow = false;
     for (var k = 0; k < shown.length; k++) {
-      if (!keep[shown[k].id] && !busy(shown[k])) {
+      inWindow = inWindow || keep[shown[k].id] === true;
+      if (inWindow && !keep[shown[k].id] && !busy(shown[k])) {
         shown[k].remove();
         delete hashes[shown[k].id];
       }
@@ -224,14 +258,118 @@
     }
   }
 
+  // have lists the latest entries the page holds as the server last
+  // sent them, which it sends back without their HTML.
+  function have() {
+    var out = [];
+    var es = list.querySelectorAll(".entry");
+    for (var i = Math.max(es.length - 60, 0); i < es.length; i++) {
+      if (hashes[es[i].id]) {
+        out.push(es[i].id + "." + hashes[es[i].id]);
+      }
+    }
+    return out.join(",");
+  }
+
   function pull() {
     if (document.hidden) {
       return Promise.resolve();
     }
-    return fetch(box.getAttribute("data-entries"), { credentials: "same-origin", cache: "no-store" })
+    return fetch(box.getAttribute("data-entries") + "?have=" + encodeURIComponent(have()), { credentials: "same-origin", cache: "no-store" })
       .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
       .then(merge)
       .catch(function () {});
+  }
+
+  // olderLink shows the link to older entries when there are some, to
+  // those before entry head, or hides it.
+  function olderLink(more, head) {
+    var p = box.querySelector(".older");
+    if (!more) {
+      if (p) {
+        p.remove();
+      }
+      return;
+    }
+    if (!p) {
+      p = document.createElement("p");
+      p.className = "older";
+      p.appendChild(document.createElement("a")).textContent = "Older entries";
+      box.insertBefore(p, list);
+    }
+    var a = p.querySelector("a");
+    a.href = head ? location.pathname + "?before=" + encodeURIComponent(head.id) : location.pathname;
+    a.setAttribute("data-before", head ? head.id : "");
+  }
+
+  // older fetches the entries before the first shown and puts them above
+  // it, the box kept where the owner is; it says whether it fetched any.
+  // A fetch already under way is the one waited for.
+  var loading = null;
+  function older() {
+    var link = box.querySelector(".older a");
+    var top = list.querySelector(".entry");
+    if (loading) {
+      return loading;
+    }
+    if (!link || !top) {
+      return Promise.resolve(false);
+    }
+    var url = box.getAttribute("data-entries") + "?before=" + encodeURIComponent(top.id) + "&at=" + (top.getAttribute("data-at") || "");
+    loading = fetch(url, { credentials: "same-origin", cache: "no-store" })
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+      .then(function (doc) {
+        var height = box.scrollHeight;
+        for (var i = 0; i < doc.entries.length; i++) {
+          var d = doc.entries[i];
+          if (!document.getElementById(d.id)) {
+            list.insertBefore(element(d.html), top);
+            hashes[d.id] = d.hash;
+          }
+        }
+        olderLink(doc.more, list.querySelector(".entry"));
+        applyFilter();
+        box.scrollTop += box.scrollHeight - height;
+        loading = null;
+        return doc.entries.length > 0;
+      })
+      .catch(function () {
+        loading = null;
+        return false;
+      });
+    return loading;
+  }
+
+  // refresh brings an entry above the latest window up to date, as one
+  // just answered: the window before the entry below it is fetched again.
+  function refreshAt(el) {
+    var below = el.nextElementSibling;
+    if (!below) {
+      return Promise.resolve();
+    }
+    var url = box.getAttribute("data-entries") + "?before=" + encodeURIComponent(below.id) + "&at=" + (below.getAttribute("data-at") || "");
+    return fetch(url, { credentials: "same-origin", cache: "no-store" })
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+      .then(function (doc) {
+        for (var i = 0; i < doc.entries.length; i++) {
+          var d = doc.entries[i];
+          var old = document.getElementById(d.id);
+          if (old && d.html && hashes[d.id] !== d.hash && !busy(old)) {
+            old.replaceWith(element(d.html));
+            hashes[d.id] = d.hash;
+          }
+        }
+      })
+      .catch(function () {});
+  }
+
+  // reveal shows entry id, fetching older entries until it is there.
+  function reveal(id, tries) {
+    var el = document.getElementById(id);
+    if (el || tries <= 0) {
+      return Promise.resolve(el);
+    }
+    return older().then(function (got) { return got ? reveal(id, tries - 1) : null; });
   }
 
   function loop() {
@@ -270,7 +408,8 @@
         if (form === composer) {
           clearRe();
         }
-        return pull().then(toBottom);
+        var entry = form.closest(".entry");
+        return pull().then(function () { return entry ? refreshAt(entry) : null; }).then(toBottom);
       })
       .catch(function (t) {
         var p = document.createElement("p");
@@ -337,13 +476,19 @@
       toBottom();
       return;
     }
+    if (t.closest(".older a")) {
+      e.preventDefault();
+      older();
+      return;
+    }
     if (t.closest(".open-questions")) {
       if (openIDs.length === 0) {
         return;
       }
-      var el = document.getElementById(openIDs[nextOpen % openIDs.length]);
-      nextOpen++;
-      if (el) {
+      reveal(openIDs[nextOpen % openIDs.length], 20).then(function (el) {
+        if (!el) {
+          return;
+        }
         el.scrollIntoView({ block: "center" });
         el.classList.add("flash");
         setTimeout(function () { el.classList.remove("flash"); }, 1200);
@@ -351,7 +496,8 @@
         if (d) {
           d.setAttribute("open", "");
         }
-      }
+      });
+      nextOpen++;
       return;
     }
     var chip = t.closest(".chip-filter");
@@ -402,7 +548,14 @@
       unseen = 0;
       showNewer();
     }
+    if (box.scrollTop < 200) {
+      older();
+    }
   });
+  var held = list.querySelectorAll(".entry[data-hash]");
+  for (var h = 0; h < held.length; h++) {
+    hashes[held[h].id] = held[h].getAttribute("data-hash");
+  }
   var q0 = document.querySelector(".open-questions");
   if (q0) {
     var ids = [];
@@ -413,5 +566,9 @@
     openIDs = ids;
   }
   toBottom();
+  // A window too short to scroll fetches older entries at once.
+  if (box.scrollHeight <= box.clientHeight) {
+    older();
+  }
   setTimeout(loop, poll);
 })();
