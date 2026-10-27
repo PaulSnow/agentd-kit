@@ -107,16 +107,21 @@ type JobUsage struct {
 	CacheReadTokens     int64   `json:"cache_read_input_tokens,omitempty"`
 	CacheCreationTokens int64   `json:"cache_creation_input_tokens,omitempty"`
 	CostUSD             float64 `json:"cost_usd,omitempty"`
+	// Account is the account the call ran on (#64), set by agentd, not
+	// the CLI; none for the default login.
+	Account string `json:"account,omitempty"`
 }
 
 // Job is one bounded agent call: the CLI, the login it runs under and its
 // limits.
 type Job struct {
-	Command  string
-	Account  Account
-	Model    string
-	Timeout  time.Duration
-	MaxInput int
+	Command string
+	Account Account
+	// AccountName is Account's name, which its usage is charged to.
+	AccountName string
+	Model       string
+	Timeout     time.Duration
+	MaxInput    int
 	// Tools are the read-only tools the call may use in Dir, none by
 	// default, and Deny the permission rules it may never use (#60's
 	// expert reads the worktree, and never a credential).
@@ -127,7 +132,7 @@ type Job struct {
 
 // jobFromConfig is the job the config describes, with its defaults.
 func jobFromConfig(cfg *Config) Job {
-	j := Job{Command: cfg.Jobs.Command, Account: cfg.Accounts[cfg.Jobs.Account], Model: cfg.Jobs.Model,
+	j := Job{Command: cfg.Jobs.Command, Account: cfg.Accounts[cfg.Jobs.Account], AccountName: cfg.Jobs.Account, Model: cfg.Jobs.Model,
 		Timeout: cfg.Jobs.Timeout.Duration, MaxInput: cfg.Jobs.MaxInput}
 	if j.Command == "" {
 		j.Command = "claude"
@@ -217,7 +222,7 @@ func (j Job) Run(ctx context.Context, system string, schema, input []byte) (json
 	if err := json.Unmarshal(out, &r); err != nil {
 		return nil, JobUsage{}, fmt.Errorf("%s: unreadable output: %v", j.Command, err)
 	}
-	r.Usage.CostUSD = r.TotalCostUSD
+	r.Usage.CostUSD, r.Usage.Account = r.TotalCostUSD, j.AccountName
 	if r.IsError {
 		return nil, r.Usage, fmt.Errorf("%s: %s: %s", j.Command, r.Subtype, oneLine(r.Result, 200))
 	}
@@ -477,6 +482,9 @@ func (u *JobUsage) add(v JobUsage) {
 	u.CacheReadTokens += v.CacheReadTokens
 	u.CacheCreationTokens += v.CacheCreationTokens
 	u.CostUSD += v.CostUSD
+	if u.Account == "" {
+		u.Account = v.Account
+	}
 }
 
 // untriaged lists the unseen items with no triage for their current text,

@@ -62,6 +62,9 @@ type LogState struct {
 	Facts map[string]string
 	// FactAt is when each session's Now was last a fact.
 	FactAt map[string]time.Time
+	// Ledger is the readings and the tokens charged to each account over
+	// the last ledgerKeep (#64); a worker's state has none.
+	Ledger *AccountLedger
 
 	cfg *Config // its policies, read as each event is applied
 }
@@ -70,7 +73,7 @@ type LogState struct {
 func NewLogState(cfg *Config, mode string) *LogState {
 	return &LogState{Mode: mode, Tracks: map[string]*Track{}, Pending: map[string]Event{}, Items: map[string]*Item{}, Instructions: map[string]*Instruction{},
 		Cursors: map[string]time.Time{}, Polls: map[string]PollRecord{}, Cases: map[string]*Case{},
-		CI: map[string]CIRecord{}, Runtime: map[string]RuntimePayload{}, Ended: map[string]string{}, Policies: map[string]PolicyPayload{}, Approvals: map[string]ApprovalRecord{}, cfg: cfg}
+		CI: map[string]CIRecord{}, Runtime: map[string]RuntimePayload{}, Ended: map[string]string{}, Policies: map[string]PolicyPayload{}, Approvals: map[string]ApprovalRecord{}, Ledger: newAccountLedger(), cfg: cfg}
 }
 
 // setItem changes a copy of the item and puts the copy in its place: a
@@ -132,6 +135,8 @@ func (st *LogState) apply(e Event) {
 	if e.Time.After(st.Last) {
 		st.Last = e.Time
 	}
+	// After the fold, so a placement is the ledger's only once it holds.
+	defer st.applyLedger(e)
 	if e.Kind == KindCase {
 		st.applyCase(e)
 		return

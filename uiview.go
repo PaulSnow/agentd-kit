@@ -2,9 +2,12 @@ package main
 
 import (
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
+	"math"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -312,7 +315,52 @@ type uiAccount struct {
 	Over  bool
 	Stale bool
 	Error string // the latest error since the numbers, screened
+	// Report is the account's token use (#64), when one was made.
+	Report *AccountReport
 }
+
+// Spark is the week's weekly percent as an SVG path in a sparkW by
+// sparkH box, a gap where a reading is missing; "" when there is none.
+func (a uiAccount) Spark() string {
+	if a.Report == nil || len(a.Report.Week) == 0 {
+		return ""
+	}
+	start := a.Report.At.Add(-weekLength)
+	if r := a.Report.WeeklyReset; r != nil {
+		start = r.Add(-weekLength)
+	}
+	var b strings.Builder
+	pen := false
+	for _, p := range a.Report.Week {
+		if p.Weekly == nil {
+			pen = false
+			continue
+		}
+		x := float64(sparkW) * p.At.Sub(start).Hours() / weekLength.Hours()
+		y := float64(sparkH) * (1 - math.Min(math.Max(*p.Weekly, 0), 100)/100)
+		op := "L"
+		if !pen {
+			op = "M"
+		}
+		fmt.Fprintf(&b, "%s%.1f %.1f ", op, math.Min(math.Max(x, 0), sparkW), y)
+		pen = true
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// LimitY is where the limit falls in the spark's box.
+func (a uiAccount) LimitY() string {
+	if a.Report == nil {
+		return "0"
+	}
+	return fmt.Sprintf("%.1f", float64(sparkH)*(1-math.Min(a.Report.Limit, 100)/100))
+}
+
+// The spark's box.
+const (
+	sparkW = 120
+	sparkH = 24
+)
 
 // uiOtherConsole is a console without a repository (#42), merged across
 // the sources: its title and its latest message.
@@ -385,6 +433,17 @@ func (u *UI) indexView(now time.Time) (*uiIndex, error) {
 	sort.Slice(v.Consoles, func(i, j int) bool { return v.Consoles[i].Name < v.Consoles[j].Name })
 	for _, n := range v.Needs {
 		get(n.Repository).NeedsYou++
+	}
+	for _, rep := range u.accountReports(now) {
+		rep := rep
+		i := 0
+		for i < len(v.Accounts) && v.Accounts[i].Name != rep.Account {
+			i++
+		}
+		if i == len(v.Accounts) {
+			v.Accounts = append(v.Accounts, uiAccount{Name: rep.Account, Stale: true})
+		}
+		v.Accounts[i].Report = &rep
 	}
 	sort.Slice(v.Accounts, func(i, j int) bool { return v.Accounts[i].Name < v.Accounts[j].Name })
 	sortNeeds(v.Needs)
@@ -1407,6 +1466,58 @@ func shortSHA(sha string) string {
 		return sha[:12]
 	}
 	return sha
+}
+
+// accountReports are the account reports across the sources (#64): each
+// account's readings from the source that read it last, and the tokens
+// every live source charged to it, a shadow run's being the same
+// sessions' again.
+func (u *UI) accountReports(now time.Time) []AccountReport {
+	var cfg *Config
+	merged := NewLogState(nil, ModeLive)
+	merged.Accounts = map[string]AccountRecord{}
+	l := merged.Ledger
+	for _, src := range u.sources {
+		src.mu.Lock()
+		if err := src.catchUp(); err != nil || src.st.Ledger == nil {
+			src.mu.Unlock()
+			continue
+		}
+		if cfg == nil || src.st.Mode == ModeLive && !src.echo {
+			cfg = src.cfg
+		}
+		sl := src.st.Ledger
+		for a, r := range src.st.Accounts {
+			if old, ok := merged.Accounts[a]; !ok || r.At.After(old.At) || r.ErrorAt.After(old.ErrorAt) && r.At.Equal(old.At) {
+				merged.Accounts[a] = r
+				l.Readings[a] = append([]LedgerReading(nil), sl.Readings[a]...)
+			}
+		}
+		for a, f := range sl.Fallback {
+			if f.At.After(l.Fallback[a].At) {
+				l.Fallback[a] = f
+			}
+		}
+		if src.st.Mode == ModeLive && !src.echo {
+			l.Spends = append(l.Spends, sl.Spends...)
+		}
+		src.mu.Unlock()
+	}
+	if cfg == nil {
+		return nil
+	}
+	sort.SliceStable(l.Spends, func(i, j int) bool { return l.Spends[i].At.Before(l.Spends[j].At) })
+	return AccountReports(cfg, merged, now, u.loc)
+}
+
+// serveAccounts answers /accounts.json with the account reports.
+func (u *UI) serveAccounts(w http.ResponseWriter) {
+	reps := u.accountReports(u.now())
+	if reps == nil {
+		reps = []AccountReport{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(reps)
 }
 
 // addAccounts merges src's account readings into the index: the newest

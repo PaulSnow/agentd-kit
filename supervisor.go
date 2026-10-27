@@ -460,6 +460,7 @@ func (s *Supervisor) Pass() error {
 		s.feedConsoles(s.clock.Now())
 		s.triageItems(s.clock.Now())
 		s.readAccounts(s.clock.Now())
+		s.noticeAccounts(s.clock.Now())
 		s.runJobs(s.clock.Now())
 		s.checkStatuses(s.clock.Now())
 		s.noteFacts(s.clock.Now())
