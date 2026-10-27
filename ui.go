@@ -116,6 +116,12 @@ type uiMessage struct {
 	// Ref is where a session's turn was read, when its turn is logged,
 	// for its prompt page (#58).
 	Ref *promptRef
+	// Entry is its id as the owner responds to it, Writer the session
+	// that wrote it, "" when agentd or the owner did, and Re the entry an
+	// instruction responds to (#59).
+	Entry  string
+	Writer string
+	Re     *EntryRe
 }
 
 // turn says whether m is a session's turn (#38).
@@ -220,7 +226,7 @@ func (src *uiSource) catchUp() error {
 		}
 		switch {
 		case e.Feed != nil && (e.Feed.Phase == FeedIntent || e.Feed.Phase == FeedWould) && e.Feed.Text != "":
-			add(e.Feed.Repository, uiMessage{At: e.Time, Kind: "feed", From: "agentd", Text: e.Feed.Text})
+			add(e.Feed.Repository, uiMessage{At: e.Time, Kind: "feed", From: "agentd", Text: e.Feed.Text, Entry: entryKey(entryFeed, e.Feed.Key, e.Time, e.Feed.Text)})
 		case src.echo && owners:
 		case e.Feed != nil && e.Feed.Phase == FeedImported:
 			at := e.Time
@@ -231,9 +237,10 @@ func (src *uiSource) catchUp() error {
 			if e.Feed.Kind != "" {
 				kind = "imported-" + e.Feed.Kind
 			}
-			add(e.Feed.Repository, uiMessage{At: at, Kind: kind, From: e.Feed.From, Text: e.Feed.Text})
+			add(e.Feed.Repository, uiMessage{At: at, Kind: kind, From: e.Feed.From, Text: e.Feed.Text, Entry: entryKey(entryFeed, e.Feed.Key, at, e.Feed.Text)})
 		case e.Act != nil && (e.Kind == KindAction || e.Kind == KindWould) && (e.Act.Action == ActEscalate || e.Act.Action == ActUpdate):
-			m := uiMessage{At: e.Time, Kind: "escalation", From: "agentd", Session: e.Session, Text: e.Act.Message}
+			m := uiMessage{At: e.Time, Kind: "escalation", From: "agentd", Session: e.Session, Text: e.Act.Message,
+				Entry: entryKey(entryEscalation, "", e.Time, e.Session+"\n"+e.Act.Key)}
 			// A session's repository has it; one that names none, its
 			// console's repositories or the console without one it went to.
 			if repo := repoOf(e.Session); repo != "" {
@@ -246,14 +253,19 @@ func (src *uiSource) catchUp() error {
 				}
 			}
 		case e.Kind == KindInstruction && e.Instruction != nil:
-			m := uiMessage{At: e.Time, Kind: "instruction", From: e.Instruction.From, Text: e.Instruction.Text, ID: e.Instruction.ID}
+			m := uiMessage{At: e.Time, Kind: "instruction", From: e.Instruction.From, Text: e.Instruction.Text, ID: e.Instruction.ID,
+				Entry: entryInstruction + e.Instruction.ID, Re: e.Instruction.Re}
 			for _, r := range e.Instruction.Repositories {
 				add(r, m)
 			}
 			add(e.Instruction.Console, m)
 		case e.Kind == KindMessage && e.Message != nil && e.Message.Kind == MessagePrompt && loggedNoPrompt(e.Message.Text):
 		case e.Kind == KindMessage && e.Message != nil:
-			m := uiMessage{At: e.Time, Kind: e.Message.Kind, From: e.Message.From, Text: e.Message.Text}
+			m := uiMessage{At: e.Time, Kind: e.Message.Kind, From: e.Message.From, Text: e.Message.Text, Entry: entryKey(entryMessage, e.Message.ID, e.Time, e.Message.Text)}
+			// A session's own post or turn is the session's to answer.
+			if _, ok := cfg.Sessions[e.Message.From]; ok {
+				m.Writer = e.Message.From
+			}
 			if m.turn() {
 				m.Session = e.Message.From // a session's turn links to its page
 				if ref, ok := src.turnRefs[e.Message.ID]; ok && m.Kind == MessagePrompt {
@@ -454,7 +466,7 @@ func (u *UI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 	get := r.Method == http.MethodGet || r.Method == http.MethodHead
 	posts := map[string]func(http.ResponseWriter, *http.Request){
-		"/seen": u.serveSeen, "/answer": u.serveAnswer, "/deadline": u.serveDeadline, "/reply": u.serveReply,
+		"/seen": u.serveSeen, "/answer": u.serveAnswer, "/deadline": u.serveDeadline, "/reply": u.serveReply, "/respond": u.serveRespond,
 	}
 	switch {
 	case path == "/ui.css" || path == "/ui.js":
@@ -622,7 +634,29 @@ func (u *UI) serveAnswer(w http.ResponseWriter, r *http.Request) {
 	}
 	f := func(k string) string { return strings.TrimSpace(r.PostForm.Get(k)) }
 	session := f("session")
-	a := AnswerPayload{ID: f("id"), Choice: f("choice"), Text: f("text"), Other: f("other"), Note: f("note"), From: r.RemoteAddr}
+	a, err := answerForm(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	a.ID, a.Text = f("id"), f("text")
+	if session == "" || a.ID == "" {
+		http.Error(w, "name the session and the decision", http.StatusBadRequest)
+		return
+	}
+	if err := src.answer(session, a); err != nil {
+		http.Error(w, "the answer was not recorded: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	u.back(w, r)
+}
+
+// answerForm reads the answer a checked POST gives a decision: answer
+// (yes or no), choice, choices, value, other and a note, with the address
+// it came from. The decision and its text the caller reads.
+func answerForm(r *http.Request) (AnswerPayload, error) {
+	f := func(k string) string { return strings.TrimSpace(r.PostForm.Get(k)) }
+	a := AnswerPayload{Choice: f("choice"), Other: f("other"), Note: f("note"), From: r.RemoteAddr}
 	for _, k := range r.PostForm["choices"] {
 		a.Choices = append(a.Choices, strings.TrimSpace(k))
 	}
@@ -641,15 +675,52 @@ func (u *UI) serveAnswer(w http.ResponseWriter, r *http.Request) {
 		yes := f("answer") == "yes"
 		a.Answer = &yes
 	default:
-		http.Error(w, "answer is yes or no", http.StatusBadRequest)
+		return a, errors.New("answer is yes or no")
+	}
+	return a, nil
+}
+
+// serveRespond records the owner's response to one entry of a console
+// (#59), then sends the owner back: the form names the source, the
+// repository and the entry, and holds the owner's words and, for a
+// decision, an answer as /answer takes it. Without an entry it is a
+// reply to the console, to the session the form names, if any.
+func (u *UI) serveRespond(w http.ResponseWriter, r *http.Request) {
+	if !u.checkPost(w, r) {
 		return
 	}
-	if session == "" || a.ID == "" {
-		http.Error(w, "name the session and the decision", http.StatusBadRequest)
+	src := u.postSource(w, r)
+	if src == nil {
 		return
 	}
-	if err := src.answer(session, a); err != nil {
-		http.Error(w, "the answer was not recorded: "+err.Error(), http.StatusBadRequest)
+	repo, entry, text := strings.TrimSpace(r.PostForm.Get("repository")), strings.TrimSpace(r.PostForm.Get("entry")), r.PostForm.Get("text")
+	if repo == "" || len(text) > maxReply {
+		http.Error(w, fmt.Sprintf("name the repository and write at most %d bytes", maxReply), http.StatusBadRequest)
+		return
+	}
+	if entry == "" {
+		if strings.TrimSpace(text) == "" {
+			http.Error(w, "write a message", http.StatusBadRequest)
+			return
+		}
+		if err := src.reply(repo, strings.TrimSpace(r.PostForm.Get("session")), text); err != nil {
+			http.Error(w, "the message was not recorded: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		u.back(w, r)
+		return
+	}
+	a, err := answerForm(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var ap *AnswerPayload
+	if a.Binding() || a.Other != "" || strings.HasPrefix(entry, entryDecision) {
+		ap = &a
+	}
+	if err := src.respond(repo, entry, text, ap); err != nil {
+		http.Error(w, "the response was not recorded: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	u.back(w, r)
