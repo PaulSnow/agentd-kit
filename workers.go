@@ -55,6 +55,9 @@ func newWorkState() *workState {
 		pollTally: map[string]PollPayload{}, liveCursor: map[string]time.Time{}}
 }
 
+// busy says whether a job of key runs in a worker now.
+func (w *workState) busy(key string) bool { return w.inFlight[key] }
+
 // signal wakes the loop, if it is not already due to wake.
 func (w *workState) signal() {
 	select {

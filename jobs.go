@@ -73,6 +73,8 @@ type JobsConfig struct {
 	// what ask_expert may spend (#60).
 	Curator CuratorConfig `json:"curator"`
 	Expert  ExpertConfig  `json:"expert"`
+	// Thread bounds the agents that answer the owner's threads (#59).
+	Thread ThreadConfig `json:"thread"`
 }
 
 // TriagePayload is one triage call's outcome: the answers Go accepted, the

@@ -130,68 +130,6 @@ func (h *harness) launchOf(name string) (transcript string, act *ActPayload) {
 	return transcript, act
 }
 
-// A message in the repository's box goes to its chat session, which
-// agentd starts for it beside the work sessions, outside sessions.max,
-// with a brief and a launch that hand it the message. The next message
-// is typed into the same session; a chat session is never nudged, and
-// is ended once the owner is quiet for ChatIdle.
-func TestChatSessionStartedAndKeptWarm(t *testing.T) {
-	h := sessionsHarness(t)
-	h.startSession("issue-1", KindWork, 1)
-	h.startSession("issue-2", KindWork, 2)
-	h.ticks(3, time.Minute)
-	if err := reply(h, "widgets", "What is left on the squeak?"); err != nil {
-		t.Fatal(err)
-	}
-	h.ticks(3, time.Minute)
-	name := runtimeName("widgets", chatBranch, KindChat)
-	in := h.instruction(t)
-	if in.Session != name || !in.Started || in.Delivered.IsZero() {
-		t.Fatalf("instruction = %+v", in)
-	}
-	sess := h.sup.cfg.Sessions[name]
-	if sess.Kind != KindChat || len(sess.Deliver) != 0 || len(sessionsOf(h.sup.st.Runtime, "widgets")) != 2 {
-		t.Fatalf("chat session = %+v; counted %v", sess, sessionsOf(h.sup.st.Runtime, "widgets"))
-	}
-	brief, err := os.ReadFile(filepath.Join(sess.Workdir, "BRIEF.md"))
-	if err != nil || !strings.HasPrefix(string(brief), briefChat) {
-		t.Fatalf("BRIEF.md = %q, %v", brief, err)
-	}
-	if docs := readInstructions(t, sess.Workdir); len(docs) != 1 || docs[0].Text != "What is left on the squeak?" {
-		t.Fatalf("instructions.json = %+v", docs)
-	}
-	transcript, act := h.launchOf(name)
-	if transcript == "" || !strings.Contains(act.Command, h.cfg.Policies.Instructions.Pointer) || strings.Join(act.Instructions, ",") != in.ID {
-		t.Fatalf("launch = %+v", act)
-	}
-	at := h.clock.Now()
-	file := filepath.Join(TranscriptDir(h.cfg.TranscriptDir, sess.Cwd), transcript+".jsonl")
-	appendFile(t, file, promptLine("u1", "launch prompt", at)+toolLines("u2", "c1", "cat STATUS.md", 0, at)+summaryLine("u3", "m1", "Two tests are left.", at, 100))
-	h.ticks(2, time.Minute)
-	if in := h.instruction(t); in.Reply != "Two tests are left." || len(in.Activity) != 1 {
-		t.Fatalf("instruction = %+v", in)
-	}
-	h.alive(name, "chat waits")
-	h.ticks(12, time.Minute)
-	if n := len(h.typed(name)); n != 0 {
-		t.Fatalf("an idle chat session was typed into %d times", n)
-	}
-	if err := reply(h, "widgets", "And the docs?"); err != nil {
-		t.Fatal(err)
-	}
-	h.ticks(1, time.Minute)
-	if got := h.typed(name); len(got) != 1 || got[0] != h.cfg.Policies.Instructions.Pointer || h.count(KindAction, ActRestart, name) != 1 {
-		t.Fatalf("second message: typed %q, %d launches", got, h.count(KindAction, ActRestart, name))
-	}
-	appendFile(t, file, promptLine("u4", h.cfg.Policies.Instructions.Pointer, h.clock.Now())+summaryLine("u5", "m2", "The docs wait.", h.clock.Now(), 100))
-	h.ticks(2, time.Minute)
-	h.clock.advance(ChatIdle)
-	h.ticks(2, time.Minute)
-	if _, ok := h.sup.st.Runtime[name]; ok {
-		t.Fatal("a quiet chat session was not ended")
-	}
-}
-
 // What cannot be delivered says so: a withheld text, and a console with
 // no repository and no session addressed. An instruction recorded before
 // #56 is not routed at all.
