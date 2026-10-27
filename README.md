@@ -345,6 +345,8 @@ The owner: "Why do I have to use this session to make the go infrastructure work
 
 Work handed to a running session is that session's to design, and goes to it as before.
 
+**Go keeps its own room.** A start that finds its repository at `sessions.max` (a work session for the owner's work or an item, the loop's next case, a reviewer or judge) ends a finished session agentd started there, the oldest first: a work session that wrote DONE, or stopped, crash-looped or was parked, with every request it delivered merged or closed and no open work item. The end carries why, and the console is told which session went and for what. A session at work, one whose request is still open (its fix rounds are its own), a reviewer or judge, and a chat session are never ended for room; when every place is held so, the start is refused and the owner told, as before.
+
 ## The operations console (#63)
 
 The owner asked for "a way to talk to an AI to manage the whole go infrastructure." The console named by `ops.console` is that: a message there goes to the **ops agent**, a thread agent (#59) like the others, short-lived, one `claude -p` per message with the thread so far, reading in `ops.repo` with Read, Grep and Glob. As it starts, Go reads it the live facts (#62): each supervisor, up or down (its tmux pane runs agentd or not), its sessions by state, or why its config does not load; each account's plan usage; the installed binary's commit (as Go stamped it) against the clone's `origin/main`; and the latest ten changes with where each stands. Its tools, on `agentd mcp --ops`, are its own: it is given neither the repositories' context tools nor any shell, and only `ask_expert` besides.

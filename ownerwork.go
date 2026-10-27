@@ -311,7 +311,11 @@ func (s *Supervisor) startOwnerWork(in *Instruction, repo string, w ThreadWork) 
 		return false
 	}
 	rules, _ := effectivePolicy(s.cfg, s.st, repo)
-	if held := sessionsOf(s.st.Runtime, repo); len(held) >= rules.Sessions.Max {
+	// A finished session is ended for room (#68); one at work is not.
+	if held := sessionsOf(s.st.Runtime, repo); len(held) >= rules.Sessions.Max && !s.makeRoom(repo, name, rules.Sessions.Max) {
+		if s.halt != nil {
+			return false
+		}
 		s.routeStep(in, RouteFail, "", false, fmt.Sprintf("%s runs %d started sessions, its max (sessions.max): %s; end one, and agentd starts a session for it",
 			repo, len(held), strings.Join(held, ", ")))
 		return false

@@ -553,7 +553,10 @@ func (s *Supervisor) startRuntime(repo, name string, p RuntimePayload) string {
 	if c, ok := s.cfg.Sessions[name]; ok && !c.Runtime {
 		return "a configured session has the name"
 	}
-	if n := len(sessionsOf(s.st.Runtime, repo)); n >= rules.Sessions.Max && p.Kind != KindChat {
+	if n := len(sessionsOf(s.st.Runtime, repo)); n >= rules.Sessions.Max && p.Kind != KindChat && !s.makeRoom(repo, name, rules.Sessions.Max) {
+		if s.halt != nil {
+			return s.halt.Error()
+		}
 		return fmt.Sprintf("%s runs %d started sessions, its max", repo, n)
 	}
 	p.ID, p.Action, p.Repository, p.Max, p.By = newIntentID(), SessionStart, repo, rules.Sessions.Max, "agentd"
