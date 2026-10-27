@@ -26,6 +26,7 @@ const (
 	HistDecision    = "decision"     // a decision a session raised, or agentd raised for it
 	HistAnswer      = "answer"       // the owner's answer to one
 	HistInstruction = "instruction"  // the owner's words in a console
+	HistAttachment  = "attachment"   // a file the owner sent with them (#61): its name and path, never its bytes
 	HistRuling      = "ruling"       // the owner's ruling on a case
 	HistStatus      = "status"       // a status check's record (#57)
 	HistPrompt      = "prompt"       // a turn's prompt
@@ -39,7 +40,7 @@ const (
 )
 
 // HistKinds are the kinds history keeps, in the order a filter lists them.
-var HistKinds = []string{HistIssue, HistRequest, HistComment, HistItem, HistDecision, HistAnswer, HistInstruction, HistRuling,
+var HistKinds = []string{HistIssue, HistRequest, HistComment, HistItem, HistDecision, HistAnswer, HistInstruction, HistAttachment, HistRuling,
 	HistStatus, HistPrompt, HistReply, HistToolFailure, HistCommit, HistCI, HistMerge, HistEscalation, HistPost}
 
 // HistRecord is one history record. Its id is drawn from its source, so a
@@ -58,7 +59,7 @@ type HistRecord struct {
 
 // histLetter is the first letter of a kind's ids.
 var histLetter = map[string]string{HistIssue: "N", HistRequest: "N", HistComment: "C", HistItem: "W", HistDecision: "D", HistAnswer: "A",
-	HistInstruction: "I", HistRuling: "R", HistStatus: "S", HistPrompt: "P", HistReply: "T", HistToolFailure: "F", HistCommit: "G",
+	HistInstruction: "I", HistAttachment: "Y", HistRuling: "R", HistStatus: "S", HistPrompt: "P", HistReply: "T", HistToolFailure: "F", HistCommit: "G",
 	HistCI: "K", HistMerge: "M", HistEscalation: "E", HistPost: "O"}
 
 // histID is a record's id: its kind's letter and a hash of its key.
@@ -203,10 +204,19 @@ type histSource struct {
 	sessionRepo  map[string]string
 	sessionIssue map[string]int
 	sessionCwd   map[string]string
+	// messages are the repository and topics of each instruction read,
+	// which its attachments are on.
+	messages map[string]histMessage
+}
+
+// histMessage is where an instruction's records went.
+type histMessage struct {
+	repo   string
+	topics []string
 }
 
 func newHistSource(cfg *Config) *histSource {
-	s := &histSource{cfg: cfg, sessionRepo: map[string]string{}, sessionIssue: map[string]int{}, sessionCwd: map[string]string{}}
+	s := &histSource{cfg: cfg, sessionRepo: map[string]string{}, sessionIssue: map[string]int{}, sessionCwd: map[string]string{}, messages: map[string]histMessage{}}
 	for name, sess := range cfg.Sessions {
 		s.sessionRepo[name], s.sessionIssue[name], s.sessionCwd[name] = sess.Repository, sess.Issue, sess.Cwd
 	}
@@ -304,6 +314,9 @@ func (s *histSource) records(e Event) []*HistRecord {
 				topics = append(topics, topicSession+in.To)
 			}
 			rec := one(HistInstruction, in.ID+"|"+r, "", in.Text, "instruction:"+in.ID, topics)
+			if len(rec) > 0 && s.messages[in.ID].repo == "" {
+				s.messages[in.ID] = histMessage{repo: r, topics: rec[0].Topics}
+			}
 			if len(rec) > 0 {
 				rec[0].ID = in.ID // the owner's instruction keeps its own id
 				if len(in.Repositories) > 1 {
@@ -313,6 +326,21 @@ func (s *histSource) records(e Event) []*HistRecord {
 			out = append(out, rec...)
 		}
 		return out
+	case e.Attachment != nil:
+		// On the topics of the message it came with; a file of a console
+		// without a repository is on none.
+		a := e.Attachment
+		m, ok := s.messages[a.Message]
+		if !ok {
+			return nil
+		}
+		repo = m.repo
+		rec := one(HistAttachment, a.ID, a.Name, fmt.Sprintf("%s, %s, %d bytes, with %s; the path an agent reads it at is %s",
+			a.Name, a.Type, a.Bytes, a.Message, attachmentPath(s.cfg, *a)), "attachment:"+a.ID, m.topics)
+		if len(rec) > 0 {
+			rec[0].ID = a.ID
+		}
+		return rec
 	case e.Case != nil && e.Case.Ruling != nil:
 		r, ref := refOfCase(e.Case.Case)
 		repo = s.repoNamed(r)

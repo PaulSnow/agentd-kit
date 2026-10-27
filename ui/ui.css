@@ -239,3 +239,19 @@ body:has(.console) > .foot { display: none; }
   .card { padding: var(--space-3); }
   .console-link { margin-left: 0; }
 }
+
+/* Attachments (#61): the composer's button and list, and a message's files. */
+.attach { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.attach-button { cursor: pointer; font-size: 1.25rem; line-height: 1; padding: var(--space-1); border-radius: 4px; }
+.attach-button:hover, .attach-button:focus-within { background: var(--surface); }
+.attach-button input { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; }
+.attach-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--space-2); font-size: var(--size-s); }
+.attach-list:empty { display: none; }
+.attach-list li { display: flex; align-items: center; gap: var(--space-1); border: 1px solid var(--line); border-radius: 4px; padding: 2px var(--space-1); }
+.attach-list img { height: 2rem; width: auto; border-radius: 2px; }
+form.attach-over { outline: 2px dashed var(--accent); outline-offset: 2px; }
+.attachments { list-style: none; margin: var(--space-2) 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.attachments img { max-height: 8rem; max-width: 16rem; border: 1px solid var(--line); border-radius: 4px; display: block; }
+.attachments .file { display: inline-flex; align-items: center; gap: var(--space-1); border: 1px solid var(--line); border-radius: 4px; padding: var(--space-1) var(--space-2); }
+.file-icon { font-size: var(--size-s); font-weight: 600; color: var(--accent); }
+

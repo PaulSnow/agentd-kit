@@ -208,7 +208,7 @@ func (src *uiSource) entryOf(cfg *Config, rep Report, repo, id string) (EntryRe,
 // one, then the response as an instruction carrying the entry, for
 // session to when the owner chose one, else the session that wrote it,
 // else routed as a reply to the console is.
-func (src *uiSource) respond(repo, id, to, text string, a *AnswerPayload) error {
+func (src *uiSource) respond(repo, id, to, text string, a *AnswerPayload, files []stagedAttachment) error {
 	src.mu.Lock()
 	defer src.mu.Unlock()
 	now := time.Now()
@@ -254,7 +254,7 @@ func (src *uiSource) respond(repo, id, to, text string, a *AnswerPayload) error 
 			answer = entryAnswer(*a)
 		}
 	}
-	if text == "" && answer == nil {
+	if text == "" && answer == nil && len(files) == 0 {
 		return errors.New("an empty response")
 	}
 	// The session the owner chose; else the entry's writer, when it is
@@ -269,12 +269,12 @@ func (src *uiSource) respond(repo, id, to, text string, a *AnswerPayload) error 
 	if err := src.catchUp(); err != nil {
 		return err
 	}
-	return respondInstruction(cfg, src.log, now, repo, to, text, &re, answer)
+	return respondInstruction(cfg, src.log, now, repo, to, text, &re, answer, files)
 }
 
 // respondInstruction records a response as the owner's instruction for
 // repo, or for a console without one, addressed to session to when set.
-func respondInstruction(cfg *Config, log *Log, now time.Time, repo, to, text string, re *EntryRe, answer *EntryAnswer) error {
+func respondInstruction(cfg *Config, log *Log, now time.Time, repo, to, text string, re *EntryRe, answer *EntryAnswer, files []stagedAttachment) error {
 	var repos []string
 	console := repo
 	if _, ok := cfg.Consoles[repo]; !ok {
@@ -283,5 +283,5 @@ func respondInstruction(cfg *Config, log *Log, now time.Time, repo, to, text str
 		}
 		repos, console = []string{repo}, ""
 	}
-	return recordInstructionRe(cfg, log, now, repos, console, to, "ui", text, re, answer)
+	return recordInstructionRe(cfg, log, now, repos, console, to, "ui", text, re, answer, files)
 }

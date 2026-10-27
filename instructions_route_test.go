@@ -71,10 +71,10 @@ func TestInstructionToWorkingSessionAtOnce(t *testing.T) {
 		t.Fatalf("b is %s", h.state("b"))
 	}
 	const text = "Put the squeak fix ahead of the docs."
-	if err := UIInstruction(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", "b", text); err != nil {
+	if err := UIInstruction(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", "b", text, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := UIInstruction(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", "d", text); err == nil {
+	if err := UIInstruction(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", "d", text, nil); err == nil {
 		t.Fatal("an instruction to another repository's session was taken")
 	}
 	h.alive("b", "b works, screen 4")
@@ -166,7 +166,7 @@ func TestShadowInstructionOnlyRecords(t *testing.T) {
 	h := turnsHarness(t)
 	h.restart(true)
 	h.ticks(3, time.Minute)
-	if err := UIInstruction(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", "a", "Hold the release."); err != nil {
+	if err := UIInstruction(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", "a", "Hold the release.", nil); err != nil {
 		t.Fatal(err)
 	}
 	h.ticks(3, time.Minute)
@@ -239,7 +239,7 @@ func TestChatLatency(t *testing.T) {
 	if WakeCheck > 2*time.Second || ChatPoll > 5*time.Second {
 		t.Fatalf("wake check %s, chat poll %s", WakeCheck, ChatPoll)
 	}
-	if err := UIInstruction(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", "a", "Is the squeak fixed?"); err != nil {
+	if err := UIInstruction(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", "a", "Is the squeak fixed?", nil); err != nil {
 		t.Fatal(err)
 	}
 	h.sup.Pass()
@@ -271,12 +271,12 @@ func TestChatLatency(t *testing.T) {
 func TestAddressedMessageEdges(t *testing.T) {
 	h := sessionsHarness(t)
 	rev := h.startSession("request-4", KindReviewer, 0)
-	if err := UIInstruction(h.sup.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", rev, "Look again."); err == nil || !strings.Contains(err.Error(), "reviewer") {
+	if err := UIInstruction(h.sup.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", rev, "Look again.", nil); err == nil || !strings.Contains(err.Error(), "reviewer") {
 		t.Fatalf("a reviewer took a message: %v", err)
 	}
 	h.status("a", "# Status\n\nDONE\n")
 	h.ticks(3, time.Minute)
-	if err := UIInstruction(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", "a", "One more thing."); err != nil {
+	if err := UIInstruction(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", "a", "One more thing.", nil); err != nil {
 		t.Fatal(err)
 	}
 	h.ticks(2, time.Minute)
@@ -290,7 +290,7 @@ func TestAddressedMessageEdges(t *testing.T) {
 	if n := h.count(KindTurn, "", "b"); n != 0 {
 		t.Fatalf("%d turns logged with no message open", n)
 	}
-	if err := UIInstruction(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", "b", "Rebase on main."); err != nil {
+	if err := UIInstruction(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", "b", "Rebase on main.", nil); err != nil {
 		t.Fatal(err)
 	}
 	h.ticks(1, time.Minute)
@@ -338,7 +338,7 @@ func TestAddressedMessageEdges(t *testing.T) {
 func TestUnansweredMessageLetGo(t *testing.T) {
 	h := turnsHarness(t)
 	h.ticks(3, time.Minute)
-	if err := UIInstruction(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", "b", "Rebase on main."); err != nil {
+	if err := UIInstruction(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", "b", "Rebase on main.", nil); err != nil {
 		t.Fatal(err)
 	}
 	h.ticks(1, time.Minute)

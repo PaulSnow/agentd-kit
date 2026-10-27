@@ -392,7 +392,10 @@
     if (shown) {
       shown.remove();
     }
-    fetch(form.action, { method: "POST", body: new URLSearchParams(data), credentials: "same-origin" })
+    // A form with files goes as multipart (#61), one without as before.
+    var picked = form.querySelector('input[type="file"]');
+    var body = picked && picked.files.length ? data : new URLSearchParams(data);
+    fetch(form.action, { method: "POST", body: body, credentials: "same-origin" })
       .then(function (r) {
         if (!r.ok) {
           return r.text().then(function (t) { return Promise.reject(t); });
@@ -404,6 +407,9 @@
         var area = form.querySelector("textarea");
         if (area) {
           area.value = "";
+        }
+        if (window.agentdAttach) {
+          window.agentdAttach.clear(form);
         }
         if (form === composer) {
           clearRe();
@@ -571,4 +577,191 @@
     older();
   }
   setTimeout(loop, poll);
+})();
+
+// Attachments (#61): a form with a file input takes screenshots, PDFs and
+// text files pasted into it (Ctrl+V, the main case), dropped on it, or
+// picked with its button; a paste anywhere else on a console goes to its
+// composer. The files are checked here as agentd checks them, so a wrong
+// one is refused at once, and agentd checks them again. The input holds
+// them, so the form sends them however it is sent.
+(function () {
+  "use strict";
+  var types = ["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf", "text/plain"];
+  var maxBytes = 20 * 1024 * 1024;
+  var maxFiles = 10;
+  var held = new WeakMap();
+
+  function inputOf(form) {
+    return form ? form.querySelector('.attach input[type="file"]') : null;
+  }
+
+  function filesOf(form) {
+    var fs = held.get(form);
+    if (!fs) {
+      fs = [];
+      held.set(form, fs);
+    }
+    return fs;
+  }
+
+  function textFile(f) {
+    return f.type === "" && /\.(txt|log)$/i.test(f.name);
+  }
+
+  // say shows a refusal under the form, or clears it.
+  function say(form, text) {
+    var p = form.querySelector(".attach-error");
+    if (!text) {
+      if (p) {
+        p.remove();
+      }
+      return;
+    }
+    if (!p) {
+      p = document.createElement("p");
+      p.className = "composer-error attach-error";
+      form.appendChild(p);
+    }
+    p.textContent = text;
+  }
+
+  // sync puts the held files into the input and lists them; the text is
+  // not needed while a file is.
+  function sync(form) {
+    var input = inputOf(form);
+    var fs = filesOf(form);
+    var dt = new DataTransfer();
+    fs.forEach(function (f) { dt.items.add(f); });
+    input.files = dt.files;
+    var area = form.querySelector("textarea");
+    if (area) {
+      if (!area.hasAttribute("data-required")) {
+        area.setAttribute("data-required", area.required ? "1" : "");
+      }
+      area.required = area.getAttribute("data-required") === "1" && fs.length === 0;
+    }
+    var list = form.querySelector(".attach-list");
+    Array.prototype.forEach.call(list.querySelectorAll("img"), function (img) { URL.revokeObjectURL(img.src); });
+    list.textContent = "";
+    fs.forEach(function (f, i) {
+      var li = document.createElement("li");
+      if (f.type.indexOf("image/") === 0) {
+        var img = document.createElement("img");
+        img.src = URL.createObjectURL(f);
+        img.alt = "";
+        li.appendChild(img);
+      }
+      var name = document.createElement("span");
+      name.textContent = f.name + " (" + Math.max(1, Math.round(f.size / 1024)) + " KB)";
+      li.appendChild(name);
+      var x = document.createElement("button");
+      x.type = "button";
+      x.className = "link attach-remove";
+      x.setAttribute("aria-label", "Remove " + f.name);
+      x.textContent = "×";
+      x.addEventListener("click", function () {
+        fs.splice(i, 1);
+        sync(form);
+      });
+      li.appendChild(x);
+      list.appendChild(li);
+    });
+  }
+
+  // add holds files for form, after checking each; one refused is named
+  // and the rest are kept.
+  function add(form, files) {
+    var fs = filesOf(form);
+    var refused = [];
+    Array.prototype.forEach.call(files, function (f) {
+      var name = f.name || "pasted";
+      if (types.indexOf(f.type) < 0 && !textFile(f)) {
+        refused.push(name + " is not a PNG, JPEG, GIF, WebP, PDF or plain text file");
+      } else if (f.size > maxBytes) {
+        refused.push(name + " is over 20 MB");
+      } else if (f.size === 0) {
+        refused.push(name + " is empty");
+      } else if (fs.length >= maxFiles) {
+        refused.push("a message carries at most " + maxFiles + " files");
+      } else {
+        // A pasted screenshot is named for when it was pasted.
+        if (!f.name || f.name === "image.png") {
+          var stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+          f = new File([f], "screenshot-" + stamp + "." + (f.type.split("/")[1] || "png"), { type: f.type });
+        }
+        fs.push(f);
+      }
+    });
+    say(form, refused.length ? "Not attached: " + refused.join("; ") + "." : "");
+    sync(form);
+  }
+
+  window.agentdAttach = {
+    clear: function (form) {
+      if (inputOf(form)) {
+        held.set(form, []);
+        say(form, "");
+        sync(form);
+      }
+    },
+  };
+
+  document.addEventListener("change", function (e) {
+    var input = e.target;
+    if (!input.matches || !input.matches('.attach input[type="file"]')) {
+      return;
+    }
+    var picked = Array.prototype.slice.call(input.files);
+    var form = input.form;
+    // The input now holds only what was picked: the held files go back
+    // in with it.
+    add(form, picked.filter(function (f) { return filesOf(form).indexOf(f) < 0; }));
+  });
+
+  document.addEventListener("paste", function (e) {
+    var files = e.clipboardData && e.clipboardData.files;
+    if (!files || !files.length) {
+      return;
+    }
+    var form = e.target.closest ? e.target.closest("form") : null;
+    if (!inputOf(form)) {
+      form = document.getElementById("composer");
+    }
+    if (!inputOf(form)) {
+      return;
+    }
+    // Text pasted with an image (from a document, say) still pastes.
+    if (!e.clipboardData.getData("text/plain")) {
+      e.preventDefault();
+    }
+    add(form, files);
+    var area = form.querySelector("textarea");
+    if (area && document.activeElement !== area) {
+      area.focus();
+    }
+  });
+
+  document.addEventListener("dragover", function (e) {
+    var form = e.target.closest ? e.target.closest("form") : null;
+    if (inputOf(form) && e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types, "Files") >= 0) {
+      e.preventDefault();
+      form.classList.add("attach-over");
+    }
+  });
+  document.addEventListener("dragleave", function (e) {
+    var form = e.target.closest ? e.target.closest("form") : null;
+    if (form) {
+      form.classList.remove("attach-over");
+    }
+  });
+  document.addEventListener("drop", function (e) {
+    var form = e.target.closest ? e.target.closest("form") : null;
+    if (!inputOf(form) || !e.dataTransfer || !e.dataTransfer.files.length) {
+      return;
+    }
+    e.preventDefault();
+    form.classList.remove("attach-over");
+    add(form, e.dataTransfer.files);
+  });
 })();
