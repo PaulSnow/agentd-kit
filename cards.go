@@ -21,7 +21,13 @@ const (
 	CardRequest    = "request"
 	CardSession    = "session"
 	CardRepository = "repository"
+	// CardFleet is a fleet's card, which Go writes from its heartbeats
+	// (#67), not a curator.
+	CardFleet = "fleet"
 )
+
+// topicFleet prefixes a fleet's topic: fleet:TARGET.
+const topicFleet = "fleet:"
 
 // Card is a topic's state.
 type Card struct {
@@ -88,6 +94,8 @@ func cardKindOf(topic string) string {
 		return CardRequest
 	case strings.HasPrefix(topic, topicSession):
 		return CardSession
+	case strings.HasPrefix(topic, topicFleet):
+		return CardFleet
 	}
 	return ""
 }

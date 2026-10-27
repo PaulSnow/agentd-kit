@@ -134,7 +134,7 @@
 {{with .Words}}<blockquote class="re">{{.}}</blockquote>{{end}}
 {{with .Question}}<p><strong>Asks you:</strong> {{.}}</p>{{end}}{{with .Claim}}<p><strong>Says done:</strong> {{.}}</p>{{end}}
 <p class="muted">Done when {{.DoneWhen}}{{with .LastCheck}} · last check: {{.}}{{end}}</p>{{with .Progress}}<p class="muted">{{.}}</p>{{end}}
-{{if $.ReplySrc}}<form class="item-answer" method="post" action="/respond" enctype="multipart/form-data"><input type="hidden" name="token" value="{{$.Token}}"><input type="hidden" name="back" value="{{$.Back}}"><input type="hidden" name="src" value="{{.Src}}"><input type="hidden" name="repository" value="{{$.Repository}}"><input type="hidden" name="entry" value="{{.Entry}}">
+{{if and $.ReplySrc .Entry}}<form class="item-answer" method="post" action="/respond" enctype="multipart/form-data"><input type="hidden" name="token" value="{{$.Token}}"><input type="hidden" name="back" value="{{$.Back}}"><input type="hidden" name="src" value="{{.Src}}"><input type="hidden" name="repository" value="{{$.Repository}}"><input type="hidden" name="entry" value="{{.Entry}}">
 <div class="inline"><input type="text" name="text" maxlength="4000" placeholder="{{if .Question}}Your answer, to {{.Session}}{{else}}Words to {{.Session}}, or a word with an answer{{end}}" aria-label="Your words on {{.ID}}"><button type="submit">Send</button>{{range .Options}}<button type="submit" name="choice" value="{{.}}">{{.}}</button>{{end}}</div></form>{{end}}
 </li>{{end}}</ol></section>{{end}}{{end}}
 
