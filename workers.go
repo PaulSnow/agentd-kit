@@ -6,9 +6,11 @@ import (
 )
 
 // WakeCheck is how often a running agentd looks for owner records that
-// another process appended (agentd clear, mark-delivered), so one is acted
-// on within a minute rather than at the next poll.
-const WakeCheck = 15 * time.Second
+// another process appended (agentd clear, mark-delivered, a message on
+// the console), so one is acted on within seconds rather than at the next
+// poll: the owner waits on a chat's answer (#56). A look reads only what
+// was appended since the last.
+const WakeCheck = 2 * time.Second
 
 // StopWait is how long a run that is told to stop waits for its running
 // jobs. One still running then is cut short: the next start warns of it.

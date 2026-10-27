@@ -288,3 +288,37 @@ func TestConsoleShowsTurnLive(t *testing.T) {
 		t.Fatalf("console after the reply:\n%s", page)
 	}
 }
+
+// How long agentd itself holds up a chat turn: an owner record wakes
+// the loop within WakeCheck, and the pass it wakes routes and types the
+// message; while it is unanswered the loop passes every ChatPoll, and
+// each pass logs what the session's transcript gained, for the page to
+// show at its next refresh. The model's own time comes on top.
+func TestChatLatency(t *testing.T) {
+	h := turnsHarness(t)
+	h.ticks(3, time.Minute)
+	if WakeCheck > 2*time.Second || ChatPoll > 5*time.Second {
+		t.Fatalf("wake check %s, chat poll %s", WakeCheck, ChatPoll)
+	}
+	if err := UIInstruction(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", "a", "Is the squeak fixed?"); err != nil {
+		t.Fatal(err)
+	}
+	h.sup.Pass()
+	h.sup.Wait()
+	if in := h.instruction(t); in.Delivered.IsZero() || len(h.typed("a")) != 1 || h.sup.passWait() != ChatPoll {
+		t.Fatalf("after one pass: %+v, typed %q, next pass in %s", in, h.typed("a"), h.sup.passWait())
+	}
+	at := h.clock.Now()
+	h.transcriptOf("a", "t1", promptLine("u1", h.cfg.Policies.Instructions.Pointer, at)+toolLines("u2", "c1", "go test ./...", 0, at))
+	h.sup.Pass()
+	h.sup.Wait()
+	if in := h.instruction(t); len(in.Activity) != 1 {
+		t.Fatalf("after one more pass: %+v", in)
+	}
+	h.transcriptOf("a", "t1", summaryLine("u3", "m1", "Yes; the test passes.", at, 100))
+	h.sup.Pass()
+	h.sup.Wait()
+	if in := h.instruction(t); in.Reply != "Yes; the test passes." || h.sup.passWait() != h.cfg.PollInterval.Duration {
+		t.Fatalf("after the answer's pass: %+v", in)
+	}
+}

@@ -159,8 +159,8 @@ func TestConsoleReplyWakesTheLoopAndAnswers(t *testing.T) {
 		}
 		return false
 	})
-	if waited := h.clock.Now().Sub(start); waited > 2*WakeCheck {
-		t.Fatalf("the answer came %s after the reply, want within %s", waited, 2*WakeCheck)
+	if waited := h.clock.Now().Sub(start); waited > wakeBound {
+		t.Fatalf("the answer came %s after the reply, want within %s", waited, wakeBound)
 	}
 	cancel()
 	if err := <-done; err != nil {
