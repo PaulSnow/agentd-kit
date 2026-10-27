@@ -239,7 +239,8 @@ func (u *UI) promptView(src *uiSource, name, id string, now time.Time) (*uiPromp
 		var text string
 		v.Label, v.Title = "Not a prompt", name+": not a prompt"
 		v.What, text, v.At = notPrompt(line)
-		if secret(string(line)) {
+		// Screened as read and as shown, which JSON escaping may differ.
+		if secret(string(line), text) {
 			v.Note = "It was withheld because it matched a confidential pattern."
 		} else {
 			v.Body = template.HTML("<pre>" + template.HTMLEscapeString(text) + "</pre>")
@@ -319,7 +320,7 @@ func notPrompt(line []byte) (string, string, time.Time) {
 	case l.Type == "assistant" && l.Message.StopReason == "end_turn":
 		return "The session's reply, not a prompt.", text, at
 	case l.Type == "assistant":
-		return "A step of the session's own work, not a prompt.", text, at
+		return "The session's own words or work, not a prompt.", text, at
 	case results:
 		return "A tool's result, which Claude Code hands back to the session, not a prompt.", text, at
 	case m != nil:
@@ -327,7 +328,7 @@ func notPrompt(line []byte) (string, string, time.Time) {
 	case l.IsMeta:
 		return "A meta line Claude Code wrote into the conversation, not a prompt.", text, at
 	}
-	return "A user line with nothing typed in it, not a prompt.", text, at
+	return "A line Claude Code wrote on the user's side, not a typed prompt.", text, at
 }
 
 // harnessWhat is what an entry Claude Code wrote, opening with tag, is.

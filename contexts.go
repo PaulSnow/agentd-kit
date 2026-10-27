@@ -31,11 +31,13 @@ import (
 // their tokens by kind, the context of its latest main-chain call (input,
 // cache write and cache read), and the input-equivalent spend. Guessed marks
 // a transcript agentd did not launch, taken as the newest in the session's
-// directory. Each event carries the transcript's totals, so a replay or a
+// directory; Cleared, one /clear typed into its pane began after its
+// launch, which it now runs. Each event carries the transcript's totals, so a replay or a
 // re-read gives the same figures.
 type UsagePayload struct {
 	Transcript string `json:"transcript"`
 	Guessed    bool   `json:"guessed,omitempty"`
+	Cleared    bool   `json:"cleared,omitempty"`
 	Calls      int    `json:"calls"`
 	Input      int64  `json:"input"`
 	CacheWrite int64  `json:"cache_write"`
@@ -74,11 +76,11 @@ func spendOf(u UsagePayload) int64 {
 }
 
 // current is the usage of the transcript the session now runs, when known:
-// the one agentd launched, or the guess, for a session it did not launch or
-// whose launched transcript never appeared.
+// the one agentd launched, the one a /clear began since, or the guess, for
+// a session it did not launch or whose launched transcript never appeared.
 func (t *Track) current() (UsagePayload, bool) {
 	u, ok := t.Usage[t.Measured]
-	if !ok || t.Transcript != "" && t.Measured != t.Transcript && !u.Guessed {
+	if !ok || t.Transcript != "" && t.Measured != t.Transcript && !u.Guessed && !u.Cleared {
 		return UsagePayload{}, false
 	}
 	return u, true
@@ -141,8 +143,9 @@ type transcriptFile struct {
 // usageReader reads transcripts in the workers, each file from where the
 // last read stopped. The loop and its workers share it.
 type usageReader struct {
-	mu    sync.Mutex
-	files map[string]*transcriptFile
+	mu      sync.Mutex
+	files   map[string]*transcriptFile
+	cleared map[string]clearVerdict // by path, what a head said of /clear
 }
 
 func newUsageReader() *usageReader { return &usageReader{files: map[string]*transcriptFile{}} }
@@ -284,7 +287,7 @@ const clearHead = 64 << 10
 // typed into the session's pane began at or after since, its launch: a
 // /clear goes on in a new transcript, which agentd did not launch. They
 // are in the order they were begun.
-func clearedFrom(dir, own string, since time.Time) []string {
+func (r *usageReader) clearedFrom(dir, own string, since time.Time) []string {
 	entries, err := os.ReadDir(dir)
 	if err != nil || since.IsZero() {
 		return nil
@@ -303,7 +306,7 @@ func clearedFrom(dir, own string, since time.Time) []string {
 		if info, err := e.Info(); err != nil || info.ModTime().Before(since) {
 			continue
 		}
-		if at, ok := clearBegun(filepath.Join(dir, e.Name())); ok && !at.Before(since) {
+		if at, ok := r.clearBegun(filepath.Join(dir, e.Name())); ok && !at.Before(since) {
 			out = append(out, begun{id, at})
 		}
 	}
@@ -315,12 +318,45 @@ func clearedFrom(dir, own string, since time.Time) []string {
 	return ids
 }
 
+// clearVerdict is what a transcript's head said of /clear, once it said
+// either way: a head can no longer change then.
+type clearVerdict struct {
+	at      time.Time
+	cleared bool
+}
+
 // clearBegun says whether /clear began the transcript at path, before
-// any prompt, and when its first entry was written.
-func clearBegun(path string) (time.Time, bool) {
+// any prompt, and when its first entry was written; a verdict is read
+// once.
+func (r *usageReader) clearBegun(path string) (time.Time, bool) {
+	r.mu.Lock()
+	v, ok := r.cleared[path]
+	r.mu.Unlock()
+	if ok {
+		return v.at, v.cleared
+	}
+	at, cleared, decided := readClearHead(path)
+	if decided {
+		r.mu.Lock()
+		if r.cleared == nil || len(r.cleared) >= clearVerdicts {
+			r.cleared = map[string]clearVerdict{}
+		}
+		r.cleared[path] = clearVerdict{at, cleared}
+		r.mu.Unlock()
+	}
+	return at, cleared
+}
+
+// clearVerdicts bounds the verdicts a reader keeps.
+const clearVerdicts = 4096
+
+// readClearHead reads the head of the transcript at path: whether /clear
+// began it, before any prompt, when its first entry was written, and
+// whether the head decided it.
+func readClearHead(path string) (time.Time, bool, bool) {
 	f, err := os.Open(path)
 	if err != nil {
-		return time.Time{}, false
+		return time.Time{}, false, false
 	}
 	defer f.Close()
 	b, _ := io.ReadAll(io.LimitReader(f, clearHead))
@@ -343,14 +379,15 @@ func clearBegun(path string) (time.Time, bool) {
 		if l.Type != "user" || l.IsSidechain {
 			continue
 		}
-		if text, _ := lineText(l.Message.Content); strings.Contains(text, "<command-name>/clear</command-name>") {
-			return first, !first.IsZero()
+		// The command as Claude Code records it, not a prompt quoting it.
+		if text, _ := lineText(l.Message.Content); strings.HasPrefix(strings.TrimSpace(text), "<command-name>/clear</command-name>") {
+			return first, !first.IsZero(), true
 		}
 		if _, ok := wholeTurn(line, 0); ok {
-			return time.Time{}, false
+			return time.Time{}, false, true
 		}
 	}
-	return time.Time{}, false
+	return time.Time{}, false, len(b) == clearHead
 }
 
 // sharesTranscripts says whether another session keeps its transcripts
@@ -400,8 +437,10 @@ func (s *Supervisor) measure(name string, sess Session, t *Track, toolsSince tim
 		// A /clear typed into the pane goes on in a transcript agentd did
 		// not launch; its prompts are the session's too.
 		if id != "" && !guessed && !s.cfg.sharesTranscripts(name) {
-			ids = append(ids, clearedFrom(dir, id, t.Launched)...)
+			ids = append(ids, s.usage.clearedFrom(dir, id, t.Launched)...)
 		}
+		// The session runs in the last: its context is the one measured.
+		last := ids[len(ids)-1]
 		for i, id := range ids {
 			if id == "" {
 				continue
@@ -410,7 +449,8 @@ func (s *Supervisor) measure(name string, sess Session, t *Track, toolsSince tim
 				// A guess that lands on a transcript agentd launched is
 				// that transcript, measured exactly.
 				u.Guessed = i == 0 && guessed && (t.Usage[id].Transcript == "" || t.Usage[id].Guessed)
-				if prev, seen := t.Usage[id]; !seen || prev != u || i == 0 && t.Measured != id {
+				u.Cleared = i > 0
+				if prev, seen := t.Usage[id]; !seen || prev != u || id == last && t.Measured != id {
 					s.emit(name, Event{Kind: KindUsage, Usage: &u})
 				}
 			}

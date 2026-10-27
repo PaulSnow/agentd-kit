@@ -203,7 +203,7 @@ func TestPromptPageSaysWhatALineIs(t *testing.T) {
 	for _, c := range []struct{ id, what, text string }{
 		{"t1.2", "The session&#39;s reply, not a prompt.", "<pre>Read the brief; painting goes on.</pre>"},
 		{"t1.10", "A background-task notice from Claude Code, not a prompt.", "&lt;result&gt;The primer branch is ready: two findings, both fixed.&lt;/result&gt;"},
-		{"t1.11", "A step of the session&#39;s own work, not a prompt.", "Bash: {&#34;command&#34;:&#34;./bin/check&#34;}"},
+		{"t1.11", "The session&#39;s own words or work, not a prompt.", "Bash: {&#34;command&#34;:&#34;./bin/check&#34;}"},
 		{"t1.12", "A tool&#39;s result, which Claude Code hands back to the session, not a prompt.", "CHECK PASS"},
 		{"t1.13", "Claude Code&#39;s note before a slash command&#39;s output, not a prompt.", "DO NOT respond to these messages."},
 		{"t1.14", "A file-history-snapshot line Claude Code keeps for its own bookkeeping, not a prompt.", "&#34;isSnapshotUpdate&#34;: false"},
@@ -218,13 +218,17 @@ func TestPromptPageSaysWhatALineIs(t *testing.T) {
 			t.Errorf("%s is not headed as no prompt:\n%s", c.id, page)
 		}
 	}
-	// Screened whole: a match anywhere in the line withholds all of it.
-	h.cfg.ConfidentialPatterns = []string{"(?i)two findings"}
+	// Screened whole, as read and as shown: a match anywhere withholds all
+	// of it, one only the decoded text has too.
+	h.cfg.ConfidentialPatterns = []string{"(?i)two findings", "(?m)^CHECK PASS"}
 	u2, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
 	u2.now = h.clock.Now
 	page := owner(t, u2, "/session/night/a/prompt/t1.10")
 	if strings.Contains(page, "primer branch") || !strings.Contains(page, "background-task notice") || !strings.Contains(page, "withheld because it matched") {
 		t.Errorf("a confidential line is shown:\n%s", page)
+	}
+	if page := owner(t, u2, "/session/night/a/prompt/t1.12"); strings.Contains(page, "CHECK PASS") || !strings.Contains(page, "withheld because it matched") {
+		t.Errorf("a line confidential only as shown is shown:\n%s", page)
 	}
 }
 

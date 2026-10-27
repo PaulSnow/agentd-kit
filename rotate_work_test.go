@@ -304,6 +304,7 @@ func TestPromptsAfterClearAreRead(t *testing.T) {
 	h.workTranscript(name, "c-early", cleared("c-early", launched.Add(-time.Hour)))
 	h.workTranscript(name, "c-cleared", cleared("c-cleared", h.clock.Now()))
 	h.workTranscript(name, "c-other", promptLine("o1", "Another session's prompt.", h.clock.Now()))
+	h.workTranscript(name, "c-quoted", promptLine("q1", "Why does <command-name>/clear</command-name> begin a new transcript?", h.clock.Now()))
 	h.ticks(2, time.Minute)
 	got := map[string][]string{}
 	for _, e := range h.events() {
@@ -312,8 +313,14 @@ func TestPromptsAfterClearAreRead(t *testing.T) {
 		}
 	}
 	want := []string{"prompt: Read BRIEF.md (its last section is new) and STATUS.md, then paint the third coat as the brief says.", "summary: Third coat started."}
-	if fmt.Sprint(got["c-cleared"]) != fmt.Sprint(want) || len(got["c-early"]) != 0 || len(got["c-other"]) != 0 || len(got[id]) != 1 {
+	if fmt.Sprint(got["c-cleared"]) != fmt.Sprint(want) || len(got["c-early"]) != 0 || len(got["c-other"]) != 0 || len(got["c-quoted"]) != 0 || len(got[id]) != 1 {
 		t.Fatalf("turns by transcript: %q", got)
+	}
+	// It runs in the cleared transcript now: its context is that one's.
+	if tr := h.sup.track(name); tr.Measured != "c-cleared" {
+		t.Fatalf("measured %q, want the cleared transcript", tr.Measured)
+	} else if u, ok := tr.current(); !ok || u.Transcript != "c-cleared" || !u.Cleared {
+		t.Fatalf("current usage %+v, %v", u, ok)
 	}
 	if h.sup.cfg.sharesTranscripts(name) {
 		t.Fatal("a session alone in its worktree shares its transcripts")
