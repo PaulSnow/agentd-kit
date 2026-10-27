@@ -90,11 +90,11 @@ func busyTranscript(start time.Time, n int, prefix string) (string, []string, []
 // start and end of each failure, drops the bookkeeping and stays under
 // 12k tokens (#57), at the 2 bytes a token measured on real sessions'
 // transcripts. This window runs as many tools as the busiest recorded
-// one, with more failures, so the input is fitted: the outputs and inputs
-// are cut harder, and nothing is dropped.
+// one, with more failures, so the input is fitted: the inputs and
+// outputs are cut harder, the texts are kept, and nothing is dropped.
 func TestStatusWindowOfABusyFiveMinutes(t *testing.T) {
 	start := time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC)
-	text, targets, says := busyTranscript(start, 45, "w")
+	text, targets, says := busyTranscript(start, 50, "w")
 	path := filepath.Join(t.TempDir(), "t.jsonl")
 	appendFile(t, path, text)
 	win, err := readStatusWindow(path, 0, start)
@@ -125,8 +125,8 @@ func TestStatusWindowOfABusyFiveMinutes(t *testing.T) {
 			}
 		}
 	}
-	if tools != 45 {
-		t.Fatalf("%d tool entries, want 45", tools)
+	if tools != 50 {
+		t.Fatalf("%d tool entries, want 50", tools)
 	}
 	for _, want := range append(append(targets, says...), "w: carry on with the widgets brief") {
 		if !strings.Contains(got, jsonText(want)) {
@@ -139,8 +139,8 @@ func TestStatusWindowOfABusyFiveMinutes(t *testing.T) {
 		}
 	}
 	// A long read is trimmed to its ends; each failure keeps its exit code
-	// and its first and last lines.
-	if !strings.Contains(got, "[… 398 lines …]") || strings.Count(got, "Exit code 1") != 6 || strings.Count(got, "got 3 frames, want 4") < 6*4 {
+	// and its start.
+	if !strings.Contains(got, " bytes …] ") || strings.Count(got, "Exit code 1") != 7 || strings.Count(got, "got 3 frames, want 4") < 7 {
 		t.Fatalf("outputs not trimmed as they should be: %d failure lines", strings.Count(got, "got 3 frames, want 4"))
 	}
 	// A quieter window is sent as read: outputs to three lines at each end,

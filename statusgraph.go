@@ -51,6 +51,7 @@ const (
 	statusLineMax     = 160     // bytes of one line of a tool's output
 	statusFailedMax   = 2000    // bytes of a failed tool's output, kept whole up to it
 	statusFailedTight = 500     // bytes of a failed tool's output, when the input is over its limit
+	statusLast        = 80      // bytes of a call's input strings and output, when the input is still over its limit
 	statusMDMax       = 3000    // bytes of STATUS.md sent whole, when no earlier copy is known
 	statusCommits     = 20      // new commits listed at most
 	statusPointsKept  = 300     // records a Track keeps: more than a day at five minutes
@@ -410,8 +411,9 @@ func (in statusInput) empty() bool {
 // fit marshals the input within limit bytes: the outputs of the tools
 // that did not fail trimmed to their first and last line first, then each
 // tool call's input cut to statusInputTight a string, so every call is
-// still there, then each failed output cut to statusFailedTight; only
-// then are the earliest entries dropped.
+// still there, then each failed output cut to statusFailedTight, then
+// every call's input and output to statusLast; only then are the earliest
+// entries dropped, one at a time.
 func (in *statusInput) fit(limit int) ([]byte, error) {
 	b, err := json.Marshal(in)
 	if err != nil || len(b) <= limit {
@@ -438,6 +440,18 @@ func (in *statusInput) fit(limit int) ([]byte, error) {
 			e.Out = cutMiddle(e.Out, statusFailedTight)
 		}
 	}
+	if b, err = json.Marshal(in); err != nil || len(b) <= limit {
+		return b, err
+	}
+	// Last before dropping: each call's input strings and output to
+	// their ends alone; the texts stay.
+	for i := range in.Entries {
+		e := &in.Entries[i]
+		e.Out = cutMiddle(e.Out, statusLast)
+		if len(e.Input) > 0 {
+			e.Input = cutToolInput(e.Input, statusLast, statusLast)
+		}
+	}
 	for {
 		if b, err = json.Marshal(in); err != nil || len(b) <= limit {
 			return b, err
@@ -445,10 +459,7 @@ func (in *statusInput) fit(limit int) ([]byte, error) {
 		if len(in.Entries) == 0 {
 			return nil, fmt.Errorf("status input is %d bytes without its transcript, over the %d allowed", len(b), limit)
 		}
-		// Drop the earliest fifth at a time, so a long window takes a few
-		// marshals, not one per entry.
-		n := max(1, len(in.Entries)/5)
-		in.Entries, in.Dropped = in.Entries[n:], in.Dropped+n
+		in.Entries, in.Dropped = in.Entries[1:], in.Dropped+1
 	}
 }
 
@@ -644,7 +655,8 @@ func (s *Supervisor) checkStatuses(now time.Time) {
 				}
 			}
 			w.emit(name, Event{Kind: KindStatus, Status: p})
-			if p.statusMD != nil {
+			// The model saw STATUS.md as read only when it was called.
+			if p.statusMD != nil && call != nil {
 				w.status.set(name, *p.statusMD)
 			}
 		})
