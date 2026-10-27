@@ -57,6 +57,11 @@ type LogState struct {
 	// Commented are the thread outcomes agentd posted on issues, by key
 	// (#60), so none is posted twice.
 	Commented map[string]time.Time
+	// Facts are what the latest fact of each session's run, brief and Now,
+	// and of each issue's state, said (#62), so a change is logged once.
+	Facts map[string]string
+	// FactAt is when each session's Now was last a fact.
+	FactAt map[string]time.Time
 
 	cfg *Config // its policies, read as each event is applied
 }
@@ -158,6 +163,10 @@ func (st *LogState) apply(e Event) {
 	}
 	if e.Kind == KindRoute {
 		st.applyRoute(e)
+		return
+	}
+	if e.Kind == KindFact {
+		st.applyFact(e)
 		return
 	}
 	if e.Session == "" {

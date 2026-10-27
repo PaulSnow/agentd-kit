@@ -37,11 +37,12 @@ const (
 	HistMerge       = "merge"        // agentd merged a request
 	HistEscalation  = "escalation"   // agentd escalated to the owner
 	HistPost        = "post"         // a session's post to a console
+	HistFact        = "fact"         // a change in a session's run, brief or Now, or an issue's state (#62)
 )
 
 // HistKinds are the kinds history keeps, in the order a filter lists them.
 var HistKinds = []string{HistIssue, HistRequest, HistComment, HistItem, HistDecision, HistAnswer, HistInstruction, HistAttachment, HistRuling,
-	HistStatus, HistPrompt, HistReply, HistToolFailure, HistCommit, HistCI, HistMerge, HistEscalation, HistPost}
+	HistStatus, HistPrompt, HistReply, HistToolFailure, HistCommit, HistCI, HistMerge, HistEscalation, HistPost, HistFact}
 
 // HistRecord is one history record. Its id is drawn from its source, so a
 // rebuild from the log gives it again.
@@ -60,7 +61,7 @@ type HistRecord struct {
 // histLetter is the first letter of a kind's ids.
 var histLetter = map[string]string{HistIssue: "N", HistRequest: "N", HistComment: "C", HistItem: "W", HistDecision: "D", HistAnswer: "A",
 	HistInstruction: "I", HistAttachment: "Y", HistRuling: "R", HistStatus: "S", HistPrompt: "P", HistReply: "T", HistToolFailure: "F", HistCommit: "G",
-	HistCI: "K", HistMerge: "M", HistEscalation: "E", HistPost: "O"}
+	HistCI: "K", HistMerge: "M", HistEscalation: "E", HistPost: "O", HistFact: "H"}
 
 // histID is a record's id: its kind's letter and a hash of its key.
 func histID(kind, key string) string {
@@ -263,6 +264,11 @@ func (s *histSource) records(e Event) []*HistRecord {
 			Topics: topicsOf(e.Session, topics, title, inTree(text)), Source: source, repo: repo}}
 	}
 	switch {
+	case e.Fact != nil:
+		if r := factRecord(e); r != nil {
+			return []*HistRecord{r}
+		}
+		return nil
 	case e.Item != nil:
 		it := e.Item
 		repo = s.repoNamed(it.Repository)

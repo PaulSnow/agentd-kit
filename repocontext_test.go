@@ -230,6 +230,17 @@ func curatorCalls(t *testing.T, dir string) []string {
 	return strings.Fields(string(b))
 }
 
+// withoutSessions is the curator calls that are not of a session's card.
+func withoutSessions(calls []string) []string {
+	var out []string
+	for _, c := range calls {
+		if !strings.HasPrefix(c, "session_") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 func countOf(list []string, s string) int {
 	n := 0
 	for _, x := range list {
@@ -274,7 +285,8 @@ func TestCuratorConflictingRulings(t *testing.T) {
 		t.Fatalf("%d calls before the topic was quiet", n)
 	}
 	h.ticks(4, time.Minute)
-	if calls := curatorCalls(t, dir); fmt.Sprint(calls) != "[_7 repo]" {
+	// The session's card is curated too, its start a fact (#62).
+	if calls := withoutSessions(curatorCalls(t, dir)); fmt.Sprint(calls) != "[_7 repo]" {
 		t.Fatalf("calls %v, want #7's, then the repository's", calls)
 	}
 	if in := readFake(t, dir, "in._7"); !strings.Contains(in, r1) || !strings.Contains(in, `"card":null`) {
@@ -290,7 +302,13 @@ func TestCuratorConflictingRulings(t *testing.T) {
 	if c := cs.Card("widgets", TopicRepo); c == nil || c.Src[0] != "card:#7" {
 		t.Fatalf("repository card: %+v", c)
 	}
-	if p := cardEvents(h)[0]; p.Usage == nil || p.Usage.InputTokens != 900 || p.InputBytes == 0 || p.Model != "haiku" {
+	var p7 *CardPayload
+	for _, p := range cardEvents(h) {
+		if p.Topic == "#7" && p7 == nil {
+			p7 = p
+		}
+	}
+	if p := p7; p == nil || p.Usage == nil || p.Usage.InputTokens != 900 || p.InputBytes == 0 || p.Model != "haiku" {
 		t.Fatalf("cost not logged: %+v", p)
 	}
 
@@ -418,6 +436,11 @@ func TestContextTools(t *testing.T) {
 	rs = session(t, srv, toolCall(4, ToolState, map[string]any{"topic": "#7"}),
 		toolCall(5, ToolFind, map[string]any{"q": "spin widgets"}),
 		toolCall(6, ToolHistory, map[string]any{"ids": []string{r1, "nope"}, "why": WhyVerifyClaim}))
+	// A card says how fresh it is: its sources' newest time (#62).
+	r1At := storeOf(h).History("widgets").Record(r1).At.UTC().Format(time.RFC3339Nano)
+	if got := replyJSON(t, rs[0]); got["sources_at"] != r1At || got["newest_record_at"] == nil || got["card"].(map[string]any)["updated"] == nil {
+		t.Fatalf("state does not say how fresh the card is: %v", got)
+	}
 	if c := replyJSON(t, rs[0])["card"].(map[string]any); c["topic"] != "#7" || c["rev"].(float64) != 1 {
 		t.Fatalf("state: %v", c)
 	}
@@ -661,8 +684,8 @@ func TestCuratorReadsThreads(t *testing.T) {
 	h.sup.api = api
 	h.appendEvent(Event{Kind: KindItem, Mode: ModeShared, Item: &ItemPayload{ID: "gitlab/example-org/widgets#7", Kind: ItemIssue, Repository: "gitlab/example-org/widgets", Title: "spin"}})
 	h.ticks(6, time.Minute)
-	if len(api.callList()) != 2 {
-		t.Fatalf("forge calls %v", api.callList())
+	if threadCalls := withoutLists(api.callList()); len(threadCalls) != 2 {
+		t.Fatalf("forge calls %v", threadCalls)
 	}
 	if strings.Contains(h.buf.String(), "secret-1") {
 		t.Fatal("a confidential title reached the log")
@@ -670,4 +693,16 @@ func TestCuratorReadsThreads(t *testing.T) {
 	if in := readFake(t, dir, "in._7"); !strings.Contains(in, `"id":"C21"`) || !strings.Contains(in, "bob at 2026-10-01") {
 		t.Fatalf("curator input: %s", in)
 	}
+}
+
+// withoutLists is the forge calls that are not the live issue lists the
+// curators have read (#62).
+func withoutLists(calls []string) []string {
+	var out []string
+	for _, c := range calls {
+		if !strings.Contains(c, "updated_after=") && !strings.Contains(c, "&since=") {
+			out = append(out, c)
+		}
+	}
+	return out
 }

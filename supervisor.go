@@ -63,6 +63,9 @@ type Supervisor struct {
 	status *statusCopies
 	usage  *usageReader
 	api    ForgeAPI // the forges' APIs for the poll, or nil for none
+	// live is each repository's issue list as last read, shared by the
+	// loop and its workers (#62).
+	live *liveIssues
 	// cards is the repositories' context the curators keep (#60): the
 	// loop's alone.
 	cards *ContextStore
@@ -112,6 +115,7 @@ func NewSupervisor(cfg *Config, log *Log, clock Clock, tmux Tmux, git Git, forge
 		st:     NewLogState(cfg, mode(shadow)),
 		work:   newWorkState(),
 		status: &statusCopies{},
+		live:   &liveIssues{},
 		usage:  newUsageReader(),
 
 		checkpointRe: regexp.MustCompile(cfg.Policies.Context.Checkpoint),
@@ -458,6 +462,7 @@ func (s *Supervisor) Pass() error {
 		s.readAccounts(s.clock.Now())
 		s.runJobs(s.clock.Now())
 		s.checkStatuses(s.clock.Now())
+		s.noteFacts(s.clock.Now())
 		s.curateCards(s.clock.Now())
 	}
 	return s.halt
