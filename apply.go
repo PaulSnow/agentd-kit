@@ -30,6 +30,12 @@ type LogState struct {
 	Instructions map[string]*Instruction
 	// Ops are the changes proposed on the ops console (#63), by id.
 	Ops map[string]*OpsRecord
+	// Releases are the release items (#67), by repository and tag;
+	// ReleaseTags the tags each repository's items were opened or seen
+	// for; Fleets each fleet's latest reading, by repository/target.
+	Releases    map[string]*Release
+	ReleaseTags map[string]map[string]bool
+	Fleets      map[string]*FleetReading
 	// CI is each watched request's latest CI, by repository and request.
 	CI map[string]CIRecord
 	// Feed is what the consoles' feed has posted.
@@ -178,6 +184,20 @@ func (st *LogState) apply(e Event) {
 	}
 	if e.Kind == KindOps {
 		st.applyOps(e)
+		return
+	}
+	if e.Kind == KindRelease {
+		st.applyRelease(e)
+		return
+	}
+	if e.Kind == KindFleet {
+		st.applyFleet(e)
+		return
+	}
+	if e.Kind == KindNode {
+		if e.Node.Result != nil && e.Node.Result.Action == NodeDeployStep {
+			st.applyDeployResult(e)
+		}
 		return
 	}
 	if e.Session == "" {

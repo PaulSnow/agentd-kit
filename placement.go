@@ -67,6 +67,14 @@ func (p *placements) apply(e Event) {
 		}
 	case KindPolicy:
 		p.st.applyPolicy(e)
+	case KindRelease:
+		if e.Mode == ModeLive || e.Mode == ModeOwner { // a shadow run deploys nothing
+			p.st.applyRelease(e)
+		}
+	case KindNode:
+		if e.Node.Result != nil && e.Node.Result.Action == NodeDeployStep {
+			p.st.applyDeployResult(e)
+		}
 	}
 }
 

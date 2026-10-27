@@ -60,6 +60,14 @@ type Git interface {
 	// origin/target. A detached one is at the branch's commit, so a
 	// reviewer's worktree beside its worker's, which has the branch out.
 	AddWorktree(clone, dir, branch, target string, detach bool) error
+	// Tags fetches the clone's tags and lists them (#67); TagNotes is a
+	// tag's own message, a NUL, and the CHANGELOG.md the tag holds.
+	Tags(clone string) ([]string, error)
+	TagNotes(clone, tag string) (string, error)
+	// TagWorktree adds a detached worktree at dir at tag, which
+	// RemoveWorktree removes.
+	TagWorktree(clone, dir, tag string) error
+	RemoveWorktree(clone, dir string) error
 }
 
 // MergeRequest is what to open on the forge.
@@ -561,6 +569,36 @@ func (g ExecGit) AddWorktree(clone, dir, branch, target string, detach bool) err
 		args = []string{"worktree", "add", "-q", "--no-track", "-b", branch, dir, "origin/" + target}
 	}
 	_, err := gitOut(g.Timeout, clone, args...)
+	return err
+}
+
+func (g ExecGit) Tags(clone string) ([]string, error) {
+	if _, err := gitOut(g.Timeout, clone, "fetch", "-q", "--tags", "origin"); err != nil {
+		return nil, err
+	}
+	out, err := gitOut(g.Timeout, clone, "tag", "--list")
+	if err != nil {
+		return nil, err
+	}
+	return strings.Fields(out), nil
+}
+
+func (g ExecGit) TagNotes(clone, tag string) (string, error) {
+	notes, err := gitOut(g.Timeout, clone, "tag", "--list", "--format=%(contents)", "--", tag)
+	if err != nil {
+		return "", err
+	}
+	changelog, _ := gitOut(g.Timeout, clone, "show", "refs/tags/"+tag+":CHANGELOG.md")
+	return notes + "\x00" + changelog, nil
+}
+
+func (g ExecGit) TagWorktree(clone, dir, tag string) error {
+	_, err := gitOut(g.Timeout, clone, "worktree", "add", "-q", "--detach", dir, "refs/tags/"+tag+"^{commit}")
+	return err
+}
+
+func (g ExecGit) RemoveWorktree(clone, dir string) error {
+	_, err := gitOut(g.Timeout, clone, "worktree", "remove", "--force", dir)
 	return err
 }
 

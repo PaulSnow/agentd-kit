@@ -69,6 +69,10 @@ type NodeConfig struct {
 	SessionsRoot string             `json:"sessions_root"`
 	Launch       []string           `json:"launch"`
 	Accounts     map[string]Account `json:"accounts"`
+	// Deploy names the release targets, as repository/target, whose
+	// steps the node may run; SSH the hosts it holds ssh access to (#67).
+	Deploy []string `json:"deploy,omitempty"`
+	SSH    []string `json:"ssh,omitempty"`
 }
 
 // Hub and node defaults.
@@ -137,6 +141,8 @@ type NodeResult struct {
 	Path       string `json:"path"`
 	Outcome    string `json:"outcome"`
 	Error      string `json:"error,omitempty"`
+	// Deploy is a release step's result (#67).
+	Deploy *DeployStepResult `json:"deploy,omitempty"`
 }
 
 // Node command actions and outcomes.
@@ -189,6 +195,8 @@ type NodeCommand struct {
 	Issue   int    `json:"issue,omitempty"`
 	Account string `json:"account,omitempty"`
 	Model   string `json:"model,omitempty"`
+	// Deploy is a release's step (#67).
+	Deploy *DeployStepCommand `json:"deploy,omitempty"`
 }
 
 func (p *NodePayload) check() error {
@@ -257,6 +265,12 @@ func (r *NodeRecord) apply(e Event) {
 		r.Sessions = map[string]TmuxState{}
 		for _, t := range p.Report.Sessions {
 			r.Sessions[t.Name] = t
+		}
+	case p.Result != nil && p.Result.Action == NodeDeployStep:
+		if p.Result.Outcome == NodeDone {
+			r.Done[p.Result.Command] = true
+		} else {
+			r.Failed[p.Result.Command] = e.Time
 		}
 	case p.Result != nil && p.Result.Session != "":
 		r.Last[p.Result.Session] = *p.Result
@@ -471,6 +485,7 @@ func (h *Hub) take(host string, events []NodePayload) (int, nodeReply) {
 	reply := nodeReply{Acked: rec.Seq, Watch: watchList(h.cfg, host), Sessions: h.places.on(host), Error: msg}
 	if code == http.StatusOK {
 		reply.Commands = append(commands(h.cfg, rec, h.now()), h.places.commands(h.cfg, rec, h.now())...)
+		reply.Commands = append(reply.Commands, deployCommands(h.cfg, h.places.st, rec)...)
 	}
 	return code, reply
 }
@@ -609,6 +624,8 @@ type Node struct {
 	// width and height are a new session's window, as the restart
 	// policy has it.
 	width, height int
+	// run runs a release's step (#67).
+	run func(dir string, argv []string, timeout time.Duration) (int, string, error)
 
 	known   bool          // acked is the hub's: no post since has failed
 	acked   int64         // the last of the host's events the hub holds
@@ -620,7 +637,7 @@ type Node struct {
 
 // NewNode is a node reporting to cfg.Hub with token.
 func NewNode(cfg NodeConfig, token string, git NodeGit, tmux Tmux, client *http.Client, now func() time.Time) *Node {
-	return &Node{cfg: cfg, token: token, git: git, tmux: tmux, client: client, now: now}
+	return &Node{cfg: cfg, token: token, git: git, tmux: tmux, client: client, now: now, run: execStep}
 }
 
 // Tick reports what the node watches and does the commands the hub
@@ -824,6 +841,8 @@ func (n *Node) do(ctx context.Context, c NodeCommand) *NodeResult {
 		return n.startSession(c, r, refuse)
 	case NodeSessionStop:
 		return n.stopSession(c, r, refuse)
+	case NodeDeployStep:
+		return n.deployStep(ctx, c, r, refuse)
 	case NodeClone:
 	default:
 		return refuse("the node does no " + c.Action)
