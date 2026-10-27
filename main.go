@@ -86,6 +86,8 @@ func main() {
 		err = nodeCmd(os.Args[2:])
 	case "nodes":
 		err = nodesCmd(os.Args[2:], os.Stdout)
+	case "releases":
+		err = releasesCmd(os.Args[2:], os.Stdout)
 	case "version", "--version":
 		if c := buildCommit(); c != "" {
 			fmt.Println("agentd", version, c)
@@ -115,6 +117,7 @@ func usage() {
   agentd clear [--config PATH] [--log PATH] SESSION
   agentd sessions [--config PATH] [--log PATH] end NAME
   agentd loop [--config PATH] [--log PATH] retry REPOSITORY REQUEST
+  agentd releases [--config PATH] [--log PATH] [open|retry REPOSITORY TAG]
   agentd policy [--config PATH] [--log PATH] show REPO
   agentd console [--config PATH] [--log PATH] [--shadow] reply CONSOLE TEXT...
   agentd console [--config PATH] [--log PATH] [--repository REPO] import FILE

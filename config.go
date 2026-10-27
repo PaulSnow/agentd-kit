@@ -279,6 +279,8 @@ type Repository struct {
 	// CloneOn are the hosts that must have a clone (#29): a node whose
 	// host it names creates one where it is missing.
 	CloneOn []string `json:"clone_on"`
+	// Deploy is where the repository's releases must run (#67).
+	Deploy *DeployConfig `json:"deploy,omitempty"`
 
 	defaulted []string // the policy keys checkPolicy filled in
 }
@@ -598,6 +600,11 @@ func (c *Config) finish(base string) error {
 	}
 	c.checkSessionsPolicies(path, &errs)
 	c.checkNodeConfig(path, &errs)
+	for _, name := range sortedKeys(c.Repositories) {
+		repo := c.Repositories[name]
+		c.checkDeploy(name, &repo, path, &errs)
+		c.Repositories[name] = repo
+	}
 	for name, a := range c.Accounts {
 		if a.ConfigDir == "" && a.TokenFile == "" {
 			errs = append(errs, fmt.Errorf("accounts.%s needs a config_dir, a token_file, or both", name))

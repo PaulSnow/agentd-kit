@@ -362,6 +362,38 @@ type fakeGit struct {
 	gateErr      error                // what GateFiles fails with
 	worktrees    []string             // the worktrees added: clone, dir, branch, target
 	worktreeErr  error                // what AddWorktree fails with
+	tags         []string             // the clone's tags (#67)
+	tagNotes     map[string]string    // each tag's notes, NUL, CHANGELOG
+	tagErr       error                // what Tags fails with
+	tagCopies    []string             // the tags copied for a gate, as clone tag
+	removed      int                  // the worktrees removed
+}
+
+func (g *fakeGit) Tags(string) ([]string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]string(nil), g.tags...), g.tagErr
+}
+
+func (g *fakeGit) TagNotes(clone, tag string) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.tagNotes[tag], nil
+}
+
+// TagWorktree makes dir and records the tag it would have copied.
+func (g *fakeGit) TagWorktree(clone, dir, tag string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.tagCopies = append(g.tagCopies, clone+" "+tag)
+	return os.MkdirAll(dir, 0o755)
+}
+
+func (g *fakeGit) RemoveWorktree(string, string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.removed++
+	return nil
 }
 
 // AddWorktree makes dir and records the worktree it would have added.

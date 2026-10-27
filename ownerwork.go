@@ -181,6 +181,9 @@ func (s *Supervisor) threadCards(x *threadInput, keep func(string) string) []thr
 		note(f.Name, f.Finished, f.Brief+"\n"+f.Status)
 	}
 	topics := sortedKeys(x.refs())
+	for _, f := range x.Fleets {
+		topics = append(topics, topicFleet+f.Target)
+	}
 	for _, st := range statuses {
 		topics = append(topics, topicSession+st.name)
 		topics = append(topics, sortedKeys(st.refs)...)
@@ -245,6 +248,8 @@ type ownerWorkDoc struct {
 	Finished []threadFinished `json:"finished,omitempty"`
 	Issues   []LiveIssue      `json:"issues,omitempty"`
 	Cards    []threadCard     `json:"cards,omitempty"`
+	Fleets   []threadFleet    `json:"fleets,omitempty"`
+	Releases []threadRelease  `json:"releases,omitempty"`
 }
 
 // briefOwner heads the BRIEF.md of a session started for the owner's
@@ -263,7 +268,7 @@ func keepOwnerWork(cfg *Config, x threadInput, w ThreadWork, id string) error {
 		return nil
 	}
 	doc := ownerWorkDoc{Title: w.Title, Brief: w.Brief, Issue: w.Issue, Message: x.Message, Earlier: x.Earlier, Re: x.Re, At: x.At,
-		Running: x.Running, Finished: x.Finished, Issues: x.Issues, Cards: x.Cards}
+		Running: x.Running, Finished: x.Finished, Issues: x.Issues, Cards: x.Cards, Fleets: x.Fleets, Releases: x.Releases}
 	b, err := json.Marshal(doc)
 	if err != nil {
 		return err
