@@ -175,6 +175,9 @@ func (s *Supervisor) screen(e *Event) {
 			e.Turn.Text, e.Turn.Withheld = "", i
 		}
 		switch e.Turn.Role {
+		case TurnCompact:
+			// Its page reads it from the transcript, screened then (#58).
+			e.Turn.Text, e.Turn.Withheld = "", 0
 		case TurnSummary:
 			e.Turn.Text = cutUTF8(e.Turn.Text, replyText)
 		case TurnTool:

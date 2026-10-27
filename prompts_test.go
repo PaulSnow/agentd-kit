@@ -140,7 +140,7 @@ func TestPromptPageScreensAndReadsOnlyTheWorkdir(t *testing.T) {
 	for _, c := range []struct{ path, want string }{
 		{filepath.Join(filepath.Dir(workdir), "BRIEF.md"), "not under the session's workdir"},
 		{filepath.Join(workdir, "..", "x", "BRIEF.md"), "not under the session's workdir"},
-		{"", "not named"},
+		{"", "names no path"},
 	} {
 		if _, err := underWorkdir(workdir, c.path); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%q: %v", c.path, err)
@@ -166,6 +166,8 @@ func TestLabelPromptCut(t *testing.T) {
 		{TurnPrompt, cut, promptLabel{Link: "Restarted (answered): brief, progress, answers"}},
 		{TurnPrompt, DefaultRestartPrompt + ` {"why":"instructed","brief":"b","progress":"p"}`, promptLabel{Link: "Restarted (instructed): brief, progress, instructions"}},
 		{TurnPrompt, cutUTF8(pol.Instructions.Pointer, 60), promptLabel{Link: "Your message delivered"}},
+		{TurnPrompt, cutUTF8(DefaultRestartPrompt, 60), promptLabel{Link: "Restarted: brief, progress"}},
+		{TurnPrompt, cutUTF8(DefaultRestartPrompt+" "+pol.Answers.Pointer+" "+pol.Instructions.Pointer+` {"why":"answered-instructed"}`, 360), promptLabel{Link: "Restarted (answered-instructed): brief, progress, answers, instructions"}},
 		{TurnPrompt, pol.Nudge.Message, promptLabel{Link: "Nudged to carry on"}},
 		{TurnPrompt, compactPosted, promptLabel{Link: "Context compacted"}},
 		{TurnPrompt, "Why does it squeak? Look at the hinge.", promptLabel{Lead: "Why does it squeak?", Link: "full prompt"}},
@@ -175,5 +177,24 @@ func TestLabelPromptCut(t *testing.T) {
 		if got := labelPrompt(pol, c.role, c.text); got != c.want {
 			t.Errorf("%q: %+v, want %+v", cutUTF8(c.text, 50), got, c.want)
 		}
+	}
+}
+
+// A compaction is logged without its text, and the supervisor judges a
+// session's turn by the turns around it, as before (#58).
+func TestCompactionIsNoTurnToJudge(t *testing.T) {
+	h, _ := promptsFixture(t)
+	tr := NewLogState(h.cfg, ModeLive).Fold(h.events()).Tracks["a"]
+	if tr.TurnCount != 8 {
+		t.Fatalf("turn count %d, want 8: the compaction counted", tr.TurnCount)
+	}
+	for _, e := range h.events() {
+		if e.Turn != nil && e.Turn.Role == TurnCompact && (e.Turn.Text != "" || e.Turn.Line != 7) {
+			t.Fatalf("compaction logged as %+v", e.Turn)
+		}
+	}
+	tr.Turns = append(tr.Turns, TurnRecord{Role: TurnCompact, Transcript: "t1", Line: 10, At: h.clock.Now()})
+	if last := tr.lastTurn(); last.Role != TurnSummary || last.Line != 9 {
+		t.Fatalf("last turn = %+v", last)
 	}
 }

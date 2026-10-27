@@ -68,7 +68,7 @@ func labelPrompt(pol Policies, role, text string) promptLabel {
 	if role == TurnCompact || text == compactPosted || strings.HasPrefix(text, compactOpening) {
 		return promptLabel{Link: "Context compacted"}
 	}
-	if rest, ok := strings.CutPrefix(text, DefaultRestartPrompt); ok {
+	if rest, ok := restartRest(text); ok {
 		_, why := restartOf(pol, rest)
 		label := "Restarted"
 		if why != "" {
@@ -102,6 +102,15 @@ func firstSentence(text string) string {
 	return strings.TrimSpace(cutUTF8(text, promptLead))
 }
 
+// restartRest is what follows the restart prompt in text, when text is
+// one, cut or not.
+func restartRest(text string) (string, bool) {
+	if rest, ok := strings.CutPrefix(text, DefaultRestartPrompt); ok {
+		return rest, true
+	}
+	return "", len(text) >= 40 && strings.HasPrefix(DefaultRestartPrompt, strings.TrimSuffix(text, "…"))
+}
+
 // whyFact is why a restart's facts say it was, read from facts cut.
 var whyFact = regexp.MustCompile(`\{"why":"([a-z-]{1,40})"`)
 
@@ -123,18 +132,20 @@ func restartOf(pol Policies, rest string) (*restartFacts, string) {
 	if m := whyFact.FindStringSubmatch(rest); m != nil {
 		return facts, m[1]
 	}
-	rest = strings.TrimSpace(rest)
-	starts := func(pointer string) bool {
+	starts := func(rest, pointer string) bool {
+		rest = strings.TrimSpace(rest)
 		return pointer != "" && rest != "" && (strings.HasPrefix(rest, pointer) || strings.HasPrefix(pointer, strings.TrimSuffix(rest, "…")))
 	}
-	switch {
-	case starts(pol.Answers.Pointer):
+	switch rest = strings.TrimSpace(rest); {
+	case starts(rest, pol.Answers.Pointer) && starts(strings.TrimPrefix(rest, pol.Answers.Pointer), pol.Instructions.Pointer):
+		return facts, "answered-instructed"
+	case starts(rest, pol.Answers.Pointer):
 		return facts, "answered"
-	case starts(pol.Instructions.Pointer):
+	case starts(rest, pol.Instructions.Pointer):
 		return facts, "instructed"
-	case starts(pol.CI.Pointer):
+	case starts(rest, pol.CI.Pointer):
 		return facts, "ci-fix"
-	case starts(FixRoundPointer):
+	case starts(rest, FixRoundPointer):
 		return facts, "fix-round"
 	}
 	return facts, ""
@@ -181,9 +192,17 @@ func (u *UI) promptView(src *uiSource, name, id string, now time.Time) (*uiPromp
 	if !ok {
 		return nil, nil
 	}
-	src.mu.Lock()
-	defer src.mu.Unlock()
-	cfg, _, err := src.view(now)
+	// The source is held only to read the config: the transcript and the
+	// files are read with it released, so a long transcript holds up no
+	// other page.
+	var cfg *Config
+	err := func() error {
+		src.mu.Lock()
+		defer src.mu.Unlock()
+		var err error
+		cfg, _, err = src.view(now)
+		return err
+	}()
 	if err != nil {
 		return nil, err
 	}
@@ -199,15 +218,16 @@ func (u *UI) promptView(src *uiSource, name, id string, now time.Time) (*uiPromp
 		return v, nil
 	}
 	line, err := transcriptLine(filepath.Join(TranscriptDir(root, sess.Cwd), ref.Transcript+".jsonl"), ref.Line)
-	tn, ok := wholeTurn(line, ref.Line)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		v.Note = "The transcript is gone."
 		return v, nil
 	case err != nil:
-		v.Note = "The transcript could not be read: " + err.Error()
+		v.Note = "The transcript could not be read: " + readError(err)
 		return v, nil
-	case !ok || tn.Role != TurnPrompt && tn.Role != TurnCompact:
+	}
+	tn, ok := wholeTurn(line, ref.Line)
+	if !ok || tn.Role != TurnPrompt && tn.Role != TurnCompact {
 		v.Note = "That line of the transcript is no prompt."
 		return v, nil
 	}
@@ -225,13 +245,14 @@ func (u *UI) promptView(src *uiSource, name, id string, now time.Time) (*uiPromp
 	text, files := tn.Text, []uiPromptFile(nil)
 	if rest, ok := strings.CutPrefix(text, DefaultRestartPrompt); ok {
 		facts, why := restartOf(pol, rest)
+		// Without facts the cards say the prompt names no path.
+		brief, progress := "", ""
 		if i := strings.Index(rest, `{"why"`); i >= 0 && facts != nil {
 			text = DefaultRestartPrompt + rest[:i]
 			v.Facts = prettyJSON([]byte(rest[i:]))
+			brief, progress = facts.Brief, facts.Progress
 		}
-		if facts != nil {
-			files = append(files, uiPromptFile{Name: "brief", Path: facts.Brief}, uiPromptFile{Name: "progress", Path: facts.Progress})
-		}
+		files = append(files, uiPromptFile{Name: "brief", Path: brief}, uiPromptFile{Name: "progress", Path: progress})
 		if strings.Contains(why, "answered") {
 			files = append(files, uiPromptFile{Name: "answers", Path: AnswersFile})
 		}
@@ -266,7 +287,7 @@ func promptFile(workdir string, f uiPromptFile, secret func(...string) bool) uiP
 	case errors.Is(err, os.ErrNotExist):
 		f.Note = "There is no such file now."
 	case err != nil:
-		f.Note = "It could not be read: " + err.Error()
+		f.Note = "It could not be read: " + readError(err)
 	case len(b) > promptFileMax:
 		f.Note = fmt.Sprintf("It is larger than %d KiB, so it is not shown.", promptFileMax>>10)
 	case secret(string(b)):
@@ -281,11 +302,21 @@ func promptFile(workdir string, f uiPromptFile, secret func(...string) bool) uiP
 	return f
 }
 
+// readError is err as a page says it: a path it names left out, since
+// the page screens no error.
+func readError(err error) string {
+	var pe *os.PathError
+	if errors.As(err, &pe) {
+		return pe.Op + ": " + pe.Err.Error()
+	}
+	return err.Error()
+}
+
 // underWorkdir is path, relative to workdir or absolute, when it names a
 // file under workdir that no link on the way leads to.
 func underWorkdir(workdir, path string) (string, error) {
 	if workdir == "" || strings.TrimSpace(path) == "" {
-		return "", errors.New("It is not named, or the session has no workdir.")
+		return "", errors.New("The prompt names no path for it, or the session has no workdir.")
 	}
 	workdir = filepath.Clean(workdir)
 	if !filepath.IsAbs(path) {
