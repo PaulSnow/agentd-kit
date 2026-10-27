@@ -77,6 +77,8 @@ type Supervisor struct {
 	// dueRetype the items due to be typed again (#66): the loop's alone.
 	checkedAt map[string]time.Time
 	dueRetype map[string]bool
+	// designTried is when each item's designer last started (#68).
+	designTried map[string]time.Time
 
 	checkpointRe *regexp.Regexp
 
@@ -126,8 +128,9 @@ func NewSupervisor(cfg *Config, log *Log, clock Clock, tmux Tmux, git Git, forge
 		live:   &liveIssues{},
 		usage:  newUsageReader(),
 
-		checkedAt: map[string]time.Time{},
-		dueRetype: map[string]bool{},
+		checkedAt:   map[string]time.Time{},
+		dueRetype:   map[string]bool{},
+		designTried: map[string]time.Time{},
 
 		checkpointRe: regexp.MustCompile(cfg.Policies.Context.Checkpoint),
 		runCtx:       context.Background(),

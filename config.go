@@ -491,6 +491,9 @@ func (c *Config) finish(base string) error {
 		c.Jobs.Expert.BudgetTokens < 0 || c.Jobs.Expert.Timeout.Duration < 0 {
 		errs = append(errs, errors.New("jobs.curator's and jobs.expert's settings must not be negative"))
 	}
+	if d := c.Jobs.Designer; d.MaxInput < 0 || d.Timeout.Duration < 0 {
+		errs = append(errs, errors.New("jobs.designer.max_input and jobs.designer.timeout must not be negative"))
+	}
 	if c.Poll.Every.Duration <= 0 || c.Poll.CIEvery.Duration <= 0 {
 		errs = append(errs, errors.New("poll.every and poll.ci_every must be positive"))
 	}

@@ -36,6 +36,8 @@ type RepoPolicy struct {
 	ConfidentialPatterns []string      `json:"confidential_patterns"`
 	// Feed is which of its sessions' turns its console receives (turns.go).
 	Feed FeedRules `json:"feed"`
+	// Design is whether a contained design goes on without a go (#68).
+	Design DesignRules `json:"design"`
 }
 
 // DeliveryRules: Allow is the writes delivery may make, push and open.
@@ -181,6 +183,9 @@ func (c *Config) checkPolicy(name string, repo *Repository, errs *[]error) {
 		if a == "push" && len(p.Gate.Argv) == 0 {
 			bad("delivery.allow has push but gate.argv is empty: nothing is delivered without a gate")
 		}
+	}
+	if p.Design.SpendLimitUSD < 0 {
+		bad("design.spend_limit_usd must not be negative")
 	}
 	if p.Gate.Timeout.Duration < 0 {
 		bad("gate.timeout must not be negative")
@@ -548,6 +553,19 @@ func narrowKey(eff *RepoPolicy, key string, raw json.RawMessage) bool {
 		}
 		eff.Review.OthersMaxAge = d
 		return true
+	case "design.auto":
+		if strictJSON(raw, &b) != nil || b && !eff.Design.Auto {
+			return false
+		}
+		eff.Design.Auto = b
+		return true
+	case "design.spend_limit_usd":
+		var f float64
+		if strictJSON(raw, &f) != nil || f < 0 || f > eff.Design.SpendLimitUSD {
+			return false
+		}
+		eff.Design.SpendLimitUSD = f
+		return true
 	case "ci.required", "ci.retest_on_base_move":
 		have := &eff.CI.Required
 		if key == "ci.retest_on_base_move" {
@@ -703,12 +721,12 @@ func effectiveFor(cfg *Config, st *LogState, repo, target string) RepoPolicy {
 }
 
 // narrowBy narrows p by a file's read. A file withheld for matching a
-// confidential pattern cannot be read, so it turns merge off: what it
+// confidential pattern cannot be read, so it turns merge and design.auto off: what it
 // says is unknown, and it may narrow.
 func narrowBy(p RepoPolicy, f PolicyPayload) RepoPolicy {
 	if f.Withheld > 0 {
 		p = clonePolicy(p)
-		p.Merge.Enabled = false
+		p.Merge.Enabled, p.Design.Auto = false, false
 		return p
 	}
 	if len(f.File) == 0 {

@@ -75,6 +75,9 @@ type JobsConfig struct {
 	Expert  ExpertConfig  `json:"expert"`
 	// Thread bounds the agents that answer the owner's threads (#59).
 	Thread ThreadConfig `json:"thread"`
+	// Designer sets the agent that designs the owner's work before a
+	// session starts on it (#68).
+	Designer DesignerConfig `json:"designer"`
 }
 
 // TriagePayload is one triage call's outcome: the answers Go accepted, the
@@ -128,6 +131,16 @@ type Job struct {
 	Tools []string
 	Deny  []string
 	Dir   string
+	// Turns bounds an agent's model turns, by default agentTurns.
+	Turns int
+}
+
+// turns is the model turns an agent run of j may take.
+func (j Job) turns() int {
+	if j.Turns > 0 {
+		return j.Turns
+	}
+	return agentTurns
 }
 
 // jobFromConfig is the job the config describes, with its defaults.

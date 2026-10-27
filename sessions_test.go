@@ -42,6 +42,9 @@ func sessionsHarness(t *testing.T) *harness {
 	w.Sessions = &SessionsPolicy{Root: h.dir, Clone: clone, Target: "main"}
 	w.Policy.Sessions.Max = 2
 	h.cfg.Repositories["widgets"] = w
+	// The design step (#68) is designerHarness's: these sessions start
+	// on the thread agent's reading, as #65 and #66 have them.
+	h.cfg.Jobs.Designer.Off = true
 	if err := h.cfg.finish(h.dir); err != nil {
 		t.Fatal(err)
 	}

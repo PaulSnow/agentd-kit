@@ -367,7 +367,13 @@ func (s *Supervisor) routeInstructions(now time.Time) {
 		// Work the agent named, which no running session covers: Go
 		// starts a work session for it (#65).
 		if a := in.AgentLast; in.Route && in.Agent && in.Session == "" && in.Replied.IsZero() && in.Failed == "" && in.AgentError == "" && a != nil && a.Work != nil && a.Error == "" && !s.work.busy("thread:"+in.ID) && len(in.Repositories) > 0 {
-			if s.startOwnerWork(in, in.Repositories[0], *a.Work); s.halt != nil {
+			// Designed first, unless the design step is off (#68).
+			if repo := in.Repositories[0]; s.st.Work[workID(in.ID)] != nil || s.designs(repo) {
+				s.openDesign(in, repo, *a.Work)
+			} else {
+				s.startOwnerWork(in, repo, *a.Work)
+			}
+			if s.halt != nil {
 				return
 			}
 			continue
@@ -381,11 +387,13 @@ func (s *Supervisor) routeInstructions(now time.Time) {
 			}
 			continue
 		}
-		if !in.Route || !in.Delivered.IsZero() || in.Failed != "" || in.Session != "" && s.takesInstructions(in.Session) && !s.stranded(in) {
+		// One answered, by Go on an entry's answer too, is settled.
+		if !in.Route || !in.Delivered.IsZero() || !in.Replied.IsZero() || in.Failed != "" || in.Session != "" && s.takesInstructions(in.Session) && !s.stranded(in) {
 			continue
 		}
-		// A response on a work item's entry is the item's (#66).
-		if s.routeWork(in) {
+		// A response on a work item's entry is the item's (#66), and one
+		// on its design's the design's (#68).
+		if s.routeWork(in) || s.routeDesign(in) {
 			if s.halt != nil {
 				return
 			}

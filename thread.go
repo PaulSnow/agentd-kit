@@ -631,7 +631,7 @@ func (j Job) RunAgent(ctx context.Context, system string, schema, input []byte, 
 	}
 	args := []string{"-p", "--model", j.Model, "--output-format", "stream-json", "--verbose", "--json-schema", string(schema),
 		"--system-prompt", system, "--setting-sources", "", "--strict-mcp-config", "--mcp-config", mcp,
-		"--max-turns", strconv.Itoa(agentTurns), "--permission-mode", "default",
+		"--max-turns", strconv.Itoa(j.turns()), "--permission-mode", "default",
 		"--tools", "Read,Grep,Glob", "--allowedTools", allowed}
 	for _, d := range dirs {
 		args = append(args, "--add-dir", d)
