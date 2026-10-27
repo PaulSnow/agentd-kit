@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -146,5 +147,75 @@ func TestResponseBoundToItsEntry(t *testing.T) {
 	}
 	if got := h.typed("c"); len(got) == 0 || got[len(got)-1] != h.cfg.Policies.Instructions.Pointer {
 		t.Fatalf("typed into c: %q", got)
+	}
+}
+
+// The box's JSON (#59 §2) holds each entry as the page renders it, newest
+// last: a response threaded under the entry it answers with the session's
+// reply under it, an answered decision with its answer, and only the
+// decisions still open listed as open.
+func TestBoxThreadsResponsesUnderTheirEntries(t *testing.T) {
+	h, u, entries := respondFixture(t)
+	for _, form := range []url.Values{{"entry": {entries[2]}, "answer": {"yes"}}, {"entry": {entries[4]}, "quick": {"Explain"}, "text": {"why is it still wet?"}}} {
+		form.Set("src", "night")
+		form.Set("repository", "widgets")
+		if w := ownerPost(u, "/respond", form); w.Code != http.StatusSeeOther {
+			t.Fatalf("respond %v: %d %s", form, w.Code, w.Body.String())
+		}
+	}
+	for i := 6; i < 8; i++ {
+		for _, n := range []string{"a", "b", "c"} {
+			h.alive(n, fmt.Sprintf("%s works, screen %d", n, i))
+		}
+		h.ticks(1, time.Minute)
+	}
+	at := h.clock.Now()
+	for _, tn := range []TurnPayload{
+		{Transcript: "t9", Line: 1, Role: TurnPrompt, Text: h.cfg.Policies.Instructions.Pointer, At: at},
+		{Transcript: "t9", Line: 2, Role: TurnSummary, Text: "The primer needs four hours; it was laid at noon.", At: at},
+	} {
+		tn := tn
+		if err := h.sup.log.Append(Event{V: EventVersion, Time: at, Session: "b", Kind: KindTurn, Mode: ModeLive, Turn: &tn}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := get(u, "GET", "/console/widgets/entries", pageAddr, "192.0.2.20:51000")
+	if w.Code != http.StatusOK || w.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("entries: %d %s", w.Code, w.Body.String())
+	}
+	var doc uiEntriesDoc
+	if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	html := map[string]string{}
+	var order []string
+	for _, e := range doc.Entries {
+		if e.Hash == "" || e.ID == "" {
+			t.Fatalf("entry %+v", e)
+		}
+		var entry string
+		if i := strings.Index(e.HTML, `data-entry="`); i >= 0 {
+			entry = e.HTML[i+len(`data-entry="`):]
+			entry = entry[:strings.Index(entry, `"`)]
+		}
+		html[entry] = e.HTML
+		order = append(order, entry)
+	}
+	if fmt.Sprint(order) != fmt.Sprint(entries) {
+		t.Fatalf("entries in order %q, want %q", order, entries)
+	}
+	post := html[entries[4]]
+	reply, response := strings.Index(post, "The primer needs four hours"), strings.Index(post, "Explain. why is it still wet?")
+	if response < 0 || reply < response || !strings.Contains(post, `class="responses"`) {
+		t.Fatalf("the response and its reply are not threaded under the post:\n%s", post)
+	}
+	if !strings.Contains(html[entries[2]], "Answered: <strong>yes</strong>") || strings.Contains(html[entries[2]], `name="answer"`) {
+		t.Fatalf("the answered decision:\n%s", html[entries[2]])
+	}
+	if !strings.Contains(html[entries[0]], `<button type="submit" name="answer" value="yes">Yes</button>`) {
+		t.Fatalf("an open decision offers no options:\n%s", html[entries[0]])
+	}
+	if len(doc.Open) != 3 || !strings.Contains(doc.Chips, `id="chips"`) {
+		t.Fatalf("open %q, chips %q", doc.Open, doc.Chips)
 	}
 }

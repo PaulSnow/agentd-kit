@@ -551,6 +551,11 @@ type uiMessageView struct {
 	ReplyMore template.HTML
 	ReplyBy   string
 	Replied   time.Time
+	// Answer is the answer a response gave a decision (#59); live, that
+	// it waits on its session's answer.
+	Answer *EntryAnswer
+	To     string // the session an instruction went to
+	live   bool
 }
 
 // uiStep is one step of an owner instruction, as the page shows it.
@@ -646,19 +651,19 @@ type uiConsole struct {
 	uiPage
 	Repository string
 	Other      bool
-	Messages   []uiMessageView
-	Needs      []uiNeed
-	ReplySrc   string // the source a reply is recorded in, or "" when none configures the repository
-	// Live: a message waits on its session's answer, so the page
-	// refreshes every few seconds.
+	// Entries are the conversation box's, newest last (#59), and Open
+	// the DOM ids of the decisions among them that wait on an answer.
+	Entries  []uiEntry
+	Open     []string
+	ReplySrc string // the source a reply is recorded in, or "" when none configures the repository
+	// Live: a message waits on its session's answer.
 	Live bool
-	// Panels are the console's sessions, one each (#56 D).
+	// Panels are the console's sessions, a chip each (#59 §3), and To
+	// those a message may be addressed to.
 	Panels []uiPanel
+	To     []string
 	// StatusTokens is what the sessions' status checks cost today.
 	StatusTokens int64
-	// Page is the page of history shown, newest first, of Pages; Newer
-	// and Older are the pages beside it, -1 when there is none.
-	Page, Pages, Newer, Older int
 }
 
 // uiPanel is one session on its console: its state, what it does now,
@@ -758,17 +763,55 @@ func statusGraph(t *Track, every time.Duration, now time.Time, loc *time.Locatio
 	return g
 }
 
-// historyPage is how many messages a page of a console's history holds.
-const historyPage = 50
-
 // withheldMessage stands in for a message that matches a confidential
 // pattern.
 const withheldMessage = "(withheld: it matched a confidential pattern)"
 
-// consoleView is repo's console, nil when no source knows the repository.
-func (u *UI) consoleView(repo string, page int, now time.Time) (*uiConsole, error) {
+// consoleEntries bounds the entries a console's box holds: the latest.
+const consoleEntries = 300
+
+// uiEntry is one entry of a console's conversation box (#59): a message,
+// a decision or something that waits on the owner, the owner's responses
+// threaded under it, and what the owner can say to it.
+type uiEntry struct {
+	uiMessageView
+	DOMID    string
+	Decision *uiDecisionEntry
+	Need     *uiNeed
+	// Responses are the owner's responses to it, each with what became
+	// of it, oldest first.
+	Responses []uiMessageView
+	// Quick are the words the popover offers beside free text; Open
+	// marks a decision that waits on its answer.
+	Quick []string
+	Open  bool
+}
+
+// quickWords are what an entry of a kind offers to say to it.
+func quickWords(kind string) []string {
+	switch kind {
+	case "ci":
+		return []string{"Fix it", "Ignore it"}
+	case "feed", "imported", "imported-feed":
+		return []string{"Start work", "Explain"}
+	case "instruction", "decision":
+		return nil
+	case "need":
+		return []string{"Go ahead", "Explain"}
+	}
+	return []string{"Go ahead", "Stop", "Explain"}
+}
+
+// needEntry is the entry id of a session's need of a kind.
+func needEntry(session, kind string) string { return "n:" + session + ":" + kind }
+
+// consoleView is repo's console, nil when no source knows the repository:
+// its entries newest last, the owner's responses threaded under the
+// entries they answer, and a chip per session.
+func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 	v := &uiConsole{uiPage: uiPage{Title: repo + " console", Token: u.token, Back: "/console/" + repo, Now: now, loc: u.loc}, Repository: repo}
 	known, loops := false, false
+	var responses []uiMessageView
 	for _, src := range u.sources {
 		err := func() error {
 			src.mu.Lock()
@@ -797,41 +840,31 @@ func (u *UI) consoleView(repo string, page int, now time.Time) (*uiConsole, erro
 			}
 			secret := confidentialMatcher(cfg)
 			for _, m := range src.messages[repo] {
-				body, more := folded(m.Text)
-				if m.Text == "" || secret(m.Text) {
-					body, more = template.HTML(template.HTMLEscapeString(withheldMessage)), ""
+				mv := src.messageView(cfg, m, now, secret)
+				v.Live = v.Live || mv.live
+				if m.Kind == "instruction" && m.Re != nil {
+					responses = append(responses, mv)
+					continue
 				}
-				mv := uiMessageView{uiMessage: m, Src: src.Name, Body: body, More: more}
-				if m.Ref != nil && m.Text != "" && !secret(m.Text) {
-					mv.Prompt = promptLinkOf(cfg.Policies, src.Name, m.Session, *m.Ref, m.Text)
-				}
-				if in := src.st.Instructions[m.ID]; in != nil && m.Kind == "instruction" {
-					mv.Steps = instructionSteps(src.st, in)
-					for _, tn := range in.Activity {
-						text := tn.Text
-						if tn.Withheld > 0 || secret(text) {
-							text = withheldMessage
-						}
-						mv.Activity = append(mv.Activity, uiStep{Text: text, At: tn.At, Failed: tn.Failed, Exit: tn.Exit})
-					}
-					v.Live = v.Live || in.open(src.st, now) || in.Route && in.Failed == "" && in.Waiting == "" && in.Delivered.IsZero() && now.Sub(in.At) < ChatIdle && takesLine(src.st.Tracks[in.Session])
-					if !in.Replied.IsZero() {
-						mv.ReplyBy, mv.Replied = in.Session, in.Replied
-						mv.Reply, mv.ReplyMore = folded(in.Reply)
-						if in.Reply == "" || in.ReplyWithheld || secret(in.Reply) {
-							mv.Reply, mv.ReplyMore = template.HTML(template.HTMLEscapeString(withheldMessage)), ""
-						}
-					}
-				}
-				v.Messages = append(v.Messages, mv)
+				v.Entries = append(v.Entries, uiEntry{uiMessageView: mv, Quick: quickWords(m.Kind)})
 			}
-			for _, n := range src.needs(cfg, rep, src.askedAt) {
-				if n.Repository == repo {
-					v.Needs = append(v.Needs, n)
+			for _, d := range src.decisionEntries(cfg, rep, repo) {
+				d := d
+				e := uiEntry{uiMessageView: uiMessageView{uiMessage: uiMessage{At: d.At, Kind: "decision", From: d.Session, Session: d.Session,
+					Entry: decisionEntry(d.Session, d.ID), Writer: d.Session}, Src: src.Name}, Decision: &d, Open: d.Answer == nil}
+				v.Entries = append(v.Entries, e)
+			}
+			needs := src.needs(cfg, rep, src.askedAt)
+			for _, n := range needs {
+				if n.Repository != repo || n.Decision != nil {
+					continue
 				}
+				n := n
+				v.Entries = append(v.Entries, uiEntry{uiMessageView: uiMessageView{uiMessage: uiMessage{At: n.Since, Kind: "need", From: "agentd", Session: n.Session,
+					Text: n.Text, Entry: needEntry(n.Session, n.Kind)}, Src: src.Name}, Need: &n, Quick: quickWords("need")})
 			}
 			if !src.echo {
-				for _, p := range src.panels(cfg, repo, v.Needs, secret) {
+				for _, p := range src.panels(cfg, repo, needs, secret) {
 					p.Status = statusGraph(src.st.Tracks[p.Name], cfg.Jobs.Status.every(), now, u.loc, secret)
 					if p.Status != nil {
 						v.StatusTokens += p.Status.Tokens
@@ -845,31 +878,88 @@ func (u *UI) consoleView(repo string, page int, now time.Time) (*uiConsole, erro
 			return nil, err
 		}
 	}
-	if !known && len(v.Messages) == 0 {
+	if !known && len(v.Entries) == 0 && len(responses) == 0 {
 		return nil, nil
 	}
-	// Newest first, a page at a time, the later of two at one time first:
-	// against the order they came when their times are the same.
-	sort.SliceStable(v.Messages, func(i, j int) bool { return v.Messages[i].At.Before(v.Messages[j].At) })
-	for i, j := 0, len(v.Messages)-1; i < j; i, j = i+1, j-1 {
-		v.Messages[i], v.Messages[j] = v.Messages[j], v.Messages[i]
+	// Newest last; of two at one time, in the order they came.
+	sort.SliceStable(v.Entries, func(i, j int) bool { return v.Entries[i].At.Before(v.Entries[j].At) })
+	if len(v.Entries) > consoleEntries {
+		v.Entries = v.Entries[len(v.Entries)-consoleEntries:]
 	}
-	v.Pages = (len(v.Messages) + historyPage - 1) / historyPage
-	if v.Pages == 0 {
-		v.Pages = 1
+	at := map[string]int{}
+	for i := range v.Entries {
+		e := &v.Entries[i]
+		e.DOMID = "e-" + shortHash(HashPane(e.Src + "\n" + e.Entry))[:12]
+		at[e.Src+"\n"+e.Entry] = i
+		if e.Open {
+			v.Open = append(v.Open, e.DOMID)
+		}
 	}
-	v.Page = min(max(page, 1), v.Pages)
-	v.Messages = v.Messages[(v.Page-1)*historyPage : min(v.Page*historyPage, len(v.Messages))]
-	v.Newer, v.Older = v.Page-1, v.Page+1
-	if v.Newer < 1 {
-		v.Newer = -1
+	// A response is threaded under the entry it answers; one whose entry
+	// the box no longer holds is shown where it came, quoting it.
+	sort.SliceStable(responses, func(i, j int) bool { return responses[i].At.Before(responses[j].At) })
+	for _, r := range responses {
+		if i, ok := at[r.Src+"\n"+r.Re.ID]; ok {
+			v.Entries[i].Responses = append(v.Entries[i].Responses, r)
+			continue
+		}
+		e := uiEntry{uiMessageView: r}
+		e.DOMID = "e-" + shortHash(HashPane(e.Src + "\n" + e.Entry))[:12]
+		v.Entries = append(v.Entries, e)
 	}
-	if v.Older > v.Pages {
-		v.Older = -1
-	}
+	sort.SliceStable(v.Entries, func(i, j int) bool { return v.Entries[i].At.Before(v.Entries[j].At) })
 	sort.SliceStable(v.Panels, func(i, j int) bool { return v.Panels[i].Name < v.Panels[j].Name })
-	sortNeeds(v.Needs)
+	for _, p := range v.Panels {
+		if p.MessageTo != "" {
+			v.To = append(v.To, p.Name)
+		}
+	}
 	return v, nil
+}
+
+// messageView is console message m as the box shows it: screened, a
+// prompt as its line, an owner's instruction with its steps, the tools
+// the session ran on it and its reply.
+func (src *uiSource) messageView(cfg *Config, m uiMessage, now time.Time, secret func(...string) bool) uiMessageView {
+	body, more := folded(m.Text)
+	if m.Text == "" || secret(m.Text) {
+		body, more = template.HTML(template.HTMLEscapeString(withheldMessage)), ""
+	}
+	mv := uiMessageView{uiMessage: m, Src: src.Name, Body: body, More: more}
+	if m.Ref != nil && m.Text != "" && !secret(m.Text) {
+		mv.Prompt = promptLinkOf(cfg.Policies, src.Name, m.Session, *m.Ref, m.Text)
+	}
+	if m.Re != nil {
+		re := *m.Re
+		if secret(re.Text, re.Question) {
+			re.Text, re.Question = "", ""
+		}
+		mv.Re = &re
+	}
+	in := src.st.Instructions[m.ID]
+	if in == nil || m.Kind != "instruction" {
+		return mv
+	}
+	mv.Steps, mv.To = instructionSteps(src.st, in), in.Session
+	for _, tn := range in.Activity {
+		text := tn.Text
+		if tn.Withheld > 0 || secret(text) {
+			text = withheldMessage
+		}
+		mv.Activity = append(mv.Activity, uiStep{Text: text, At: tn.At, Failed: tn.Failed, Exit: tn.Exit})
+	}
+	mv.live = in.open(src.st, now) || in.Route && in.Failed == "" && in.Waiting == "" && in.Delivered.IsZero() && now.Sub(in.At) < ChatIdle && takesLine(src.st.Tracks[in.Session])
+	if in.Answer != nil {
+		mv.Answer = in.Answer
+	}
+	if !in.Replied.IsZero() {
+		mv.ReplyBy, mv.Replied = in.Session, in.Replied
+		mv.Reply, mv.ReplyMore = folded(in.Reply)
+		if in.Reply == "" || in.ReplyWithheld || secret(in.Reply) {
+			mv.Reply, mv.ReplyMore = template.HTML(template.HTMLEscapeString(withheldMessage)), ""
+		}
+	}
+	return mv
 }
 
 // panels are the sessions of src that console repo shows: a repository's,

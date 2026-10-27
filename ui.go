@@ -510,10 +510,14 @@ func (u *UI) serveView(w http.ResponseWriter, r *http.Request) {
 		view, err = u.indexView(now)
 	case strings.HasPrefix(path, "/console/"):
 		name = "console"
+		repo, entries := strings.CutSuffix(strings.TrimPrefix(path, "/console/"), "/entries")
 		var v *uiConsole
-		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-		if v, err = u.consoleView(strings.TrimPrefix(path, "/console/"), page, now); err == nil && v == nil {
+		if v, err = u.consoleView(repo, now); err == nil && v == nil {
 			http.NotFound(w, r)
+			return
+		}
+		if entries && err == nil {
+			u.serveEntries(w, v)
 			return
 		}
 		view = v
@@ -551,6 +555,46 @@ func (u *UI) serveView(w http.ResponseWriter, r *http.Request) {
 	if err := uiTemplates.ExecuteTemplate(w, name, view); err != nil {
 		fmt.Fprintf(os.Stderr, "agentd ui: %v\n", err)
 	}
+}
+
+// uiEntriesDoc is a console's box as its page polls it (#59): each entry
+// rendered as the page renders it, with a hash that says when it changed;
+// the open decisions; and the session chips.
+type uiEntriesDoc struct {
+	Entries []uiEntryDoc `json:"entries"`
+	Open    []string     `json:"open"`
+	Chips   string       `json:"chips"`
+}
+
+// uiEntryDoc is one entry of a uiEntriesDoc.
+type uiEntryDoc struct {
+	ID   string `json:"id"`
+	Hash string `json:"hash"`
+	HTML string `json:"html"`
+}
+
+// serveEntries answers a console page's poll with its box as JSON.
+func (u *UI) serveEntries(w http.ResponseWriter, v *uiConsole) {
+	doc := uiEntriesDoc{Entries: []uiEntryDoc{}, Open: v.Open}
+	if doc.Open == nil {
+		doc.Open = []string{}
+	}
+	var b strings.Builder
+	for _, e := range v.Entries {
+		b.Reset()
+		if err := uiTemplates.ExecuteTemplate(&b, "entry", map[string]any{"P": v, "V": e}); err != nil {
+			fmt.Fprintf(os.Stderr, "agentd ui: %v\n", err)
+			http.Error(w, "the console could not be rendered", http.StatusInternalServerError)
+			return
+		}
+		doc.Entries = append(doc.Entries, uiEntryDoc{ID: e.DOMID, Hash: shortHash(HashPane(b.String())), HTML: b.String()})
+	}
+	b.Reset()
+	if err := uiTemplates.ExecuteTemplate(&b, "chips", v); err == nil {
+		doc.Chips = b.String()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(doc)
 }
 
 // maxSeen is the most items one POST may mark seen.
@@ -694,6 +738,13 @@ func (u *UI) serveRespond(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	repo, entry, text := strings.TrimSpace(r.PostForm.Get("repository")), strings.TrimSpace(r.PostForm.Get("entry")), r.PostForm.Get("text")
+	// A quick word the popover offers leads the owner's own.
+	if q := strings.TrimSpace(r.PostForm.Get("quick")); q != "" {
+		if t := strings.TrimSpace(text); t != "" {
+			q += ". " + t
+		}
+		text = q
+	}
 	if repo == "" || len(text) > maxReply {
 		http.Error(w, fmt.Sprintf("name the repository and write at most %d bytes", maxReply), http.StatusBadRequest)
 		return
