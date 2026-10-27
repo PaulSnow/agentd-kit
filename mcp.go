@@ -445,6 +445,8 @@ type MCPServer struct {
 	restartErr error         // why re-executing it failed
 	note       string        // said in the next tool reply: the server restarted
 	held       *bytes.Reader // the handover input, which Serve reads before its own
+	store      *ContextStore // the repository's context, as the log has it (#60)
+	api        ForgeAPI      // the forge, to read a thread history lacks; nil for none
 }
 
 // NewMCPServer is the server for the named session, which must work a
@@ -458,11 +460,24 @@ func NewMCPServer(cfg *Config, name string, log *Log, read func() ([]Event, erro
 	if id == "" {
 		return nil, fmt.Errorf("session %s works no case: it needs a repository and an issue", name)
 	}
+	return newServer(cfg, name, sess, id, log, read, now), nil
+}
+
+func newServer(cfg *Config, name string, sess Session, id string, log *Log, read func() ([]Event, error), now func() time.Time) *MCPServer {
 	srv := &MCPServer{cfg: cfg, name: name, sess: sess, caseID: id, log: log, read: read, now: now}
 	for _, p := range screenPatterns(cfg) {
 		srv.confidential = append(srv.confidential, regexp.MustCompile(p))
 	}
-	return srv, nil
+	return srv
+}
+
+// NewQueryServer is a server of the context tools alone, on repository
+// repo, for an agent that works no case; as names it in the log.
+func NewQueryServer(cfg *Config, repo, as string, log *Log, read func() ([]Event, error), now func() time.Time) (*MCPServer, error) {
+	if _, ok := cfg.Repositories[repo]; !ok {
+		return nil, fmt.Errorf("no repository %q", repo)
+	}
+	return newServer(cfg, as, Session{Repository: repo, Role: RoleQuery}, "", log, read, now), nil
 }
 
 // mcpVersions are the protocol versions the server speaks, newest first.
@@ -591,8 +606,8 @@ func (srv *MCPServer) handle(req rpcRequest) (any, *rpcError) {
 		return map[string]any{}, nil
 	case "tools/list":
 		var tools []MCPTool
-		for _, name := range toolsFor(srv.sess.Role) {
-			for _, t := range toolList() {
+		for _, name := range srv.tools() {
+			for _, t := range append(toolList(), contextToolList()...) {
 				if t.Name == name {
 					tools = append(tools, t)
 				}
@@ -609,7 +624,7 @@ func (srv *MCPServer) handle(req rpcRequest) (any, *rpcError) {
 		}
 		// A tool the server does not have is a protocol error, answered
 		// and not logged: nothing reached the case.
-		if tools := toolsFor(srv.sess.Role); !contains(tools, p.Name) {
+		if tools := srv.tools(); !contains(tools, p.Name) {
 			return nil, &rpcError{rpcInvalidParams, fmt.Sprintf("no tool %q: %s", p.Name, strings.Join(tools, ", "))}
 		}
 		reply, refused := srv.call(p.Name, p.Arguments)
@@ -626,6 +641,9 @@ func (srv *MCPServer) handle(req rpcRequest) (any, *rpcError) {
 // call checks and records one tool call. It returns the reply, compact
 // JSON, and whether the call was refused.
 func (srv *MCPServer) call(tool string, args json.RawMessage) (string, bool) {
+	if contains(contextTools, tool) {
+		return srv.contextCall(tool, args)
+	}
 	events, err := srv.load()
 	if err != nil {
 		return compact(map[string]any{"refused": "agentd could not read its log: " + err.Error()}), true
@@ -716,6 +734,17 @@ func (srv *MCPServer) call(tool string, args json.RawMessage) (string, bool) {
 
 // instructions is what the server tells the session of its tools.
 func (srv *MCPServer) instructions() string {
+	if srv.sess.Role == RoleQuery {
+		return contextInstructions
+	}
+	return srv.caseInstructions() + " " + contextInstructions
+}
+
+// contextInstructions is what every server says of the context tools.
+const contextInstructions = "For what is true now about the repository, an issue (#N), a request (!N) or a session, call state, or find to look a topic up; " +
+	"each claim names its src records. Read history only when state is not enough, and say why. When out of your depth, ask_expert."
+
+func (srv *MCPServer) caseInstructions() string {
 	switch srv.sess.Role {
 	case RoleReviewer:
 		return "Review the work on case " + srv.caseID + " and report every finding with review_findings, once a round. You advise; the judge decides. " +
@@ -1164,6 +1193,25 @@ func mcpLaunchConfig(cfg *Config, name string, sess Session) string {
 	return compact(map[string]any{"mcpServers": map[string]any{"agentd": map[string]any{"type": "stdio", "command": exe, "args": args}}})
 }
 
+// mcpQueryConfig is the --mcp-config document that starts a server of the
+// context tools alone on repository repo, its queries logged as name: for
+// an agent that works no case, as a console thread's (#59).
+func mcpQueryConfig(cfg *Config, repo, name string) string {
+	exe, err := os.Executable()
+	if err != nil {
+		exe = "agentd"
+	}
+	args := []string{"mcp"}
+	if cfg.Path != "" {
+		args = append(args, "--config", cfg.Path)
+	}
+	args = append(args, "--log", cfg.EventLog, "--repository", repo)
+	if name != "" {
+		args = append(args, "--as", name)
+	}
+	return compact(map[string]any{"mcpServers": map[string]any{"agentd": map[string]any{"type": "stdio", "command": exe, "args": args}}})
+}
+
 // servesTools says whether the session gets a server: one that works a
 // case.
 func servesTools(cfg *Config, sess Session) bool {
@@ -1205,12 +1253,14 @@ func mcpCmd(args []string, r io.Reader, w io.Writer) error {
 	}
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	session := fs.String("session", "", "the session the server reports for")
+	repository := fs.String("repository", "", "with no session: serve the context tools alone, on this repository (#60)")
+	as := fs.String("as", "", "with --repository: the name the server's queries are logged under")
 	cfg, _, err := loadConfigFlag(fs, args)
 	if err != nil {
 		return err
 	}
-	if *session == "" || fs.NArg() > 0 {
-		return errors.New("usage: agentd mcp [--config PATH] [--log PATH] --session NAME")
+	if (*session == "") == (*repository == "") || fs.NArg() > 0 {
+		return errors.New("usage: agentd mcp [--config PATH] [--log PATH] (--session NAME | --repository NAME [--as NAME])")
 	}
 	log, err := OpenLog(cfg.EventLog)
 	if err != nil {
@@ -1226,10 +1276,16 @@ func mcpCmd(args []string, r io.Reader, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	srv, err := NewMCPServer(projected(cfg, events), *session, log, read, time.Now)
+	var srv *MCPServer
+	if *repository != "" {
+		srv, err = NewQueryServer(projected(cfg, events), *repository, *as, log, read, time.Now)
+	} else {
+		srv, err = NewMCPServer(projected(cfg, events), *session, log, read, time.Now)
+	}
 	if err != nil {
 		return err
 	}
+	srv.api = ExecForgeAPI{Timeout: cfg.Timeouts.Forge.Duration}
 	if pending != nil {
 		srv.note = restartNote(why)
 		fmt.Fprintln(os.Stderr, "agentd mcp:", srv.note)

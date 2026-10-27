@@ -63,6 +63,9 @@ type Supervisor struct {
 	status *statusCopies
 	usage  *usageReader
 	api    ForgeAPI // the forges' APIs for the poll, or nil for none
+	// cards is the repositories' context the curators keep (#60): the
+	// loop's alone.
+	cards *ContextStore
 
 	checkpointRe *regexp.Regexp
 
@@ -194,6 +197,23 @@ func (s *Supervisor) screen(e *Event) {
 	}
 	if e.Status != nil {
 		s.screenStatus(e.Status)
+	}
+	if t := e.Thread; t != nil {
+		// Read screened already; screened again with every pattern the
+		// repositories' own files add.
+		if i := s.confidentialMatch(t.Title, t.Body, t.Author, strings.Join(t.Labels, "\n")); i > 0 {
+			t.Title, t.Body, t.Author, t.Labels, t.Withheld = "", "", "", nil, i
+		}
+		for k := range t.Comments {
+			if c := &t.Comments[k]; s.confidentialMatch(c.Body, c.Author) > 0 {
+				c.Body, c.Author, c.Withheld = "", "", s.confidentialMatch(c.Body, c.Author)
+			}
+		}
+	}
+	if c := e.Card; c != nil && c.Card != nil {
+		if i := s.confidentialMatch(compact(c.Card)); i > 0 {
+			c.Card, c.Refused = nil, fmt.Sprintf("the card's words match confidential pattern %d; it is not kept", i)
+		}
 	}
 }
 
@@ -438,6 +458,7 @@ func (s *Supervisor) Pass() error {
 		s.readAccounts(s.clock.Now())
 		s.runJobs(s.clock.Now())
 		s.checkStatuses(s.clock.Now())
+		s.curateCards(s.clock.Now())
 	}
 	return s.halt
 }

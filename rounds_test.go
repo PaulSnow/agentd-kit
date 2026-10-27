@@ -242,7 +242,7 @@ func TestRoundsToolsByRole(t *testing.T) {
 		"rv": {ToolReviewFindings},
 		"jd": {ToolJudgeDispositions, ToolRaiseDecision},
 	} {
-		if got := names(name); !reflect.DeepEqual(got, want) {
+		if got := names(name); !reflect.DeepEqual(got, append(want, contextTools...)) {
 			t.Errorf("%s: %v", name, got)
 		}
 	}
