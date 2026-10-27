@@ -76,11 +76,78 @@
 <div class="choices"><button type="submit">Send</button></div></form>
 
 </section>
+<section id="panels" data-refresh aria-labelledby="panels-h">
+<h2 id="panels-h">Sessions</h2>
+<div class="panels"><article class="card panel">
+<header class="card-head"><h3><a href="/session/night/done1">done1</a></h3></header>
+<p class="meta"><span class="state state-done">done</span> since 2026-10-23 09:00</p>
+
+
+
+</article><article class="card panel">
+<header class="card-head"><h3><a href="/session/coord/lim1">lim1</a></h3></header>
+<p class="meta"><span class="state state-usage-limited">usage-limited</span> since 2026-10-23 11:20</p>
+
+
+<form class="answer" method="post" action="/reply"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/console/widgets"><input type="hidden" name="src" value="coord"><input type="hidden" name="repository" value="widgets"><input type="hidden" name="session" value="lim1">
+<textarea name="text" rows="2" maxlength="4000" aria-label="Your message to lim1" required></textarea>
+<div class="choices"><button type="submit">Send to lim1</button></div></form>
+</article><article class="card panel">
+<header class="card-head"><h3><a href="/session/night/quiet1">quiet1</a></h3></header>
+<p class="meta"><span class="state state-working">working</span> since 2026-10-23 11:00</p>
+
+
+<form class="answer" method="post" action="/reply"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/console/widgets"><input type="hidden" name="src" value="night"><input type="hidden" name="repository" value="widgets"><input type="hidden" name="session" value="quiet1">
+<textarea name="text" rows="2" maxlength="4000" aria-label="Your message to quiet1" required></textarea>
+<div class="choices"><button type="submit">Send to quiet1</button></div></form>
+</article><article class="card panel">
+<header class="card-head"><h3><a href="/session/night/s-blocked">s-blocked</a></h3></header>
+<p class="meta"><span class="state state-idle">idle</span> since 2026-10-23 10:00 · <a href="#console-needs">1 waiting on you</a></p>
+
+
+<form class="answer" method="post" action="/reply"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/console/widgets"><input type="hidden" name="src" value="night"><input type="hidden" name="repository" value="widgets"><input type="hidden" name="session" value="s-blocked">
+<textarea name="text" rows="2" maxlength="4000" aria-label="Your message to s-blocked" required></textarea>
+<div class="choices"><button type="submit">Send to s-blocked</button></div></form>
+</article><article class="card panel">
+<header class="card-head"><h3><a href="/session/night/txt1">txt1</a></h3></header>
+<p class="meta"><span class="state state-blocked-on-owner">blocked-on-owner</span> since 2026-10-23 11:15 · <a href="#console-needs">1 waiting on you</a></p>
+
+
+<form class="answer" method="post" action="/reply"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/console/widgets"><input type="hidden" name="src" value="night"><input type="hidden" name="repository" value="widgets"><input type="hidden" name="session" value="txt1">
+<textarea name="text" rows="2" maxlength="4000" aria-label="Your message to txt1" required></textarea>
+<div class="choices"><button type="submit">Send to txt1</button></div></form>
+</article><article class="card panel">
+<header class="card-head"><h3><a href="/session/night/w17">w17</a></h3></header>
+<p class="meta"><span class="state state-working">working</span> since 2026-10-23 07:00</p>
+
+<div class="msg msg-reply"><div class="msg-head"><span class="badge">last reply</span> <time class="muted">2026-10-23 11:40</time></div><div class="md"><p>Primed the widgets; <strong>paint</strong> next.</p>
+</div></div>
+<form class="answer" method="post" action="/reply"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/console/widgets"><input type="hidden" name="src" value="night"><input type="hidden" name="repository" value="widgets"><input type="hidden" name="session" value="w17">
+<textarea name="text" rows="2" maxlength="4000" aria-label="Your message to w17" required></textarea>
+<div class="choices"><button type="submit">Send to w17</button></div></form>
+</article><article class="card panel">
+<header class="card-head"><h3><a href="/session/night/w18">w18</a></h3></header>
+<p class="meta"><span class="state state-working">working</span> since 2026-10-23 09:00</p>
+
+
+<form class="answer" method="post" action="/reply"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/console/widgets"><input type="hidden" name="src" value="night"><input type="hidden" name="repository" value="widgets"><input type="hidden" name="session" value="w18">
+<textarea name="text" rows="2" maxlength="4000" aria-label="Your message to w18" required></textarea>
+<div class="choices"><button type="submit">Send to w18</button></div></form>
+</article></div>
+</section>
 <section id="messages" data-refresh aria-labelledby="messages-h">
-<h2 id="messages-h">Messages</h2>
-<ol class="messages"><li class="msg msg-imported">
-<div class="msg-head"><span class="from">owner-a</span> <span class="badge">imported</span> <time class="muted">2026-10-20 12:00</time></div>
-<div class="md"><p>Old console line</p>
+<h2 id="messages-h">History</h2>
+<p class="muted">Newest first.</p>
+<ol class="messages"><li class="msg msg-instruction">
+<div class="msg-head"><span class="from">console:widgets-console</span> <span class="badge">instruction</span> <time class="muted">2026-10-23 10:30</time></div>
+<div class="md"><p>Ship it on Friday</p>
+</div>
+<ol class="steps"><li class="step">received <time class="muted">2026-10-23 10:30</time></li><li class="step step-wait">recorded before agentd routed instructions; not delivered to any session</li></ol>
+
+
+</li><li class="msg msg-escalation">
+<div class="msg-head"><span class="from">agentd</span> <a href="/session/night/w18">w18</a> <span class="badge">escalation</span> <time class="muted">2026-10-23 08:00</time></div>
+<div class="md"><p>w18 shows a dialog: <strong>Allow</strong> the tool?</p>
 </div>
 
 
@@ -92,21 +159,15 @@
 
 
 
-</li><li class="msg msg-escalation">
-<div class="msg-head"><span class="from">agentd</span> <a href="/session/night/w18">w18</a> <span class="badge">escalation</span> <time class="muted">2026-10-23 08:00</time></div>
-<div class="md"><p>w18 shows a dialog: <strong>Allow</strong> the tool?</p>
+</li><li class="msg msg-imported">
+<div class="msg-head"><span class="from">owner-a</span> <span class="badge">imported</span> <time class="muted">2026-10-20 12:00</time></div>
+<div class="md"><p>Old console line</p>
 </div>
 
-
-
-</li><li class="msg msg-instruction">
-<div class="msg-head"><span class="from">console:widgets-console</span> <span class="badge">instruction</span> <time class="muted">2026-10-23 10:30</time></div>
-<div class="md"><p>Ship it on Friday</p>
-</div>
-<ol class="steps"><li class="step">received <time class="muted">2026-10-23 10:30</time></li><li class="step step-wait">recorded before agentd routed instructions; not delivered to any session</li></ol>
 
 
 </li></ol>
+
 </section>
 </main>
 <footer class="foot muted">Shown 2026-10-23 12:00. The page refreshes every 30 seconds.</footer>

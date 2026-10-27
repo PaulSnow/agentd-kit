@@ -537,13 +537,15 @@ type uiMessageView struct {
 	uiMessage
 	Src  string
 	Body template.HTML
+	More template.HTML // the whole text of a long one, folded (#56)
 	// An instruction's steps (#56), the tools the session ran on it, and
 	// the reply threaded under it.
-	Steps    []uiStep
-	Activity []uiStep
-	Reply    template.HTML
-	ReplyBy  string
-	Replied  time.Time
+	Steps     []uiStep
+	Activity  []uiStep
+	Reply     template.HTML
+	ReplyMore template.HTML
+	ReplyBy   string
+	Replied   time.Time
 }
 
 // uiStep is one step of an owner instruction, as the page shows it.
@@ -553,6 +555,32 @@ type uiStep struct {
 	Failed bool
 	Wait   bool
 	Exit   *int
+}
+
+// activityStep is a tool line as the page shows it: screened whole, then
+// cut, as the log would hold it.
+func activityStep(tn TurnPayload, secret func(...string) bool) uiStep {
+	text := cutUTF8(tn.Text, toolTargetLength)
+	if secret(tn.Text) {
+		text = withheldMessage
+	}
+	return uiStep{Text: text, At: tn.At, Failed: tn.Failed, Exit: tn.Exit}
+}
+
+// foldAt is how much of a message the page shows before the fold.
+const foldAt = 1200
+
+// folded renders text: whole when it is short; else its start, cut at a
+// line, with the whole text to show under a fold.
+func folded(text string) (body, more template.HTML) {
+	if len(text) <= foldAt {
+		return markdown(text), ""
+	}
+	start := cutUTF8(text, foldAt)
+	if i := strings.LastIndex(start, "\n"); i > foldAt/2 {
+		start = text[:i] + "\n\n…"
+	}
+	return markdown(start), markdown(text)
 }
 
 // takesLine says whether a message routed to a session with track t will
@@ -619,14 +647,38 @@ type uiConsole struct {
 	// Live: a message waits on its session's answer, so the page
 	// refreshes every few seconds.
 	Live bool
+	// Panels are the console's sessions, one each (#56 D).
+	Panels []uiPanel
+	// Page is the page of history shown, newest first, of Pages; Newer
+	// and Older are the pages beside it, -1 when there is none.
+	Page, Pages, Newer, Older int
 }
+
+// uiPanel is one session on its console: its state, what it does now,
+// whether it waits on the owner, its last reply, and a box to message it.
+type uiPanel struct {
+	Src       string
+	Name      string
+	Kind      string
+	State     string
+	Since     time.Time
+	Doing     *uiStep
+	Questions int
+	Reply     template.HTML
+	ReplyMore template.HTML
+	ReplyAt   time.Time
+	MessageTo string
+}
+
+// historyPage is how many messages a page of a console's history holds.
+const historyPage = 50
 
 // withheldMessage stands in for a message that matches a confidential
 // pattern.
 const withheldMessage = "(withheld: it matched a confidential pattern)"
 
 // consoleView is repo's console, nil when no source knows the repository.
-func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
+func (u *UI) consoleView(repo string, page int, now time.Time) (*uiConsole, error) {
 	v := &uiConsole{uiPage: uiPage{Title: repo + " console", Token: u.token, Back: "/console/" + repo, Now: now, loc: u.loc}, Repository: repo}
 	known, loops := false, false
 	for _, src := range u.sources {
@@ -657,11 +709,11 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 			}
 			secret := confidentialMatcher(cfg)
 			for _, m := range src.messages[repo] {
-				body := markdown(m.Text)
+				body, more := folded(m.Text)
 				if m.Text == "" || secret(m.Text) {
-					body = template.HTML(template.HTMLEscapeString(withheldMessage))
+					body, more = template.HTML(template.HTMLEscapeString(withheldMessage)), ""
 				}
-				mv := uiMessageView{uiMessage: m, Src: src.Name, Body: body}
+				mv := uiMessageView{uiMessage: m, Src: src.Name, Body: body, More: more}
 				if in := src.st.Instructions[m.ID]; in != nil && m.Kind == "instruction" {
 					mv.Steps = instructionSteps(src.st, in)
 					for _, tn := range in.Activity {
@@ -673,9 +725,10 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 					}
 					v.Live = v.Live || in.open(src.st, now) || in.Route && in.Failed == "" && in.Waiting == "" && in.Delivered.IsZero() && now.Sub(in.At) < ChatIdle && takesLine(src.st.Tracks[in.Session])
 					if !in.Replied.IsZero() {
-						mv.ReplyBy, mv.Replied, mv.Reply = in.Session, in.Replied, markdown(in.Reply)
+						mv.ReplyBy, mv.Replied = in.Session, in.Replied
+						mv.Reply, mv.ReplyMore = folded(in.Reply)
 						if in.Reply == "" || in.ReplyWithheld || secret(in.Reply) {
-							mv.Reply = template.HTML(template.HTMLEscapeString(withheldMessage))
+							mv.Reply, mv.ReplyMore = template.HTML(template.HTMLEscapeString(withheldMessage)), ""
 						}
 					}
 				}
@@ -686,6 +739,9 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 					v.Needs = append(v.Needs, n)
 				}
 			}
+			if !src.echo {
+				v.Panels = append(v.Panels, src.panels(cfg, repo, v.Needs, secret)...)
+			}
 			return nil
 		}()
 		if err != nil {
@@ -695,9 +751,89 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 	if !known && len(v.Messages) == 0 {
 		return nil, nil
 	}
+	// Newest first, a page at a time, the later of two at one time first:
+	// against the order they came when their times are the same.
 	sort.SliceStable(v.Messages, func(i, j int) bool { return v.Messages[i].At.Before(v.Messages[j].At) })
+	for i, j := 0, len(v.Messages)-1; i < j; i, j = i+1, j-1 {
+		v.Messages[i], v.Messages[j] = v.Messages[j], v.Messages[i]
+	}
+	v.Pages = (len(v.Messages) + historyPage - 1) / historyPage
+	if v.Pages == 0 {
+		v.Pages = 1
+	}
+	v.Page = min(max(page, 1), v.Pages)
+	v.Messages = v.Messages[(v.Page-1)*historyPage : min(v.Page*historyPage, len(v.Messages))]
+	v.Newer, v.Older = v.Page-1, v.Page+1
+	if v.Newer < 1 {
+		v.Newer = -1
+	}
+	if v.Older > v.Pages {
+		v.Older = -1
+	}
+	sort.SliceStable(v.Panels, func(i, j int) bool { return v.Panels[i].Name < v.Panels[j].Name })
 	sortNeeds(v.Needs)
 	return v, nil
+}
+
+// panels are the sessions of src that console repo shows: a repository's,
+// or those a console without one takes; each with what it does now, read
+// from its transcript, and its last reply.
+func (src *uiSource) panels(cfg *Config, repo string, needs []uiNeed, secret func(...string) bool) []uiPanel {
+	var out []uiPanel
+	for _, name := range cfg.SessionNames() {
+		sess := cfg.Sessions[name]
+		if sess.Repository != repo && !(sess.Repository == "" && cfg.Console(name) == repo) {
+			continue
+		}
+		p := uiPanel{Src: src.Name, Name: name, Kind: sess.Kind, State: "unknown"}
+		t := src.st.Tracks[name]
+		if t != nil && t.State != "" {
+			p.State, p.Since = string(t.State), t.Since
+		}
+		// A finished session takes no message: one addressed to it fails.
+		if sess.Role == "" && src.st.Mode == ModeLive && (t == nil || t.State != Done) {
+			p.MessageTo = repo
+		}
+		// Only a session that runs has anything doing: a finished one's
+		// transcript is not read, and a call it left open is not shown.
+		if running(t) {
+			if a, ok := sessionActivity(cfg, sess, t); ok {
+				if a.Now != nil {
+					doing := activityStep(*a.Now, secret)
+					p.Doing = &doing
+				} else if n := len(a.Ran); n > 0 && (t == nil || t.State == Working) {
+					last := activityStep(a.Ran[n-1], secret)
+					p.Doing = &last
+				}
+			}
+		}
+		for _, n := range needs {
+			if n.Session == name && n.Src == src.Name && (n.Kind == "decision" || n.Kind == "blocked") {
+				p.Questions++
+			}
+		}
+		if t != nil {
+			for i := len(t.Turns) - 1; i >= 0; i-- {
+				if tr := t.Turns[i]; tr.Role == TurnSummary {
+					p.ReplyAt = tr.At
+					p.Reply, p.ReplyMore = folded(tr.Text)
+					if tr.Withheld || secret(tr.Text) {
+						p.Reply, p.ReplyMore = template.HTML(template.HTMLEscapeString(withheldMessage)), ""
+					}
+					break
+				}
+			}
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// running says whether a session's transcript may show a tool it runs
+// now: not one that is done, stopped, crash-looping or parked, whose call
+// left open is no more running.
+func running(t *Track) bool {
+	return t == nil || !t.Parked && t.State != Done && t.State != Stopped && t.State != CrashLooping
 }
 
 // uiEvent is one line of a session's timeline.
@@ -712,6 +848,7 @@ type uiTurn struct {
 	Role string
 	At   time.Time
 	Body template.HTML
+	More template.HTML // the whole text of a long one, folded
 }
 
 // uiSessionPage is a session's view: its row, its latest turns, its
@@ -730,6 +867,11 @@ type uiSessionPage struct {
 	// MessageTo is the repository or console a message to the session is
 	// recorded for, "" when the session takes none here (#56).
 	MessageTo string
+	// Activity is the tools it ran lately and Doing the one it runs now,
+	// read from its transcript (#56 C); HasActivity when one was read.
+	Activity    []uiStep
+	Doing       *uiStep
+	HasActivity bool
 }
 
 // uiTurns is how many of a session's latest turns its view shows.
@@ -764,6 +906,18 @@ func (u *UI) sessionView(src *uiSource, name string, now time.Time) (*uiSessionP
 	}
 	secret := confidentialMatcher(cfg)
 	t := src.st.Tracks[name]
+	if sess, ok := cfg.Sessions[name]; ok {
+		if a, ok := sessionActivity(cfg, sess, t); ok {
+			v.HasActivity = true
+			for _, tn := range a.Ran {
+				v.Activity = append(v.Activity, activityStep(tn, secret))
+			}
+			if a.Now != nil && running(t) {
+				now := activityStep(*a.Now, secret)
+				v.Doing = &now
+			}
+		}
+	}
 	if !secret(t.Reason) {
 		v.Reason = t.Reason
 	}
@@ -772,11 +926,11 @@ func (u *UI) sessionView(src *uiSource, name string, now time.Time) (*uiSessionP
 		turns = turns[len(turns)-uiTurns:]
 	}
 	for _, tr := range turns {
-		body := markdown(tr.Text)
+		body, more := folded(tr.Text)
 		if tr.Withheld || secret(tr.Text) {
-			body = template.HTML(template.HTMLEscapeString(withheldMessage))
+			body, more = template.HTML(template.HTMLEscapeString(withheldMessage)), ""
 		}
-		v.Turns = append(v.Turns, uiTurn{Role: tr.Role, At: tr.At, Body: body})
+		v.Turns = append(v.Turns, uiTurn{Role: tr.Role, At: tr.At, Body: body, More: more})
 	}
 	if sess, ok := cfg.Sessions[name]; ok && sess.Workdir != "" {
 		b, err := readRegular(filepath.Join(sess.Workdir, "STATUS.md"), statusLimit)

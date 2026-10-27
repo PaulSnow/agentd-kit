@@ -477,7 +477,8 @@ func (u *UI) serveView(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/console/"):
 		name = "console"
 		var v *uiConsole
-		if v, err = u.consoleView(strings.TrimPrefix(path, "/console/"), now); err == nil && v == nil {
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		if v, err = u.consoleView(strings.TrimPrefix(path, "/console/"), page, now); err == nil && v == nil {
 			http.NotFound(w, r)
 			return
 		}

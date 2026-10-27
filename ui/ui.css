@@ -146,6 +146,15 @@ textarea { width: 100%; resize: vertical; }
 .activity { list-style: none; margin: var(--space-1) 0 0 var(--space-3); padding: 0; font-size: var(--size-s); }
 .tool code { white-space: pre-wrap; word-break: break-all; }
 .tool-failed code { color: var(--warn); }
+.more > summary { list-style: none; cursor: pointer; }
+.more > summary::-webkit-details-marker { display: none; }
+.more-label { font-size: var(--size-s); text-decoration: underline; }
+.more[open] > summary .show-all, .more:not([open]) > summary .show-less { display: none; }
+.fold:has(> .more[open]) > .preview { display: none; }
+.panels { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 22rem), 1fr)); gap: var(--space-3); }
+.panel textarea { width: 100%; }
+.doing code { white-space: pre-wrap; word-break: break-all; }
+.pager { display: flex; gap: var(--space-3); margin-top: var(--space-2); }
 .thread { margin: var(--space-2) 0 0 var(--space-3); }
 .msg-head { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: baseline; font-size: var(--size-s); margin-bottom: var(--space-1); }
 .from { font-weight: 600; }
