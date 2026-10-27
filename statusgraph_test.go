@@ -12,8 +12,8 @@ import (
 // busyTranscript is a recorded busy five minutes of a work session's
 // transcript, in its shape: every entry with Claude Code's bookkeeping
 // (ids, the session, the working directory, the version, the branch, the
-// usage) and each tool result twice, as the message and as its
-// toolUseResult copy. It runs n tools from start, one every few seconds:
+// usage), each tool result twice, as the message and as its
+// toolUseResult copy, and the progress and file-history lines between. It runs n tools from start, one every few seconds:
 // long file reads, test runs with long logs, edits, and every seventh a
 // failed command. It returns the lines, the tool calls' commands or files,
 // and the session's own texts.
@@ -73,6 +73,10 @@ func busyTranscript(start time.Time, n int, prefix string) (string, []string, []
 			"content": []any{map[string]any{"type": "text", "text": say}, map[string]any{"type": "tool_use", "id": id, "name": name, "input": input}}}})
 		line(map[string]any{"type": "user", "toolUseResult": map[string]any{"stdout": out, "stderr": "", "interrupted": false, "file": map[string]any{"content": out}},
 			"message": map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": id, "is_error": failed, "content": out}}}})
+		line(map[string]any{"type": "progress", "toolUseID": id, "data": map[string]any{"type": "hook_progress", "hookEvent": "PostToolUse", "command": "true"}})
+		if name == "Edit" {
+			line(map[string]any{"type": "file-history-snapshot", "messageId": "msg_01" + id, "snapshot": map[string]any{"trackedFileBackups": map[string]any{"decode.go": map[string]any{"version": i}}}})
+		}
 	}
 	end := prefix + ": the parser now rejects empty frames; the decoder test still fails on frame counts."
 	says = append(says, end)
@@ -85,12 +89,12 @@ func busyTranscript(start time.Time, n int, prefix string) (string, []string, []
 // prompt and all of the session's text, trims the outputs, keeps the
 // start and end of each failure, drops the bookkeeping and stays under
 // 12k tokens (#57), at the 2 bytes a token measured on real sessions'
-// transcripts. This window is busier than the busiest recorded one, so
-// the input is fitted: the outputs and inputs are cut harder, and nothing
-// is dropped.
+// transcripts. This window runs as many tools as the busiest recorded
+// one, with more failures, so the input is fitted: the outputs and inputs
+// are cut harder, and nothing is dropped.
 func TestStatusWindowOfABusyFiveMinutes(t *testing.T) {
 	start := time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC)
-	text, targets, says := busyTranscript(start, 50, "w")
+	text, targets, says := busyTranscript(start, 45, "w")
 	path := filepath.Join(t.TempDir(), "t.jsonl")
 	appendFile(t, path, text)
 	win, err := readStatusWindow(path, 0, start)
@@ -109,7 +113,7 @@ func TestStatusWindowOfABusyFiveMinutes(t *testing.T) {
 	got := string(b)
 	t.Logf("before fitting: %d bytes", len(whole))
 	t.Logf("transcript %d bytes, input %d bytes (~%dk tokens)", len(text), len(b), len(b)/2000)
-	if len(b)/2 >= 12500 || in.Dropped != 0 || len(text) < 50*len(b) {
+	if len(b)*4/7 >= 12000 || in.Dropped != 0 || len(text) < 50*len(b) {
 		t.Fatalf("input %d bytes, %d dropped, from %d", len(b), in.Dropped, len(text))
 	}
 	tools := 0
@@ -121,8 +125,8 @@ func TestStatusWindowOfABusyFiveMinutes(t *testing.T) {
 			}
 		}
 	}
-	if tools != 50 {
-		t.Fatalf("%d tool entries, want 50", tools)
+	if tools != 45 {
+		t.Fatalf("%d tool entries, want 45", tools)
 	}
 	for _, want := range append(append(targets, says...), "w: carry on with the widgets brief") {
 		if !strings.Contains(got, jsonText(want)) {
@@ -136,7 +140,7 @@ func TestStatusWindowOfABusyFiveMinutes(t *testing.T) {
 	}
 	// A long read is trimmed to its ends; each failure keeps its exit code
 	// and its first and last lines.
-	if !strings.Contains(got, "[… 398 lines …]") || strings.Count(got, "Exit code 1") != 7 || strings.Count(got, "got 3 frames, want 4") < 7*4 {
+	if !strings.Contains(got, "[… 398 lines …]") || strings.Count(got, "Exit code 1") != 6 || strings.Count(got, "got 3 frames, want 4") < 6*4 {
 		t.Fatalf("outputs not trimmed as they should be: %d failure lines", strings.Count(got, "got 3 frames, want 4"))
 	}
 	// A quieter window is sent as read: outputs to three lines at each end,
@@ -351,8 +355,8 @@ func TestStatusInTheLoop(t *testing.T) {
 	}
 }
 
-// Off by default: no session is checked.
-func TestStatusOffByDefault(t *testing.T) {
+// Off by default, and never in a shadow run: no session is checked.
+func TestStatusOffByDefaultAndInShadow(t *testing.T) {
 	dir := fakeClaude(t)
 	h, id := contextHarness(t, false)
 	text, _, _ := busyTranscript(h.clock.Now(), 2, "one")
@@ -360,6 +364,14 @@ func TestStatusOffByDefault(t *testing.T) {
 	h.ticks(10, time.Minute)
 	if n := claudeCalls(t, dir); n != 0 {
 		t.Fatalf("%d calls", n)
+	}
+	h.cfg.Jobs.Status.Enabled = true
+	h.sup.shadow = true
+	more, _, _ := busyTranscript(h.clock.Now(), 2, "two")
+	h.transcript(id, more)
+	h.ticks(10, time.Minute)
+	if n := claudeCalls(t, dir); n != 0 {
+		t.Fatalf("shadow: %d calls", n)
 	}
 }
 

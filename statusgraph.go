@@ -37,7 +37,7 @@ import (
 // Status defaults, when the config leaves them unset.
 const (
 	DefaultStatusEvery    = 5 * time.Minute
-	DefaultStatusMaxInput = 24 << 10 // bytes: about 12k tokens, at the 2 bytes a token measured on sessions' transcripts
+	DefaultStatusMaxInput = 20 << 10 // bytes: under 12k tokens, at the 1.75 to 2 bytes a token measured on sessions' transcripts
 )
 
 // Bounds on what one window sends.
@@ -116,6 +116,9 @@ type StatusFacts struct {
 // and the record the model gave, or the error that left a gap instead.
 // Usage is what the call cost.
 type StatusPayload struct {
+	// Checked is when the check began: the next one's window, and the CI
+	// changes it sends, start there.
+	Checked    time.Time     `json:"checked"`
 	Transcript string        `json:"transcript,omitempty"`
 	Offset     int64         `json:"offset"`
 	Head       string        `json:"head,omitempty"`
@@ -126,6 +129,7 @@ type StatusPayload struct {
 	Error      string        `json:"error,omitempty"`
 	Model      string        `json:"model,omitempty"`
 	Usage      *JobUsage     `json:"usage,omitempty"`
+	statusMD   *string       // STATUS.md as the check read it, kept once it is logged
 }
 
 // StatusPoint is one check as the graph shows it: a record, or a gap
@@ -568,15 +572,22 @@ type statusCopies struct {
 	next map[string]time.Time // a session found with nothing new is not read again before it
 }
 
-func (c *statusCopies) swap(name, text string) (string, bool) {
+func (c *statusCopies) get(name string) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	text, ok := c.text[name]
+	return text, ok
+}
+
+// set keeps text as session name's STATUS.md once its check is logged,
+// so a change a check read and never sent is sent by the next.
+func (c *statusCopies) set(name, text string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.text == nil {
 		c.text = map[string]string{}
 	}
-	before, ok := c.text[name]
 	c.text[name] = text
-	return before, ok
 }
 
 // statusDue says whether session name, whose Track is t, is checked now:
@@ -605,9 +616,11 @@ func (s *Supervisor) statusDue(name string, sess Session, t *Track, now time.Tim
 }
 
 // checkStatuses starts a status check, in a worker each, of every active
-// session that is due one, when the config turns them on.
+// session that is due one, when the config turns them on. A shadow run
+// makes no calls: its checks would be the live run's again, paid twice,
+// since a check is a run's event and not shared.
 func (s *Supervisor) checkStatuses(now time.Time) {
-	if !s.cfg.Jobs.Status.Enabled {
+	if !s.cfg.Jobs.Status.Enabled || s.shadow {
 		return
 	}
 	for _, name := range s.cfg.SessionNames() {
@@ -631,6 +644,9 @@ func (s *Supervisor) checkStatuses(now time.Time) {
 				}
 			}
 			w.emit(name, Event{Kind: KindStatus, Status: p})
+			if p.statusMD != nil {
+				w.status.set(name, *p.statusMD)
+			}
 		})
 	}
 }
@@ -659,12 +675,14 @@ func (s *Supervisor) statusCheck(name string, sess Session, t *Track, now time.T
 	}
 	in := statusInput{Session: name, Kind: sess.Kind, Issue: sess.Issue, Minutes: int(now.Sub(since).Round(time.Minute) / time.Minute),
 		Previous: t.StatusLast, Entries: win.Entries}
-	p := &StatusPayload{Transcript: id, Offset: win.Offset, Head: t.StatusHead, Entries: len(win.Entries)}
+	p := &StatusPayload{Checked: now, Transcript: id, Offset: win.Offset, Head: t.StatusHead, Entries: len(win.Entries)}
 	if b, err := os.ReadFile(filepath.Join(sess.Workdir, "STATUS.md")); err == nil {
-		if before, ok := s.status.swap(name, string(b)); ok {
-			in.StatusAdd, in.StatusDel = statusLines(before, string(b))
+		text := string(b)
+		p.statusMD = &text
+		if before, ok := s.status.get(name); ok {
+			in.StatusAdd, in.StatusDel = statusLines(before, text)
 		} else {
-			in.StatusMD = cutMiddle(string(b), statusMDMax)
+			in.StatusMD = cutMiddle(text, statusMDMax)
 		}
 	}
 	if head, err := s.git.Head(sess.Cwd); err == nil && head != "" {
@@ -675,11 +693,16 @@ func (s *Supervisor) statusCheck(name string, sess Session, t *Track, now time.T
 		p.Head = head
 	}
 	for _, c := range t.StatusCI {
-		if c.At.After(t.StatusAt) {
+		if c.At.After(since) {
 			in.CI = append(in.CI, strings.TrimSpace(c.Ref+" "+c.State+" "+c.Cause))
 		}
 	}
 	if in.empty() {
+		// Nothing to send, and no change lost: STATUS.md as read is the
+		// copy the next check compares with.
+		if p.statusMD != nil {
+			s.status.set(name, *p.statusMD)
+		}
 		return nil, nil
 	}
 	f := StatusFacts{State: string(t.State), Commits: len(in.Commits)}
@@ -712,7 +735,10 @@ func (s *Supervisor) statusCheck(name string, sess Session, t *Track, now time.T
 // applyStatus folds a check into the session's Track: where the next
 // window starts, the latest record, and the graph's point.
 func (t *Track) applyStatus(at time.Time, p *StatusPayload) {
-	t.StatusAt, t.StatusTranscript, t.StatusOffset, t.StatusHead = at, p.Transcript, p.Offset, p.Head
+	t.StatusAt, t.StatusTranscript, t.StatusOffset, t.StatusHead = p.Checked, p.Transcript, p.Offset, p.Head
+	if p.Checked.IsZero() {
+		t.StatusAt = at
+	}
 	if p.Record != nil {
 		r := *p.Record
 		t.StatusLast = &r
@@ -788,7 +814,7 @@ func statusCheckCmd(args []string, w io.Writer) error {
 		return err
 	}
 	out := map[string]any{"entries": len(in.Entries), "dropped": in.Dropped, "input_bytes": len(input),
-		"input_tokens_estimate": len(input) / 4, "transcript_bytes": info.Size()}
+		"input_tokens_estimate": len(input) * 4 / 7, "transcript_bytes": info.Size()}
 	if *show {
 		out["input"] = json.RawMessage(input)
 	}
