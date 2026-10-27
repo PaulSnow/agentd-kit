@@ -260,36 +260,51 @@ const workdirAttachments = "attachments"
 
 // copyAttachments copies atts into workdir's attachments/, each once by
 // its stored name, and returns them as the session is given them: a work
-// session reads in its workdir, never agentd's state directory.
-func copyAttachments(cfg *Config, workdir string, atts []AttachmentPayload) ([]AttachmentRef, error) {
+// session reads in its workdir, never agentd's state directory. One that
+// cannot be copied, gone from the state directory say, is left out and
+// named in missing, so it never holds up the rest; nothing is written
+// through a symbolic link, so nothing lands outside the workdir.
+func copyAttachments(cfg *Config, workdir string, atts []AttachmentPayload) (refs []AttachmentRef, missing []string) {
 	if len(atts) == 0 {
 		return nil, nil
 	}
-	dir := filepath.Join(workdir, workdirAttachments)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
+	ids := func() []string {
+		var out []string
+		for _, a := range atts {
+			out = append(out, a.ID)
+		}
+		return out
 	}
-	if _, err := os.Stat(filepath.Join(dir, ".gitignore")); errors.Is(err, os.ErrNotExist) {
-		if err := writeAtomic(filepath.Join(dir, ".gitignore"), []byte("*\n")); err != nil {
-			return nil, err
+	dir := filepath.Join(workdir, workdirAttachments)
+	if info, err := os.Lstat(dir); err == nil && !info.IsDir() {
+		return nil, ids()
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, ids()
+	}
+	ignore := filepath.Join(dir, ".gitignore")
+	if _, err := os.Lstat(ignore); errors.Is(err, os.ErrNotExist) {
+		if err := writeAtomic(ignore, []byte("*\n")); err != nil {
+			return nil, ids()
 		}
 	}
 	for _, a := range atts {
 		dst := filepath.Join(dir, a.Hash+attachmentExts[a.Type])
-		if info, err := os.Stat(dst); err == nil && info.Mode().IsRegular() && info.Size() == a.Bytes {
+		info, err := os.Lstat(dst)
+		if err == nil && (!info.Mode().IsRegular() || info.Size() != a.Bytes) {
+			missing = append(missing, a.ID) // not agentd's copy: left alone
 			continue
 		}
-		b, err := os.ReadFile(attachmentPath(cfg, a))
 		if err != nil {
-			return nil, fmt.Errorf("attachment %s: %w", a.ID, err)
+			b, rerr := os.ReadFile(attachmentPath(cfg, a))
+			if rerr != nil || writeAtomic(dst, b) != nil {
+				missing = append(missing, a.ID)
+				continue
+			}
 		}
-		if err := writeAtomic(dst, b); err != nil {
-			return nil, err
-		}
+		refs = append(refs, AttachmentRef{ID: a.ID, Name: a.Name, Type: a.Type, Bytes: a.Bytes, Path: dst})
 	}
-	return attachmentRefs(atts, func(a AttachmentPayload) string {
-		return filepath.Join(dir, a.Hash+attachmentExts[a.Type])
-	}), nil
+	return refs, missing
 }
 
 // hasAttachment says whether atts holds the attachment id.

@@ -605,8 +605,15 @@
     return fs;
   }
 
+  // textFile: a text file of any name, a log say, which a browser may
+  // call text/x-log, or nothing; agentd reads its bytes to be sure.
   function textFile(f) {
-    return f.type === "" && /\.(txt|log)$/i.test(f.name);
+    return f.type.indexOf("text/") === 0 || f.type === "" && /\.(txt|log)$/i.test(f.name);
+  }
+
+  // same says whether two files are one picked again.
+  function same(a, b) {
+    return a.name === b.name && a.size === b.size && a.lastModified === b.lastModified;
   }
 
   // say shows a refusal under the form, or clears it.
@@ -716,7 +723,9 @@
     var form = input.form;
     // The input now holds only what was picked: the held files go back
     // in with it.
-    add(form, picked.filter(function (f) { return filesOf(form).indexOf(f) < 0; }));
+    add(form, picked.filter(function (f) {
+      return !filesOf(form).some(function (g) { return same(f, g); });
+    }));
   });
 
   document.addEventListener("paste", function (e) {

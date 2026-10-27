@@ -115,7 +115,7 @@
 <ol class="entries">{{range .Rendered}}{{.}}{{else}}<li class="empty">No messages yet.</li>{{end}}</ol>
 </section>
 <p class="box-new" hidden><button type="button" class="link">new ↓</button></p>
-{{if .ReplySrc}}<form id="composer" class="composer" method="post" action="/respond"><input type="hidden" name="token" value="{{.Token}}"><input type="hidden" name="back" value="{{.Back}}"><input type="hidden" name="src" value="{{.ReplySrc}}"><input type="hidden" name="repository" value="{{.Repository}}"><input type="hidden" name="entry" value="">
+{{if .ReplySrc}}<form id="composer" class="composer" method="post" action="/respond" enctype="multipart/form-data"><input type="hidden" name="token" value="{{.Token}}"><input type="hidden" name="back" value="{{.Back}}"><input type="hidden" name="src" value="{{.ReplySrc}}"><input type="hidden" name="repository" value="{{.Repository}}"><input type="hidden" name="entry" value="">
 <div class="composer-head"><label>To: <select name="session" aria-label="Send to">{{if not .Other}}<option value="">agent (new thread)</option>{{end}}{{range .To}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
 <span class="re-chip" hidden>Re: <span class="re-label"></span> <button type="button" class="re-clear" aria-label="Respond to no entry">×</button></span>
 <button type="button" class="open-questions"{{if not .Open}} hidden{{end}}>{{len .Open}} open question{{if ne (len .Open) 1}}s{{end}}</button></div>
@@ -145,7 +145,7 @@
 {{with .Answer}}<p class="answered">Answer: <strong>{{if .Answer}}{{if yes .Answer}}yes{{else}}no{{end}}{{else if .Choice}}{{.Choice}}{{else if .Choices}}{{range $i, $c := .Choices}}{{if $i}}, {{end}}{{$c}}{{end}}{{else}}{{.Text}}{{end}}</strong></p>{{end}}
 {{if .Text}}<div class="md">{{.Body}}</div>{{end}}{{template "attachments" .Attachments}}{{template "thread" (ctx $p .)}}</li>{{end}}</ol>{{end}}
 {{if and .Entry $p.ReplySrc}}<details class="respond" data-key="r-{{.DOMID}}"><summary aria-label="Respond to this entry">Respond</summary>
-<form method="post" action="/respond"><input type="hidden" name="token" value="{{$p.Token}}"><input type="hidden" name="back" value="{{$p.Back}}"><input type="hidden" name="src" value="{{.Src}}"><input type="hidden" name="repository" value="{{$p.Repository}}"><input type="hidden" name="entry" value="{{.Entry}}">
+<form method="post" action="/respond" enctype="multipart/form-data"><input type="hidden" name="token" value="{{$p.Token}}"><input type="hidden" name="back" value="{{$p.Back}}"><input type="hidden" name="src" value="{{.Src}}"><input type="hidden" name="repository" value="{{$p.Repository}}"><input type="hidden" name="entry" value="{{.Entry}}">
 {{if and .Open .Decision}}{{with .Decision}}{{if not .Withheld}}{{template "decision-inputs" .Decision}}{{end}}{{end}}{{end}}
 {{with .Quick}}<div class="choices quick">{{range .}}<button type="submit" name="quick" value="{{.}}">{{.}}</button>{{end}}</div>{{end}}
 <textarea name="text" rows="2" maxlength="4000" aria-label="Your response"></textarea>

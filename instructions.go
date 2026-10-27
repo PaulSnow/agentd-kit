@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -547,9 +548,9 @@ func writeInstructions(cfg *Config, workdir string, ins []*Instruction, now time
 		Instructions []InstructionDoc `json:"instructions"`
 	}{Instructions: []InstructionDoc{}}
 	for _, in := range ins {
-		atts, err := copyAttachments(cfg, workdir, in.Attachments)
-		if err != nil {
-			return err
+		atts, missing := copyAttachments(cfg, workdir, in.Attachments)
+		if len(missing) > 0 {
+			fmt.Fprintf(os.Stderr, "agentd: instruction %s: attachments %s could not be copied into the workdir\n", in.ID, strings.Join(missing, ", "))
 		}
 		doc.Instructions = append(doc.Instructions, InstructionDoc{ID: in.ID, Text: in.Text, From: in.From, At: in.At, Re: in.Re, Answer: in.Answer, Attachments: atts,
 			New: in.Replied.IsZero() && (in.Delivered.IsZero() || now.Sub(in.Delivered) < ChatIdle)})

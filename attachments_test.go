@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -35,30 +36,63 @@ var testPDF = []byte("%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << 
 type upload struct {
 	name string
 	body []byte
+	pad  int64 // zero bytes after body
 }
 
 // multipartTo sends fields and files to path as the owner's page sends
 // them, from the UI itself, with token.
 func multipartTo(u *UI, path, token string, fields map[string]string, files ...upload) *httptest.ResponseRecorder {
-	var b bytes.Buffer
-	mw := multipart.NewWriter(&b)
-	mw.WriteField("token", token)
-	for k, v := range fields {
-		mw.WriteField(k, v)
-	}
-	for _, f := range files {
-		w, _ := mw.CreateFormFile("file", f.name)
-		w.Write(f.body)
-	}
-	mw.Close()
-	req := httptest.NewRequest("POST", path, &b)
+	return multipartFrom(u, path, "http://"+pageAddr, token, fields, files...)
+}
+
+// multipartFrom is multipartTo with the Origin given. The body is
+// streamed, so a large one is never held whole; the files the form
+// spooled are removed, as http.Server removes them after a request.
+func multipartFrom(u *UI, path, origin, token string, fields map[string]string, files ...upload) *httptest.ResponseRecorder {
+	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
+	go func() {
+		mw.WriteField("token", token)
+		for k, v := range fields {
+			mw.WriteField(k, v)
+		}
+		for _, f := range files {
+			w, err := mw.CreateFormFile("file", f.name)
+			if err == nil {
+				_, err = w.Write(f.body)
+			}
+			if err == nil && f.pad > 0 {
+				_, err = io.Copy(w, io.LimitReader(zeros{}, f.pad))
+			}
+			if err != nil {
+				pw.CloseWithError(err)
+				return
+			}
+		}
+		pw.CloseWithError(mw.Close())
+	}()
+	req := httptest.NewRequest("POST", path, pr)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
-	req.Header.Set("Origin", "http://"+pageAddr)
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
 	req.Host = pageAddr
 	req.RemoteAddr = "192.0.2.20:51000"
 	w := httptest.NewRecorder()
 	u.ServeHTTP(w, req)
+	pr.CloseWithError(io.ErrClosedPipe) // a refusal reads no further
+	if req.MultipartForm != nil {
+		req.MultipartForm.RemoveAll()
+	}
 	return w
+}
+
+// zeros reads as zero bytes without end.
+type zeros struct{}
+
+func (zeros) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
 }
 
 // attachmentFixture is the UI fixture with its configs' state directory
@@ -89,7 +123,7 @@ func TestUIAttachmentPasted(t *testing.T) {
 	u, f, dir := attachmentFixture(t)
 	shot := testPNG(t)
 	w := multipartTo(u, "/respond", u.token, map[string]string{"src": "coord", "repository": "widgets", "text": "What is wrong here?", "back": "/console/widgets"},
-		upload{"image.png", shot}, upload{"notes.log", []byte("panic: squeak\n")})
+		upload{"image.png", shot, 0}, upload{"notes.log", []byte("panic: squeak\n"), 0})
 	if w.Code != http.StatusSeeOther {
 		t.Fatalf("send: %d %s", w.Code, w.Body.String())
 	}
@@ -121,7 +155,7 @@ func TestUIAttachmentPasted(t *testing.T) {
 	// The same screenshot again is stored once; sent alone, it is a
 	// message without words, not a withheld one.
 	withheld := strings.Count(owner(t, u, "/console/widgets"), withheldMessage)
-	if w := multipartTo(u, "/respond", u.token, map[string]string{"src": "coord", "repository": "widgets", "text": "", "back": "/console/widgets"}, upload{"image.png", shot}); w.Code != http.StatusSeeOther {
+	if w := multipartTo(u, "/respond", u.token, map[string]string{"src": "coord", "repository": "widgets", "text": "", "back": "/console/widgets"}, upload{"image.png", shot, 0}); w.Code != http.StatusSeeOther {
 		t.Fatalf("files alone: %d %s", w.Code, w.Body.String())
 	}
 	if ents, _ := os.ReadDir(filepath.Join(dir, "attachments", "widgets")); len(ents) != 2 {
@@ -164,9 +198,8 @@ func TestUIAttachmentRefused(t *testing.T) {
 	fields := map[string]string{"src": "coord", "repository": "widgets", "text": "Look", "back": "/console/widgets"}
 	eleven := make([]upload, 11)
 	for i := range eleven {
-		eleven[i] = upload{"shot.png", shot}
+		eleven[i] = upload{"shot.png", shot, 0}
 	}
-	big := append(append([]byte{}, shot...), make([]byte, maxAttachment)...)
 	cases := []struct {
 		name  string
 		token string
@@ -174,13 +207,19 @@ func TestUIAttachmentRefused(t *testing.T) {
 		code  int
 		want  string
 	}{
-		{"html named png", u.token, []upload{{"x.png", []byte("<html><script>alert(1)</script></html>")}}, http.StatusBadRequest, "x.png is text/html; agentd takes PNG, JPEG, GIF, WebP, PDF or plain text files only"},
-		{"zip", u.token, []upload{{"a.zip", []byte("PK\x03\x04rest")}}, http.StatusBadRequest, "agentd takes"},
-		{"too big", u.token, []upload{{"big.png", big}}, http.StatusBadRequest, "over the 20 MB a file may be"},
-		{"empty", u.token, []upload{{"none.txt", nil}}, http.StatusBadRequest, "none.txt is empty"},
+		{"html named png", u.token, []upload{{"x.png", []byte("<html><script>alert(1)</script></html>"), 0}}, http.StatusBadRequest, "x.png is text/html; agentd takes PNG, JPEG, GIF, WebP, PDF or plain text files only"},
+		{"zip", u.token, []upload{{"a.zip", []byte("PK\x03\x04rest"), 0}}, http.StatusBadRequest, "agentd takes"},
+		{"too big", u.token, []upload{{"big.png", shot, maxAttachment}}, http.StatusBadRequest, "over the 20 MB a file may be"},
+		{"empty", u.token, []upload{{"none.txt", nil, 0}}, http.StatusBadRequest, "none.txt is empty"},
 		{"eleven", u.token, eleven, http.StatusBadRequest, "at most 10 files"},
-		{"a good one with a bad one", u.token, []upload{{"shot.png", shot}, {"x.exe", []byte("MZ\x90\x00")}}, http.StatusBadRequest, "x.exe is"},
-		{"no token", "nope", []upload{{"shot.png", shot}}, http.StatusForbidden, "token"},
+		{"a good one with a bad one", u.token, []upload{{"shot.png", shot, 0}, {"x.exe", []byte("MZ\x90\x00"), 0}}, http.StatusBadRequest, "x.exe is"},
+		{"no token", "nope", []upload{{"shot.png", shot, 0}}, http.StatusForbidden, "token"},
+	}
+	for _, origin := range []string{"", "http://elsewhere.example"} {
+		before := f.coordBuf.Len()
+		if w := multipartFrom(u, "/respond", origin, u.token, fields, upload{"shot.png", shot, 0}); w.Code != http.StatusForbidden || f.coordBuf.Len() != before {
+			t.Errorf("origin %q: %d", origin, w.Code)
+		}
 	}
 	for _, c := range cases {
 		before := f.coordBuf.Len()
@@ -198,7 +237,7 @@ func TestUIAttachmentRefused(t *testing.T) {
 	// The whole body is bounded too.
 	huge := make([]upload, 11)
 	for i := range huge {
-		huge[i] = upload{"big.png", big}
+		huge[i] = upload{"big.png", shot, maxAttachment}
 	}
 	if w := multipartTo(u, "/respond", u.token, fields, huge...); w.Code != http.StatusRequestEntityTooLarge || !strings.Contains(w.Body.String(), "at most 10 files of at most 20 MB") {
 		t.Fatalf("a body over the bound: %d %s", w.Code, w.Body.String())
@@ -212,7 +251,7 @@ func TestUIAttachmentRefused(t *testing.T) {
 func TestAttachmentReachesWorkSession(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{EventLog: filepath.Join(dir, "state", "events.jsonl")}
-	staged := stage(t, upload{"spec.pdf", testPDF})
+	staged := stage(t, upload{"spec.pdf", testPDF, 0})
 	atts, err := storeAttachments(cfg, "widgets", "I1", staged)
 	if err != nil {
 		t.Fatal(err)
@@ -239,6 +278,33 @@ func TestAttachmentReachesWorkSession(t *testing.T) {
 	}
 	if ig, _ := os.ReadFile(filepath.Join(work, "attachments", ".gitignore")); string(ig) != "*\n" {
 		t.Fatalf(".gitignore %q", ig)
+	}
+	// A file gone from the state directory is left out, and holds up
+	// neither the instruction nor the rest; a link in the workdir is
+	// never written through.
+	more, err := storeAttachments(cfg, "widgets", "I2", stage(t, upload{"a.txt", []byte("one\n"), 0}, upload{"b.txt", []byte("two\n"), 0}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(attachmentPath(cfg, more[0]))
+	outside := filepath.Join(dir, "outside.txt")
+	os.WriteFile(outside, []byte("six\n"), 0o600)
+	work2 := filepath.Join(dir, "work2")
+	os.MkdirAll(work2, 0o755)
+	refs, missing := copyAttachments(cfg, work2, more)
+	if len(refs) != 1 || refs[0].ID != more[1].ID || len(missing) != 1 || missing[0] != more[0].ID {
+		t.Fatalf("refs %+v missing %v", refs, missing)
+	}
+	linked := filepath.Join(dir, "work3")
+	os.MkdirAll(linked, 0o755)
+	os.Symlink(dir, filepath.Join(linked, "attachments"))
+	if refs, missing := copyAttachments(cfg, linked, more[1:]); len(refs) != 0 || len(missing) != 1 {
+		t.Fatalf("written through a link: %+v", refs)
+	}
+	os.MkdirAll(filepath.Join(dir, "work4", "attachments"), 0o755)
+	os.Symlink(outside, filepath.Join(dir, "work4", "attachments", more[1].Hash+".txt"))
+	if refs, _ := copyAttachments(cfg, filepath.Join(dir, "work4"), more[1:]); len(refs) != 0 {
+		t.Fatalf("a link taken for the copy: %+v", refs)
 	}
 	if !strings.Contains(string(b), `"attachments":[{"id":"`+atts[0].ID+`","name":"spec.pdf","type":"application/pdf","bytes":`) {
 		t.Fatalf("the record's shape:\n%s", b)
@@ -278,7 +344,7 @@ func TestThreadAgentGetsAttachment(t *testing.T) {
 	h.ticks(1, time.Minute)
 	claudeAnswers(t, dir, 1, agentOut("The screenshot shows a red dot on a white field.", ""))
 	shot := testPNG(t)
-	if err := UIInstruction(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", "", "What does this show?", stage(t, upload{"image.png", shot})); err != nil {
+	if err := UIInstruction(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", "", "What does this show?", stage(t, upload{"image.png", shot, 0})); err != nil {
 		t.Fatal(err)
 	}
 	h.ticks(2, time.Minute)
@@ -385,7 +451,7 @@ func TestAttachmentNames(t *testing.T) {
 		}
 	}
 	cfg := &Config{EventLog: filepath.Join(t.TempDir(), "events.jsonl"), ConfidentialPatterns: []string{"secret-[a-z]+"}}
-	atts, err := storeAttachments(cfg, "widgets", "I1", stage(t, upload{"secret-plan.png", testPNG(t)}))
+	atts, err := storeAttachments(cfg, "widgets", "I1", stage(t, upload{"secret-plan.png", testPNG(t), 0}))
 	if err != nil || atts[0].Name != "attachment.png" {
 		t.Fatalf("%v %+v", err, atts)
 	}
