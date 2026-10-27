@@ -98,7 +98,7 @@ func TestConsolePostWithheld(t *testing.T) {
 // session, a pane not running Claude, or a dialog on screen is refused,
 // and nothing is typed or recorded.
 func TestConsolePostTo(t *testing.T) {
-	h := newHarness(t, false, "a")
+	h := newHarness(t, false, "a", "b-shell", "c-dialog", "d-dead", "e-trust")
 	tmux := newFakeTmux()
 	tmux.alive["a"], tmux.panes["a"] = true, "❯ "
 	log := NewLogWriter(h.buf)
@@ -126,6 +126,12 @@ func TestConsolePostTo(t *testing.T) {
 		if n := tmux.count("type", to); n != 0 {
 			t.Errorf("typed into %s", to)
 		}
+	}
+	// A session agentd does not run, one on another machine say, is
+	// refused by name, even when a tmux session here has the name (#66).
+	tmux.alive["laptop"], tmux.panes["laptop"] = true, "❯ "
+	if err := PostMessage(h.cfg, log, tmux, h.clock.Now(), MessagePost{Console: "widgets", Text: "go 1b", To: "laptop"}); err == nil || !strings.Contains(err.Error(), `"laptop"`) {
+		t.Errorf("--to a session agentd does not run: %v", err)
 	}
 	if err := PostMessage(h.cfg, log, tmux, h.clock.Now(), MessagePost{Console: "widgets", Text: "stop\x1b[A", To: "a"}); err == nil {
 		t.Error("a post with an Escape was typed")

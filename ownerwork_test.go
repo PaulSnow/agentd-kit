@@ -11,7 +11,7 @@ import (
 
 // agentWork is what a fake thread agent prints when it asks for work.
 func agentWork(answer, title, brief string) string {
-	out, _ := json.Marshal(map[string]any{"answer": answer, "hand_to": "", "work": map[string]any{"title": title, "brief": brief}})
+	out, _ := json.Marshal(map[string]any{"answer": answer, "hand_to": "", "work": map[string]any{"title": title, "brief": brief, "done_when": map[string]any{"kind": "owner"}}})
 	res, _ := json.Marshal(map[string]any{"type": "result", "subtype": "success", "is_error": false, "structured_output": json.RawMessage(out),
 		"usage": map[string]any{"input_tokens": 12, "output_tokens": 300}, "total_cost_usd": 0.01})
 	return string(res) + "\n"

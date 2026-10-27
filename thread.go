@@ -90,10 +90,15 @@ const threadSystem = `You answer the owner of a software project on agentd's con
 	`find when you do not know the topic, history only when state is not enough, ask_expert only when you are out of your depth, and say so when you relied on it. ` +
 	`Read files in the worktree with Read, Grep and Glob only when the tools do not answer it, and read no more than you need. ` +
 	`Never claim to have done what you did not do: you can only read. ` +
-	`When the owner asks for work that belongs to one of the running sessions, set hand_to to its name: the owner's message then goes to it, and your answer says so. ` +
+	`The running sessions, and the finished ones marked alive, are the only ones Go supervises and can reach; any other session, one on a machine Go does not run among them, receives nothing, so never offer to send work there. ` +
+	`When the owner's message asks for work (an instruction rather than a question: a change, a fix, a release, a deployment), set work: a title, a brief for the session that does it, the issue when one is its topic, and done_when, ` +
+	`the observable end state that is true only once the work is done, which Go checks itself: {"kind":"url","url":U,"contains":S} a page whose body holds S (a version string, say); ` +
+	`{"kind":"forge","ref":"#N","state":"closed"}, {"kind":"forge","ref":"!N","state":"merged"} or {"kind":"forge","ref":TAG,"state":"tagged"}; {"kind":"file","path":P,"contains":S} a file of the worktree; ` +
+	`{"kind":"status","contains":S} a line the session's STATUS.md will hold, only for a string the work itself produces (a commit hash, a deployed version) and never words the session would write unasked; {"kind":"owner"} only when nothing observable can tell. ` +
+	`When the work belongs to one of the running sessions, also set hand_to to its name: the owner's message goes to it, and the work is its. ` +
 	`hand_to may also name a finished session marked alive, whose tmux session still runs: agentd reopens it with the message. Never a finished one not marked alive. ` +
-	`When the owner's message asks for work, an instruction rather than a question, and no running or alive session covers it, set work with a title, a brief for the session that does it, and the issue when one is its topic: ` +
-	`agentd then starts a work session of the repository for it, briefed with the owner's message, the thread and your facts; your answer says agentd is starting one, never that it started. Never answer an instruction with only an explanation. ` +
+	`Without hand_to, agentd starts a work session of the repository for it, briefed with the owner's message, the thread and your facts. ` +
+	`Go holds the work as an item until done_when is true: your answer says where it went and what Go will check, and never that the work is done or that a session started. Never answer an instruction with only an explanation. ` +
 	`When the thread settles a decision about an issue or a request, or reports the outcome of work on one, set outcome: Go posts it there as an agent's comment. ` +
 	`Label what you report: say which entry, issue or session each point is about. ` +
 	`Never state that something does not exist, is not planned or is not happening: you see only your sources. Say what you checked and how fresh each was, ` +
@@ -109,9 +114,12 @@ func threadSchema() []byte {
 		`"outcome":{"type":"object","additionalProperties":false,"required":["ref","kind","text"],"properties":{`+
 		`"ref":{"type":"string","pattern":"^[#!][0-9]+$"},"kind":{"enum":[%q,%q]},"text":{"type":"string","minLength":1,"maxLength":%d},`+
 		`"records":{"type":"array","items":{"type":"string"},"maxItems":10}}},`+
-		`"work":{"type":"object","additionalProperties":false,"required":["title","brief"],"properties":{`+
-		`"title":{"type":"string","minLength":1,"maxLength":%d},"brief":{"type":"string","minLength":1,"maxLength":%d},"issue":{"type":"integer","minimum":1}}}}}`,
-		agentAnswer, OutcomeDecision, OutcomeResult, outcomeMax, workTitle, workBrief))
+		`"work":{"type":"object","additionalProperties":false,"required":["title","brief","done_when"],"properties":{`+
+		`"title":{"type":"string","minLength":1,"maxLength":%d},"brief":{"type":"string","minLength":1,"maxLength":%d},"issue":{"type":"integer","minimum":1},`+
+		`"done_when":{"type":"object","additionalProperties":false,"required":["kind"],"properties":{`+
+		`"kind":{"enum":[%q,%q,%q,%q,%q]},"url":{"type":"string","maxLength":500},"contains":{"type":"string","maxLength":%d},`+
+		`"ref":{"type":"string","maxLength":100},"state":{"enum":["closed","merged","tagged"]},"path":{"type":"string","maxLength":300}}}}}}}`,
+		agentAnswer, OutcomeDecision, OutcomeResult, outcomeMax, workTitle, workBrief, DoneURL, DoneForge, DoneFile, DoneStatus, DoneOwner, itemContainsMax))
 }
 
 // threadJob is the job the config describes for thread agents.
@@ -138,7 +146,9 @@ type AgentPayload struct {
 	Answer   string `json:"answer,omitempty"`
 	Withheld int    `json:"withheld,omitempty"`
 	HandTo   string `json:"hand_to,omitempty"`
-	// Work is the work it asked Go to start a session for (#65).
+	// Work is the work it read in the owner's message: Go starts a
+	// session for it unless it was handed over (#65), and holds it as a
+	// work item until its done_when is true (#66).
 	Work       *ThreadWork   `json:"work,omitempty"`
 	Outcome    string        `json:"outcome,omitempty"` // the reference it was posted on, or why it was not
 	Activity   []TurnPayload `json:"activity,omitempty"`
@@ -519,10 +529,19 @@ func (s *Supervisor) checkThreadAnswer(raw json.RawMessage, running, finished ma
 			return a, handToError(a.HandTo, finished)
 		}
 		p.HandTo = a.HandTo
-	} else if w := a.Work; w != nil {
-		w.Title, w.Brief = strings.TrimSpace(w.Title), strings.TrimSpace(w.Brief)
+	}
+	// Work is held as an item (#66), handed over or not: the session it
+	// was handed to holds it, else one Go starts for it (#65).
+	if w := a.Work; w != nil {
+		w.Title, w.Brief = oneLine(w.Title, workTitle), strings.TrimSpace(w.Brief)
 		if w.Title == "" {
 			return a, errors.New("the agent asked for work with no title")
+		}
+		if err := w.DoneWhen.check(); err != nil {
+			return a, fmt.Errorf("the agent's work: %v", err)
+		}
+		if s.confidentialMatch(w.DoneWhen.URL, w.DoneWhen.Contains, w.DoneWhen.Path, w.DoneWhen.Ref) > 0 {
+			return a, errors.New("the agent's work's done_when matched a confidential pattern")
 		}
 		if s.confidentialMatch(w.Title) > 0 {
 			w.Title = "owner work"
@@ -530,7 +549,7 @@ func (s *Supervisor) checkThreadAnswer(raw json.RawMessage, running, finished ma
 		if s.confidentialMatch(w.Brief) > 0 {
 			w.Brief, w.Withheld = "", true
 		}
-		p.Work = &ThreadWork{Title: cutUTF8(w.Title, workTitle), Brief: cutUTF8(w.Brief, workBrief), Issue: w.Issue, Withheld: w.Withheld}
+		p.Work = &ThreadWork{Title: w.Title, Brief: cutUTF8(w.Brief, workBrief), Issue: w.Issue, Withheld: w.Withheld, DoneWhen: w.DoneWhen}
 	}
 	p.Answer = a.Answer
 	if i := s.confidentialMatch(a.Answer); i > 0 {

@@ -793,6 +793,8 @@ type uiConsole struct {
 	To     []string
 	// StatusTokens is what the sessions' status checks cost today.
 	StatusTokens int64
+	// Items are the open work items (#66), the first thing on the page.
+	Items []WorkView
 }
 
 // uiPanel is one session on its console: its state, what it does now,
@@ -1067,6 +1069,11 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 					continue
 				}
 				v.Entries = append(v.Entries, uiEntry{uiMessageView: mv, Quick: quickWords(m.Kind)})
+			}
+			// The open work items of the repository (#66).
+			for _, w := range WorkViews(cfg, src.st, repo, false, now, secret) {
+				w.Src = src.Name
+				v.Items = append(v.Items, w)
 			}
 			// The changes proposed on the ops console, each a yes or no
 			// showing exactly what it does (#63).

@@ -178,7 +178,7 @@ func TestInstructionAfterRotationReachesNewSession(t *testing.T) {
 		t.Fatalf("rotations = %d, want 1", len(rots))
 	}
 	h.alive(name, idleScreen)
-	if err := PostMessage(h.cfg, NewLogWriter(h.buf), h.tmux, h.clock.Now(), MessagePost{Console: "widgets", Text: "Rebase on main.", To: name}); err != nil {
+	if err := PostMessage(projected(h.cfg, h.events()), NewLogWriter(h.buf), h.tmux, h.clock.Now(), MessagePost{Console: "widgets", Text: "Rebase on main.", To: name}); err != nil {
 		t.Fatal(err)
 	}
 	replaced, typedAt := -1, -1

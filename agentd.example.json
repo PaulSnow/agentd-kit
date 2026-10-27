@@ -95,6 +95,7 @@
     },
     "repo": "~/repos/agentd-kit"
   },
+  "items": {"ack_within": "10m", "escalate_after": "2h"},
   "repositories": {
     "widgets": {
       "forge": "gitlab",
