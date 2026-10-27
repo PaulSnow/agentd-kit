@@ -88,7 +88,7 @@ const threadSystem = `You answer the owner of a software project on agentd's con
 	`Label what you report: say which entry, issue or session each point is about. ` +
 	`Never state that something does not exist, is not planned or is not happening: you see only your sources. Say what you checked and how fresh each was, ` +
 	`as "the cards as of 07:41, the issue list as of 07:52, night-60's STATUS.md as of 07:52". ` +
-	`The running sessions and issues are live; a card is as of its updated time. When they disagree, trust the live facts, ` +
+	`The running sessions' brief, now and status_at, and the issues, are live facts, not cards; a card is what state returns, as of its updated time. When they disagree, trust the live facts, ` +
 	`and call history on the card's topic with why "missing-from-state" so its curator learns what it lacks.`
 
 // threadSchema is the JSON schema of a thread agent's answer.
@@ -318,10 +318,28 @@ func (x threadInput) fit(max int) ([]byte, error) {
 			x.Earlier = x.Earlier[1:]
 		case len(x.Issues) > 0:
 			x.Issues = x.Issues[:len(x.Issues)-1]
+		case x.cutNow():
 		default:
 			return nil, fmt.Errorf("the thread's input is %d bytes, over the %d allowed", len(b), max)
 		}
 	}
+}
+
+// cutNow halves the longest Now of the running sessions, on a copy, and
+// says whether there was one to cut.
+func (x *threadInput) cutNow() bool {
+	i := -1
+	for j, r := range x.Running {
+		if len(r.Now) > 40 && (i < 0 || len(r.Now) > len(x.Running[i].Now)) {
+			i = j
+		}
+	}
+	if i < 0 {
+		return false
+	}
+	x.Running = append([]threadRunning{}, x.Running...)
+	x.Running[i].Now = cutUTF8(x.Running[i].Now, len(x.Running[i].Now)/2)
+	return true
 }
 
 // threadAnswer is a thread agent's answer, as its schema has it.

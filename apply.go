@@ -60,6 +60,8 @@ type LogState struct {
 	// Facts are what the latest fact of each session's run, brief and Now,
 	// and of each issue's state, said (#62), so a change is logged once.
 	Facts map[string]string
+	// FactAt is when each session's Now was last a fact.
+	FactAt map[string]time.Time
 
 	cfg *Config // its policies, read as each event is applied
 }

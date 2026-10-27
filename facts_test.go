@@ -114,7 +114,9 @@ func TestThreadAgentGivenFreshFacts(t *testing.T) {
 		t.Fatalf("the second thread's list: %d issues, %d calls", len(x.Issues), api.count())
 	}
 	// The issue's opening and the session's brief and Now are facts, on
-	// the issue's topic and the session's, which call their curators.
+	// the issue's topic and the session's, which call their curators; a
+	// Now once in nowGap.
+	h.clock.advance(nowGap)
 	h.ticks(1, time.Second)
 	hist := NewContextStore(h.cfg)
 	for _, e := range h.events() {
@@ -145,9 +147,12 @@ func TestSessionFacts(t *testing.T) {
 	h.ticks(2, time.Minute)
 	work := h.sup.cfg.Sessions[w1].Workdir
 	writeFile(t, filepath.Join(work, "STATUS.md"), "# spin\n\n## Now\nwriting the test\n\n## Questions\nnone\n")
-	h.ticks(2, time.Minute)
+	h.ticks(5, time.Minute)
+	// Rewritten twice within nowGap: its latest is the one fact.
+	writeFile(t, filepath.Join(work, "STATUS.md"), "# spin\n\n## Now\nwriting it\n\n## Questions\nnone\n")
+	h.ticks(1, time.Minute)
 	writeFile(t, filepath.Join(work, "STATUS.md"), "# spin\n\n## Now\nwriting the code\n\n## Questions\nnone\n")
-	h.ticks(2, time.Minute)
+	h.ticks(5, time.Minute)
 	var changes, nows []string
 	for _, e := range h.events() {
 		if e.Fact != nil && e.Fact.Session == w1 {
@@ -172,6 +177,22 @@ func TestSessionFacts(t *testing.T) {
 	}
 	if got := strings.Join(last[5:], ","); got != "finished" {
 		t.Fatalf("after DONE, facts %s", got)
+	}
+	// Another, ended by the owner while it runs: it stopped.
+	w2 := h.startSession("issue-8", KindWork, 8)
+	h.ticks(2, time.Minute)
+	if err := h.endSession(w2); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(3, time.Minute)
+	var ended []string
+	for _, e := range h.events() {
+		if e.Fact != nil && e.Fact.Session == w2 && (e.Fact.Change == FactStarted || e.Fact.Change == FactStopped) {
+			ended = append(ended, e.Fact.Change)
+		}
+	}
+	if got := strings.Join(ended, ","); got != "started,stopped" {
+		t.Fatalf("an ended session's facts: %s", got)
 	}
 	h.restart(true)
 	writeFile(t, filepath.Join(work, "STATUS.md"), "# spin\n\n## Now\nshadowed\n")
@@ -220,5 +241,19 @@ func TestIssueFacts(t *testing.T) {
 	}
 	if s := strings.Join(got, ","); s != "#1:opened,#2:seen,#3:closed,#4:closed,#5:opened" {
 		t.Fatalf("facts %s", s)
+	}
+}
+
+// An input over its bound drops issues, then the thread's records, and
+// last cuts the sessions' Now.
+func TestThreadInputFitCutsNowLast(t *testing.T) {
+	x := threadInput{Message: threadRecord{Text: "q"}, Running: []threadRunning{{Name: "w", Now: strings.Repeat("n", 600)}},
+		Earlier: []threadRecord{{Text: strings.Repeat("e", 300)}}, Issues: []LiveIssue{{Ref: "#1", Title: strings.Repeat("t", 150)}}}
+	b, err := x.fit(400)
+	if err != nil || len(b) > 400 || strings.Contains(string(b), `"earlier"`) || strings.Contains(string(b), `"issues"`) || !strings.Contains(string(b), `"now":"nnn`) {
+		t.Fatalf("fit: %v %s", err, b)
+	}
+	if len(x.Running[0].Now) != 600 {
+		t.Fatal("fit cut the caller's input")
 	}
 }

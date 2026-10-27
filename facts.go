@@ -80,7 +80,7 @@ func factValue(p *FactPayload) string {
 	case p.Change == FactBrief || p.Change == FactNow:
 		return p.Hash
 	}
-	return p.Change
+	return p.Change + "|" + p.Repository
 }
 
 func (st *LogState) applyFact(e Event) {
@@ -88,6 +88,12 @@ func (st *LogState) applyFact(e Event) {
 		st.Facts = map[string]string{}
 	}
 	st.Facts[factKey(e.Fact)] = factValue(e.Fact)
+	if e.Fact.Change == FactNow {
+		if st.FactAt == nil {
+			st.FactAt = map[string]time.Time{}
+		}
+		st.FactAt[e.Fact.Session] = e.Time
+	}
 }
 
 // factRecord is the history record a fact makes, or nil for one only seen.
@@ -213,7 +219,7 @@ func (s *Supervisor) runOf(name string) string {
 // its run, its brief's heading and its STATUS.md's Now since the last
 // fact; the brief and Now only while it runs. A shadow run logs none: the
 // live run does.
-func (s *Supervisor) noteSessions() {
+func (s *Supervisor) noteSessions(now time.Time) {
 	if s.shadow {
 		return
 	}
@@ -242,12 +248,29 @@ func (s *Supervisor) noteSessions() {
 		if _, ok := s.st.Facts["session:"+name+"|run"]; ok || run == FactStarted {
 			note(FactPayload{Change: run, Brief: f.Brief})
 		}
-		if run == FactStarted {
+		// A file missing, or withheld, is no change; a Now that changes
+		// often is noted at most once a nowGap, its latest then.
+		if run == FactStarted && f.Brief != "" {
 			note(FactPayload{Change: FactBrief, Brief: f.Brief, Hash: shortHash(HashPane(f.Brief))})
+		}
+		if run == FactStarted && f.Now != "" && now.Sub(s.st.FactAt[name]) >= nowGap {
 			note(FactPayload{Change: FactNow, Now: f.Now, Hash: shortHash(HashPane(f.Now))})
 		}
 	}
+	// A session ended is gone from the configuration: one last fact.
+	for _, k := range sortedKeys(s.st.Facts) {
+		name, ok := strings.CutSuffix(strings.TrimPrefix(k, "session:"), "|run")
+		run, repo, _ := strings.Cut(s.st.Facts[k], "|")
+		if _, configured := s.cfg.Sessions[name]; ok && run == FactStarted && !configured && repo != "" && s.halt == nil {
+			s.emit("", Event{Kind: KindFact, Fact: &FactPayload{Repository: repo, Session: name, Change: FactStopped}})
+		}
+	}
 }
+
+// nowGap is the least time between two facts of a session's Now, so a
+// session that rewrites it at each step does not spend the curators'
+// day.
+const nowGap = 5 * time.Minute
 
 // LiveIssue is an issue or request as the forge's list has it now.
 type LiveIssue struct {
@@ -271,43 +294,67 @@ const (
 )
 
 // liveIssues is each repository's latest list, shared by the loop and its
-// workers: a list is read by one at a time.
+// workers: a repository's list is read by one at a time, and the lock is
+// never held across the forge call, so the loop never waits on it.
 type liveIssues struct {
-	mu  sync.Mutex
-	at  map[string]time.Time
-	is  map[string][]LiveIssue
-	err map[string]error
+	mu      sync.Mutex
+	at      map[string]time.Time
+	is      map[string][]LiveIssue
+	err     map[string]error
+	reading map[string]chan struct{} // closed when the read in flight ends
 }
 
 // recent is repo's issues and requests updated within liveIssueSpan of
-// now, newest first, and when they were read: the list read within
-// liveIssueAge, or one forge list now.
-func (l *liveIssues) recent(api ForgeAPI, repo string, r Repository, now time.Time) ([]LiveIssue, time.Time, error) {
+// now, newest first, when they were read, and whether this call read
+// them: the list read within liveIssueAge, or, once a read in flight
+// ends, one forge list now.
+func (l *liveIssues) recent(api ForgeAPI, repo string, r Repository, now time.Time) ([]LiveIssue, time.Time, bool, error) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
-	if at, ok := l.at[repo]; ok && now.Sub(at) < liveIssueAge && !now.Before(at) {
-		return l.is[repo], at, l.err[repo]
+	for {
+		if at, ok := l.at[repo]; ok && now.Sub(at) < liveIssueAge && !now.Before(at) {
+			defer l.mu.Unlock()
+			return l.is[repo], at, false, l.err[repo]
+		}
+		wait, ok := l.reading[repo]
+		if !ok {
+			break
+		}
+		l.mu.Unlock()
+		<-wait
+		l.mu.Lock()
 	}
 	if api == nil || r.Project == "" {
-		return nil, time.Time{}, fmt.Errorf("%s: no forge to list %s's issues from", liveIssueCall, repo)
+		l.mu.Unlock()
+		return nil, time.Time{}, false, fmt.Errorf("%s: no forge to list %s's issues from", liveIssueCall, repo)
 	}
+	if l.at == nil {
+		l.at, l.is, l.err, l.reading = map[string]time.Time{}, map[string][]LiveIssue{}, map[string]error{}, map[string]chan struct{}{}
+	}
+	done := make(chan struct{})
+	l.reading[repo] = done
+	l.mu.Unlock()
 	// A failed list is kept as long as one read, so a forge that fails is
 	// not asked again by every thread.
 	list, err := listRecent(api.At(r.Host), r, now.Add(-liveIssueSpan))
 	if err != nil {
 		list, err = nil, fmt.Errorf("%s: %v", liveIssueCall, oneLine(err.Error(), 200))
 	}
-	if l.at == nil {
-		l.at, l.is, l.err = map[string]time.Time{}, map[string][]LiveIssue{}, map[string]error{}
-	}
+	l.mu.Lock()
 	l.at[repo], l.is[repo], l.err[repo] = now, list, err
-	return list, now, err
+	delete(l.reading, repo)
+	close(done)
+	l.mu.Unlock()
+	return list, now, true, err
 }
 
-// age is how long ago repo's list was read, or a day for one never read.
+// age is how long ago repo's list was read, none while one is read, or a
+// day for one never read.
 func (l *liveIssues) age(repo string, now time.Time) time.Duration {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if _, ok := l.reading[repo]; ok {
+		return 0
+	}
 	if at, ok := l.at[repo]; ok {
 		return now.Sub(at)
 	}
@@ -414,12 +461,14 @@ func (st *LogState) knownIssues() map[string]string {
 	return out
 }
 
-// readIssues reads repo's live list, from the cache or the forge, and
-// logs the facts it makes; the titles are screened, and one that matches
-// is left out of what is returned and logged.
+// readIssues reads repo's live list, from the cache or the forge, and,
+// when it read the forge, logs the facts the list makes: lists are a
+// minute apart, so the loop has applied one's facts before the next is
+// told from them. The titles are screened, and one that matches is left
+// out of what is returned and logged.
 func (w *Supervisor) readIssues(repo string, known map[string]string) ([]LiveIssue, time.Time, error) {
 	now := w.clock.Now()
-	list, at, err := w.live.recent(w.api, repo, w.cfg.Repositories[repo], now)
+	list, at, read, err := w.live.recent(w.api, repo, w.cfg.Repositories[repo], now)
 	if err != nil {
 		return nil, at, err
 	}
@@ -431,7 +480,7 @@ func (w *Supervisor) readIssues(repo string, known map[string]string) ([]LiveIss
 		li.Title = cutUTF8(li.Title, liveIssueTitle)
 		kept = append(kept, li)
 	}
-	if !w.shadow {
+	if read && !w.shadow {
 		for _, p := range issueFacts(repo, kept, known, now) {
 			p := p
 			w.emit("", Event{Kind: KindFact, Fact: &p})
@@ -444,7 +493,7 @@ func (w *Supervisor) readIssues(repo string, known map[string]string) ([]LiveIss
 // has each repository's issues listed when no thread did so within
 // liveIssueRefresh.
 func (s *Supervisor) noteFacts(now time.Time) {
-	s.noteSessions()
+	s.noteSessions(now)
 	if s.shadow || s.api == nil || !s.cfg.Jobs.Curator.Enabled {
 		return
 	}
