@@ -179,8 +179,9 @@ type TurnRecord struct {
 // harnessLine is the start of a user entry Claude Code wrote itself, not a
 // prompt anyone typed: a <task-notification>, a <system-reminder>, a
 // <bash-input> or <bash-stdout>, a <command-name> and the like (#56):
-// a text that opens with a tag it also closes.
-var harnessLine = regexp.MustCompile(`^<([a-z][a-z0-9_-]*)>`)
+// a text that opens with a tag it also closes, and ends with a closing
+// tag, so nothing typed follows it.
+var harnessLine = regexp.MustCompile(`^<([a-z][a-z0-9_-]*)>(?s:.*)</[a-z][a-z0-9_-]*>$`)
 
 // injected says whether text is an entry the harness wrote, not a prompt.
 func injected(text string) bool {

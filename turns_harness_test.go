@@ -36,10 +36,11 @@ func TestOnlyRealPromptsAndWholeReplies(t *testing.T) {
 		injectedLine("u7", "This session is being continued from a previous conversation.", at, map[string]any{"isCompactSummary": true})+
 		summaryLine("u8", "m1", long, at, 100)+
 		injectedLine("u9", "", at, map[string]any{"message": map[string]any{"role": "user", "content": []map[string]any{
-			{"type": "text", "text": "<ide_opened_file>w.go</ide_opened_file>"}, {"type": "text", "text": "<div> breaks on mobile"}}}}))
+			{"type": "text", "text": "<ide_opened_file>w.go</ide_opened_file>"}, {"type": "text", "text": "<div> breaks on mobile"}}}})+
+		promptLine("u10", "<b>bold</b> renders raw", at))
 	h.ticks(3, time.Minute)
 	got := h.turnMessages()
-	if len(got) != 3 || got[0].Text != "Build the widget." || got[1].Kind != MessageReply || got[1].Text != strings.TrimSpace(long) || got[2].Text != "<div> breaks on mobile" {
+	if len(got) != 4 || got[3].Text != "<b>bold</b> renders raw" || got[0].Text != "Build the widget." || got[1].Kind != MessageReply || got[1].Text != strings.TrimSpace(long) || got[2].Text != "<div> breaks on mobile" {
 		var kinds []string
 		for _, m := range got {
 			kinds = append(kinds, m.Kind+":"+cutUTF8(m.Text, 30))
@@ -48,10 +49,10 @@ func TestOnlyRealPromptsAndWholeReplies(t *testing.T) {
 	}
 	u, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
 	page := owner(t, u, "/console/widgets")
-	if strings.Contains(page, "task-notification") || !strings.Contains(page, `<details class="more">`) || !strings.Contains(page, "Show all") {
+	if strings.Contains(page, "task-notification") || !strings.Contains(page, `<details class="more" data-key="m-night-a-`) || !strings.Contains(page, "Show all") {
 		t.Fatalf("console:\n%s", page)
 	}
-	if !strings.Contains(owner(t, u, "/session/night/a"), `<details class="more">`) {
+	if !strings.Contains(owner(t, u, "/session/night/a"), `<details class="more" data-key="t-`) {
 		t.Fatal("the session page does not fold the long reply")
 	}
 }

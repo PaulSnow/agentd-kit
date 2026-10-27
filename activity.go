@@ -52,6 +52,9 @@ func readActivity(path string) (Activity, error) {
 	got, err := readActivityFrom(f, info)
 	if err == nil {
 		activityMu.Lock()
+		if len(activityRead) >= activityCachedMax {
+			clear(activityRead)
+		}
 		activityRead[key.path] = activityCached{key, got}
 		activityMu.Unlock()
 	}
@@ -72,7 +75,10 @@ type activityCached struct {
 }
 
 // activityRead holds each transcript's activity as last read, one per
-// transcript path.
+// transcript path, at most activityCachedMax: when full it starts again,
+// so transcripts left behind by rotations do not pile up.
+const activityCachedMax = 256
+
 var (
 	activityMu   sync.Mutex
 	activityRead = map[string]activityCached{}
