@@ -537,7 +537,7 @@ func diffLines(name string, a, b []byte) (string, error) {
 }
 
 // diffMax bounds the lines of a file diffLines compares.
-const diffMax = 5000
+const diffMax = 1000
 
 func splitLines(b []byte) []string {
 	s := strings.TrimSuffix(string(b), "\n")

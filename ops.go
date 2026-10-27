@@ -184,6 +184,10 @@ type OpsPayload struct {
 	Change      *OpsChange `json:"change,omitempty"`
 	Instruction string     `json:"instruction,omitempty"`
 	Outcome     string     `json:"outcome,omitempty"`
+	// Swapped is the kept binary an install or a rollback put another in
+	// place of, logged as the swap is made, so the next process can put
+	// it back when this one stopped before the end.
+	Swapped string `json:"swapped,omitempty"`
 }
 
 // check says what an ops event lacks.
@@ -212,6 +216,7 @@ type OpsRecord struct {
 	// Restarting is what was done when the process carrying it out
 	// restarted itself to finish it: the next one reports it done.
 	Restarting string
+	Swapped    string
 	Ended      time.Time
 	Outcome    string
 	Failed     bool
@@ -244,6 +249,9 @@ func (st *LogState) applyOps(e Event) {
 		if p.Outcome != "" {
 			r.Restarting = p.Outcome
 		}
+		if p.Swapped != "" {
+			r.Swapped = p.Swapped
+		}
 	case OpsDone, OpsFailed, OpsDeclined:
 		if r.Ended.IsZero() {
 			r.Ended, r.Outcome, r.Failed = e.Time, p.Outcome, p.Step == OpsFailed
@@ -255,7 +263,8 @@ func (st *LogState) applyOps(e Event) {
 // only a yes or a no given on the change's own entry, from the page, in
 // the ops console, and only the first; any later one changes nothing.
 func (st *LogState) opsAnswer(in *Instruction, at time.Time) {
-	if in.Re == nil || in.Answer == nil || in.Answer.Answer == nil || in.From != "ui" {
+	// A withheld instruction is refused as any is: it settles nothing.
+	if in.Re == nil || in.Answer == nil || in.Answer.Answer == nil || in.From != "ui" || in.Withheld > 0 {
 		return
 	}
 	id, ok := strings.CutPrefix(in.Re.ID, entryOps)
@@ -329,7 +338,27 @@ func short(sha string) string {
 
 // redactedKeys are the config keys whose values ops tools never show:
 // credentials and the paths to them.
-var redactedKeys = regexp.MustCompile(`(?i)token|secret|password|credential|config_dir|api_key`)
+var redactedKeys = regexp.MustCompile(`(?i)(^|_)token(_file)?$|secret|password|credential|config_dir|api_key`)
+
+// hasRedactedKey says whether v, a decoded JSON value, holds a redacted
+// key at any depth.
+func hasRedactedKey(v any) bool {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, val := range x {
+			if redactedKeys.MatchString(k) || hasRedactedKey(val) {
+				return true
+			}
+		}
+	case []any:
+		for _, val := range x {
+			if hasRedactedKey(val) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // redactValue is v, a decoded config, with every redacted key's value
 // replaced and every string that matches a confidential pattern withheld.
@@ -363,17 +392,33 @@ func redactValue(v any, secret func(...string) bool) any {
 	return v
 }
 
-// redactLines is text with each line that names a redacted key, or
-// matches a confidential pattern, cut to its key.
-var redactedLine = regexp.MustCompile(`^([-+ ]?\s*"[^"]*(?i:token|secret|password|credential|config_dir|api_key)[^"]*"\s*:).*$`)
+// redactLines is text, a diff or a pane's lines, with the value of each
+// redacted key cut, the lines of a value that spans several among it,
+// and each line that matches a confidential pattern withheld.
+var keyLine = regexp.MustCompile(`^([-+ ]?\s*"([^"]*)"\s*:)\s*(.*)$`)
 
 func redactLines(text string, secret func(...string) bool) string {
 	lines := strings.Split(text, "\n")
+	depth := 0 // the brackets of a redacted value still open
 	for i, l := range lines {
-		switch {
-		case redactedLine.MatchString(l):
-			lines[i] = redactedLine.ReplaceAllString(l, `$1 "(redacted)"`)
-		case secret(l):
+		if depth > 0 {
+			depth += strings.Count(l, "{") + strings.Count(l, "[") - strings.Count(l, "}") - strings.Count(l, "]")
+			if depth > 0 {
+				lines[i] = "  (redacted)"
+				continue
+			}
+			depth = 0
+			continue
+		}
+		if m := keyLine.FindStringSubmatch(l); m != nil && redactedKeys.MatchString(m[2]) {
+			lines[i] = m[1] + ` "(redacted)"`
+			rest := strings.TrimRight(m[3], ", ")
+			if strings.HasSuffix(rest, "{") || strings.HasSuffix(rest, "[") {
+				depth = 1
+			}
+			continue
+		}
+		if secret(l) {
 			lines[i] = withheldMessage
 		}
 	}

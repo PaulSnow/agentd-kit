@@ -23,11 +23,12 @@ type opsTmux struct {
 	screen  map[string]string
 	noStart map[string]bool
 	keys    []string
-	up      map[string]bool // Up was the last key
+	up      map[string]bool   // Up was the last key
+	recall  map[string]string // the line Up recalls, by default agentd's
 }
 
 func newOpsTmux() *opsTmux {
-	return &opsTmux{command: map[string]string{}, screen: map[string]string{}, noStart: map[string]bool{}, up: map[string]bool{}}
+	return &opsTmux{command: map[string]string{}, screen: map[string]string{}, noStart: map[string]bool{}, up: map[string]bool{}, recall: map[string]string{}}
 }
 
 func (f *opsTmux) HasSession(name string) (bool, error) {
@@ -57,7 +58,13 @@ func (f *opsTmux) Keys(name string, keys ...string) error {
 		switch {
 		case k == "C-c":
 			f.command[name] = "bash"
-		case k == "Enter" && f.up[name] && !f.noStart[name]:
+		case k == "Up":
+			line, ok := f.recall[name]
+			if !ok {
+				line = "agentd run --config live.json"
+			}
+			f.screen[name] = "$ " + line + "\n"
+		case k == "Enter" && f.up[name] && !f.noStart[name] && f.recall[name] == "":
 			f.command[name] = "agentd"
 		}
 		f.up[name] = k == "Up"
@@ -180,7 +187,7 @@ func newOpsH(t *testing.T) *opsH {
 			return os.WriteFile(out, []byte(h.built), 0o755)
 		},
 		accounts:    func([]*Config) []opsAccount { return nil },
-		selfRestart: func(tmux string) error { h.selfs = append(h.selfs, tmux); return nil }}
+		selfRestart: func(tmux, command, binary, kept string) error { h.selfs = append(h.selfs, tmux); return nil }}
 	h.restartOps()
 	return h
 }
@@ -290,7 +297,7 @@ func TestOpsReads(t *testing.T) {
 	h.tmux.screen["agentd-live"] = "agentd live: 1 sessions\nall well\n"
 	out, refused := h.call(ToolOpsStatus, `{}`)
 	b, _ := json.Marshal(out)
-	if refused || !strings.Contains(string(b), `"name":"live"`) || !strings.Contains(string(b), `"up":true`) || !strings.Contains(string(b), `"pane":"bash"`) || !strings.Contains(string(b), `"name":"w1"`) {
+	if refused || !strings.Contains(string(b), `"name":"live"`) || !strings.Contains(string(b), `"up":true`) || !strings.Contains(string(b), `"pane":"its pane runs bash"`) || !strings.Contains(string(b), `"name":"w1"`) {
 		t.Fatalf("ops_status = %s", b)
 	}
 	writeOps(t, filepath.Join(h.dir, "tok"), "secret\n", 0o600)
@@ -472,11 +479,109 @@ func TestOpsDownRestartNeedsNoYes(t *testing.T) {
 	if got := strings.Join(h.tmux.sent(), ","); got != "agentd-page Up,agentd-page Enter" {
 		t.Fatalf("keys = %s", got)
 	}
+	// A shell that recalls another line than agentd's runs nothing.
+	h.tmux.command["agentd-page"] = "bash"
+	h.tmux.recall["agentd-page"] = "git reset --hard"
+	id = h.propose(ToolOpsRestart, `{"supervisor": "page", "why": "down again"}`)
+	h.ticks(2, time.Minute)
+	if r := h.record(id); !r.Failed || !strings.Contains(r.Outcome, "nothing was run") {
+		t.Fatalf("change = %+v", r)
+	}
+	if got := strings.Join(h.tmux.sent(), ","); got != "agentd-page Up,agentd-page Enter,agentd-page Up,agentd-page C-u" {
+		t.Fatalf("keys = %s", got)
+	}
+	delete(h.tmux.recall, "agentd-page")
+	// This process, or a pane that runs something else than a shell, is
+	// never down beyond doubt: it needs the yes.
+	h.tmux.command["agentd-live"] = "bash"
+	h.tmux.command["agentd-page"] = "agentd-v2"
+	for _, sup := range []string{"live", "page"} {
+		id := h.propose(ToolOpsRestart, `{"supervisor": "`+sup+`", "why": "down?"}`)
+		h.ticks(2, time.Minute)
+		if r := h.record(id); r.Auto || !r.open() || len(h.selfs) != 0 {
+			t.Fatalf("%s: change = %+v, self restarts %v", sup, r, h.selfs)
+		}
+	}
+	h.tmux.command["agentd-live"], h.tmux.command["agentd-page"] = "agentd", "agentd"
 	// One that is up needs the yes, as any change.
 	id = h.propose(ToolOpsRestart, `{"supervisor": "page", "why": "again"}`)
 	h.ticks(2, time.Minute)
 	if r := h.record(id); r.Auto || !r.open() {
 		t.Fatalf("change = %+v", r)
+	}
+}
+
+// A set whose value holds a credential's key, or a delete of a value that
+// does, is refused: the owner could not see it.
+func TestOpsConfigSetRefusesCredentials(t *testing.T) {
+	h := newOpsH(t)
+	writeOps(t, filepath.Join(h.dir, "tok"), "secret\n", 0o600)
+	writeOps(t, filepath.Join(h.dir, "page.json"), "{\n  \"event_log\": \"page.jsonl\",\n  \"accounts\": {\n    \"a\": {\"token_file\": \"tok\"}\n  }\n}\n", 0o600)
+	for _, args := range []string{
+		`{"supervisor": "page", "pointer": "/accounts/b", "value": {"token_file": "tok"}, "why": "x"}`,
+		`{"supervisor": "page", "pointer": "/accounts/a/token_file", "value": "tok", "why": "x"}`,
+		`{"supervisor": "page", "pointer": "/accounts", "delete": true, "why": "x"}`,
+	} {
+		if out, refused := h.call(ToolOpsConfigSet, args); !refused || !strings.Contains(out["refused"].(string), "credential") {
+			t.Fatalf("%s: %v", args, out)
+		}
+	}
+	// A diff's context keeps a credential's value out, over lines too.
+	got := redactLines("   \"token_file\": \"/x/tok\",\n   \"credentials\": {\n     \"pass\": \"x\"\n   },\n   \"session_tokens\": 5", func(...string) bool { return false })
+	if strings.Contains(got, "/x/tok") || strings.Contains(got, `"pass"`) || !strings.Contains(got, `"session_tokens": 5`) {
+		t.Fatalf("redacted = %q", got)
+	}
+}
+
+// Only the owner's yes from the page settles a change: a yes logged from
+// anywhere else, or one whose words were withheld, settles nothing.
+func TestOpsYesOnlyFromThePage(t *testing.T) {
+	h := newOpsH(t)
+	id := h.propose(ToolOpsRestart, `{"supervisor": "page", "why": "stuck"}`)
+	yes := true
+	for i, p := range []InstructionPayload{
+		{ID: "Icli1", Console: "ops", From: "console:ops", Route: true, Re: &EntryRe{ID: id}, Answer: &EntryAnswer{Answer: &yes}},
+		{ID: "Iwh1", Console: "ops", From: "ui", Route: true, Withheld: 1, Re: &EntryRe{ID: id}, Answer: &EntryAnswer{Answer: &yes}},
+		{ID: "Ioth1", Console: "infra", From: "ui", Route: true, Re: &EntryRe{ID: id}, Answer: &EntryAnswer{Answer: &yes}},
+	} {
+		p := p
+		if err := NewLogWriter(h.buf).Append(Event{V: EventVersion, Time: h.clock.Now(), Kind: KindInstruction, Mode: ModeOwner, Instruction: &p}); err != nil {
+			t.Fatal(i, err)
+		}
+	}
+	h.ticks(2, time.Minute)
+	if r := h.record(id); !r.open() || len(h.tmux.sent()) != 0 {
+		t.Fatalf("change = %+v, keys %v", r, h.tmux.sent())
+	}
+}
+
+// While this process restarts itself to finish a change, it carries out
+// no other; a clear is carried out on the supervisor's own log.
+func TestOpsNothingWhileSelfRestarts(t *testing.T) {
+	h := newOpsH(t)
+	self := h.propose(ToolOpsRestart, `{"supervisor": "live", "why": "reload"}`)
+	clear := h.propose(ToolOpsClear, `{"supervisor": "page", "session": "w1", "why": "it crashed on a bad file"}`)
+	if err := h.answer(self, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.answer(clear, true); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(3, time.Minute)
+	if r := h.record(clear); !r.Started.IsZero() || len(h.selfs) != 1 {
+		t.Fatalf("clear = %+v, self restarts %v", r, h.selfs)
+	}
+	h.restartOps()
+	h.ticks(2, time.Minute)
+	if r := h.record(self); r.Failed || !strings.Contains(r.Outcome, "live is up again") {
+		t.Fatalf("restart = %+v", r)
+	}
+	if r := h.record(clear); r.Failed || r.Ended.IsZero() {
+		t.Fatalf("clear = %+v", r)
+	}
+	events, _, err := ReadLog(filepath.Join(h.dir, "page.jsonl"))
+	if err != nil || len(events) != 1 || events[0].Kind != KindClear || events[0].Session != "w1" {
+		t.Fatalf("page's log = %+v, %v", events, err)
 	}
 }
 
@@ -571,6 +676,24 @@ func TestOpsCutShortNotRepeated(t *testing.T) {
 	h.ticks(2, time.Minute)
 	if r := h.record(id); !r.Failed || !strings.Contains(r.Outcome, "stopped while") || len(h.tmux.sent()) != 0 {
 		t.Fatalf("change = %+v, keys %v", r, h.tmux.sent())
+	}
+	// One cut short after its swap puts the kept binary back.
+	kept := filepath.Join(h.dir, "bin", "agentd.unknown-0123456789ab")
+	writeOps(t, kept, "#!/bin/sh\n# kept\nexit 0\n", 0o755)
+	id = h.propose(ToolOpsRollback, `{"binary": "agentd.unknown-0123456789ab", "why": "the new one is slow"}`)
+	if err := h.answer(id, true); err != nil {
+		t.Fatal(err)
+	}
+	h.sup.emit("", Event{Kind: KindOps, Mode: ModeShared, Ops: &OpsPayload{ID: strings.TrimPrefix(id, entryOps), Step: OpsStarted}})
+	h.sup.emit("", Event{Kind: KindOps, Mode: ModeShared, Ops: &OpsPayload{ID: strings.TrimPrefix(id, entryOps), Step: OpsStarted, Swapped: "agentd.unknown-0123456789ab"}})
+	writeOps(t, h.binary, "#!/bin/sh\n# half installed\nexit 0\n", 0o755)
+	h.restartOps()
+	h.ticks(2, time.Minute)
+	if r := h.record(id); !r.Failed || !strings.Contains(r.Outcome, "is back") {
+		t.Fatalf("change = %+v", r)
+	}
+	if b, _ := os.ReadFile(h.binary); string(b) != "#!/bin/sh\n# kept\nexit 0\n" {
+		t.Fatalf("the binary is %q", b)
 	}
 }
 

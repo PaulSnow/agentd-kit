@@ -296,10 +296,17 @@ func (s *Supervisor) runOps(now time.Time) {
 	}
 	sort.Slice(rs, func(i, j int) bool { return rs[i].Proposed.Before(rs[j].Proposed) })
 	for _, r := range rs {
+		// While this process restarts itself to finish a change, it
+		// starts no other: the Ctrl-C would cut it short.
+		if r.Restarting != "" && !r.Started.Before(s.st.Started) {
+			return
+		}
+	}
+	for _, r := range rs {
 		switch {
 		case !r.Started.IsZero():
 			if r.Started.Before(s.st.Started) {
-				step, outcome := opsResolved(r, s.ops.self, now)
+				step, outcome := s.ops.opsResolved(r)
 				s.opsEnd(r, step, outcome)
 			}
 		case r.Answer == "no":
@@ -341,13 +348,18 @@ func (s *Supervisor) opsCarryOut(r *OpsRecord) {
 	if in := s.st.Instructions[r.AnsweredBy]; in != nil {
 		s.routeStep(in, RouteWait, "", false, "agentd is carrying out "+entryOps+r.ID)
 	}
-	rec, env := *r, s.ops
+	rec, base := *r, s.ops
 	s.spawnShared("ops", func(w *Supervisor) {
 		if rec.Auto && rec.Answer == "" {
-			if up, _ := env.up(env.cfg.Ops.Supervisors[rec.Supervisor]); up {
-				w.opsEnd(&rec, OpsFailed, rec.Supervisor+" was up again when agentd came to restart it, so nothing was done; propose it again for the owner's yes")
+			if rec.Supervisor == base.self || !base.down(base.cfg.Ops.Supervisors[rec.Supervisor]) {
+				w.opsEnd(&rec, OpsFailed, rec.Supervisor+" was not down beyond doubt when agentd came to restart it, so nothing was done; propose it again for the owner's yes")
 				return
 			}
+		}
+		// A swap is logged the moment it is made.
+		env := *base
+		env.swapped = func(kept string) {
+			w.emit("", Event{Kind: KindOps, Mode: ModeShared, Ops: &OpsPayload{ID: rec.ID, Step: OpsStarted, Instruction: rec.AnsweredBy, Swapped: kept}})
 		}
 		outcome, self, err := env.execute(w.runCtx, rec)
 		switch {

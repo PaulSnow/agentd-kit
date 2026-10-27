@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -47,11 +48,12 @@ func (o *opsEnv) propose(op string, a opsArgs) (OpsChange, error) {
 			_, _, err := o.supervisor(a.Supervisor)
 			return c, err
 		}
-		up, pane := o.up(s)
+		_, pane := o.up(s)
 		c.Summary = fmt.Sprintf("Restart %s (tmux session %s): Ctrl-C, then Up and Enter.", a.Supervisor, s.Tmux)
-		if !up {
+		// Down beyond doubt, and not this process: a shell waits in its pane.
+		if a.Supervisor != o.self && o.down(s) {
 			c.Auto = true
-			c.Summary = fmt.Sprintf("Restart %s (tmux session %s), which is down (its pane runs %s): Up and Enter. A supervisor that is down is restarted without a yes.", a.Supervisor, s.Tmux, oneLine(pane, 60))
+			c.Summary = fmt.Sprintf("Restart %s (tmux session %s), which is down (%s): Up and Enter. A supervisor that is down is restarted without a yes.", a.Supervisor, s.Tmux, oneLine(pane, 60))
 		}
 		return c, nil
 	case OpsInstall:
@@ -121,6 +123,17 @@ func (o *opsEnv) proposeSet(c OpsChange, a opsArgs) (OpsChange, error) {
 	src, err := os.ReadFile(s.Config)
 	if err != nil {
 		return c, err
+	}
+	// A value that holds a credential's key, or a delete of one that
+	// does, could not be shown to the owner.
+	changed := []byte(c.Value)
+	if c.Delete {
+		if doc, err := decodeNumbers(src); err == nil {
+			changed, _ = json.Marshal(pointerGet(doc, toks))
+		}
+	}
+	if v, err := decodeNumbers(changed); err == nil && hasRedactedKey(v) {
+		return c, fmt.Errorf("the change at %s holds a credential or the path to one; the owner edits those by hand", cutUTF8(a.Pointer, 120))
 	}
 	out, err := setConfigText(src, c.Pointer, c.Value, c.Delete)
 	if err != nil {
@@ -269,6 +282,9 @@ func (o *opsEnv) execute(ctx context.Context, r OpsRecord) (outcome string, self
 		}
 		return o.swapIn(built, "commit "+short(full))
 	case OpsRollback:
+		if base := filepath.Base(o.binary) + "."; !strings.HasPrefix(r.Kept, base) || !keptName.MatchString(strings.TrimPrefix(r.Kept, base)) {
+			return "", false, fmt.Errorf("%q is not a kept binary's name", cutUTF8(r.Kept, 60))
+		}
 		src := filepath.Join(filepath.Dir(o.binary), r.Kept)
 		dir, err := os.MkdirTemp("", "agentd-rollback-")
 		if err != nil {
@@ -334,8 +350,8 @@ func (o *opsEnv) executeSet(r OpsRecord) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	backup := s.Config + ".bak-ops-" + o.now().UTC().Format("20060102T150405Z")
-	if err := os.WriteFile(backup, src, info.Mode().Perm()); err != nil {
+	backup, err := writeBackup(s.Config+".bak-ops-"+o.now().UTC().Format("20060102T150405Z"), src, info.Mode().Perm())
+	if err != nil {
 		return "", false, fmt.Errorf("the backup could not be written, so nothing was: %v", err)
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(s.Config), "."+filepath.Base(s.Config)+".new-")
@@ -357,7 +373,7 @@ func (o *opsEnv) executeSet(r OpsRecord) (string, bool, error) {
 		return "", false, fmt.Errorf("%s could not be written: %v", filepath.Base(s.Config), werr)
 	}
 	outcome := fmt.Sprintf("wrote %s (the old one is kept as %s)", filepath.Base(s.Config), filepath.Base(backup))
-	done, self, _, err := o.restartAll(s.Config)
+	done, self, _, err := o.restartAll(s.Config, "")
 	if len(done) > 0 {
 		outcome += "; restarted " + strings.Join(done, ", ")
 	}
@@ -384,6 +400,9 @@ func (o *opsEnv) swapIn(src, what string) (string, bool, error) {
 	if err := copyFileTo(src, o.binary); err != nil {
 		return "", false, fmt.Errorf("the swap failed, so nothing was installed: %v", err)
 	}
+	if o.swapped != nil {
+		o.swapped(kept)
+	}
 	back := func(why error, restarted []string) (string, bool, error) {
 		if err := copyFileTo(keptPath, o.binary); err != nil {
 			return "", false, fmt.Errorf("%v; and putting %s back failed: %v; the binary is %s now", why, kept, err, what)
@@ -408,7 +427,7 @@ func (o *opsEnv) swapIn(src, what string) (string, bool, error) {
 	if err := o.checkConfigs(); err != nil {
 		return back(err, nil)
 	}
-	done, self, failing, err := o.restartAll("")
+	done, self, failing, err := o.restartAll("", kept)
 	if err != nil {
 		if failing != "" {
 			done = append(done, failing)
@@ -425,16 +444,69 @@ func (o *opsEnv) swapIn(src, what string) (string, bool, error) {
 	return outcome, self, nil
 }
 
+// writeBackup writes b to path, or to path.N for the first N free, never
+// over a file, and says which.
+func writeBackup(path string, b []byte, mode os.FileMode) (string, error) {
+	for n := 0; n < 100; n++ {
+		p := path
+		if n > 0 {
+			p = fmt.Sprintf("%s.%d", path, n)
+		}
+		f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		_, werr := f.Write(b)
+		if cerr := f.Close(); werr == nil {
+			werr = cerr
+		}
+		return p, werr
+	}
+	return "", fmt.Errorf("%s and 99 more exist", path)
+}
+
+// pointerGet is the value at toks in doc, or nil.
+func pointerGet(doc any, toks []string) any {
+	for _, tok := range toks {
+		switch x := doc.(type) {
+		case map[string]any:
+			doc = x[tok]
+		case []any:
+			i, err := strconv.Atoi(tok)
+			if err != nil || i < 0 || i >= len(x) {
+				return nil
+			}
+			doc = x[i]
+		default:
+			return nil
+		}
+	}
+	return doc
+}
+
 // opsResolved is what the next process says of a change the last one
 // left: one it was restarting itself to finish is done, now it is up;
-// any other was cut short.
-func opsResolved(r *OpsRecord, self string, now time.Time) (string, string) {
+// any other was cut short, and when it had swapped the binary, the kept
+// one is put back.
+func (o *opsEnv) opsResolved(r *OpsRecord) (string, string) {
 	if r.Restarting != "" {
 		commit := short(buildCommit())
 		if commit == "" {
 			commit = "an unknown commit"
 		}
-		return OpsDone, fmt.Sprintf("%s; %s is up again, on %s", r.Restarting, self, commit)
+		return OpsDone, fmt.Sprintf("%s; %s is up again, on %s", r.Restarting, o.self, commit)
 	}
-	return OpsFailed, fmt.Sprintf("agentd stopped while it was carrying this out (started %s); ops_status and ops_tail show where it stands", r.Started.UTC().Format(time.RFC3339))
+	why := fmt.Sprintf("agentd stopped while it was carrying this out (started %s)", r.Started.UTC().Format(time.RFC3339))
+	if r.Swapped != "" && o.binary != "" {
+		if base := filepath.Base(o.binary) + "."; strings.HasPrefix(r.Swapped, base) && keptName.MatchString(strings.TrimPrefix(r.Swapped, base)) {
+			if err := copyFileTo(filepath.Join(filepath.Dir(o.binary), r.Swapped), o.binary); err != nil {
+				return OpsFailed, fmt.Sprintf("%s, after swapping the binary; putting %s back failed: %v", why, r.Swapped, err)
+			}
+			return OpsFailed, fmt.Sprintf("%s, after swapping the binary: %s is back; the supervisors restarted since run the new one until restarted with ops_restart", why, r.Swapped)
+		}
+	}
+	return OpsFailed, why + "; ops_status and ops_tail show where it stands"
 }

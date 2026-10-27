@@ -131,6 +131,11 @@ func (srv *MCPServer) opsCall(tool string, args json.RawMessage) (string, bool) 
 	if err != nil {
 		return refuse(err)
 	}
+	// A value the log may not hold cannot be shown to the owner, nor
+	// carried out from the log.
+	if v := string(c.Value) + "\n" + c.Pointer; srv.withheld(v) != v {
+		return refuse(fmt.Errorf("the change matches a confidential pattern; the owner makes it by hand"))
+	}
 	c.Thread = strings.TrimPrefix(srv.name, "thread:")
 	c.Summary, c.Why = srv.withheld(c.Summary), srv.withheld(c.Why)
 	events, err := srv.load()

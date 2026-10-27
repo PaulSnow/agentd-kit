@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -28,8 +29,12 @@ type opsEnv struct {
 	// accounts reads each account's usage now.
 	accounts func(cfgs []*Config) []opsAccount
 	// selfRestart restarts the tmux session this process runs in, from a
-	// process of its own, since this one is what Ctrl-C stops.
-	selfRestart func(tmux string) error
+	// process of its own, since this one is what Ctrl-C stops; when kept
+	// is set and the pane does not run command again, it puts kept back
+	// over binary and tries once more.
+	selfRestart func(tmux, command, binary, kept string) error
+	// swapped, when set, is told the kept binary as soon as a swap is made.
+	swapped func(kept string)
 	// binary is the agentd an install replaces; self the supervisor this
 	// process is, "" when none is.
 	binary string
@@ -122,16 +127,27 @@ func goBuild(ctx context.Context, repo, sha, out string) error {
 
 // detachedRestart restarts tmux session name from a process of its own
 // session, which outlives the Ctrl-C it sends: once the pane no longer
-// runs agentd, it sends Up and Enter, as the owner would.
-func detachedRestart(name string) error {
+// runs command, it sends Up, and Enter only when the line Up recalled runs
+// command, as the owner would; else it clears the line. When the pane
+// does not run command a minute later and kept is set, it puts kept back
+// over binary and does it again.
+func detachedRestart(name, command, binary, kept string) error {
 	tg, err := target(name)
 	if err != nil {
 		return err
 	}
-	script := `sleep 2; tmux send-keys -t "$1" C-c; i=0; ` +
-		`while [ "$(tmux display-message -p -t "$1" '#{pane_current_command}')" = agentd ] && [ $i -lt 150 ]; do sleep 1; i=$((i+1)); done; ` +
-		`sleep 1; tmux send-keys -t "$1" Up; sleep 1; tmux send-keys -t "$1" Enter`
-	cmd := exec.Command("sh", "-c", script, "sh", tg)
+	script := `t=$1 c=$2 b=$3 k=$4
+runs() { [ "$(tmux display-message -p -t "$t" '#{pane_current_command}')" = "$c" ]; }
+again() {
+  sleep 1; tmux send-keys -t "$t" Up; sleep 1
+  if tmux capture-pane -p -t "$t" | grep -v '^[[:space:]]*$' | tail -n 1 | grep -qF -- "$c"; then tmux send-keys -t "$t" Enter; else tmux send-keys -t "$t" C-u; exit 1; fi
+}
+sleep 2; tmux send-keys -t "$t" C-c
+i=0; while runs && [ $i -lt 150 ]; do sleep 1; i=$((i+1)); done
+again
+sleep 60
+if [ -n "$k" ] && ! runs; then cp "$k" "$b.restore" && chmod 755 "$b.restore" && mv "$b.restore" "$b" && again; fi`
+	cmd := exec.Command("sh", "-c", script, "sh", tg, command, binary, kept)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		return err
@@ -150,7 +166,7 @@ func (o *opsEnv) supervisor(name string) (OpsSupervisor, *Config, error) {
 }
 
 // up says whether the supervisor's tmux session runs agentd now, and
-// what its pane runs.
+// what its pane runs, in words.
 func (o *opsEnv) up(s OpsSupervisor) (bool, string) {
 	ok, err := o.tmux.HasSession(s.Tmux)
 	if err != nil {
@@ -166,7 +182,22 @@ func (o *opsEnv) up(s OpsSupervisor) (bool, string) {
 	if info.Dead {
 		return false, "its pane is dead"
 	}
-	return info.Command == o.command(), info.Command
+	return info.Command == o.command(), "its pane runs " + info.Command
+}
+
+// shells are the commands a pane shows when its agentd has stopped and
+// its shell waits: only then is a supervisor down for a restart without
+// a yes.
+var shells = map[string]bool{"bash": true, "zsh": true, "sh": true, "dash": true, "fish": true, "ksh": true}
+
+// down says whether the supervisor is down beyond doubt: its pane is
+// there, and runs a shell.
+func (o *opsEnv) down(s OpsSupervisor) bool {
+	if ok, err := o.tmux.HasSession(s.Tmux); err != nil || !ok {
+		return false
+	}
+	info, err := o.tmux.Pane(s.Tmux)
+	return err == nil && !info.Dead && shells[info.Command]
 }
 
 // command is what a pane running agentd shows as its command.
@@ -377,6 +408,10 @@ func (o *opsEnv) events(name, kind string, n int) ([]string, error) {
 			continue
 		}
 		b, _ := json.Marshal(events[i])
+		var v any
+		if json.Unmarshal(b, &v) == nil {
+			b, _ = json.Marshal(redactValue(v, func(...string) bool { return false }))
+		}
 		text := string(b)
 		if secret(text) {
 			text = fmt.Sprintf(`{"t":%q,"kind":%q,"withheld":true}`, events[i].Time.Format(time.RFC3339), events[i].Kind)
@@ -468,16 +503,22 @@ func (o *opsEnv) keep() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	suffix := short(strings.TrimSuffix(binaryCommit(o.binary), "+modified"))
-	if len(suffix) != 12 {
-		suffix = "unknown-" + fileHash(b)[:12]
+	// A modified build, or one of no known commit, is kept by its bytes'
+	// hash; so is one whose commit's name holds other bytes already.
+	commit := binaryCommit(o.binary)
+	suffix := short(commit)
+	name := func(suffix string) (string, string) {
+		n := filepath.Base(o.binary) + "." + suffix
+		return n, filepath.Join(filepath.Dir(o.binary), n)
 	}
-	name := filepath.Base(o.binary) + "." + suffix
-	path := filepath.Join(filepath.Dir(o.binary), name)
-	if _, err := os.Stat(path); err == nil {
-		return name, nil
+	n, path := name(suffix)
+	if old, err := os.ReadFile(path); len(suffix) != 12 || strings.HasSuffix(commit, "+modified") || err == nil && !bytes.Equal(old, b) {
+		n, path = name("unknown-" + fileHash(b)[:12])
 	}
-	return name, copyFileTo(o.binary, path)
+	if old, err := os.ReadFile(path); err == nil && bytes.Equal(old, b) {
+		return n, nil
+	}
+	return n, copyFileTo(o.binary, path)
 }
 
 // checkConfigs runs the installed binary's agentd config on every
@@ -521,16 +562,22 @@ func (o *opsEnv) waitUp(s OpsSupervisor, want bool) bool {
 }
 
 // restart restarts one supervisor the owner's way: Ctrl-C when it is up,
-// then, once its pane no longer runs agentd, Up and Enter, which run its
-// command again; and it waits for it to be up. This process restarts
-// itself from a process of its own: errSelf says that one is under way.
-func (o *opsEnv) restart(name string) error {
+// then, once its pane no longer runs agentd, Up, and Enter only when the
+// line Up recalled runs agentd; and it waits for it to be up. This
+// process restarts itself from a process of its own, which puts kept
+// back if it does not come up: errSelf says that one is under way.
+func (o *opsEnv) restart(name string) error { return o.restartKept(name, "") }
+
+func (o *opsEnv) restartKept(name, kept string) error {
 	s, ok := o.cfg.Ops.Supervisors[name]
 	if !ok {
 		return fmt.Errorf("no supervisor %q", name)
 	}
 	if name == o.self {
-		if err := o.selfRestart(s.Tmux); err != nil {
+		if kept != "" {
+			kept = filepath.Join(filepath.Dir(o.binary), kept)
+		}
+		if err := o.selfRestart(s.Tmux, o.command(), o.binary, kept); err != nil {
 			return fmt.Errorf("restarting %s, this process: %v", name, err)
 		}
 		return errSelf
@@ -546,12 +593,22 @@ func (o *opsEnv) restart(name string) error {
 			return fmt.Errorf("%s still runs agentd %s after Ctrl-C", name, o.wait)
 		}
 	}
-	if err := o.tmux.Keys(s.Tmux, "Up", "Enter"); err != nil {
+	if err := o.tmux.Keys(s.Tmux, "Up"); err != nil {
+		return err
+	}
+	o.sleep(o.poll)
+	// Up recalls the shell's last line: only agentd's own is run again.
+	screen, err := o.tmux.CapturePane(s.Tmux, 0)
+	if line := lastLine(screen); err != nil || !strings.Contains(line, o.command()) {
+		o.tmux.Keys(s.Tmux, "C-u")
+		return fmt.Errorf("%s's shell recalled %q, not agentd's command, so nothing was run; start it by hand", name, oneLine(line, 120))
+	}
+	if err := o.tmux.Keys(s.Tmux, "Enter"); err != nil {
 		return err
 	}
 	if !o.waitUp(s, true) {
 		_, pane := o.up(s)
-		return fmt.Errorf("%s is not up %s after Up and Enter; its pane runs %s", name, o.wait, oneLine(pane, 80))
+		return fmt.Errorf("%s is not up %s after Up and Enter: %s", name, o.wait, oneLine(pane, 80))
 	}
 	return nil
 }
@@ -563,7 +620,7 @@ var errSelf = errors.New("this process restarts")
 // restartAll restarts the supervisors that run config, or every one for
 // "", this process last; it says which it restarted, whether this
 // process restarts, and the one that failed, stopping there.
-func (o *opsEnv) restartAll(config string) ([]string, bool, string, error) {
+func (o *opsEnv) restartAll(config, kept string) ([]string, bool, string, error) {
 	var done []string
 	self := false
 	for _, name := range o.cfg.Ops.names() {
@@ -581,7 +638,7 @@ func (o *opsEnv) restartAll(config string) ([]string, bool, string, error) {
 		done = append(done, name)
 	}
 	if self {
-		if err := o.restart(o.self); err != errSelf {
+		if err := o.restartKept(o.self, kept); err != errSelf {
 			return done, false, "", err
 		}
 	}
