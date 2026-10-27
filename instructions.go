@@ -44,6 +44,11 @@ type InstructionPayload struct {
 	// is shown as recorded only, so an upgrade acts on no old backlog.
 	To    string `json:"to,omitempty"`
 	Route bool   `json:"route,omitempty"`
+	// Re is the console entry the owner responded to (#59), as Go
+	// filled it in from the log, and Answer the answer the response gave
+	// it, when it is a decision.
+	Re     *EntryRe     `json:"re,omitempty"`
+	Answer *EntryAnswer `json:"answer,omitempty"`
 }
 
 // Instruction is an instruction as the log holds it, with when it came,
@@ -174,17 +179,32 @@ func UIInstruction(cfg *Config, log *Log, now time.Time, repo, to, text string) 
 // for console when it has none, screened, from where it was typed, for
 // agentd to route.
 func recordInstruction(cfg *Config, log *Log, now time.Time, repos []string, console, to, from, text string) error {
+	return recordInstructionRe(cfg, log, now, repos, console, to, from, text, nil, nil)
+}
+
+// recordInstructionRe is recordInstruction for a response to entry re,
+// which may be no more than answer, its words left out (#59).
+func recordInstructionRe(cfg *Config, log *Log, now time.Time, repos []string, console, to, from, text string, re *EntryRe, answer *EntryAnswer) error {
 	text = strings.TrimSpace(text)
-	if text == "" {
+	if text == "" && answer == nil {
 		return errors.New("an empty instruction")
 	}
-	p := &InstructionPayload{Repositories: repos, Console: console, Text: text, Hash: shortHash(HashPane(text)), From: from, To: to, Route: true}
+	p := &InstructionPayload{Repositories: repos, Console: console, Text: text, Hash: shortHash(HashPane(text)), From: from, To: to, Route: true, Re: re, Answer: answer}
 	for i, pat := range screenPatterns(cfg) {
 		if regexp.MustCompile(pat).MatchString(text) {
 			// Nothing of a withheld text is logged, not even its hash,
 			// so it is never taken for a copy.
 			p.Text, p.Hash, p.Withheld = "", "", i+1
 			break
+		}
+	}
+	// The entry's words were screened as the page showed them; once more
+	// here, so none is logged that matches now.
+	if r := p.Re; r != nil {
+		for _, pat := range screenPatterns(cfg) {
+			if m := regexp.MustCompile(pat); m.MatchString(r.Text) || m.MatchString(r.Question) {
+				r.Text, r.Question = "", ""
+			}
 		}
 	}
 	p.ID = "I" + shortHash(HashPane(now.UTC().Format(time.RFC3339Nano) + "\n" + from + "\n" + p.Hash))[:8]
@@ -482,10 +502,14 @@ const instructionsKept = 20
 // marks one not answered yet, within ChatIdle of its delivery.
 type InstructionDoc struct {
 	ID   string    `json:"id"`
-	Text string    `json:"text"`
-	From string    `json:"from"`
 	At   time.Time `json:"at"`
-	New  bool      `json:"new,omitempty"`
+	From string    `json:"from"`
+	// Re is the entry a response is about and Answer the answer it gave
+	// a decision (#59): each record stands alone.
+	Re     *EntryRe     `json:"re,omitempty"`
+	Answer *EntryAnswer `json:"answer,omitempty"`
+	Text   string       `json:"text,omitempty"`
+	New    bool         `json:"new,omitempty"`
 }
 
 // writeInstructions writes the instructions routed to the session to
@@ -499,7 +523,7 @@ func writeInstructions(workdir string, ins []*Instruction, now time.Time) error 
 		Instructions []InstructionDoc `json:"instructions"`
 	}{Instructions: []InstructionDoc{}}
 	for _, in := range ins {
-		doc.Instructions = append(doc.Instructions, InstructionDoc{ID: in.ID, Text: in.Text, From: in.From, At: in.At, New: in.Replied.IsZero() && (in.Delivered.IsZero() || now.Sub(in.Delivered) < ChatIdle)})
+		doc.Instructions = append(doc.Instructions, InstructionDoc{ID: in.ID, Text: in.Text, From: in.From, At: in.At, Re: in.Re, Answer: in.Answer, New: in.Replied.IsZero() && (in.Delivered.IsZero() || now.Sub(in.Delivered) < ChatIdle)})
 	}
 	b, err := json.Marshal(doc)
 	if err != nil {

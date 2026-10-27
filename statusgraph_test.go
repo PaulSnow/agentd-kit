@@ -428,9 +428,9 @@ func TestConsoleShowsStatusGraph(t *testing.T) {
 	u, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
 	u.now = h.clock.Now
 	page := owner(t, u, "/console/widgets")
-	for _, want := range []string{`<figure class="status-graph">`, `class="phase-code blocked"`, `class="gap"`, "check failed",
+	for _, want := range []string{`<span class="spark status-graph" role="img"`, `class="phase-code blocked"`, `class="gap"`, "check failed",
 		"Fixed the parser.", "Next: Run the decoder tests.", "<strong>blocked</strong>: Waits on the owner&#39;s colour choice.",
-		"60% · risk low", "1 failed checks", "Status checks today: 2.1k tokens."} {
+		"60% · risk low", "1 failed checks", "status checks today: 2.1k tokens"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("console lacks %q:\n%s", want, page)
 		}

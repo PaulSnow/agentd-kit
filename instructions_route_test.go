@@ -276,8 +276,8 @@ func TestConsoleShowsTurnLive(t *testing.T) {
 			t.Fatalf("console lacks %q:\n%s", want, page)
 		}
 	}
-	if strings.Index(page, `id="reply"`) > strings.Index(page, `id="messages"`) {
-		t.Fatal("the reply box is below the history")
+	if strings.Index(page, `id="composer"`) < strings.Index(page, `id="box"`) {
+		t.Fatal("the composer is above the box")
 	}
 	h.transcriptOf("b", "t1", summaryLine("u3", "m1", long, at, 100))
 	h.ticks(1, time.Minute)
