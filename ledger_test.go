@@ -330,3 +330,41 @@ func TestUsageRecordsTheAccount(t *testing.T) {
 		t.Fatalf("b today %+v", rep.Today)
 	}
 }
+
+// The ledger holds each reading and spend once: a live run reads back
+// what it wrote, and two sessions measuring one transcript, one by a
+// guess, charge its gains once.
+func TestLedgerChargesOnce(t *testing.T) {
+	cfg := ledgerConfig()
+	reset := pageAt.Add(48 * time.Hour)
+	evs := []Event{
+		reading(pageAt.Add(-time.Hour), "a", 1, 5, reset),
+		{V: EventVersion, Time: pageAt.Add(-50 * time.Minute), Kind: KindTriage, Mode: ModeShared, Triage: &TriagePayload{Usage: &JobUsage{InputTokens: 10, Account: "a"}}},
+		spent(pageAt.Add(-40*time.Minute), "s1", "a", "t1", 100),
+		spent(pageAt.Add(-30*time.Minute), "s2", "a", "t1", 150),
+		spent(pageAt.Add(-20*time.Minute), "s1", "a", "t1", 200),
+	}
+	st := NewLogState(cfg, ModeLive).Fold(evs).Fold(evs)
+	if n := len(st.Ledger.Readings["a"]); n != 1 {
+		t.Fatalf("readings %d", n)
+	}
+	if rep := reportOf(t, AccountReports(cfg, st, pageAt, time.UTC), "a"); rep.Today.Total != 210 {
+		t.Fatalf("today %+v", rep.Today)
+	}
+}
+
+// A weekly reset already past with no reading since: this week is the
+// one now running, not the one before the stale reset.
+func TestAccountReportResetPassed(t *testing.T) {
+	cfg := ledgerConfig()
+	reset := pageAt.Add(-time.Hour)
+	st := NewLogState(cfg, ModeLive).Fold([]Event{
+		reading(pageAt.Add(-2*time.Hour), "a", 1, 95, reset),
+		spent(pageAt.Add(-90*time.Minute), "s1", "a", "t1", 100),
+		spent(pageAt.Add(-30*time.Minute), "s1", "a", "t1", 130),
+	})
+	rep := reportOf(t, AccountReports(cfg, st, pageAt, time.UTC), "a")
+	if rep.ThisWeek.Total != 30 || len(rep.Week) != 0 || rep.Projected != nil {
+		t.Fatalf("report %+v", rep)
+	}
+}

@@ -196,10 +196,12 @@ func newUIFixture(t *testing.T) *uiFixture {
 	turn.Turn = &TurnPayload{Transcript: "t17", Line: 3, Role: TurnSummary, Text: "Primed the widgets; **paint** next.", At: at(20 * time.Minute)}
 	usage := ev(at(20*time.Minute), "w17", KindUsage, ModeLive)
 	usage.Usage = &UsagePayload{Transcript: "t17", Account: "a", Calls: 4, Context: 120_000, Spend: 450_000}
-	five, week1, week2 := 30.0, 40.0, 42.0
+	five, week0, week1, week2 := 30.0, 39.0, 40.0, 42.0
 	weekReset := pageAt.Add(3 * 24 * time.Hour)
 	read1 := ev(at(30*time.Minute), "", KindAccount, ModeShared)
 	read1.Account = &AccountPayload{Account: "a", Method: UsageEndpoint, FiveHour: &five, Weekly: &week1, WeeklyReset: &weekReset}
+	read0 := ev(at(70*time.Minute), "", KindAccount, ModeShared)
+	read0.Account = &AccountPayload{Account: "a", Method: UsageEndpoint, FiveHour: &five, Weekly: &week0, WeeklyReset: &weekReset}
 	read2 := ev(at(5*time.Minute), "", KindAccount, ModeShared)
 	read2.Account = &AccountPayload{Account: "a", Method: UsageEndpoint, FiveHour: &five, Weekly: &week2, WeeklyReset: &weekReset}
 	for _, e := range []Event{
@@ -218,7 +220,7 @@ func newUIFixture(t *testing.T) *uiFixture {
 		to(at(45*time.Minute), "txt1", BlockedOnOwner, "open Questions"),
 		observe(at(45*time.Minute), "txt1", ObservePayload{State: string(BlockedOnOwner), Alive: true, Questions: true,
 			StatusQuestions: hash("Which colour should the **logo** be?")}),
-		feed, instruction, imported, item, turn, usage, read1, read2,
+		feed, instruction, imported, item, turn, usage, read0, read1, read2,
 	} {
 		if err := NewLogWriter(f.nightBuf).Append(e); err != nil {
 			t.Fatalf("%+v: %v", e, err)
@@ -859,7 +861,7 @@ func TestUIAccountsJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(owner(t, u, "/accounts.json")), &reps); err != nil {
 		t.Fatal(err)
 	}
-	if len(reps) != 1 || reps[0].Account != "a" || reps[0].Weekly == nil || *reps[0].Weekly != 42 || reps[0].ThisWeek.Total != 450_000 || len(reps[0].Week) != 2 {
+	if len(reps) != 1 || reps[0].Account != "a" || reps[0].Weekly == nil || *reps[0].Weekly != 42 || reps[0].ThisWeek.Total != 450_000 || len(reps[0].Week) != 3 {
 		t.Fatalf("reports %+v", reps)
 	}
 }

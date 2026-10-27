@@ -29,6 +29,7 @@ var uiHTML string
 var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
 	"markdown": markdown,
 	"pct":      func(v *float64) string { return fmt.Sprintf("%.0f%%", *v) },
+	"rate":     func(v *float64) string { return fmt.Sprintf("%+.2f%%", *v) },
 	"yes":      func(b *bool) bool { return b != nil && *b },
 	"ctx":      func(p, v any) map[string]any { return map[string]any{"P": p, "V": v} },
 }).Parse(uiHTML))
@@ -348,10 +349,10 @@ func (a uiAccount) Spark() string {
 	return strings.TrimSpace(b.String())
 }
 
-// LimitY is where the limit falls in the spark's box.
+// LimitY is where the limit falls in the spark's box, "" with no limit.
 func (a uiAccount) LimitY() string {
-	if a.Report == nil {
-		return "0"
+	if a.Report == nil || a.Report.Limit <= 0 {
+		return ""
 	}
 	return fmt.Sprintf("%.1f", float64(sparkH)*(1-math.Min(a.Report.Limit, 100)/100))
 }

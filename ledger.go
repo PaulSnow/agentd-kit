@@ -90,12 +90,19 @@ type AccountLedger struct {
 	Spends   []LedgerSpend              // oldest first
 	Fallback map[string]FallbackUse     // each account's latest fallback placement
 	Noticed  map[string]time.Time       // each account's latest notice
-	seen     map[string]int64           // each session's transcript's spend so far
+	seen     map[string]seenSpend       // each transcript's spend so far
+	applied  map[string]time.Time       // the readings and job spends held, by applyKey
+}
+
+// seenSpend is a transcript's spend as last measured, and when.
+type seenSpend struct {
+	spend int64
+	at    time.Time
 }
 
 func newAccountLedger() *AccountLedger {
 	return &AccountLedger{Readings: map[string][]LedgerReading{}, Fallback: map[string]FallbackUse{},
-		Noticed: map[string]time.Time{}, seen: map[string]int64{}}
+		Noticed: map[string]time.Time{}, seen: map[string]seenSpend{}, applied: map[string]time.Time{}}
 }
 
 // jobTokens is a job's usage as input-equivalent tokens.
@@ -135,6 +142,16 @@ func (st *LogState) applyLedger(e Event) {
 			l.spend(LedgerSpend{At: e.Time, Account: orUnknown(u.Account), Repository: repo, Session: e.Session, Kind: kind, Tokens: jobTokens(u)})
 		}
 	}
+	// A live run reads back what it wrote: a reading or a job's spend is
+	// held once. A usage event's spend is so far, which holds it once.
+	if e.Account != nil || e.Triage != nil || e.Card != nil || e.Query != nil || e.Status != nil || e.Route != nil {
+		b, _ := json.Marshal(e)
+		k := shortHash(HashPane(string(b)))
+		if _, ok := l.applied[k]; ok {
+			return
+		}
+		l.applied[k] = e.Time
+	}
 	switch {
 	case e.Account != nil:
 		p := e.Account
@@ -145,16 +162,19 @@ func (st *LogState) applyLedger(e Event) {
 		l.Readings[p.Account] = append(l.Readings[p.Account], r)
 	case e.Usage != nil && e.Session != "":
 		u := e.Usage
-		key := e.Session + "\n" + u.Transcript
-		prev, seen := l.seen[key]
-		l.seen[key] = u.Spend
-		delta := u.Spend - prev
+		// By the transcript alone: two sessions measuring one, a guess
+		// landing on another's, charge its gains once.
+		// A transcript's spend only grows: one read back lower is old.
+		prev, seen := l.seen[u.Transcript]
+		if seen && u.Spend < prev.spend {
+			return
+		}
+		l.seen[u.Transcript] = seenSpend{u.Spend, e.Time}
+		delta := u.Spend - prev.spend
 		switch {
 		case !seen && u.Guessed:
 			// A guessed transcript is counted from when it was first
 			// seen: what it spent before may not be the session's.
-			delta = 0
-		case delta < 0:
 			delta = 0
 		}
 		if delta == 0 {
@@ -223,6 +243,16 @@ func (l *AccountLedger) prune(now time.Time) {
 		}
 		if j > 0 {
 			l.Readings[a] = append([]LedgerReading(nil), rs[j:]...)
+		}
+	}
+	for k, v := range l.seen {
+		if v.at.Before(cut) {
+			delete(l.seen, k)
+		}
+	}
+	for k, at := range l.applied {
+		if at.Before(cut) {
+			delete(l.applied, k)
 		}
 	}
 }
@@ -343,10 +373,16 @@ func accountReport(cfg *Config, st *LogState, l *AccountLedger, account string, 
 	if fb, ok := l.Fallback[account]; ok && now.Sub(fb.At) < weekLength {
 		rep.Fallback = &fb
 	}
-	// The week: from the latest reset a week back, else the last week.
+	// The week: from the latest reset a week back, else the last week. A
+	// reset already past, with no reading since, is rolled on to the
+	// week now running, whose line is then empty.
 	weekStart := now.Add(-weekLength)
 	if rep.WeeklyReset != nil {
-		weekStart = rep.WeeklyReset.Add(-weekLength)
+		end := *rep.WeeklyReset
+		for !end.After(now) {
+			end = end.Add(weekLength)
+		}
+		weekStart = end.Add(-weekLength)
 	}
 	var prev *LedgerReading
 	for i, r := range l.Readings[account] {
@@ -456,11 +492,7 @@ func burnOf(l *AccountLedger, account string, reset *time.Time, now time.Time, s
 	if base == nil || last == nil || now.Sub(last.At) > stale {
 		return b
 	}
-	start := base.At
-	if start.Before(from) {
-		start = from
-	}
-	if h := last.At.Sub(start).Hours(); h >= 1 {
+	if h := last.At.Sub(base.At).Hours(); h >= 1 {
 		rate := math.Round((*last.Weekly-*base.Weekly)/h*100) / 100
 		b.WeeklyPerHour = &rate
 	}
@@ -484,7 +516,7 @@ func (s *Supervisor) noticeAccounts(now time.Time) {
 		fb, fallback := l.Fallback[rep.Account]
 		switch {
 		case rep.Over:
-			why = fmt.Sprintf("account %s is projected to reach %.0f%% of its week by the reset at %s (now %.0f%%, rising %.2f%% an hour; the limit is %.0f%%)",
+			why = fmt.Sprintf("account %s is projected to reach %.0f%% of its week by the reset at %s (now %.0f%%, rising %+.2f%% an hour; the limit is %.0f%%)",
 				rep.Account, *rep.Projected, rep.WeeklyReset.UTC().Format("2006-01-02 15:04Z"), *rep.Weekly, *rep.Burn.WeeklyPerHour, rep.Limit)
 		case fallback && now.Sub(fb.At) < noticeEvery && fb.At.After(l.Noticed[rep.Account]):
 			why = fmt.Sprintf("fallback account %s is in use: %s was placed on it", rep.Account, fb.Session)
@@ -600,7 +632,7 @@ func accountReportText(r AccountReport) string {
 	split("this week", r.ThisWeek)
 	fmt.Fprintf(&b, "  burn over %.0fh: %s tokens an hour", r.Burn.Hours, tokens(r.Burn.TokensPerHour))
 	if r.Burn.WeeklyPerHour != nil {
-		fmt.Fprintf(&b, ", weekly +%.2f%% an hour", *r.Burn.WeeklyPerHour)
+		fmt.Fprintf(&b, ", weekly %+.2f%% an hour", *r.Burn.WeeklyPerHour)
 	} else {
 		b.WriteString(", weekly rate unknown")
 	}
