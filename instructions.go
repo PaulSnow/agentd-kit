@@ -7,15 +7,23 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
 
 // The owner's reply in a console that is neither an answer nor a seen mark
-// is an instruction for the repositories that console feeds (#33). It is
-// recorded, and read with agentd console inbox; nothing types it into a
-// session (#53).
+// is an instruction (#33). agentd routes each one (#56): a reply in a
+// session's own box goes to that session; one in a repository's box goes
+// to the repository's chat session, which agentd starts when the owner
+// first writes and keeps while the conversation goes on. It is handed over
+// the way answers are, at once, mid-turn too: instructions.json in the
+// session's workdir and one fixed pointer line, never the owner's words
+// typed. What became of it is folded from the log: the route, the
+// delivery, the session's next prompt, the tools it ran since, and the
+// reply it ended that turn with. agentd console inbox still reads them.
 
 // InstructionPayload is an owner instruction: its id, the repositories it
 // is for, and its text, left out when it matches a confidential pattern
@@ -31,13 +39,82 @@ type InstructionPayload struct {
 	Withheld     int      `json:"withheld,omitempty"`
 	Hash         string   `json:"hash,omitempty"`
 	From         string   `json:"from"`
+	// To is the session the owner addressed, if any. Route marks an
+	// instruction agentd routes: one recorded before #56 has none, and
+	// is shown as recorded only, so an upgrade acts on no old backlog.
+	To    string `json:"to,omitempty"`
+	Route bool   `json:"route,omitempty"`
 }
 
-// Instruction is an instruction as the log holds it, with when it came.
+// Instruction is an instruction as the log holds it, with when it came,
+// and what became of it in the run's mode (#56): the session it was routed
+// to, whether agentd started that session for it, when it was delivered,
+// when the session took it (its next prompt) and the reply it ended that
+// turn with; or why it waits, or failed.
 type Instruction struct {
 	InstructionPayload
-	At time.Time
+	At        time.Time
+	Session   string
+	Started   bool
+	Delivered time.Time
+	Taken     time.Time
+	Reply     string
+	// ReplyWithheld: the reply matched a confidential pattern.
+	ReplyWithheld bool
+	Replied       time.Time
+	// Activity is the tools the session ran since it took the
+	// instruction, oldest first, the latest activityKept.
+	Activity []TurnPayload
+	Waiting  string
+	Failed   string
 }
+
+// Route steps.
+const (
+	RouteTo   = "to"   // routed to a session; Started when agentd started it for the instruction
+	RouteWait = "wait" // not delivered yet, and why
+	RouteFail = "fail" // never to be delivered, and why
+)
+
+func validRouteStep(s string) bool { return s == RouteTo || s == RouteWait || s == RouteFail }
+
+// RoutePayload is a step agentd took with an owner instruction.
+type RoutePayload struct {
+	Instruction string `json:"instruction"`
+	Step        string `json:"step"`
+	Session     string `json:"session,omitempty"`
+	Started     bool   `json:"started,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+}
+
+// InstructionsFile is where a session reads the owner's instructions
+// routed to it, in its workdir.
+const InstructionsFile = "instructions.json"
+
+// KindChat is the kind of a repository's chat session: the one the
+// owner talks to on the console (#56). It works on a worktree detached at
+// the target's tip, delivers nothing, is never nudged and never counts
+// against sessions.max, and runs on the repository's work model.
+const KindChat = "chat"
+
+// chatBranch is the branch a chat session is named by.
+const chatBranch = "chat"
+
+// ChatIdle is how long a chat session is kept with no message from the
+// owner; the next message starts it again.
+const ChatIdle = 2 * time.Hour
+
+// ChatPoll is how often agentd passes while an instruction is delivered
+// and not answered, so the page shows the turn as it goes.
+const ChatPoll = 5 * time.Second
+
+// activityKept bounds the tool lines an instruction keeps.
+const activityKept = 40
+
+// routeSkew is how much earlier than its delivery a session's prompt may
+// be stamped and still be taken as the delivery's: the transcript's clock
+// is the session's host's.
+const routeSkew = 30 * time.Second
 
 // InboxInstruction is an instruction as agentd console inbox shows it.
 type InboxInstruction struct {
@@ -58,36 +135,47 @@ var decisionLike = regexp.MustCompile(`^[A-Za-z]\d+(@\S*)?$`)
 // session, so no earlier copy is waiting to be carried.
 func RecordInstruction(cfg *Config, log *Log, now time.Time, console, text string) error {
 	if _, ok := cfg.Consoles[console]; ok {
-		return recordInstruction(cfg, log, now, nil, console, "console:"+console, text)
+		return recordInstruction(cfg, log, now, nil, console, "", "console:"+console, text)
 	}
 	repos := cfg.consoleRepos(console)
 	if len(repos) == 0 {
 		return fmt.Errorf("console %q feeds no repository, so it takes no instruction", console)
 	}
-	return recordInstruction(cfg, log, now, repos, "", "console:"+console, text)
+	return recordInstruction(cfg, log, now, repos, "", "", "console:"+console, text)
 }
 
 // UIInstruction records text as the owner's instruction from the UI for
 // one repository (#41), or for a console without one (#42), as a console
-// reply is recorded.
-func UIInstruction(cfg *Config, log *Log, now time.Time, repo, text string) error {
+// reply is recorded; to, when set, is the session the owner addressed,
+// which must be one of repo's, or one the console shows.
+func UIInstruction(cfg *Config, log *Log, now time.Time, repo, to, text string) error {
+	if to != "" {
+		sess, ok := cfg.Sessions[to]
+		if !ok {
+			return fmt.Errorf("no session %q", to)
+		}
+		if sess.Repository != repo && cfg.Console(to) != repo {
+			return fmt.Errorf("session %q is not %s's", to, repo)
+		}
+	}
 	if _, ok := cfg.Consoles[repo]; ok {
-		return recordInstruction(cfg, log, now, nil, repo, "ui", text)
+		return recordInstruction(cfg, log, now, nil, repo, to, "ui", text)
 	}
 	if _, ok := cfg.Repositories[repo]; !ok {
 		return fmt.Errorf("no repository %q", repo)
 	}
-	return recordInstruction(cfg, log, now, []string{repo}, "", "ui", text)
+	return recordInstruction(cfg, log, now, []string{repo}, "", to, "ui", text)
 }
 
 // recordInstruction records text as the owner's instruction for repos, or
-// for console when it has none, screened, from where it was typed.
-func recordInstruction(cfg *Config, log *Log, now time.Time, repos []string, console, from, text string) error {
+// for console when it has none, screened, from where it was typed, for
+// agentd to route.
+func recordInstruction(cfg *Config, log *Log, now time.Time, repos []string, console, to, from, text string) error {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return errors.New("an empty instruction")
 	}
-	p := &InstructionPayload{Repositories: repos, Console: console, Text: text, Hash: shortHash(HashPane(text)), From: from}
+	p := &InstructionPayload{Repositories: repos, Console: console, Text: text, Hash: shortHash(HashPane(text)), From: from, To: to, Route: true}
 	for i, pat := range screenPatterns(cfg) {
 		if regexp.MustCompile(pat).MatchString(text) {
 			// Nothing of a withheld text is logged, not even its hash,
@@ -189,4 +277,291 @@ func ImportConsole(cfg *Config, log *Log, events []Event, now time.Time, repo st
 		added++
 	}
 	return added, skipped, nil
+}
+
+// routeInstructions routes each owner instruction agentd routes that is
+// neither delivered nor failed, and not held by a session that can still
+// take it: to the session addressed, else to its repository's chat
+// session, started for it. Each step is logged once; one that cannot be
+// taken now waits, and is tried again each pass. Then it ends each chat
+// session the owner has not written to for ChatIdle.
+func (s *Supervisor) routeInstructions(now time.Time) {
+	for _, id := range sortedKeys(s.st.Instructions) {
+		in := s.st.Instructions[id]
+		if !in.Route || !in.Delivered.IsZero() || in.Failed != "" || in.Session != "" && s.takesInstructions(in.Session) {
+			continue
+		}
+		if s.routeOne(in, now); s.halt != nil {
+			return
+		}
+	}
+	s.endIdleChats(now)
+}
+
+// endIdleChats ends each chat session agentd started whose last
+// instruction, or its start when it has none, is ChatIdle old, and whose
+// instructions are all answered.
+func (s *Supervisor) endIdleChats(now time.Time) {
+	if s.shadow {
+		return
+	}
+	for _, name := range sortedKeys(s.st.Runtime) {
+		p := s.st.Runtime[name]
+		if p.Kind != KindChat {
+			continue
+		}
+		last, open := s.st.StartedAt[name], false
+		for _, in := range s.st.instructionsFor(name, false) {
+			if in.At.After(last) {
+				last = in.At
+			}
+			open = open || in.Replied.IsZero()
+		}
+		if !open && now.Sub(last) >= ChatIdle {
+			if s.emit(name, Event{Kind: KindSession, Mode: ModeShared, Runtime: &RuntimePayload{ID: newIntentID(), Action: SessionEnd, Repository: p.Repository, By: "agentd"}}); s.halt != nil {
+				return
+			}
+		}
+	}
+}
+
+// chatInFlight says whether an instruction is delivered and not yet
+// answered, for a pass every ChatPoll.
+func (st *LogState) chatInFlight() bool {
+	for _, in := range st.Instructions {
+		if in.Route && !in.Delivered.IsZero() && in.Replied.IsZero() && in.Failed == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// routeOne finds the session for in, starting one when it must.
+func (s *Supervisor) routeOne(in *Instruction, now time.Time) {
+	if in.Withheld > 0 {
+		s.routeStep(in, RouteFail, "", false, fmt.Sprintf("its text matched confidential pattern %d, so it was never logged and agentd cannot deliver it; reword it, or type it into the session yourself", in.Withheld))
+		return
+	}
+	if in.To != "" && s.takesInstructions(in.To) {
+		s.routeStep(in, RouteTo, in.To, false, "")
+		return
+	}
+	if len(in.Repositories) == 0 {
+		why := "console " + in.Console + " feeds no repository, so agentd has no session to start for it; reply in one of its sessions' boxes"
+		if in.To != "" {
+			why = in.To + " is not running, and console " + in.Console + " feeds no repository to start a session in"
+		}
+		s.routeStep(in, RouteFail, "", false, why)
+		return
+	}
+	repo := in.Repositories[0]
+	if s.cfg.Repositories[repo].Sessions == nil {
+		s.routeStep(in, RouteFail, "", false, repo+" has no sessions entry, so agentd starts no chat session there; reply in one of its sessions' boxes")
+		return
+	}
+	name := runtimeName(repo, chatBranch, KindChat)
+	if _, ok := s.st.Runtime[name]; ok {
+		if s.takesInstructions(name) {
+			s.routeStep(in, RouteTo, name, false, "")
+			return
+		}
+		if t := s.st.Tracks[name]; t == nil || t.State != Done {
+			s.routeStep(in, RouteWait, "", false, name+" is "+string(stateOf(t))+"; agentd hands it nothing until the owner clears it")
+			return
+		}
+		// A chat session that wrote DONE takes no line: it is ended, and
+		// started again for this instruction once it has stopped.
+		if !s.shadow {
+			s.emit(name, Event{Kind: KindSession, Mode: ModeShared, Runtime: &RuntimePayload{ID: newIntentID(), Action: SessionEnd, Repository: repo, By: "agentd"}})
+		}
+		s.routeStep(in, RouteWait, "", false, name+" finished; agentd ends it and starts it again for this instruction")
+		return
+	}
+	if s.shadow {
+		s.routeStep(in, RouteWait, "", false, repo+" has no chat session, and shadow mode starts none")
+		return
+	}
+	if why := s.startRuntime(repo, name, RuntimePayload{Kind: KindChat, Branch: chatBranch}); why != "" {
+		s.routeStep(in, RouteWait, "", false, "agentd cannot start "+name+" for it yet: "+why)
+		return
+	}
+	s.refreshRuntime()
+	s.routeStep(in, RouteTo, name, true, "")
+}
+
+// stateOf is a track's state, or unknown.
+func stateOf(t *Track) State {
+	if t == nil || t.State == "" {
+		return "unknown"
+	}
+	return t.State
+}
+
+// routeStep logs a step of in unless it is where in stands already.
+func (s *Supervisor) routeStep(in *Instruction, step, session string, started bool, reason string) {
+	switch {
+	case step == RouteTo && in.Session == session && in.Waiting == "",
+		step == RouteWait && in.Waiting == reason,
+		step == RouteFail && in.Failed == reason:
+		return
+	}
+	s.emit("", Event{Kind: KindRoute, Route: &RoutePayload{Instruction: in.ID, Step: step, Session: session, Started: started, Reason: reason}})
+}
+
+// takesInstructions says whether session name can be handed the owner's
+// instructions: a session of agentd's or the owner's, not a reviewer or a
+// judge, and not finished, stopped or parked. One gone is restarted with
+// them.
+func (s *Supervisor) takesInstructions(name string) bool {
+	sess, ok := s.cfg.Sessions[name]
+	if !ok || sess.Role != "" {
+		return false
+	}
+	t := s.st.Tracks[name]
+	return t == nil || !t.Parked && t.State != Done && t.State != Stopped && t.State != CrashLooping
+}
+
+// instructionsFor lists the instructions routed to session name, oldest
+// first; with undelivered, only those not delivered yet.
+func (st *LogState) instructionsFor(name string, undelivered bool) []*Instruction {
+	var out []*Instruction
+	for _, in := range st.Instructions {
+		if in.Route && in.Session == name && in.Failed == "" && (!undelivered || in.Delivered.IsZero()) {
+			out = append(out, in)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].At.Equal(out[j].At) {
+			return out[i].At.Before(out[j].At)
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
+}
+
+// instructionsKept bounds the instructions instructions.json holds: the
+// latest.
+const instructionsKept = 20
+
+// InstructionDoc is one instruction as instructions.json holds it. New
+// marks one not handed over before.
+type InstructionDoc struct {
+	ID   string    `json:"id"`
+	Text string    `json:"text"`
+	From string    `json:"from"`
+	At   time.Time `json:"at"`
+	New  bool      `json:"new,omitempty"`
+}
+
+// writeInstructions writes the instructions routed to the session to
+// instructions.json in its workdir, through a temporary file, and names
+// the new ones.
+func writeInstructions(workdir string, ins []*Instruction) error {
+	if len(ins) > instructionsKept {
+		ins = ins[len(ins)-instructionsKept:]
+	}
+	doc := struct {
+		Instructions []InstructionDoc `json:"instructions"`
+	}{Instructions: []InstructionDoc{}}
+	for _, in := range ins {
+		doc.Instructions = append(doc.Instructions, InstructionDoc{ID: in.ID, Text: in.Text, From: in.From, At: in.At, New: in.Delivered.IsZero()})
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	return writeAtomic(filepath.Join(workdir, InstructionsFile), append(b, '\n'))
+}
+
+// freshInstructions names the instructions routed to session name and not
+// yet delivered.
+func (st *LogState) freshInstructions(name string) []string {
+	var ids []string
+	for _, in := range st.instructionsFor(name, true) {
+		ids = append(ids, in.ID)
+	}
+	return ids
+}
+
+// deliverInstructions hands the owner's new instructions to a live
+// session as deliverAnswers hands answers: every instruction routed to it
+// written to instructions.json, then the fixed pointer line typed, only
+// into a session that can take a line. It says whether it tried to type.
+func (s *Supervisor) deliverInstructions(name string, sess Session, t *Track, ev Evidence, state State) bool {
+	ids := s.st.freshInstructions(name)
+	if len(ids) == 0 || !ev.Alive || t.Limited || ev.Dialog != "" || ev.TrustPrompt {
+		return false
+	}
+	if state != Working && state != Idle && !(state == BlockedOnOwner && ev.Status.Questions != "") {
+		return false
+	}
+	key := "instruct:" + name
+	if !s.retryDue(t, key, s.clock.Now()) {
+		return false
+	}
+	ins := s.st.instructionsFor(name, false)
+	pointer := s.cfg.Policies.Instructions.Pointer
+	s.typeInto(name, ActInstruct, &ActPayload{Key: key, Instructions: ids, Message: pointer}, t, ev.PaneHash, func() error {
+		if err := writeInstructions(sess.Workdir, ins); err != nil {
+			return err
+		}
+		return s.tmux.Type(name, pointer)
+	})
+	return true
+}
+
+// applyRoute folds a route step.
+func (st *LogState) applyRoute(e Event) {
+	p := e.Route
+	in := st.Instructions[p.Instruction]
+	if in == nil {
+		return
+	}
+	switch p.Step {
+	case RouteTo:
+		in.Session, in.Started, in.Waiting = p.Session, p.Started, ""
+	case RouteWait:
+		in.Waiting = p.Reason
+	case RouteFail:
+		in.Failed, in.Waiting = p.Reason, ""
+	}
+}
+
+// instructionsDelivered marks the instructions an instruct or a restart
+// handed over, a would-be one's too, so shadow mode records each once.
+func (st *LogState) instructionsDelivered(session string, a *ActPayload, at time.Time) {
+	for _, id := range a.Instructions {
+		if in := st.Instructions[id]; in != nil && in.Session == session && in.Delivered.IsZero() {
+			in.Delivered = at
+		}
+	}
+}
+
+// instructionTurn threads a session's turn under the instructions
+// delivered to it: its first prompt after a delivery is the session taking
+// them, each tool it runs then is its activity, and the reply it ends that
+// turn with is its answer.
+func (st *LogState) instructionTurn(session string, tn *TurnPayload) {
+	for _, in := range st.Instructions {
+		if in.Session != session || in.Delivered.IsZero() || !in.Replied.IsZero() {
+			continue
+		}
+		switch {
+		case tn.Role == TurnPrompt && in.Taken.IsZero() && (tn.At.IsZero() || !tn.At.Before(in.Delivered.Add(-routeSkew))):
+			in.Taken = tn.At
+			if in.Taken.IsZero() {
+				in.Taken = in.Delivered
+			}
+		case tn.Role == TurnTool && !in.Taken.IsZero():
+			if len(in.Activity) == activityKept {
+				in.Activity = in.Activity[1:len(in.Activity):len(in.Activity)]
+			}
+			in.Activity = append(in.Activity, *tn)
+		case tn.Role == TurnSummary && !in.Taken.IsZero():
+			in.Reply, in.ReplyWithheld, in.Replied = tn.Text, tn.Withheld > 0, tn.At
+			if in.Replied.IsZero() {
+				in.Replied = in.Taken
+			}
+		}
+	}
 }

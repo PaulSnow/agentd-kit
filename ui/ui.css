@@ -138,6 +138,15 @@ textarea { width: 100%; resize: vertical; }
 .msg { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: var(--space-2) var(--space-3); margin-bottom: var(--space-2); }
 .msg-instruction, .msg-prompt { background: var(--info-bg); }
 .msg-escalation { border-left: 4px solid var(--warn); }
+.steps { list-style: none; margin: var(--space-1) 0 0; padding: 0; font-size: var(--size-s); }
+.step::before { content: "✓ "; color: var(--ok); }
+.step-wait::before { content: "… "; }
+.step-failed { color: var(--warn); font-weight: 600; }
+.step-failed::before { content: "✗ "; }
+.activity { list-style: none; margin: var(--space-1) 0 0 var(--space-3); padding: 0; font-size: var(--size-s); }
+.tool code { white-space: pre-wrap; word-break: break-all; }
+.tool-failed code { color: var(--warn); }
+.thread { margin: var(--space-2) 0 0 var(--space-3); }
 .msg-head { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: baseline; font-size: var(--size-s); margin-bottom: var(--space-1); }
 .from { font-weight: 600; }
 .timeline { list-style: none; margin: 0; padding: 0; font-size: var(--size-s); }

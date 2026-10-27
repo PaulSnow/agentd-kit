@@ -134,6 +134,7 @@ type transcriptFile struct {
 	known   bool // a main-chain call has been read, so context is known
 	lines   int  // complete lines read
 	turns   []TurnPayload
+	tools   map[string]string // a tool call's one-line target, by its id, until its result is read
 }
 
 // usageReader reads transcripts in the workers, each file from where the
@@ -732,6 +733,10 @@ func (s *Supervisor) promptWith(facts []byte, why string) string {
 	switch why {
 	case "answered":
 		prompt += s.cfg.Policies.Answers.Pointer + " "
+	case "instructed":
+		prompt += s.cfg.Policies.Instructions.Pointer + " "
+	case "answered-instructed":
+		prompt += s.cfg.Policies.Answers.Pointer + " " + s.cfg.Policies.Instructions.Pointer + " "
 	case "ci-fix":
 		prompt += s.cfg.Policies.CI.Pointer + " "
 	case "fix-round":

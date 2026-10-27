@@ -29,30 +29,6 @@ func instructions(h *harness) []*InstructionPayload {
 	return out
 }
 
-// A free-text reply is recorded for the repositories its console feeds,
-// each time it is sent, and typed into no session (#53).
-func TestInstructionRecordedNotTyped(t *testing.T) {
-	h := instrHarness(t)
-	h.ticks(2, time.Minute)
-	const text = "Put the squeak fix ahead of the docs."
-	for i := 0; i < 2; i++ {
-		h.clock.advance(time.Second)
-		if err := reply(h, "widgets", text); err != nil {
-			t.Fatal(err)
-		}
-	}
-	ins := instructions(h)
-	if len(ins) != 2 || ins[0].Text != text || ins[0].From != "console:widgets" || strings.Join(ins[0].Repositories, ",") != "widgets" || !strings.HasPrefix(ins[0].ID, "I") || ins[0].ID == ins[1].ID {
-		t.Fatalf("instructions = %+v", ins)
-	}
-	h.ticks(3, time.Minute)
-	for _, n := range []string{"a", "b", "d"} {
-		if c := h.tmux.count("type", n); c != 0 {
-			t.Fatalf("typed into %s %d times", n, c)
-		}
-	}
-}
-
 // A reply is an answer or a seen mark when it reads as one, an error when
 // it nearly does, and otherwise an instruction; a console that feeds no
 // repository takes none.

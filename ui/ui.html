@@ -112,20 +112,23 @@
 <h2 id="console-needs-h">Needs you{{with .Needs}} <span class="count">{{len .}}</span>{{end}}</h2>
 {{range .Needs}}{{template "need" (ctx $ .)}}{{else}}<p class="empty">Nothing in {{.Repository}} waits on you.</p>{{end}}
 </section>
-<section id="messages" data-refresh aria-labelledby="messages-h">
-<h2 id="messages-h">Messages</h2>
-<ol class="messages">{{range .Messages}}<li class="msg msg-{{.Kind}}">
-<div class="msg-head"><span class="from">{{if .From}}{{.From}}{{else}}unknown{{end}}</span>{{if .Session}} <a href="/session/{{.Src}}/{{.Session}}">{{.Session}}</a>{{end}} <span class="badge">{{.Kind}}</span> <time class="muted">{{$.When .At}}</time></div>
-<div class="md">{{.Body}}</div>
-</li>{{else}}<li class="empty">No messages yet.</li>{{end}}</ol>
-</section>
 <section id="reply" aria-labelledby="reply-h">
 <h2 id="reply-h">Reply</h2>
 {{if .ReplySrc}}<form class="answer" method="post" action="/reply"><input type="hidden" name="token" value="{{.Token}}"><input type="hidden" name="back" value="{{.Back}}"><input type="hidden" name="src" value="{{.ReplySrc}}"><input type="hidden" name="repository" value="{{.Repository}}">
 <textarea name="text" rows="3" maxlength="4000" aria-label="Your instruction" required></textarea>
-<p class="muted">Recorded as your instruction {{if .Other}}in{{else}}for{{end}} {{.Repository}}; nothing is woken, and sessions read it with agentd console inbox.</p>
+<p class="muted">{{if .Other}}A console without a repository has no chat session: message one of its sessions from its page.{{else}}Your message goes to {{.Repository}}'s chat session, which agentd starts if it is not running; its activity and its answer show under your message as it works.{{end}}</p>
 <div class="choices"><button type="submit">Send</button></div></form>
 {{else}}<p class="muted">No live run configures {{.Repository}}, so it takes no reply.</p>{{end}}
+</section>
+<section id="messages" data-refresh aria-labelledby="messages-h"{{if .Live}} data-live{{end}}>
+<h2 id="messages-h">Messages</h2>
+<ol class="messages">{{range .Messages}}<li class="msg msg-{{.Kind}}">
+<div class="msg-head"><span class="from">{{if .From}}{{.From}}{{else}}unknown{{end}}</span>{{if .Session}} <a href="/session/{{.Src}}/{{.Session}}">{{.Session}}</a>{{end}} <span class="badge">{{.Kind}}</span> <time class="muted">{{$.When .At}}</time></div>
+<div class="md">{{.Body}}</div>
+{{with .Steps}}<ol class="steps">{{range .}}<li class="step{{if .Failed}} step-failed{{else if .Wait}} step-wait{{end}}">{{.Text}}{{if not .At.IsZero}} <time class="muted">{{$.When .At}}</time>{{end}}</li>{{end}}</ol>{{end}}
+{{with .Activity}}<ol class="activity">{{range .}}<li class="tool{{if .Failed}} tool-failed{{end}}"><code>{{.Text}}</code>{{if .Failed}} <span class="badge">failed{{with .Exit}}, exit {{.}}{{end}}</span>{{end}}</li>{{end}}</ol>{{end}}
+{{if .ReplyBy}}<div class="msg msg-reply thread"><div class="msg-head"><a href="/session/{{.Src}}/{{.ReplyBy}}">{{.ReplyBy}}</a> <span class="badge">reply</span> <time class="muted">{{$.When .Replied}}</time></div><div class="md">{{.Reply}}</div></div>{{end}}
+</li>{{else}}<li class="empty">No messages yet.</li>{{end}}</ol>
 </section>
 {{template "foot" .}}{{end}}
 
@@ -136,6 +139,13 @@
 <p class="meta">{{.Src}} · {{.Row.State}} since {{.When .Row.Since}}{{with .Reason}} · {{.}}{{end}}</p>
 {{range .Needs}}{{template "need" (ctx $ .)}}{{end}}
 </section>
+{{if .MessageTo}}<section id="message" aria-labelledby="message-h">
+<h2 id="message-h">Message {{.Row.Name}}</h2>
+<form class="answer" method="post" action="/reply"><input type="hidden" name="token" value="{{.Token}}"><input type="hidden" name="back" value="/console/{{.MessageTo}}"><input type="hidden" name="src" value="{{.Src}}"><input type="hidden" name="repository" value="{{.MessageTo}}"><input type="hidden" name="session" value="{{.Row.Name}}">
+<textarea name="text" rows="3" maxlength="4000" aria-label="Your message to {{.Row.Name}}" required></textarea>
+<p class="muted">agentd types a pointer to it into {{.Row.Name}} at once, even mid-turn; its activity and reply show under your message on the {{.MessageTo}} console.</p>
+<div class="choices"><button type="submit">Send</button></div></form>
+</section>{{end}}
 <section id="turns" data-refresh aria-labelledby="turns-h">
 <h2 id="turns-h">Latest turns</h2>
 <ol class="messages">{{range .Turns}}<li class="msg msg-{{.Role}}"><div class="msg-head"><span class="from">{{.Role}}</span> <time class="muted">{{$.When .At}}</time></div><div class="md">{{.Body}}</div></li>{{else}}<li class="empty">No turns read yet.</li>{{end}}</ol>

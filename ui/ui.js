@@ -1,9 +1,11 @@
-// agentd's UI (#41): every 30 seconds, fetch the page again and swap in
-// each [data-refresh] section, unless the owner is using it. Without this
-// script the page is complete; a reload shows what is new.
+// agentd's UI (#41): every 30 seconds, or every 5 while a [data-live]
+// section waits on a session's answer (#56), fetch the page again and
+// swap in each [data-refresh] section, unless the owner is using it.
+// Without this script the page is complete; a reload shows what is new.
 (function () {
   "use strict";
   var every = 30000;
+  var live = 5000;
 
   // busy says whether the owner is in section: focus inside it, or a
   // field there they typed in or changed.
@@ -72,5 +74,9 @@
       .catch(function () {});
   }
 
-  setInterval(refresh, every);
+  function tick() {
+    refresh();
+    setTimeout(tick, document.querySelector("[data-live]") ? live : every);
+  }
+  setTimeout(tick, document.querySelector("[data-live]") ? live : every);
 })();

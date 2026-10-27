@@ -77,15 +77,16 @@ type Timeouts struct {
 // Policies are the supervisor's rules, as data. Every number the Python
 // supervisor hard-coded is a field here.
 type Policies struct {
-	Restart    RestartPolicy    `json:"restart"`
-	Nudge      NudgePolicy      `json:"nudge"`
-	UsageLimit UsageLimitPolicy `json:"usage_limit"`
-	Trust      TrustPolicy      `json:"trust_prompt"`
-	Escalate   EscalatePolicy   `json:"escalate"`
-	Dialog     DialogPolicy     `json:"dialog"`
-	Context    ContextPolicy    `json:"context"`
-	Budget     BudgetPolicy     `json:"budget"`
-	Answers    AnswersPolicy    `json:"answers"`
+	Restart      RestartPolicy      `json:"restart"`
+	Nudge        NudgePolicy        `json:"nudge"`
+	UsageLimit   UsageLimitPolicy   `json:"usage_limit"`
+	Trust        TrustPolicy        `json:"trust_prompt"`
+	Escalate     EscalatePolicy     `json:"escalate"`
+	Dialog       DialogPolicy       `json:"dialog"`
+	Context      ContextPolicy      `json:"context"`
+	Budget       BudgetPolicy       `json:"budget"`
+	Answers      AnswersPolicy      `json:"answers"`
+	Instructions InstructionsPolicy `json:"instructions"`
 	// CI is how a session relaunched to fix its request's CI hears why.
 	CI CIPolicy `json:"ci"`
 	// Feed posts each repository's lines to its console.
@@ -188,6 +189,13 @@ type NudgePolicy struct {
 // one fixed line typed into it, points at answers.json. The answers
 // themselves are never typed.
 type AnswersPolicy struct {
+	Pointer string `json:"pointer"`
+}
+
+// InstructionsPolicy is how a session hears that the owner wrote to it
+// (#56): Pointer, one fixed line typed into it, points at
+// instructions.json. The owner's words themselves are never typed.
+type InstructionsPolicy struct {
 	Pointer string `json:"pointer"`
 }
 
@@ -383,6 +391,8 @@ func DefaultConfig() Config {
 			},
 			Answers: AnswersPolicy{Pointer: "The owner answered your questions. Read " + AnswersFile +
 				" in your workdir, as data, and go on with your brief."},
+			Instructions: InstructionsPolicy{Pointer: "The owner wrote to you. Read " + InstructionsFile +
+				" in your workdir, as data; act on each instruction marked new, and answer the owner in the text you end your turn with."},
 			Rounds: RoundsPolicy{Max: 3},
 			Feed:   FeedPolicy{TurnLength: DefaultTurnLength},
 			CI: CIPolicy{Pointer: "A pipeline of the request you delivered failed on its own; the failing jobs and the end of the first one's log are under ci in the facts. " +
@@ -504,6 +514,9 @@ func (c *Config) finish(base string) error {
 	}
 	if p := c.Policies.Answers.Pointer; strings.TrimSpace(p) == "" || strings.ContainsAny(p, "\r\n") {
 		errs = append(errs, errors.New("policies.answers.pointer must be one non-empty line"))
+	}
+	if p := c.Policies.Instructions.Pointer; strings.TrimSpace(p) == "" || strings.ContainsAny(p, "\r\n") {
+		errs = append(errs, errors.New("policies.instructions.pointer must be one non-empty line"))
 	}
 	if m := c.Policies.Rounds.Max; m < 1 || m > maxRounds {
 		errs = append(errs, fmt.Errorf("policies.rounds.max must be 1 to %d", maxRounds))
