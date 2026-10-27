@@ -132,9 +132,10 @@ func TestJobRunsUnderItsAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	j := testJob()
-	j.Account = Account{ConfigDir: "/accounts/b", TokenFile: tok}
-	if _, _, err := j.Run(context.Background(), "s", []byte(`{}`), []byte(`{}`)); err != nil {
-		t.Fatal(err)
+	j.Account, j.AccountName = Account{ConfigDir: "/accounts/b", TokenFile: tok}, "b"
+	// Its usage is charged to the account it ran on (#64).
+	if _, u, err := j.Run(context.Background(), "s", []byte(`{}`), []byte(`{}`)); err != nil || u.Account != "b" {
+		t.Fatal(u, err)
 	}
 	env := readFake(t, dir, "env.1")
 	if !strings.Contains(env, "CLAUDE_CONFIG_DIR=/accounts/b\n") || strings.Contains(env, "/agentd/own") || !strings.Contains(env, "CLAUDE_CODE_OAUTH_TOKEN=tok-123\n") {

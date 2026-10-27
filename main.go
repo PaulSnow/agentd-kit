@@ -119,7 +119,7 @@ func usage() {
   agentd inventory [--config PATH]
   agentd report [--config PATH] [--log PATH] [--shadow] [--host NAME] --out PATH
   agentd ui [--config PATH] [--log PATH]
-  agentd accounts [--config PATH]
+  agentd accounts [--config PATH] [--report [--json]]
   agentd items [--config PATH] [--log PATH] [--new] [--seen ID,...]
   agentd triage [--config PATH] --items FILE
   agentd status-check [--config PATH] --transcript FILE [--window 5m] [--input] [--call]

@@ -44,6 +44,9 @@ type MessagePayload struct {
 	Withheld int    `json:"withheld,omitempty"`
 	To       string `json:"to,omitempty"`
 	Typed    bool   `json:"typed,omitempty"`
+	// Account is the account an agentd notice of token use is about
+	// (#64): at most one is posted per account per noticeEvery.
+	Account string `json:"account,omitempty"`
 }
 
 // InboxPayload records that Reader read the instructions IDs of Console.

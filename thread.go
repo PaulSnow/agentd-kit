@@ -616,7 +616,7 @@ func (j Job) RunAgent(ctx context.Context, system string, schema, input []byte, 
 	if result == nil {
 		return nil, JobUsage{}, ran, fmt.Errorf("%s: no result in its output", j.Command)
 	}
-	result.Usage.CostUSD = result.TotalCostUSD
+	result.Usage.CostUSD, result.Usage.Account = result.TotalCostUSD, j.AccountName
 	if result.IsError {
 		return nil, result.Usage, ran, fmt.Errorf("%s: %s: %s", j.Command, result.Subtype, oneLine(result.Result, 200))
 	}

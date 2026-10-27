@@ -36,6 +36,9 @@ import (
 // re-read gives the same figures.
 type UsagePayload struct {
 	Transcript string `json:"transcript"`
+	// Account is the account the session runs on, its tokens charged to
+	// it (#64); none for the default login, or from before it was kept.
+	Account    string `json:"account,omitempty"`
 	Guessed    bool   `json:"guessed,omitempty"`
 	Cleared    bool   `json:"cleared,omitempty"`
 	Calls      int    `json:"calls"`
@@ -450,6 +453,7 @@ func (s *Supervisor) measure(name string, sess Session, t *Track, toolsSince tim
 				// that transcript, measured exactly.
 				u.Guessed = i == 0 && guessed && (t.Usage[id].Transcript == "" || t.Usage[id].Guessed)
 				u.Cleared = i > 0
+				u.Account = sess.Account
 				if prev, seen := t.Usage[id]; !seen || prev != u || id == last && t.Measured != id {
 					s.emit(name, Event{Kind: KindUsage, Usage: &u})
 				}

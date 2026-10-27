@@ -528,6 +528,12 @@ func (u *UI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		posts[path](w, r)
+	case path == "/accounts.json":
+		if !get {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		u.serveAccounts(w)
 	case strings.HasPrefix(path, "/attachment/"):
 		if !get {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"math"
@@ -547,13 +546,19 @@ func (s *Supervisor) place(name string, t *Track, now time.Time) {
 	s.refreshRuntime()
 }
 
-// accountsCmd reads every configured account's usage now and prints it.
-// It logs nothing.
+// accountsCmd reads every configured account's usage now and prints it,
+// or with --report prints each account's token use from the event log
+// (#64). It logs nothing.
 func accountsCmd(args []string, out io.Writer) error {
-	fs := flag.NewFlagSet("accounts", flag.ContinueOnError)
-	cfg, _, err := loadConfigFlag(fs, args)
+	cfg, report, asJSON, err := accountsFlags(args)
 	if err != nil {
 		return err
+	}
+	if report {
+		return printAccountReports(cfg, asJSON, time.Now(), out)
+	}
+	if asJSON {
+		return errors.New("--json goes with --report")
 	}
 	return printAccounts(cfg, out)
 }
