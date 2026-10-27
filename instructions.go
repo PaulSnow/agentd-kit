@@ -345,6 +345,12 @@ func ImportConsole(cfg *Config, log *Log, events []Event, now time.Time, repo st
 func (s *Supervisor) routeInstructions(now time.Time) {
 	for _, id := range sortedKeys(s.st.Instructions) {
 		in := s.st.Instructions[id]
+		if s.ops != nil && in.Console != "" && in.Console == s.cfg.opsConsole() && len(in.Repositories) == 0 {
+			if s.routeOps(in, now); s.halt != nil {
+				return
+			}
+			continue
+		}
 		if in.Route && in.Agent && in.Session == "" && in.Replied.IsZero() && in.Failed == "" && len(in.Repositories) > 0 {
 			if repo := in.Repositories[0]; !s.shadow {
 				s.retryThread(in, repo, s.threadCwd(repo), now)
@@ -660,7 +666,7 @@ func (st *LogState) applyRoute(e Event) {
 			// any other, and its reply is the answer.
 			in.Session, in.Delivered, in.Taken, in.Activity = a.HandTo, time.Time{}, time.Time{}, nil
 		default:
-			in.Reply, in.ReplyWithheld, in.Replied = a.Answer, a.Withheld > 0, e.Time
+			in.Reply, in.ReplyWithheld, in.Replied, in.Waiting = a.Answer, a.Withheld > 0, e.Time, ""
 		}
 	}
 }

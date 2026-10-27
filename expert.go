@@ -164,7 +164,7 @@ func (srv *MCPServer) askExpert(cs *ContextStore, args json.RawMessage, q *Query
 	if len(a.Topics) > expertCards {
 		return nil, []problem{{format: "at most %d topics", args: []any{expertCards}}}
 	}
-	repo := srv.sess.Repository
+	repo := q.Repository
 	q.Question, q.IDs, q.Model = oneLine(srv.withheld(a.Question), 500), a.IDs, expertModel(srv.cfg)
 	budget := srv.cfg.Jobs.Expert.budget()
 	if spent := cs.ExpertSpent(repo, srv.now()); spent >= budget {

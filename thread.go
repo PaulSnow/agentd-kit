@@ -137,6 +137,9 @@ type AgentPayload struct {
 	Records    int           `json:"records,omitempty"`
 	Usage      *JobUsage     `json:"usage,omitempty"`
 	Error      string        `json:"error,omitempty"`
+	// By is "agentd" on the outcome of a change Go carried out on the ops
+	// console (#63), which no agent wrote.
+	By string `json:"by,omitempty"`
 }
 
 // threadKey is the thread an instruction belongs to: the entry it
@@ -364,6 +367,10 @@ type threadAnswer struct {
 // logged, then the agent runs in a worker, and its answer, or why it
 // failed, is logged as the next route step.
 func (s *Supervisor) startThread(in *Instruction, repo, cwd string) {
+	if repo == "" {
+		s.startOpsThread(in, cwd) // the ops console's agent (#63)
+		return
+	}
 	key := "thread:" + in.ID
 	if s.work.busy(key) {
 		return

@@ -87,6 +87,14 @@
   "consoles": {
     "chat": {"title": "General chat", "sessions": ["chat-*"]}
   },
+  "ops": {
+    "console": "ops",
+    "supervisors": {
+      "live": {"config": "~/.config/agentd-kit/agentd.json", "tmux": "agentd-live"},
+      "page": {"config": "~/.config/agentd-kit/page.json", "tmux": "agentd-page"}
+    },
+    "repo": "~/repos/agentd-kit"
+  },
   "repositories": {
     "widgets": {
       "forge": "gitlab",

@@ -43,6 +43,9 @@ type Config struct {
 	Usage UsageConfig `json:"usage"`
 	// Consoles are the consoles that are no repository's (#42).
 	Consoles map[string]ConsoleConfig `json:"consoles"`
+	// Ops is the operations console (#63): every agentd process on the
+	// host, which the ops agent reads and the owner changes through it.
+	Ops OpsConfig `json:"ops,omitempty"`
 	// Hub, Hosts and Node are agentd on every machine (#29, node.go): the
 	// hub the nodes report to, the hosts it serves, and this machine's
 	// node.
@@ -668,6 +671,7 @@ func (c *Config) finish(base string) error {
 	}
 	// Without an escalation command, escalations and feed lines are
 	// logged, and the UI shows them in their consoles (#42).
+	c.checkOps(path, &errs)
 	c.checkConsoles(&errs)
 	c.checkTurns(&errs)
 	// A bare command name is left for PATH to find; a path is expanded.

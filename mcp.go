@@ -447,6 +447,7 @@ type MCPServer struct {
 	held       *bytes.Reader // the handover input, which Serve reads before its own
 	store      *ContextStore // the repository's context, as the log has it (#60)
 	api        ForgeAPI      // the forge, to read a thread history lacks; nil for none
+	ops        *opsEnv       // the ops tools' environment, on the ops agent's server (#63)
 }
 
 // NewMCPServer is the server for the named session, which must work a
@@ -607,7 +608,7 @@ func (srv *MCPServer) handle(req rpcRequest) (any, *rpcError) {
 	case "tools/list":
 		var tools []MCPTool
 		for _, name := range srv.tools() {
-			for _, t := range append(toolList(), contextToolList()...) {
+			for _, t := range append(append(toolList(), contextToolList()...), opsToolList()...) {
 				if t.Name == name {
 					tools = append(tools, t)
 				}
@@ -643,6 +644,9 @@ func (srv *MCPServer) handle(req rpcRequest) (any, *rpcError) {
 func (srv *MCPServer) call(tool string, args json.RawMessage) (string, bool) {
 	if contains(contextTools, tool) {
 		return srv.contextCall(tool, args)
+	}
+	if contains(opsTools, tool) && srv.ops != nil {
+		return srv.opsCall(tool, args)
 	}
 	events, err := srv.load()
 	if err != nil {
@@ -736,6 +740,9 @@ func (srv *MCPServer) call(tool string, args json.RawMessage) (string, bool) {
 func (srv *MCPServer) instructions() string {
 	if srv.sess.Role == RoleQuery {
 		return contextInstructions
+	}
+	if srv.sess.Role == RoleOps {
+		return opsInstructions
 	}
 	return srv.caseInstructions() + " " + contextInstructions
 }
@@ -1254,13 +1261,20 @@ func mcpCmd(args []string, r io.Reader, w io.Writer) error {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	session := fs.String("session", "", "the session the server reports for")
 	repository := fs.String("repository", "", "with no session: serve the context tools alone, on this repository (#60)")
-	as := fs.String("as", "", "with --repository: the name the server's queries are logged under")
+	as := fs.String("as", "", "with --repository or --ops: the name the server's queries are logged under")
+	ops := fs.Bool("ops", false, "with no session: serve the ops tools, for the ops console's agent (#63)")
 	cfg, _, err := loadConfigFlag(fs, args)
 	if err != nil {
 		return err
 	}
-	if (*session == "") == (*repository == "") || fs.NArg() > 0 {
-		return errors.New("usage: agentd mcp [--config PATH] [--log PATH] (--session NAME | --repository NAME [--as NAME])")
+	modes := 0
+	for _, on := range []bool{*session != "", *repository != "", *ops} {
+		if on {
+			modes++
+		}
+	}
+	if modes != 1 || fs.NArg() > 0 {
+		return errors.New("usage: agentd mcp [--config PATH] [--log PATH] (--session NAME | --repository NAME [--as NAME] | --ops [--as NAME])")
 	}
 	log, err := OpenLog(cfg.EventLog)
 	if err != nil {
@@ -1277,9 +1291,12 @@ func mcpCmd(args []string, r io.Reader, w io.Writer) error {
 		return err
 	}
 	var srv *MCPServer
-	if *repository != "" {
+	switch {
+	case *ops:
+		srv, err = NewOpsServer(projected(cfg, events), *as, log, read, time.Now)
+	case *repository != "":
 		srv, err = NewQueryServer(projected(cfg, events), *repository, *as, log, read, time.Now)
-	} else {
+	default:
 		srv, err = NewMCPServer(projected(cfg, events), *session, log, read, time.Now)
 	}
 	if err != nil {

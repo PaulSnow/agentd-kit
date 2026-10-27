@@ -69,6 +69,9 @@ type Supervisor struct {
 	// cards is the repositories' context the curators keep (#60): the
 	// loop's alone.
 	cards *ContextStore
+	// ops is what the ops console's changes run on (#63), nil without an
+	// ops block.
+	ops *opsEnv
 
 	checkpointRe *regexp.Regexp
 
@@ -427,7 +430,8 @@ func (s *Supervisor) watchOwner(ctx context.Context, off int64) {
 		}
 		off = next
 		for _, e := range events {
-			if e.Mode == ModeOwner {
+			// A change proposed on the ops console may need no yes (#63).
+			if e.Mode == ModeOwner || e.Kind == KindOps && e.Ops.Step == OpsProposed {
 				s.work.signal()
 				break
 			}
@@ -446,6 +450,7 @@ func (s *Supervisor) Pass() error {
 	// Instructions are routed before the sessions' steps, so one is
 	// delivered in the pass that read it.
 	s.routeInstructions(s.clock.Now())
+	s.runOps(s.clock.Now())
 	for _, name := range s.cfg.SessionNames() {
 		if s.halt != nil {
 			break
@@ -495,7 +500,7 @@ func (s *Supervisor) ownerRecords() {
 		}
 		shared := e.Kind == KindSeen || e.Kind == KindInstruction || e.Kind == KindAttachment || e.Kind == KindAccount || e.Kind == KindTriage || e.Kind == KindError && e.Error.Triage != nil ||
 			e.Kind == KindItem && s.st.itemChanged(*e.Item) || e.Kind == KindCase && e.Mode == ModeOwner ||
-			e.Kind == KindLoop && e.Mode == ModeOwner
+			e.Kind == KindLoop && e.Mode == ModeOwner || e.Kind == KindOps && e.Ops.Step == OpsProposed
 		if e.Session == "" && shared {
 			s.st.apply(e)
 			continue
