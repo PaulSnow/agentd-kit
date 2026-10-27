@@ -82,6 +82,9 @@ type RuntimePayload struct {
 	Place bool `json:"place,omitempty"`
 	// Item is the owner's work item it was started for (#66).
 	Item string `json:"item,omitempty"`
+	// Why is an end's reason, when agentd ended a finished session to
+	// make room for a start (#68).
+	Why string `json:"why,omitempty"`
 	// Max is the repository's max when the start was made: the fold
 	// judges the start by it, so a replay under another max agrees.
 	Max int    `json:"max,omitempty"`

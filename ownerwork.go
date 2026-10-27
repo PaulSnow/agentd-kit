@@ -315,12 +315,6 @@ func (s *Supervisor) startOwnerWork(in *Instruction, repo string, w ThreadWork) 
 		s.routeStep(in, RouteFail, "", false, repo+" places its sessions on "+sp.Host+", whose node cannot brief one with your message yet; send it to one of its sessions")
 		return false
 	}
-	rules, _ := effectivePolicy(s.cfg, s.st, repo)
-	if held := sessionsOf(s.st.Runtime, repo); len(held) >= rules.Sessions.Max {
-		s.routeStep(in, RouteFail, "", false, fmt.Sprintf("%s runs %d started sessions, its max (sessions.max): %s; end one, and agentd starts a session for it",
-			repo, len(held), strings.Join(held, ", ")))
-		return false
-	}
 	// The facts kept by the agent's worker, or, from the owner's next
 	// step, read now.
 	if _, err := os.Stat(ownerWorkPath(s.cfg, repo, in.ID)); err != nil {
@@ -330,6 +324,16 @@ func (s *Supervisor) startOwnerWork(in *Instruction, repo string, w ThreadWork) 
 			s.routeStep(in, RouteFail, "", false, cutUTF8("agentd could not keep the work's brief: "+err.Error(), 300))
 			return false
 		}
+	}
+	rules, _ := effectivePolicy(s.cfg, s.st, repo)
+	// A finished session is ended for room (#68); one at work is not.
+	if held := sessionsOf(s.st.Runtime, repo); len(held) >= rules.Sessions.Max && !s.makeRoom(repo, name, rules.Sessions.Max) {
+		if s.halt != nil {
+			return false
+		}
+		s.routeStep(in, RouteFail, "", false, fmt.Sprintf("%s runs %d started sessions, its max (sessions.max): %s; end one, and agentd starts a session for it",
+			repo, len(held), strings.Join(held, ", ")))
+		return false
 	}
 	if why := s.startRuntime(repo, name, RuntimePayload{Kind: KindWork, Branch: branch, Issue: w.Issue, Owner: in.ID}); why != "" {
 		if s.halt == nil {
