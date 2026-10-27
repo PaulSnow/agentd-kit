@@ -545,12 +545,11 @@ type uiMessageView struct {
 	Prompt *uiPromptLink
 	// An instruction's steps (#56), the tools the session ran on it, and
 	// the reply threaded under it.
-	Steps     []uiStep
-	Activity  []uiStep
-	Reply     template.HTML
-	ReplyMore template.HTML
-	ReplyBy   string
-	Replied   time.Time
+	Steps    []uiStep
+	Activity []uiStep
+	Reply    template.HTML
+	ReplyBy  string
+	Replied  time.Time
 	// Answer is the answer a response gave a decision (#59); live, that
 	// it waits on its session's answer.
 	Answer *EntryAnswer
@@ -654,9 +653,12 @@ type uiConsole struct {
 	// Entries are the conversation box's, newest last (#59), and Open
 	// the DOM ids of the decisions among them that wait on an answer;
 	// More, that the box holds older entries than those shown.
-	Entries  []uiEntry
-	Open     []string
-	More     bool
+	Entries []uiEntry
+	Open    []string
+	More    bool
+	// Rendered are the entries as the page shows them, each carrying
+	// its hash for the page's polls.
+	Rendered []template.HTML
 	ReplySrc string // the source a reply is recorded in, or "" when none configures the repository
 	// Live: a message waits on its session's answer.
 	Live bool
@@ -790,50 +792,76 @@ type uiEntry struct {
 }
 
 // statusRun is how close a session's status lines come to collapse
-// into one entry (#59 §4).
-const statusRun = 5 * time.Minute
+// into one entry, and statusSpan how long one such entry may cover
+// (#59 §4).
+const (
+	statusRun  = 5 * time.Minute
+	statusSpan = 30 * time.Minute
+)
 
 // collapseStatus folds each run of a session's status lines, its posts
-// and progress reports each within statusRun of the one before, into the
-// latest of them; an entry the owner responded to stays its own.
+// and progress reports each within statusRun of the one before and all
+// within statusSpan, into the latest of them, however other sessions'
+// entries fall between; any other entry of the session ends the run, and
+// an entry the owner responded to stays its own.
 func collapseStatus(es []uiEntry) []uiEntry {
 	status := func(e uiEntry) bool {
 		return (e.Kind == "info" || e.Kind == "progress") && e.Writer != "" && len(e.Responses) == 0
 	}
-	out := es[:0]
+	start := func(e uiEntry) time.Time {
+		if len(e.Earlier) > 0 {
+			return e.Earlier[0].At
+		}
+		return e.At
+	}
+	var out []uiEntry
+	gone := map[int]bool{}
 	last := map[string]int{} // a writer's latest status entry in out
 	for _, e := range es {
+		w := e.Writer
 		if !status(e) {
+			if w != "" {
+				delete(last, w)
+			}
 			out = append(out, e)
 			continue
 		}
-		if i, ok := last[e.Writer]; ok && i == len(out)-1 && e.At.Sub(out[i].At) <= statusRun {
+		if i, ok := last[w]; ok && e.At.Sub(out[i].At) <= statusRun && e.At.Sub(start(out[i])) <= statusSpan {
 			prev := out[i]
 			e.Earlier = append(append(prev.Earlier, prev.uiMessageView), e.Earlier...)
-			out[i] = e
-			continue
+			gone[i] = true
 		}
-		last[e.Writer] = len(out)
+		last[w] = len(out)
 		out = append(out, e)
 	}
-	return out
+	kept := es[:0]
+	for i, e := range out {
+		if !gone[i] {
+			kept = append(kept, e)
+		}
+	}
+	return kept
 }
 
 // consoleWindow is how many entries a console's page, and each poll of
 // its box, carries; older ones come as the owner scrolls up.
 const consoleWindow = 50
 
-// window is the n entries of es before the entry with DOM id before, or
-// the latest n without it, and whether older ones remain.
-func window(es []uiEntry, before string, n int) ([]uiEntry, bool) {
+// window is the n entries of es before the entry with DOM id before,
+// or, when the console no longer holds that one, before the time at; or
+// the latest n without either; and whether older ones remain.
+func window(es []uiEntry, before string, at time.Time, n int) ([]uiEntry, bool) {
 	end := len(es)
-	if before != "" {
-		end = 0
+	if before != "" || !at.IsZero() {
+		end = -1
 		for i, e := range es {
-			if e.DOMID == before {
+			if before != "" && e.DOMID == before {
 				end = i
 				break
 			}
+		}
+		if end < 0 {
+			end = sort.Search(len(es), func(i int) bool { return !es[i].At.Before(at) })
 		}
 	}
 	start := max(end-n, 0)
@@ -1069,7 +1097,7 @@ func (src *uiSource) messageView(cfg *Config, m uiMessage, now time.Time, secret
 		mv.ReplyBy, mv.Replied = in.Session, in.Replied
 		mv.Reply = markdown(in.Reply)
 		if in.Reply == "" || in.ReplyWithheld || secret(in.Reply) {
-			mv.Reply, mv.ReplyMore = template.HTML(template.HTMLEscapeString(withheldMessage)), ""
+			mv.Reply = template.HTML(template.HTMLEscapeString(withheldMessage))
 		}
 	}
 	return mv

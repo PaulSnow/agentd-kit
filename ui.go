@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"html/template"
 	"math"
 	"net"
 	"net/http"
@@ -260,8 +261,19 @@ func (src *uiSource) catchUp() error {
 			if p.NextAction != "" {
 				text += "\n\nNext: " + p.NextAction
 			}
-			add(repoOf(e.Session), uiMessage{At: e.Time, Kind: "progress", From: e.Session, Session: e.Session, Writer: e.Session, Text: text,
-				Entry: entryKey(entryProgress, e.Case.Case+"-"+e.Case.Call.Hash, e.Time, text)})
+			m := uiMessage{At: e.Time, Kind: "progress", From: e.Session, Session: e.Session, Writer: e.Session, Text: text,
+				Entry: entryKey(entryProgress, e.Case.Case+"-"+e.Case.Call.Hash, e.Time, text)}
+			// A session of no repository's goes to its console.
+			if repo := repoOf(e.Session); repo != "" {
+				add(repo, m)
+			} else if con := cfg.Console(e.Session); cfg.knownConsole(con) {
+				if _, ok := cfg.Consoles[con]; ok {
+					add(con, m)
+				}
+				for _, r := range cfg.consoleRepos(con) {
+					add(r, m)
+				}
+			}
 		case e.Kind == KindInstruction && e.Instruction != nil:
 			m := uiMessage{At: e.Time, Kind: "instruction", From: e.Instruction.From, Text: e.Instruction.Text, ID: e.Instruction.ID,
 				Entry: entryInstruction + e.Instruction.ID, Re: e.Instruction.Re}
@@ -526,14 +538,27 @@ func (u *UI) serveView(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
+		q := r.URL.Query()
+		var before time.Time
+		if ms, perr := strconv.ParseInt(q.Get("at"), 10, 64); perr == nil {
+			before = time.UnixMilli(ms)
+		}
 		if entries && err == nil {
-			u.serveEntries(w, v, r.URL.Query().Get("before"), r.URL.Query().Get("have"))
+			u.serveEntries(w, v, q.Get("before"), before, q.Get("have"))
 			return
 		}
 		// The page carries the latest entries only; older ones come as
 		// the owner scrolls up, so a long console stays light (#59).
 		if v != nil {
-			v.Entries, v.More = window(v.Entries, r.URL.Query().Get("before"), consoleWindow)
+			v.Entries, v.More = window(v.Entries, q.Get("before"), before, consoleWindow)
+			for _, e := range v.Entries {
+				html, _, rerr := renderEntry(v, e)
+				if rerr != nil {
+					err = rerr
+					break
+				}
+				v.Rendered = append(v.Rendered, template.HTML(html))
+			}
 		}
 		view = v
 	default:
@@ -590,35 +615,51 @@ type uiEntryDoc struct {
 	HTML string `json:"html"`
 }
 
+// maxHave bounds the have list a poll may send, in bytes.
+const maxHave = 16 << 10
+
+// renderEntry is entry e of console v as the box shows it, and its hash,
+// which the entry carries as data-hash so a page can name it in a poll.
+func renderEntry(v *uiConsole, e uiEntry) (string, string, error) {
+	var b strings.Builder
+	if err := uiTemplates.ExecuteTemplate(&b, "entry", map[string]any{"P": v, "V": e}); err != nil {
+		return "", "", err
+	}
+	hash := shortHash(HashPane(b.String()))
+	return strings.Replace(b.String(), `data-hash=""`, `data-hash="`+hash+`"`, 1), hash, nil
+}
+
 // serveEntries answers a console page's poll with its box as JSON: the
-// latest consoleWindow entries, or with before, the ones before it. An
+// latest consoleWindow entries, or those before the entry before, or
+// before the time at when the console no longer holds that entry. An
 // entry the page has as it is, by have's ID.HASH list, comes without its
 // HTML, so a poll of a quiet console is small.
-func (u *UI) serveEntries(w http.ResponseWriter, v *uiConsole, before, have string) {
-	v.Entries, v.More = window(v.Entries, before, consoleWindow)
+func (u *UI) serveEntries(w http.ResponseWriter, v *uiConsole, before string, at time.Time, have string) {
+	v.Entries, v.More = window(v.Entries, before, at, consoleWindow)
 	known := map[string]bool{}
-	for _, h := range strings.Split(have, ",") {
-		known[h] = true
+	if len(have) <= maxHave {
+		for _, h := range strings.Split(have, ",") {
+			known[h] = true
+		}
 	}
 	doc := uiEntriesDoc{Entries: []uiEntryDoc{}, More: v.More, Open: v.Open}
 	if doc.Open == nil {
 		doc.Open = []string{}
 	}
-	var b strings.Builder
 	for _, e := range v.Entries {
-		b.Reset()
-		if err := uiTemplates.ExecuteTemplate(&b, "entry", map[string]any{"P": v, "V": e}); err != nil {
+		html, hash, err := renderEntry(v, e)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "agentd ui: %v\n", err)
 			http.Error(w, "the console could not be rendered", http.StatusInternalServerError)
 			return
 		}
-		d := uiEntryDoc{ID: e.DOMID, Hash: shortHash(HashPane(b.String())), HTML: b.String()}
+		d := uiEntryDoc{ID: e.DOMID, Hash: hash, HTML: html}
 		if known[d.ID+"."+d.Hash] {
 			d.HTML = ""
 		}
 		doc.Entries = append(doc.Entries, d)
 	}
-	b.Reset()
+	var b strings.Builder
 	if err := uiTemplates.ExecuteTemplate(&b, "chips", v); err == nil {
 		doc.Chips = b.String()
 	}

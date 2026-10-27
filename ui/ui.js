@@ -176,6 +176,16 @@
         first = shown0[f];
       }
     }
+    // None of the window shown: more came than a window while the page
+    // slept, and the box starts again from the latest.
+    if (!first && shown0.length > 0 && doc.entries.length > 0) {
+      for (var g = 0; g < shown0.length; g++) {
+        shown0[g].remove();
+      }
+      hashes = {};
+      olderLink(doc.more, null);
+      bottom = true;
+    }
     for (var i = 0; i < doc.entries.length; i++) {
       var d = doc.entries[i];
       var el = document.getElementById(d.id);
@@ -248,16 +258,17 @@
     }
   }
 
-  // have lists the entries the page holds as the server last sent them,
-  // which it sends back without their HTML.
+  // have lists the latest entries the page holds as the server last
+  // sent them, which it sends back without their HTML.
   function have() {
     var out = [];
-    for (var id in hashes) {
-      if (document.getElementById(id)) {
-        out.push(id + "." + hashes[id]);
+    var es = list.querySelectorAll(".entry");
+    for (var i = Math.max(es.length - 60, 0); i < es.length; i++) {
+      if (hashes[es[i].id]) {
+        out.push(es[i].id + "." + hashes[es[i].id]);
       }
     }
-    return out.slice(-200).join(",");
+    return out.join(",");
   }
 
   function pull() {
@@ -270,18 +281,42 @@
       .catch(function () {});
   }
 
+  // olderLink shows the link to older entries when there are some, to
+  // those before entry head, or hides it.
+  function olderLink(more, head) {
+    var p = box.querySelector(".older");
+    if (!more) {
+      if (p) {
+        p.remove();
+      }
+      return;
+    }
+    if (!p) {
+      p = document.createElement("p");
+      p.className = "older";
+      p.appendChild(document.createElement("a")).textContent = "Older entries";
+      box.insertBefore(p, list);
+    }
+    var a = p.querySelector("a");
+    a.href = head ? location.pathname + "?before=" + encodeURIComponent(head.id) : location.pathname;
+    a.setAttribute("data-before", head ? head.id : "");
+  }
+
   // older fetches the entries before the first shown and puts them above
   // it, the box kept where the owner is; it says whether it fetched any.
-  var loading = false;
+  // A fetch already under way is the one waited for.
+  var loading = null;
   function older() {
     var link = box.querySelector(".older a");
     var top = list.querySelector(".entry");
-    if (loading || !link || !top) {
+    if (loading) {
+      return loading;
+    }
+    if (!link || !top) {
       return Promise.resolve(false);
     }
-    loading = true;
-    var url = box.getAttribute("data-entries") + "?before=" + encodeURIComponent(top.id);
-    return fetch(url, { credentials: "same-origin", cache: "no-store" })
+    var url = box.getAttribute("data-entries") + "?before=" + encodeURIComponent(top.id) + "&at=" + (top.getAttribute("data-at") || "");
+    loading = fetch(url, { credentials: "same-origin", cache: "no-store" })
       .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
       .then(function (doc) {
         var height = box.scrollHeight;
@@ -292,22 +327,40 @@
             hashes[d.id] = d.hash;
           }
         }
-        var head = list.querySelector(".entry");
-        if (doc.more && head) {
-          link.setAttribute("data-before", head.id);
-          link.href = location.pathname + "?before=" + encodeURIComponent(head.id);
-        } else {
-          link.parentNode.remove();
-        }
+        olderLink(doc.more, list.querySelector(".entry"));
         applyFilter();
         box.scrollTop += box.scrollHeight - height;
-        loading = false;
+        loading = null;
         return doc.entries.length > 0;
       })
       .catch(function () {
-        loading = false;
+        loading = null;
         return false;
       });
+    return loading;
+  }
+
+  // refresh brings an entry above the latest window up to date, as one
+  // just answered: the window before the entry below it is fetched again.
+  function refreshAt(el) {
+    var below = el.nextElementSibling;
+    if (!below) {
+      return Promise.resolve();
+    }
+    var url = box.getAttribute("data-entries") + "?before=" + encodeURIComponent(below.id) + "&at=" + (below.getAttribute("data-at") || "");
+    return fetch(url, { credentials: "same-origin", cache: "no-store" })
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+      .then(function (doc) {
+        for (var i = 0; i < doc.entries.length; i++) {
+          var d = doc.entries[i];
+          var old = document.getElementById(d.id);
+          if (old && d.html && hashes[d.id] !== d.hash && !busy(old)) {
+            old.replaceWith(element(d.html));
+            hashes[d.id] = d.hash;
+          }
+        }
+      })
+      .catch(function () {});
   }
 
   // reveal shows entry id, fetching older entries until it is there.
@@ -355,7 +408,8 @@
         if (form === composer) {
           clearRe();
         }
-        return pull().then(toBottom);
+        var entry = form.closest(".entry");
+        return pull().then(function () { return entry ? refreshAt(entry) : null; }).then(toBottom);
       })
       .catch(function (t) {
         var p = document.createElement("p");
@@ -498,6 +552,10 @@
       older();
     }
   });
+  var held = list.querySelectorAll(".entry[data-hash]");
+  for (var h = 0; h < held.length; h++) {
+    hashes[held[h].id] = held[h].getAttribute("data-hash");
+  }
   var q0 = document.querySelector(".open-questions");
   if (q0) {
     var ids = [];

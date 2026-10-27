@@ -306,6 +306,11 @@ func TestConsoleWindowAndCompactEntries(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Another session's line between b's leaves b's run whole.
+	if err := log.Append(Event{V: EventVersion, Time: late.Add(30 * time.Second), Kind: KindMessage, Mode: ModeShared,
+		Message: &MessagePayload{ID: "C0", Console: "widgets", Kind: "info", From: "c", Text: "Unrelated."}}); err != nil {
+		t.Fatal(err)
+	}
 	if err := log.Append(Event{V: EventVersion, Time: late.Add(time.Hour), Session: "c", Kind: KindCase, Mode: ModeShared,
 		Case: &CasePayload{Case: "gitlab/example-org/widgets#7", Call: &CaseCall{Tool: ToolReportProgress, Hash: "h1", Progress: &CaseProgress{Summary: "Two of three widgets painted.", NextAction: "Paint the third."}}}}); err != nil {
 		t.Fatal(err)
@@ -315,7 +320,7 @@ func TestConsoleWindowAndCompactEntries(t *testing.T) {
 	if n := strings.Count(page, `<li class="entry `); n != consoleWindow || !strings.Contains(page, `class="older"`) || strings.Contains(page, "Coat 060 done.") || !strings.Contains(page, "Coat 119 done.") {
 		t.Fatalf("the page holds %d entries:\n%s", n, page)
 	}
-	if !strings.Contains(page, "Painting.") || strings.Count(page, `<li class="entry msg msg-info"`) != 1 || !strings.Contains(page, "2 earlier") || strings.Index(page, "Sanding.") < strings.Index(page, "2 earlier") {
+	if !strings.Contains(page, "Painting.") || strings.Count(page, `<li class="entry msg msg-info"`) != 2 || !strings.Contains(page, "2 earlier") || strings.Index(page, "Sanding.") < strings.Index(page, "2 earlier") {
 		t.Fatalf("the status lines are not one entry:\n%s", page)
 	}
 	if !strings.Contains(page, "Two of three widgets painted.") || !strings.Contains(page, "Next: Paint the third.") || !strings.Contains(page, `class="entry msg msg-progress"`) {
@@ -343,7 +348,7 @@ func TestConsoleWindowAndCompactEntries(t *testing.T) {
 		}
 		before = doc.Entries[0].ID
 	}
-	if rounds != 3 || len(seen) != 120+1+1+5 {
+	if rounds != 3 || len(seen) != 120+2+1+5 {
 		t.Fatalf("%d rounds, %d entries", rounds, len(seen))
 	}
 	// A poll naming what the page has gets those without their HTML.
@@ -361,6 +366,15 @@ func TestConsoleWindowAndCompactEntries(t *testing.T) {
 		if e.HTML != "" {
 			t.Fatalf("%s sent again", e.ID)
 		}
+	}
+	// A window before an entry the console no longer holds is the one
+	// before its time.
+	es := []uiEntry{{DOMID: "e1"}, {DOMID: "e2"}, {DOMID: "e3"}}
+	for i := range es {
+		es[i].At = at.Add(time.Duration(i) * time.Hour)
+	}
+	if w, more := window(es, "gone", at.Add(90*time.Minute), 1); len(w) != 1 || w[0].DOMID != "e2" || !more {
+		t.Fatalf("window before a gone entry: %+v, %v", w, more)
 	}
 	mv := uiMessageView{Activity: []uiStep{{Text: "Bash: go test"}, {Text: "Bash: ./bin/check", Failed: true}, {Text: "Read: a.go"}}}
 	if got := mv.ToolsLine(); got != "3 tools, 1 failed" {
