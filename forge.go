@@ -97,6 +97,8 @@ type Forge interface {
 	// Retest runs the request's pipeline again, on its merge result where
 	// the project tests merge results.
 	Retest(repo Repository, ref string) error
+	// Comment posts body on an issue or request (#60).
+	Comment(repo Repository, ref, body string) error
 }
 
 // AllowedForge wraps a Forge with the per-repository allow-list. Every write

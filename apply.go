@@ -54,6 +54,9 @@ type LogState struct {
 	// Loops are the steps agentd took in each request's loop, by ciKey
 	// (#53).
 	Loops map[string]LoopRecord
+	// Commented are the thread outcomes agentd posted on issues, by key
+	// (#60), so none is posted twice.
+	Commented map[string]time.Time
 
 	cfg *Config // its policies, read as each event is applied
 }
@@ -178,6 +181,13 @@ func (st *LogState) apply(e Event) {
 				st.Items[e.Item.ID] = &Item{ItemPayload: *e.Item, FirstSeen: e.Time}
 			} else if st.itemChanged(*e.Item) {
 				st.setItem(e.Item.ID, func(it *Item) { it.ItemPayload = *e.Item })
+			}
+		case KindAction:
+			if e.Act.Action == ActComment {
+				if st.Commented == nil {
+					st.Commented = map[string]time.Time{}
+				}
+				st.Commented[e.Act.Key] = e.Time
 			}
 		case KindInstruction:
 			if _, ok := st.Instructions[e.Instruction.ID]; !ok {

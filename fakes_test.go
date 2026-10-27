@@ -484,6 +484,8 @@ func (g *fakeGit) Messages(string, string) (string, error) {
 // fails, as a forge whose reply could not be read would.
 type fakeForge struct {
 	mu             sync.Mutex
+	comments       []string // ref, a space, then the body of each comment posted
+	commentErr     error
 	pushes         []string
 	pushedSHAs     []string
 	pushURLs       []string
@@ -530,6 +532,13 @@ func (f *fakeForge) Merge(repo Repository, ref, head, target string) error {
 	defer f.mu.Unlock()
 	f.merges = append(f.merges, mergedRequest{ref: ref, target: target, head: head, method: repo.Policy.Merge.Method})
 	return f.mergeErr
+}
+
+func (f *fakeForge) Comment(repo Repository, ref, body string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.comments = append(f.comments, ref+" "+body)
+	return f.commentErr
 }
 
 func (f *fakeForge) Retest(repo Repository, ref string) error {
