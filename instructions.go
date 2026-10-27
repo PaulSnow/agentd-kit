@@ -74,7 +74,7 @@ type Instruction struct {
 	Failed   string
 	// Agent marks one a thread agent took (#59), AgentRuns how many were
 	// started, AgentError why the latest failed, and AgentLast what the
-	// latest did, its answer to one it handed to a session among it.
+	// latest did, which for one it handed to a session holds its answer.
 	Agent      bool
 	AgentRuns  int
 	AgentError string
@@ -429,6 +429,12 @@ func (s *Supervisor) routeOne(in *Instruction, now time.Time) {
 		return
 	}
 	repo := in.Repositories[0]
+	if in.Agent && in.Session != "" {
+		// An agent handed it to a session that can no longer take it:
+		// the owner says again where it goes.
+		s.routeStep(in, RouteFail, "", false, "the thread agent handed it to "+in.Session+", which no longer takes messages; write it again")
+		return
+	}
 	if s.shadow {
 		s.routeStep(in, RouteWait, "", false, "shadow mode starts no thread agent")
 		return
@@ -584,8 +590,9 @@ func (st *LogState) applyRoute(e Event) {
 	case RouteFail:
 		in.Failed, in.Waiting = p.Reason, ""
 	case RouteAgent:
-		// The agent takes it at once: delivered and taken as it starts.
-		in.Agent, in.AgentError, in.Waiting = true, "", ""
+		// The agent takes it at once: delivered and taken as it starts,
+		// from any session it was routed to before.
+		in.Agent, in.AgentError, in.Waiting, in.Session = true, "", "", ""
 		in.AgentRuns++
 		in.Delivered, in.Taken, in.Activity = e.Time, e.Time, nil
 	case RouteAnswered:

@@ -442,7 +442,7 @@ func (e Event) check() error {
 	case e.Kind == KindStatus && (e.Session == "" || e.Mode != ModeLive && e.Mode != ModeShadow || (e.Status.Record == nil) == (e.Status.Error == "")):
 		return errors.New("a status event is a run's, for one session, and carries a record or an error")
 	case e.Kind == KindRoute && (e.Session != "" || e.Mode != ModeLive && e.Mode != ModeShadow || e.Route.Instruction == "" || !validRouteStep(e.Route.Step) || e.Route.Step == RouteTo && e.Route.Session == "" || (e.Route.Step == RouteAnswered) != (e.Route.Agent != nil)):
-		return errors.New("a route event is a run's, for no one session, and names its instruction and step; a route to a session names it")
+		return errors.New("a route event is a run's, for no one session, and names its instruction and step; a route to a session names it, and only an answered step carries what the agent did")
 	case e.Kind == KindSession && (e.Session == "" || e.Mode != ModeShared && e.Mode != ModeOwner || e.Runtime.ID == "" || e.Runtime.Repository == "" ||
 		e.Runtime.Action != SessionStart && e.Runtime.Action != SessionEnd && e.Runtime.Action != SessionPlace ||
 		e.Runtime.Action == SessionStart && (e.Mode != ModeShared || e.Runtime.Branch == "") ||

@@ -178,3 +178,77 @@ func TestOldChatSessionEnded(t *testing.T) {
 		t.Fatal("the old chat session was not ended")
 	}
 }
+
+// A thread is one however long: each follow-up to the latest answer is
+// of the first message's thread.
+func TestThreadKeyFollowsTheWholeThread(t *testing.T) {
+	st := &LogState{Instructions: map[string]*Instruction{}}
+	prev := ""
+	for i := 0; i < 25; i++ {
+		in := &Instruction{InstructionPayload: InstructionPayload{ID: "I" + itoa(i)}}
+		if prev != "" {
+			in.Re = &EntryRe{ID: entryInstruction + prev, Kind: "instruction"}
+		}
+		st.Instructions[in.ID] = in
+		prev = in.ID
+	}
+	if got := st.threadKey(st.Instructions["I24"]); got != entryInstruction+"I0" {
+		t.Fatalf("thread of the 25th = %q", got)
+	}
+}
+
+// An agent reads under its clone only, and its output is read past but
+// for its calls and its result.
+func TestAgentScope(t *testing.T) {
+	if got := agentAllowed("/srv/widgets/clone/"); !strings.HasSuffix(got, ",Read(//srv/widgets/clone/**)") || strings.Contains(got, "Read,") {
+		t.Fatalf("allowed = %q", got)
+	}
+	f := &lineFilter{keep: []string{`"type":"assistant"`, `"type":"result"`}, max: 1 << 20, kept: capBuffer{max: 1 << 10}}
+	big := `{"type":"user","message":{"content":"` + strings.Repeat("x", 4000) + `"}}` + "\n"
+	for _, chunk := range []string{`{"type":"assistant","message":{}}` + "\n", big[:1000], big[1000:], `{"is_error":false,"type":"result"}` + "\n"} {
+		if _, err := f.Write([]byte(chunk)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := string(f.kept.b); got != `{"type":"assistant","message":{}}`+"\n"+`{"is_error":false,"type":"result"}`+"\n" {
+		t.Fatalf("kept %q", got)
+	}
+}
+
+// An answer that matches a confidential pattern is withheld; an outcome
+// is posted only on an issue the thread names; a hand-over to a session
+// that then stops fails, saying so.
+func TestThreadAgentScreensAndBounds(t *testing.T) {
+	dir := fakeClaude(t)
+	h := sessionsHarness(t)
+	h.cfg.ConfidentialPatterns = []string{`hunter2`}
+	h.restart(false)
+	h.ticks(1, time.Minute)
+	out := func(answer string, outcome map[string]any) string {
+		o, _ := json.Marshal(map[string]any{"answer": answer, "hand_to": "", "outcome": outcome})
+		r, _ := json.Marshal(map[string]any{"type": "result", "subtype": "success", "structured_output": json.RawMessage(o), "usage": map[string]any{"input_tokens": 1}})
+		return string(r) + "\n"
+	}
+	claudeAnswers(t, dir, 1, out("The password is hunter2.", nil))
+	claudeAnswers(t, dir, 2, out("Decided: blue.", map[string]any{"ref": "#9", "kind": OutcomeDecision, "text": "Blue."}))
+	if err := reply(h, "widgets", "What is the password?"); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(2, time.Minute)
+	if err := reply(h, "widgets", "Paint #7 blue?"); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(2, time.Minute)
+	if strings.Contains(h.buf.String(), "hunter2") {
+		t.Fatal("the confidential answer was logged")
+	}
+	var outcomes []string
+	for _, e := range h.events() {
+		if e.Kind == KindRoute && e.Route.Agent != nil && e.Route.Agent.Outcome != "" {
+			outcomes = append(outcomes, e.Route.Agent.Outcome)
+		}
+	}
+	if len(outcomes) != 1 || !strings.Contains(outcomes[0], "the thread names no #9") {
+		t.Fatalf("outcomes = %q", outcomes)
+	}
+}

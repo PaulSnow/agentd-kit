@@ -8,7 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -42,9 +45,24 @@ const (
 	DefaultThreadTimeout  = 5 * time.Minute
 )
 
-// agentTools are the tools a thread agent may use: reading the clone,
-// and the context tools on its repository's server.
-var agentTools = []string{"Read", "Grep", "Glob", "mcp__agentd__" + ToolState, "mcp__agentd__" + ToolFind, "mcp__agentd__" + ToolHistory, "mcp__agentd__" + ToolAskExpert}
+// agentTools are the tools a thread agent may use without asking, which
+// a headless run cannot: the context tools on its repository's server,
+// and reading under its clone (agentAllowed adds that rule); a read
+// anywhere else is refused.
+var agentTools = []string{"mcp__agentd__" + ToolState, "mcp__agentd__" + ToolFind, "mcp__agentd__" + ToolHistory, "mcp__agentd__" + ToolAskExpert}
+
+// agentAllowed is the --allowedTools list of an agent reading in cwd:
+// the context tools, and Read under cwd only, which Grep and Glob obey.
+func agentAllowed(cwd string) string {
+	return strings.Join(append(append([]string{}, agentTools...), "Read(//"+strings.TrimPrefix(filepath.Clean(cwd), "/")+"/**)"), ",")
+}
+
+// agentTurns bounds a thread agent's model turns, and so what it reads.
+const agentTurns = 12
+
+// agentOutputMax bounds what a thread agent's run may print, its tool
+// results among it; only its calls and its result are kept.
+const agentOutputMax = 32 << 20
 
 // Bounds of what a thread agent is given and gives back.
 const (
@@ -112,9 +130,12 @@ type AgentPayload struct {
 
 // threadKey is the thread an instruction belongs to: the entry it
 // responds to, or, for a response to an owner's message, that message's
-// thread; free text with no entry starts a thread of its own.
+// thread, however long; free text with no entry starts a thread of its
+// own.
 func (st *LogState) threadKey(in *Instruction) string {
-	for depth := 0; in != nil && in.Re != nil && depth < 8; depth++ {
+	seen := map[string]bool{}
+	for in != nil && in.Re != nil && !seen[in.ID] {
+		seen[in.ID] = true
 		id, ok := strings.CutPrefix(in.Re.ID, entryInstruction)
 		if !ok {
 			return in.Re.ID
@@ -225,11 +246,34 @@ func (s *Supervisor) threadInputFor(in *Instruction, repo, cwd string) threadInp
 		}
 	}
 	for _, name := range s.cfg.SessionNames() {
-		if sess := s.cfg.Sessions[name]; sess.Repository == repo && sess.Role == "" && s.takesInstructions(name) {
+		if sess := s.cfg.Sessions[name]; sess.Repository == repo && sess.Role == "" && sess.Kind != KindChat && s.takesInstructions(name) {
 			x.Running = append(x.Running, threadRunning{Name: name, State: string(s.track(name).State)})
 		}
 	}
 	return x
+}
+
+// threadRefPattern finds the issues and requests a text names.
+var threadRefPattern = regexp.MustCompile(`[#!][0-9]+\b`)
+
+// refs are the issues and requests the thread names: in the entry, the
+// owner's message and the thread's records, the only ones an outcome
+// may be posted on.
+func (x threadInput) refs() map[string]bool {
+	out := map[string]bool{}
+	texts := []string{x.Message.Text}
+	if x.Re != nil {
+		texts = append(texts, x.Re.Text, x.Re.Question)
+	}
+	for _, r := range x.Earlier {
+		texts = append(texts, r.Text)
+	}
+	for _, t := range texts {
+		for _, m := range threadRefPattern.FindAllString(t, -1) {
+			out[m] = true
+		}
+	}
+	return out
 }
 
 // fit is the input as JSON within max bytes: the thread's oldest records
@@ -271,10 +315,12 @@ func (s *Supervisor) startThread(in *Instruction, repo, cwd string) {
 	for _, r := range x.Running {
 		running[r.Name] = true
 	}
+	// A worker's state holds no comments: those posted are named here.
 	posted := map[string]bool{}
 	for k := range s.st.Commented {
 		posted[k] = true
 	}
+	refs := x.refs()
 	mcp := mcpQueryConfig(s.cfg, repo, key)
 	s.spawnShared(key, func(w *Supervisor) {
 		p := &AgentPayload{Model: job.Model, Records: len(x.Earlier)}
@@ -285,7 +331,7 @@ func (s *Supervisor) startThread(in *Instruction, repo, cwd string) {
 			var raw json.RawMessage
 			var usage JobUsage
 			var ran []TurnPayload
-			raw, usage, ran, err = job.RunAgent(w.runCtx, threadSystem, threadSchema(), input, cwd, mcp)
+			raw, usage, ran, err = job.RunAgent(w.runCtx, threadSystem, threadSchema(), input, cwd, mcp, agentAllowed(cwd))
 			p.Usage, p.Activity = &usage, ran
 			if err == nil {
 				a, err = w.checkThreadAnswer(raw, running, p)
@@ -299,6 +345,8 @@ func (s *Supervisor) startThread(in *Instruction, repo, cwd string) {
 		} else if o := a.Outcome; o != nil {
 			o.Repository, o.Thread = repo, safeThreadID(x.Thread)
 			switch {
+			case !refs[o.Ref]:
+				p.Outcome = "not posted: the thread names no " + o.Ref
 			case posted["outcome:"+o.Thread+":"+o.Ref]:
 				p.Outcome = o.Ref
 			default:
@@ -309,8 +357,20 @@ func (s *Supervisor) startThread(in *Instruction, repo, cwd string) {
 				}
 			}
 		}
+		// What the CLI or the forge said is screened as any text logged.
+		if w.confidentialMatch(p.Error, p.Outcome) > 0 {
+			p.Error, p.Outcome = withheldIf(p.Error), withheldIf(p.Outcome)
+		}
 		w.emit("", Event{Kind: KindRoute, Route: &RoutePayload{Instruction: in.ID, Step: RouteAnswered, Agent: p}})
 	})
+}
+
+// withheldIf is text, when set, as withheld.
+func withheldIf(text string) string {
+	if text == "" {
+		return ""
+	}
+	return withheldMessage
 }
 
 // safeThreadID is a thread's key as an outcome may name it.
@@ -337,7 +397,7 @@ func (s *Supervisor) checkThreadAnswer(raw json.RawMessage, running map[string]b
 	}
 	if a.HandTo = strings.TrimSpace(a.HandTo); a.HandTo != "" {
 		if !running[a.HandTo] {
-			return a, fmt.Errorf("the agent handed the work to %q, which is no running session of the repository", a.HandTo)
+			return a, errors.New("the agent handed the work to no running session of the repository")
 		}
 		p.HandTo = a.HandTo
 	}
@@ -364,6 +424,15 @@ func (s *Supervisor) retryThread(in *Instruction, repo, cwd string, now time.Tim
 	}
 	stale := now.Sub(in.Delivered) > threadJob(s.cfg).Timeout+time.Minute
 	if in.AgentError == "" && !stale {
+		return
+	}
+	switch {
+	case cwd == "":
+		s.routeStep(in, RouteFail, "", false, repo+" has no clone or session worktree here for a thread agent to read any more")
+		return
+	case strings.HasPrefix(in.AgentError, "the thread's input is"):
+		// Too large to send, and as large the next time.
+		s.routeStep(in, RouteFail, "", false, "the thread agent failed: "+in.AgentError)
 		return
 	}
 	if in.AgentRuns >= agentRuns {
@@ -394,14 +463,17 @@ type streamLine struct {
 // RunAgent runs a thread agent: as Run, but in cwd, with the read-only
 // tools and the context tools' server mcp, its output streamed so each
 // tool it runs is read as activity.
-func (j Job) RunAgent(ctx context.Context, system string, schema, input []byte, cwd, mcp string) (json.RawMessage, JobUsage, []TurnPayload, error) {
+func (j Job) RunAgent(ctx context.Context, system string, schema, input []byte, cwd, mcp, allowed string) (json.RawMessage, JobUsage, []TurnPayload, error) {
 	if len(input) > j.MaxInput {
 		return nil, JobUsage{}, nil, fmt.Errorf("agent input is %d bytes, over the %d allowed", len(input), j.MaxInput)
 	}
-	tools := strings.Join(agentTools, ",")
+	if cwd == "" {
+		return nil, JobUsage{}, nil, errors.New("an agent reads in a clone, and none is named")
+	}
 	args := []string{"-p", "--model", j.Model, "--output-format", "stream-json", "--verbose", "--json-schema", string(schema),
 		"--system-prompt", system, "--setting-sources", "", "--strict-mcp-config", "--mcp-config", mcp,
-		"--tools", "Read,Grep,Glob", "--allowedTools", tools}
+		"--max-turns", strconv.Itoa(agentTurns), "--permission-mode", "default",
+		"--tools", "Read,Grep,Glob", "--allowedTools", allowed}
 	script := `exec "$@"`
 	if j.Account.TokenFile != "" {
 		if err := checkTokenFile(j.Account.TokenFile); err != nil {
@@ -417,12 +489,14 @@ func (j Job) RunAgent(ctx context.Context, system string, schema, input []byte, 
 	var stderr tailBuffer
 	stderr.max = 2048
 	cmd.Stderr = &stderr
-	stdout := &capBuffer{max: JobOutputMax}
+	// Only the agent's calls and its result are kept: the tool results
+	// streamed between them are read past, up to agentOutputMax.
+	stdout := &lineFilter{keep: []string{`"type":"assistant"`, `"type":"result"`}, max: agentOutputMax, kept: capBuffer{max: JobOutputMax}}
 	cmd.Stdout = stdout
 	err := cmd.Run()
 	var ran []TurnPayload
 	var result *jobResult
-	sc := bufio.NewScanner(bytes.NewReader(stdout.b))
+	sc := bufio.NewScanner(bytes.NewReader(stdout.kept.b))
 	sc.Buffer(make([]byte, 64<<10), JobOutputMax)
 	for sc.Scan() {
 		var l streamLine
@@ -447,8 +521,8 @@ func (j Job) RunAgent(ctx context.Context, system string, schema, input []byte, 
 			return nil, JobUsage{}, ran, fmt.Errorf("%s timed out after %s and was killed", j.Command, j.Timeout)
 		case ctx.Err() != nil:
 			return nil, JobUsage{}, ran, fmt.Errorf("%s was stopped: %v", j.Command, ctx.Err())
-		case stdout.over:
-			return nil, JobUsage{}, ran, fmt.Errorf("%s wrote more than %d bytes and was stopped", j.Command, JobOutputMax)
+		case stdout.over():
+			return nil, JobUsage{}, ran, fmt.Errorf("%s wrote more than it may and was stopped", j.Command)
 		}
 		return nil, JobUsage{}, ran, fmt.Errorf("%s: %v: %s", j.Command, err, strings.TrimSpace(string(stderr.b)))
 	}
@@ -464,3 +538,48 @@ func (j Job) RunAgent(ctx context.Context, system string, schema, input []byte, 
 	}
 	return result.StructuredOutput, result.Usage, ran, nil
 }
+
+// lineFilter keeps the lines of what is written to it that hold one of
+// keep unquoted, in kept, and reads past the rest; past max bytes in all,
+// or once kept is full, it fails the write, which ends the command.
+type lineFilter struct {
+	keep    []string
+	max     int
+	n       int
+	partial []byte
+	kept    capBuffer
+	full    bool
+}
+
+func (f *lineFilter) Write(p []byte) (int, error) {
+	if f.n += len(p); f.n > f.max {
+		f.full = true
+		return 0, errors.New("output over its limit")
+	}
+	f.partial = append(f.partial, p...)
+	for {
+		i := bytes.IndexByte(f.partial, '\n')
+		if i < 0 {
+			break
+		}
+		line := f.partial[:i+1]
+		for _, k := range f.keep {
+			if bytes.Contains(line, []byte(k)) {
+				if _, err := f.kept.Write(line); err != nil {
+					f.full = true
+					return 0, err
+				}
+				break
+			}
+		}
+		f.partial = f.partial[i+1:]
+	}
+	// A line longer than the kept output may be is read past.
+	if len(f.partial) > f.kept.max {
+		f.partial = f.partial[:0]
+	}
+	return len(p), nil
+}
+
+// over says whether the output went over a limit.
+func (f *lineFilter) over() bool { return f.full || f.kept.over }
