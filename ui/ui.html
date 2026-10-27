@@ -116,7 +116,7 @@
 </section>
 <p class="box-new" hidden><button type="button" class="link">new ↓</button></p>
 {{if .ReplySrc}}<form id="composer" class="composer" method="post" action="/respond"><input type="hidden" name="token" value="{{.Token}}"><input type="hidden" name="back" value="{{.Back}}"><input type="hidden" name="src" value="{{.ReplySrc}}"><input type="hidden" name="repository" value="{{.Repository}}"><input type="hidden" name="entry" value="">
-<div class="composer-head"><label>To: <select name="session" aria-label="Send to">{{if not .Other}}<option value="">chat</option>{{end}}{{range .To}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
+<div class="composer-head"><label>To: <select name="session" aria-label="Send to">{{if not .Other}}<option value="">agent (new thread)</option>{{end}}{{range .To}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
 <span class="re-chip" hidden>Re: <span class="re-label"></span> <button type="button" class="re-clear" aria-label="Respond to no entry">×</button></span>
 <button type="button" class="open-questions"{{if not .Open}} hidden{{end}}>{{len .Open}} open question{{if ne (len .Open) 1}}s{{end}}</button></div>
 <div class="composer-row"><textarea name="text" rows="2" maxlength="4000" aria-label="Your message" required></textarea><button type="submit">Send</button></div>
@@ -157,7 +157,7 @@
 
 {{define "thread"}}{{$p := .P}}{{with .V}}{{with .Steps}}<ol class="steps">{{range .}}<li class="step{{if .Failed}} step-failed{{else if .Wait}} step-wait{{end}}">{{.Text}}{{if not .At.IsZero}} <time class="muted">{{$p.When .At}}</time>{{end}}</li>{{end}}</ol>{{end}}
 {{if .Activity}}<details class="tools" data-key="a-{{.Entry}}"><summary>{{.ToolsLine}}</summary><ol class="activity">{{range .Activity}}<li class="tool{{if .Failed}} tool-failed{{end}}"><code>{{.Text}}</code>{{if .Failed}} <span class="badge">failed{{with .Exit}}, exit {{.}}{{end}}</span>{{end}}</li>{{end}}</ol></details>{{end}}
-{{if .ReplyBy}}<div class="msg msg-reply thread"><div class="msg-head"><a href="/session/{{.Src}}/{{.ReplyBy}}">{{.ReplyBy}}</a> <span class="badge">reply</span> <time class="muted">{{$p.When .Replied}}</time></div><div class="md">{{.Reply}}</div></div>{{end}}{{end}}{{end}}
+{{if .ReplyBy}}<div class="msg msg-reply thread"><div class="msg-head">{{if .ReplyAgent}}<span class="from">{{.ReplyBy}}</span>{{else}}<a href="/session/{{.Src}}/{{.ReplyBy}}">{{.ReplyBy}}</a>{{end}} <span class="badge">reply</span> <time class="muted">{{$p.When .Replied}}</time></div><div class="md">{{.Reply}}</div></div>{{end}}{{end}}{{end}}
 
 {{define "decision-inputs"}}{{if eq .Type "yes_no"}}<div class="choices"><button type="submit" name="answer" value="yes">Yes</button><button type="submit" name="answer" value="no">No</button></div>
 {{else if eq .Type "choose_one"}}{{$rec := .Recommendation}}<div class="choices">{{range .Options}}<button type="submit" name="choice" value="{{.Key}}"{{if eq .Key $rec}} class="recommended"{{end}}><span class="option-label">{{.Label}}</span>{{with .Consequence}}<span class="option-note">{{.}}</span>{{end}}</button>{{end}}</div>

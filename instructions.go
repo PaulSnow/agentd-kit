@@ -17,8 +17,8 @@ import (
 // The owner's reply in a console that is neither an answer nor a seen mark
 // is an instruction (#33). agentd routes each one (#56): a reply in a
 // session's own box goes to that session; one in a repository's box goes
-// to the repository's chat session, which agentd starts when the owner
-// first writes and keeps while the conversation goes on. It is handed over
+// to a thread agent started for it alone (#59, thread.go), which answers
+// or hands it to a running session. To a session it is handed over
 // the way answers are, at once, mid-turn too: instructions.json in the
 // session's workdir and one fixed pointer line, never the owner's words
 // typed. What became of it is folded from the log: the route, the
@@ -72,16 +72,27 @@ type Instruction struct {
 	Activity []TurnPayload
 	Waiting  string
 	Failed   string
+	// Agent marks one a thread agent took (#59), AgentRuns how many were
+	// started, AgentError why the latest failed, and AgentLast what the
+	// latest did, which for one it handed to a session holds its answer.
+	Agent      bool
+	AgentRuns  int
+	AgentError string
+	AgentLast  *AgentPayload
 }
 
 // Route steps.
 const (
-	RouteTo   = "to"   // routed to a session; Started when agentd started it for the instruction
-	RouteWait = "wait" // not delivered yet, and why
-	RouteFail = "fail" // never to be delivered, and why
+	RouteTo       = "to"       // routed to a session; Started when agentd started it for the instruction
+	RouteWait     = "wait"     // not delivered yet, and why
+	RouteFail     = "fail"     // never to be delivered, and why
+	RouteAgent    = "agent"    // a thread agent started on it (#59)
+	RouteAnswered = "answered" // the thread agent answered, handed it over, or failed
 )
 
-func validRouteStep(s string) bool { return s == RouteTo || s == RouteWait || s == RouteFail }
+func validRouteStep(s string) bool {
+	return s == RouteTo || s == RouteWait || s == RouteFail || s == RouteAgent || s == RouteAnswered
+}
 
 // RoutePayload is a step agentd took with an owner instruction.
 type RoutePayload struct {
@@ -90,23 +101,26 @@ type RoutePayload struct {
 	Session     string `json:"session,omitempty"`
 	Started     bool   `json:"started,omitempty"`
 	Reason      string `json:"reason,omitempty"`
+	// Agent is what a thread agent did, on an answered step.
+	Agent *AgentPayload `json:"agent,omitempty"`
 }
 
 // InstructionsFile is where a session reads the owner's instructions
 // routed to it, in its workdir.
 const InstructionsFile = "instructions.json"
 
-// KindChat is the kind of a repository's chat session: the one the
-// owner talks to on the console (#56). It works on a worktree detached at
-// the target's tip, delivers nothing, is never nudged and never counts
-// against sessions.max, and runs on the repository's work model.
+// KindChat is the kind of a repository's chat session, which an agentd
+// before the thread agents (#59) started for the console (#56): one still
+// running is ended once nothing of the owner's is open on it. It works on
+// a worktree detached at the target's tip, delivers nothing, is never
+// nudged and never counts against sessions.max.
 const KindChat = "chat"
 
 // chatBranch is the branch a chat session is named by.
 const chatBranch = "chat"
 
-// ChatIdle is how long a chat session is kept with no message from the
-// owner; the next message starts it again.
+// ChatIdle is how long after its delivery an instruction may still be
+// answered: past it, the owner has moved on.
 const ChatIdle = 2 * time.Hour
 
 // ChatPoll is how often agentd passes while an instruction is delivered
@@ -304,13 +318,23 @@ func ImportConsole(cfg *Config, log *Log, events []Event, now time.Time, repo st
 
 // routeInstructions routes each owner instruction agentd routes that is
 // neither delivered nor failed, and not held by a session that can still
-// take it: to the session addressed, else to its repository's chat
-// session, started for it. Each step is logged once; one that cannot be
-// taken now waits, and is tried again each pass. Then it ends each chat
-// session the owner has not written to for ChatIdle.
+// take it: to the session addressed, else to a thread agent started for
+// it (#59). Each step is logged once; one that cannot be taken now
+// waits, and is tried again each pass. A thread agent that failed, or
+// that agentd outlived, is started again. Then it ends each chat session
+// an older agentd started, once nothing of the owner's is open on it.
 func (s *Supervisor) routeInstructions(now time.Time) {
 	for _, id := range sortedKeys(s.st.Instructions) {
 		in := s.st.Instructions[id]
+		if in.Route && in.Agent && in.Session == "" && in.Replied.IsZero() && in.Failed == "" && len(in.Repositories) > 0 {
+			if repo := in.Repositories[0]; !s.shadow {
+				s.retryThread(in, repo, s.threadCwd(repo), now)
+			}
+			if s.halt != nil {
+				return
+			}
+			continue
+		}
 		if !in.Route || !in.Delivered.IsZero() || in.Failed != "" || in.Session != "" && s.takesInstructions(in.Session) {
 			continue
 		}
@@ -318,13 +342,13 @@ func (s *Supervisor) routeInstructions(now time.Time) {
 			return
 		}
 	}
-	s.endIdleChats(now)
+	s.endChats(now)
 }
 
-// endIdleChats ends each chat session agentd started whose last
-// instruction, or its start when it has none, is ChatIdle old, and whose
-// instructions are all answered.
-func (s *Supervisor) endIdleChats(now time.Time) {
+// endChats ends each chat session an agentd before the thread agents
+// started (#56 A), once no instruction of the owner's is open on it: a
+// console keeps no long-lived session (#59).
+func (s *Supervisor) endChats(now time.Time) {
 	if s.shadow {
 		return
 	}
@@ -333,16 +357,11 @@ func (s *Supervisor) endIdleChats(now time.Time) {
 		if p.Kind != KindChat {
 			continue
 		}
-		last, open := s.st.StartedAt[name], false
+		open := false
 		for _, in := range s.st.instructionsFor(name, false) {
-			for _, at := range []time.Time{in.At, in.Replied} {
-				if at.After(last) {
-					last = at
-				}
-			}
 			open = open || in.open(s.st, now)
 		}
-		if !open && now.Sub(last) >= ChatIdle {
+		if !open {
 			if s.emit(name, Event{Kind: KindSession, Mode: ModeShared, Runtime: &RuntimePayload{ID: newIntentID(), Action: SessionEnd, Repository: p.Repository, By: "agentd"}}); s.halt != nil {
 				return
 			}
@@ -395,7 +414,7 @@ func (s *Supervisor) routeOne(in *Instruction, now time.Time) {
 		case s.takesInstructions(in.To):
 			s.routeStep(in, RouteTo, in.To, false, "")
 		case !ok || sess.Role != "" || t != nil && t.State == Done:
-			s.routeStep(in, RouteFail, "", false, in.To+" is not running, or finished, or takes no messages; write to the console's chat instead")
+			s.routeStep(in, RouteFail, "", false, in.To+" is not running, or finished, or takes no messages; write to the console instead")
 		default:
 			s.routeStep(in, RouteWait, "", false, in.To+" is "+string(stateOf(t))+"; agentd hands it the message once it can take one")
 		}
@@ -410,38 +429,22 @@ func (s *Supervisor) routeOne(in *Instruction, now time.Time) {
 		return
 	}
 	repo := in.Repositories[0]
-	if s.cfg.Repositories[repo].Sessions == nil {
-		s.routeStep(in, RouteFail, "", false, repo+" has no sessions entry, so agentd starts no chat session there; reply in one of its sessions' boxes")
-		return
-	}
-	name := runtimeName(repo, chatBranch, KindChat)
-	if _, ok := s.st.Runtime[name]; ok {
-		if s.takesInstructions(name) {
-			s.routeStep(in, RouteTo, name, false, "")
-			return
-		}
-		if t := s.st.Tracks[name]; t == nil || t.State != Done {
-			s.routeStep(in, RouteWait, "", false, name+" is "+string(stateOf(t))+"; agentd hands it nothing until the owner clears it")
-			return
-		}
-		// A chat session that wrote DONE takes no line: it is ended, and
-		// started again for this instruction once it has stopped.
-		if !s.shadow {
-			s.emit(name, Event{Kind: KindSession, Mode: ModeShared, Runtime: &RuntimePayload{ID: newIntentID(), Action: SessionEnd, Repository: repo, By: "agentd"}})
-		}
-		s.routeStep(in, RouteWait, "", false, name+" finished; agentd ends it and starts it again for this instruction")
+	if in.Agent && in.Session != "" {
+		// An agent handed it to a session that can no longer take it:
+		// the owner says again where it goes.
+		s.routeStep(in, RouteFail, "", false, "the thread agent handed it to "+in.Session+", which no longer takes messages; write it again")
 		return
 	}
 	if s.shadow {
-		s.routeStep(in, RouteWait, "", false, repo+" has no chat session, and shadow mode starts none")
+		s.routeStep(in, RouteWait, "", false, "shadow mode starts no thread agent")
 		return
 	}
-	if why := s.startRuntime(repo, name, RuntimePayload{Kind: KindChat, Branch: chatBranch}); why != "" {
-		s.routeStep(in, RouteWait, "", false, "agentd cannot start "+name+" for it yet: "+why)
+	cwd := s.threadCwd(repo)
+	if cwd == "" {
+		s.routeStep(in, RouteFail, "", false, repo+" has no clone or session worktree here for a thread agent to read; reply in one of its sessions' boxes")
 		return
 	}
-	s.refreshRuntime()
-	s.routeStep(in, RouteTo, name, true, "")
+	s.startThread(in, repo, cwd)
 }
 
 // stateOf is a track's state, or unknown.
@@ -586,6 +589,28 @@ func (st *LogState) applyRoute(e Event) {
 		in.Waiting = p.Reason
 	case RouteFail:
 		in.Failed, in.Waiting = p.Reason, ""
+	case RouteAgent:
+		// The agent takes it at once: delivered and taken as it starts,
+		// from any session it was routed to before.
+		in.Agent, in.AgentError, in.Waiting, in.Session = true, "", "", ""
+		in.AgentRuns++
+		in.Delivered, in.Taken, in.Activity = e.Time, e.Time, nil
+	case RouteAnswered:
+		a := p.Agent
+		if a == nil {
+			return
+		}
+		in.AgentLast, in.Activity = a, a.Activity
+		switch {
+		case a.Error != "":
+			in.AgentError = a.Error
+		case a.HandTo != "":
+			// Handed over: the session receives the owner's record as
+			// any other, and its reply is the answer.
+			in.Session, in.Delivered, in.Taken, in.Activity = a.HandTo, time.Time{}, time.Time{}, nil
+		default:
+			in.Reply, in.ReplyWithheld, in.Replied = a.Answer, a.Withheld > 0, e.Time
+		}
 	}
 }
 

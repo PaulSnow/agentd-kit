@@ -554,7 +554,9 @@ type uiMessageView struct {
 	// it waits on its session's answer.
 	Answer *EntryAnswer
 	To     string // the session an instruction went to
-	live   bool
+	// ReplyAgent: the reply is a thread agent's, which has no page.
+	ReplyAgent bool
+	live       bool
 }
 
 // uiStep is one step of an owner instruction, as the page shows it.
@@ -605,6 +607,28 @@ func instructionSteps(st *LogState, in *Instruction) []uiStep {
 	steps := []uiStep{{Text: "received", At: in.At}}
 	if !in.Route {
 		return append(steps, uiStep{Text: "recorded before agentd routed instructions; not delivered to any session", Wait: true})
+	}
+	if in.Agent {
+		// A thread agent's run (#59): its start, a failure it is tried
+		// again after, a hand-over, the outcome it posted, its answer.
+		steps = append(steps, uiStep{Text: fmt.Sprintf("a thread agent started on it (run %d)", in.AgentRuns)})
+		a := in.AgentLast
+		if a != nil && a.Outcome != "" {
+			steps = append(steps, uiStep{Text: "outcome: " + a.Outcome})
+		}
+		if a != nil && a.HandTo != "" {
+			steps = append(steps, uiStep{Text: "the agent handed it to " + a.HandTo + ": " + cutUTF8(a.Answer, 300)})
+		} else {
+			switch {
+			case in.Failed != "":
+				return append(steps, uiStep{Text: "failed: " + in.Failed, Failed: true})
+			case in.AgentError != "":
+				return append(steps, uiStep{Text: "the agent failed: " + in.AgentError + "; agentd starts it again", Wait: true})
+			case in.Replied.IsZero():
+				return append(steps, uiStep{Text: "the agent is working on it", Wait: true})
+			}
+			return append(steps, uiStep{Text: "the agent answered", At: in.Replied})
+		}
 	}
 	if in.Session != "" {
 		if in.Started {
@@ -1095,6 +1119,9 @@ func (src *uiSource) messageView(cfg *Config, m uiMessage, now time.Time, secret
 	}
 	if !in.Replied.IsZero() {
 		mv.ReplyBy, mv.Replied = in.Session, in.Replied
+		if in.Session == "" {
+			mv.ReplyBy, mv.ReplyAgent = "thread agent", true
+		}
 		mv.Reply = markdown(in.Reply)
 		if in.Reply == "" || in.ReplyWithheld || secret(in.Reply) {
 			mv.Reply = template.HTML(template.HTMLEscapeString(withheldMessage))
