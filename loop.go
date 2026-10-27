@@ -553,18 +553,20 @@ func (s *Supervisor) startRuntime(repo, name string, p RuntimePayload) string {
 	if c, ok := s.cfg.Sessions[name]; ok && !c.Runtime {
 		return "a configured session has the name"
 	}
-	if n := len(sessionsOf(s.st.Runtime, repo)); n >= rules.Sessions.Max && p.Kind != KindChat && !s.makeRoom(repo, name, rules.Sessions.Max) {
-		if s.halt != nil {
-			return s.halt.Error()
-		}
-		return fmt.Sprintf("%s runs %d started sessions, its max", repo, n)
-	}
 	p.ID, p.Action, p.Repository, p.Max, p.By = newIntentID(), SessionStart, repo, rules.Sessions.Max, "agentd"
 	if sp := s.cfg.Repositories[repo].Sessions; sp != nil {
 		p.Host = sp.Host
 	}
 	if p.Host != "" && len(rules.Sessions.Accounts) == 0 {
 		return repo + " places its sessions on " + p.Host + " and names no account for them"
+	}
+	// At its max, a finished session is ended for room (#68), once
+	// nothing else can refuse the start.
+	if n := len(sessionsOf(s.st.Runtime, repo)); n >= rules.Sessions.Max && p.Kind != KindChat && !s.makeRoom(repo, name, rules.Sessions.Max) {
+		if s.halt != nil {
+			return s.halt.Error()
+		}
+		return fmt.Sprintf("%s runs %d started sessions, its max", repo, n)
 	}
 	switch {
 	case len(rules.Sessions.Fallback) > 0 && p.Host == "":
@@ -650,15 +652,20 @@ func (s *Supervisor) fixRound(name string, sess Session, t *Track, ev Evidence, 
 // and with no session.
 func (s *Supervisor) startNext(now time.Time) {
 	room := map[string]string{} // repository key to its name
+	full := map[string]string{} // those one place short, which a finished session may give (#68)
 	for _, name := range sortedKeys(s.cfg.Repositories) {
 		repo := s.cfg.Repositories[name]
 		rules, _ := effectivePolicy(s.cfg, s.st, name)
 		// One place is kept for the judgment sessions the work asks for.
-		if looped(repo) && len(sessionsOf(s.st.Runtime, name))+1 < rules.Sessions.Max {
+		switch n := len(sessionsOf(s.st.Runtime, name)); {
+		case !looped(repo):
+		case n+1 < rules.Sessions.Max:
 			room[repoKey(repo.Forge, repo.Project)] = name
+		case n+1 == rules.Sessions.Max:
+			full[repoKey(repo.Forge, repo.Project)] = name
 		}
 	}
-	if len(room) == 0 || s.shadow {
+	if len(room) == 0 && len(full) == 0 || s.shadow {
 		return
 	}
 	pr, err := LoadPriorities(s.cfg.Tracking.Priorities)
@@ -675,15 +682,28 @@ func (s *Supervisor) startNext(now time.Time) {
 	sort.SliceStable(cs, func(i, j int) bool { return cs[i].Rank < cs[j].Rank })
 	for _, c := range cs {
 		name, ok := room[c.Repository]
+		short, isFull := full[c.Repository]
 		it := s.st.Items[c.ID]
-		if !ok || !c.Pinned && c.Priority == 0 || c.State != CaseNotStarted || len(c.Sessions) > 0 || it == nil || it.Kind != ItemIssue {
+		if !ok && !isFull || !c.Pinned && c.Priority == 0 || c.State != CaseNotStarted || len(c.Sessions) > 0 || it == nil || it.Kind != ItemIssue {
 			continue
 		}
-		if rules, _ := effectivePolicy(s.cfg, s.st, name); rules.Scope.Reserved.matches(c.Issue, nil) {
+		if !ok {
+			name = short
+		}
+		rules, _ := effectivePolicy(s.cfg, s.st, name)
+		if rules.Scope.Reserved.matches(c.Issue, nil) {
 			continue
 		}
 		branch := fmt.Sprintf("issue-%d", c.Issue)
 		session := runtimeName(name, branch, KindWork)
+		// One place short: a finished session gives its place, or the
+		// case waits.
+		if !ok && !s.makeRoom(name, session, rules.Sessions.Max) {
+			if s.halt != nil {
+				return
+			}
+			continue
+		}
 		if why := s.startRuntime(name, session, RuntimePayload{Kind: KindWork, Branch: branch, Issue: c.Issue}); why != "" {
 			s.skipOnce(requestsTrack(name), "loop-start:"+c.ID, fmt.Sprintf("not starting %s: %s", c.ID, why), s.track(requestsTrack(name)), nil)
 			continue
