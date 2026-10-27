@@ -149,7 +149,8 @@ textarea { width: 100%; resize: vertical; }
 .more > summary { list-style: none; cursor: pointer; }
 .more > summary::-webkit-details-marker { display: none; }
 .more-label { font-size: var(--size-s); text-decoration: underline; }
-.more[open] > summary { display: none; }
+.more[open] > summary .show-all, .more:not([open]) > summary .show-less { display: none; }
+.fold:has(> .more[open]) > .preview { display: none; }
 .panels { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 22rem), 1fr)); gap: var(--space-3); }
 .panel textarea { width: 100%; }
 .doing code { white-space: pre-wrap; word-break: break-all; }

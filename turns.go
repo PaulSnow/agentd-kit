@@ -178,8 +178,15 @@ type TurnRecord struct {
 
 // harnessLine is the start of a user entry Claude Code wrote itself, not a
 // prompt anyone typed: a <task-notification>, a <system-reminder>, a
-// <bash-input> or <bash-stdout>, a <command-name> and the like (#56).
-var harnessLine = regexp.MustCompile(`^<[a-z][a-z0-9-]*>`)
+// <bash-input> or <bash-stdout>, a <command-name> and the like (#56):
+// a text that opens with a tag it also closes.
+var harnessLine = regexp.MustCompile(`^<([a-z][a-z0-9_-]*)>`)
+
+// injected says whether text is an entry the harness wrote, not a prompt.
+func injected(text string) bool {
+	m := harnessLine.FindStringSubmatch(text)
+	return m != nil && strings.Contains(text, "</"+m[1]+">")
+}
 
 // turnOf reads a transcript line as a turn: a main-chain user prompt in
 // the user's own words (not a tool result, a meta line, a compaction's
@@ -222,14 +229,18 @@ func turnOf(line []byte, n int) (TurnPayload, bool) {
 		for _, b := range blocks {
 			switch b.Type {
 			case "text":
-				parts = append(parts, b.Text)
+				// A block the harness injected beside a typed one is dropped,
+				// not the typed one with it.
+				if !injected(strings.TrimSpace(b.Text)) {
+					parts = append(parts, b.Text)
+				}
 			case "tool_result", "tool_use":
 				return TurnPayload{}, false
 			}
 		}
 		text = strings.Join(parts, "\n")
 	}
-	if text = strings.TrimSpace(text); text == "" || role == TurnPrompt && harnessLine.MatchString(text) {
+	if text = strings.TrimSpace(text); text == "" || role == TurnPrompt && injected(text) {
 		return TurnPayload{}, false
 	}
 	at, _ := time.Parse(time.RFC3339Nano, l.Timestamp)

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -39,6 +40,46 @@ func readActivity(path string) (Activity, error) {
 	if err != nil {
 		return Activity{}, err
 	}
+	// A transcript unchanged since it was last read is not read again, so
+	// a page refreshing every few seconds costs a stat per session.
+	key := activityKey{path, info.Size(), info.ModTime()}
+	activityMu.Lock()
+	a, ok := activityRead[key.path]
+	activityMu.Unlock()
+	if ok && a.key == key {
+		return a.Activity, nil
+	}
+	got, err := readActivityFrom(f, info)
+	if err == nil {
+		activityMu.Lock()
+		activityRead[key.path] = activityCached{key, got}
+		activityMu.Unlock()
+	}
+	return got, err
+}
+
+// activityKey is a transcript as it was read: its path, size and time.
+type activityKey struct {
+	path string
+	size int64
+	mod  time.Time
+}
+
+// activityCached is a transcript's activity as last read.
+type activityCached struct {
+	key activityKey
+	Activity
+}
+
+// activityRead holds each transcript's activity as last read, one per
+// transcript path.
+var (
+	activityMu   sync.Mutex
+	activityRead = map[string]activityCached{}
+)
+
+// readActivityFrom reads the activity from the tail of f.
+func readActivityFrom(f *os.File, info os.FileInfo) (Activity, error) {
 	off := info.Size() - activityTail
 	if off < 0 {
 		off = 0

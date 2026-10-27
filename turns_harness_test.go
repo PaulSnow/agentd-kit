@@ -34,10 +34,12 @@ func TestOnlyRealPromptsAndWholeReplies(t *testing.T) {
 		injectedLine("u5", "<bash-stdout>a b</bash-stdout><bash-stderr></bash-stderr>", at, nil)+
 		injectedLine("u6", "<command-name>/clear</command-name>", at, nil)+
 		injectedLine("u7", "This session is being continued from a previous conversation.", at, map[string]any{"isCompactSummary": true})+
-		summaryLine("u8", "m1", long, at, 100))
+		summaryLine("u8", "m1", long, at, 100)+
+		injectedLine("u9", "", at, map[string]any{"message": map[string]any{"role": "user", "content": []map[string]any{
+			{"type": "text", "text": "<ide_opened_file>w.go</ide_opened_file>"}, {"type": "text", "text": "<div> breaks on mobile"}}}}))
 	h.ticks(3, time.Minute)
 	got := h.turnMessages()
-	if len(got) != 2 || got[0].Text != "Build the widget." || got[1].Kind != MessageReply || got[1].Text != strings.TrimSpace(long) {
+	if len(got) != 3 || got[0].Text != "Build the widget." || got[1].Kind != MessageReply || got[1].Text != strings.TrimSpace(long) || got[2].Text != "<div> breaks on mobile" {
 		var kinds []string
 		for _, m := range got {
 			kinds = append(kinds, m.Kind+":"+cutUTF8(m.Text, 30))
@@ -85,11 +87,15 @@ func TestSessionPageActivity(t *testing.T) {
 // a box addressed to it; a finished session takes no message.
 func TestConsolePanels(t *testing.T) {
 	h := turnsHarness(t)
+	h.cfg.ConfidentialPatterns = []string{`hunter2`}
+	h.restart(false)
 	at := h.clock.Now()
 	running, _ := json.Marshal(map[string]any{"type": "assistant", "uuid": "u9", "timestamp": at.Format(time.RFC3339Nano),
 		"message": map[string]any{"id": "m9", "stop_reason": "tool_use", "content": []map[string]any{{"type": "tool_use", "id": "c9", "name": "Bash", "input": map[string]any{"command": "./bin/check"}}}}})
 	h.transcriptOf("a", "t1", promptLine("u1", "Build the widget.", at)+summaryLine("u2", "m1", "Primed the widget.", at, 100)+
 		promptLine("u3", "Now paint it.", at)+string(running)+"\n")
+	h.transcriptOf("b", "t2", promptLine("u1", "Count the widgets.", at)+summaryLine("u2", "m1", "Counted hunter2 widgets.", at, 100)+
+		strings.Replace(string(running), "./bin/check", "sleep 9", 1)+"\n")
 	h.status("b", "# b\n\nDONE\n")
 	h.ticks(2, time.Minute)
 	u, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
@@ -102,6 +108,9 @@ func TestConsolePanels(t *testing.T) {
 		if !strings.Contains(page[panels:history], want) {
 			t.Fatalf("the panels lack %q:\n%s", want, page[panels:history])
 		}
+	}
+	if strings.Contains(page, "hunter2") || !strings.Contains(page[panels:history], withheldMessage) || strings.Contains(page, "sleep 9") {
+		t.Fatalf("the panels leak or show a finished session's open call:\n%s", page[panels:history])
 	}
 	if !strings.Contains(page[panels:history], `<a href="/session/night/b">b</a>`) || strings.Contains(page, "Send to b<") {
 		t.Fatalf("the finished session's panel is missing or takes a message:\n%s", page[panels:history])

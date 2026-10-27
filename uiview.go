@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -771,9 +770,6 @@ func (u *UI) consoleView(repo string, page int, now time.Time) (*uiConsole, erro
 	if v.Older > v.Pages {
 		v.Older = -1
 	}
-	if v.Page > 1 {
-		v.Back += "?page=" + strconv.Itoa(v.Page)
-	}
 	sort.SliceStable(v.Panels, func(i, j int) bool { return v.Panels[i].Name < v.Panels[j].Name })
 	sortNeeds(v.Needs)
 	return v, nil
@@ -798,17 +794,21 @@ func (src *uiSource) panels(cfg *Config, repo string, needs []uiNeed, secret fun
 		if sess.Role == "" && src.st.Mode == ModeLive && (t == nil || t.State != Done) {
 			p.MessageTo = repo
 		}
-		if a, ok := sessionActivity(cfg, sess, t); ok {
-			if a.Now != nil {
-				doing := activityStep(*a.Now, secret)
-				p.Doing = &doing
-			} else if n := len(a.Ran); n > 0 && (t == nil || t.State == Working) {
-				last := activityStep(a.Ran[n-1], secret)
-				p.Doing = &last
+		// Only a session that runs has anything doing: a finished one's
+		// transcript is not read, and a call it left open is not shown.
+		if running(t) {
+			if a, ok := sessionActivity(cfg, sess, t); ok {
+				if a.Now != nil {
+					doing := activityStep(*a.Now, secret)
+					p.Doing = &doing
+				} else if n := len(a.Ran); n > 0 && (t == nil || t.State == Working) {
+					last := activityStep(a.Ran[n-1], secret)
+					p.Doing = &last
+				}
 			}
 		}
 		for _, n := range needs {
-			if n.Session == name {
+			if n.Session == name && n.Src == src.Name && (n.Kind == "decision" || n.Kind == "blocked") {
 				p.Questions++
 			}
 		}
@@ -827,6 +827,13 @@ func (src *uiSource) panels(cfg *Config, repo string, needs []uiNeed, secret fun
 		out = append(out, p)
 	}
 	return out
+}
+
+// running says whether a session's transcript may show a tool it runs
+// now: not one that is done, stopped, crash-looping or parked, whose call
+// left open is no more running.
+func running(t *Track) bool {
+	return t == nil || !t.Parked && t.State != Done && t.State != Stopped && t.State != CrashLooping
 }
 
 // uiEvent is one line of a session's timeline.
@@ -905,7 +912,7 @@ func (u *UI) sessionView(src *uiSource, name string, now time.Time) (*uiSessionP
 			for _, tn := range a.Ran {
 				v.Activity = append(v.Activity, activityStep(tn, secret))
 			}
-			if a.Now != nil {
+			if a.Now != nil && running(t) {
 				now := activityStep(*a.Now, secret)
 				v.Doing = &now
 			}
