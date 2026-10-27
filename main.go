@@ -74,6 +74,8 @@ func main() {
 		err = triageCmd(os.Args[2:], os.Stdout)
 	case "status-check":
 		err = statusCheckCmd(os.Args[2:], os.Stdout)
+	case "context":
+		err = contextCmd(os.Args[2:], os.Stdout)
 	case "cases":
 		err = casesCmd(os.Args[2:], os.Stdout)
 	case "mcp":
@@ -125,6 +127,8 @@ func usage() {
   agentd cases [--config PATH] [--log PATH] rule CASE restriction|waiver|close|reopen [TEXT]
   agentd cases [--config PATH] [--log PATH] goal CASE FILE|-
   agentd mcp [--config PATH] [--log PATH] --session NAME
+  agentd mcp [--config PATH] [--log PATH] --repository NAME [--as NAME]
+  agentd context [--config PATH] [--log PATH] stats REPO [--since 24h] | card REPO [TOPIC]
   agentd hub [--config PATH] [--log PATH]
   agentd node [--config PATH] [--once]
   agentd nodes [--config PATH] [--log PATH]
@@ -164,6 +168,11 @@ FILE with one call (retried once on failure) and prints its checked answer and c
 status-check builds the status graph's input from the window at the end
 of a transcript and prints its size; with --call it makes the one call
 and prints the checked record and its cost. It logs nothing.
+mcp --repository serves the context tools alone (state, find, history,
+ask_expert) on a repository, for an agent that works no case. context
+stats measures how agents used them, how often state alone answered,
+and what the curators and the expert cost; context card prints a
+topic's state card, or the repository's.
 cases lists the cases, one per issue, ranked: the owner's pins and the
 repositories' order from tracking.priorities when that file exists, then
 what needs the owner, triage urgency and age; rule records the owner's

@@ -150,6 +150,9 @@ func (st *LogState) apply(e Event) {
 		st.applyLoop(e)
 		return
 	}
+	if e.Kind == KindCard || e.Kind == KindThread || e.Kind == KindQuery {
+		return // the repository's context, which its store folds (#60)
+	}
 	if e.Kind == KindRoute {
 		st.applyRoute(e)
 		return

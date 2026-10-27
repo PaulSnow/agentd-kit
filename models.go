@@ -64,7 +64,7 @@ func withModel(cmd []string, model string) []string {
 // modelsSet names a model setting the config has, or is "" when every
 // session runs the command's default.
 func (c *Config) modelsSet() string {
-	if g := c.Policies.Models; g != (ModelsPolicy{}) {
+	if g := c.Policies.Models; g.Work != "" || g.Reviewer != "" || g.Judge != "" {
 		return "policies.models"
 	}
 	for _, n := range sortedKeys(c.Repositories) {

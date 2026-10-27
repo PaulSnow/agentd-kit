@@ -205,6 +205,22 @@ With `jobs.status.enabled` set, `agentd run` asks a small model for each active 
 
 `agentd status-check --transcript FILE [--window 5m] [--input] [--call]` builds the input for the window at the end of a transcript and prints its size (and with `--input` the input itself); with `--call` it makes the one call and prints the checked record and its cost. It logs nothing.
 
+## Repository context
+
+Agents need context without being handed everything (#60). `agentd` keeps it in two layers for each repository, and agents query it through the tool server.
+
+- **State: one card per topic.** A card says what is true now about an issue (`#N`), a request (`!N`), a session (`session:NAME`) or the repository (`repo`): its title, status, a two-sentence summary, the rules in force, the questions open for the owner, the known problems and the related topics. Every claim names in `src` the history records it was drawn from. A card is at most 4000 bytes of JSON; each revision is a `card` event with its `rev`, so old ones are kept.
+- **Curators keep the cards.** With `jobs.curator.enabled` set, when a decision, answer, instruction, ruling, comment, CI result, merge, status record or commit lands on a topic, `agentd run` waits until the topic has been quiet for `quiet` (default `2m`, or `max_wait`, `10m`, since the first), at least `gap` (`10m`) after its last curation. Then it calls the jobs' model (haiku by default) with the card and only the records new since, at most `max_input` bytes (16 KiB). The curator answers with a diff. Go applies it only when every claim cites a record it was given, a rule in force or an open question leaves or changes only with a record new since the card's last revision, and the card stays within its size. Otherwise the diff is refused and logged, and the next curator is sent the same records with the reason. Two sources that disagree become an open question for the owner, and the rule stays in force. The repository's card is curated the same way from the topic cards that changed. A repository has at most `per_day` curations a day (300). A topic never curated is curated only for records within `lookback` (`72h`). A shadow run curates nothing.
+- **History: everything, rarely read.** The records are drawn from the event log (decisions, answers, the owner's instructions and rulings, status records, prompts and replies, failed tools, commits, CI results, merges, escalations, posts) and from issues' and requests' threads, read from the forge when an item arrives on one or an agent asks, and logged as `thread` events, screened. Each record has an id drawn from its source, and topics drawn from its fields and from the `#N`, `!N` and paths its text names; a path names an area, `area:DIR`.
+
+The tools, on every session's server and, with `agentd mcp --repository NAME [--as NAME]`, on a server of their own for an agent that works no case:
+
+- `state(topic?)` returns the card, or the repository's. `find(q, limit?)` returns the topics whose cards match, and topics with history but no card.
+- `history(ids | topic, since?, kinds?, budget_tokens?, more?, why, question?)` returns records by id, or on a topic newest first, cut to the budget (default 4000 tokens, at most 32000, counted as bytes × 4/7), with `more` for the next page. `why` is `spec`, `debug-decision`, `verify-claim` or `missing-from-state`; the last also tells the topic's curator what was missing.
+- `ask_expert(question, record_ids?, topics?, budget_tokens?)` calls `policies.models.expert` (default `opus`) with the stripped setup and read-only tools (Read, Grep, Glob) in the session's worktree, or the repository's clone. It answers `{"answer","confidence","used"}`. Its tokens count against `jobs.expert.budget_tokens` a repository a day (500,000).
+
+Every call is a `query` event with its size. `agentd context stats REPO [--since 24h]` reports how many questions state answered alone (no history call by the same agent within five minutes), the history calls by reason, and the curators' and the expert's tokens. `agentd context card REPO [TOPIC]` prints a card.
+
 ## Scheduled jobs
 
 `jobs.scheduled` lists commands `agentd` runs on a schedule (#51), so agent work that ran from an outside cron, under one fixed login and unseen, is supervised like the rest:

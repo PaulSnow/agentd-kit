@@ -140,6 +140,8 @@ type ModelsPolicy struct {
 	Work     string `json:"work"`
 	Reviewer string `json:"reviewer"`
 	Judge    string `json:"judge"`
+	// Expert is the model ask_expert calls (#60), opus when unset.
+	Expert string `json:"expert"`
 }
 
 // ContextPolicy rotates a session whose context (its latest call's input,
@@ -476,6 +478,10 @@ func (c *Config) finish(base string) error {
 	}
 	if s := c.Jobs.Status; s.Every.Duration < 0 || s.Every.Duration > 0 && s.Every.Duration < time.Minute || s.MaxInput < 0 {
 		errs = append(errs, errors.New("jobs.status.every must be a minute or more, and jobs.status.max_input not negative"))
+	}
+	if k := c.Jobs.Curator; k.Quiet.Duration < 0 || k.MaxWait.Duration < 0 || k.Gap.Duration < 0 || k.Lookback.Duration < 0 || k.MaxInput < 0 || k.PerDay < 0 ||
+		c.Jobs.Expert.BudgetTokens < 0 || c.Jobs.Expert.Timeout.Duration < 0 {
+		errs = append(errs, errors.New("jobs.curator's and jobs.expert's settings must not be negative"))
 	}
 	if c.Poll.Every.Duration <= 0 || c.Poll.CIEvery.Duration <= 0 {
 		errs = append(errs, errors.New("poll.every and poll.ci_every must be positive"))

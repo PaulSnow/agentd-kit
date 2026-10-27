@@ -218,7 +218,7 @@ func TestMCPHandshake(t *testing.T) {
 			t.Fatalf("tool %s has no schema", tool.Name)
 		}
 	}
-	if !reflect.DeepEqual(names, []string{"report_progress", "raise_decision", "request_step"}) {
+	if !reflect.DeepEqual(names, []string{"report_progress", "raise_decision", "request_step", "state", "find", "history", "ask_expert"}) {
 		t.Fatalf("tools %v", names)
 	}
 	if rs[2].Error != nil || string(rs[2].ID) != "3" {

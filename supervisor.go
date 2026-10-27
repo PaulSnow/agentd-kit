@@ -63,6 +63,9 @@ type Supervisor struct {
 	status *statusCopies
 	usage  *usageReader
 	api    ForgeAPI // the forges' APIs for the poll, or nil for none
+	// cards is the repositories' context the curators keep (#60): the
+	// loop's alone.
+	cards *ContextStore
 
 	checkpointRe *regexp.Regexp
 
@@ -438,6 +441,7 @@ func (s *Supervisor) Pass() error {
 		s.readAccounts(s.clock.Now())
 		s.runJobs(s.clock.Now())
 		s.checkStatuses(s.clock.Now())
+		s.curateCards(s.clock.Now())
 	}
 	return s.halt
 }

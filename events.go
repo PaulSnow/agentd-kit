@@ -67,6 +67,9 @@ type Event struct {
 	Node        *NodePayload        `json:"node,omitempty"`
 	Route       *RoutePayload       `json:"route,omitempty"`
 	Status      *StatusPayload      `json:"status,omitempty"`
+	Card        *CardPayload        `json:"card,omitempty"`
+	Thread      *ThreadPayload      `json:"thread,omitempty"`
+	Query       *QueryPayload       `json:"query,omitempty"`
 }
 
 // Event kinds.
@@ -373,7 +376,7 @@ func (e Event) check() error {
 		KindSkip: e.Skip != nil, KindCrash: e.Crash != nil, KindClear: e.Clear != nil, KindError: e.Error != nil, KindWarning: e.Warning != nil,
 		KindItem: e.Item != nil, KindSeen: e.Seen != nil, KindCursor: e.Cursor != nil, KindUsage: e.Usage != nil,
 		KindCheckpoint: e.Checkpoint != nil, KindPoll: e.Poll != nil, KindTriage: e.Triage != nil, KindDecision: e.Decision != nil,
-		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, KindApproval: e.Approval != nil, KindAccount: e.Account != nil, KindMessage: e.Message != nil, KindInbox: e.Inbox != nil, KindJob: e.Job != nil, KindLoop: e.Loop != nil, KindNode: e.Node != nil, KindRoute: e.Route != nil, KindStatus: e.Status != nil, "act": e.Act != nil,
+		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, KindApproval: e.Approval != nil, KindAccount: e.Account != nil, KindMessage: e.Message != nil, KindInbox: e.Inbox != nil, KindJob: e.Job != nil, KindLoop: e.Loop != nil, KindNode: e.Node != nil, KindRoute: e.Route != nil, KindStatus: e.Status != nil, KindCard: e.Card != nil, KindThread: e.Thread != nil, KindQuery: e.Query != nil, "act": e.Act != nil,
 	}
 	want := e.Kind
 	switch e.Kind {
@@ -404,13 +407,19 @@ func (e Event) check() error {
 		return errors.New("a node event is a shared fact, for no one session")
 	case e.Kind == KindNode && e.Node.check() != nil:
 		return e.Node.check()
+	case e.Kind == KindCard && (e.Session != "" || e.Mode != ModeLive && e.Mode != ModeShadow || e.Card.Repository == "" || e.Card.Topic == "" || e.Card.outcomes() != 1):
+		return errors.New("a card event is a run's, for no one session, names its repository and topic, and carries a card, or why there is none")
+	case e.Kind == KindThread && (e.Session != "" || e.Mode != ModeShared || e.Thread.Repository == "" || e.Thread.Ref == ""):
+		return errors.New("a thread event is a shared fact, for no one session, and names its repository and reference")
+	case e.Kind == KindQuery && (e.Mode != ModeShared || e.Query.Repository == "" || e.Query.Tool == ""):
+		return errors.New("a query event is a shared fact and names its repository and tool")
 	case e.Kind == KindAccount && (e.Session != "" || e.Mode != ModeShared || e.Account.Account == ""):
 		return errors.New("an account reading is a shared fact, for no one session, and names its account")
 	case e.Kind == KindApproval && (e.Session == "" || e.Mode != ModeShared || e.Approval.Repository == "" || e.Approval.Ref == "" || e.Approval.SHA == ""):
 		return errors.New("an approval is a shared fact of the coordinator that gave it, and names its repository, request and head")
 	case e.Kind == KindPolicy && (e.Session != "" || e.Mode != ModeShared || e.Policy.Repository == "" || e.Policy.Tip == ""):
 		return errors.New("a policy event is a shared fact, for no one session, and names its repository and tip")
-	case e.Kind != KindCase && e.Kind != KindCoordinator && e.Kind != KindSession && e.Kind != KindPolicy && e.Kind != KindApproval && e.Kind != KindAccount && e.Kind != KindMessage && e.Kind != KindInbox && e.Kind != KindNode && (e.Kind == KindItem || e.Kind == KindCursor || e.Kind == KindTriage || failedTriage) != (e.Mode == ModeShared):
+	case e.Kind != KindCase && e.Kind != KindCoordinator && e.Kind != KindSession && e.Kind != KindPolicy && e.Kind != KindApproval && e.Kind != KindAccount && e.Kind != KindMessage && e.Kind != KindInbox && e.Kind != KindNode && e.Kind != KindThread && e.Kind != KindQuery && (e.Kind == KindItem || e.Kind == KindCursor || e.Kind == KindTriage || failedTriage) != (e.Mode == ModeShared):
 		return fmt.Errorf("a %s event must not carry mode %q", e.Kind, e.Mode)
 	case e.Kind == KindSeen && e.Mode != ModeOwner:
 		return fmt.Errorf("a seen event is the owner's, not %q", e.Mode)

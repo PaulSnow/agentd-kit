@@ -69,6 +69,10 @@ type JobsConfig struct {
 	Scheduled map[string]ScheduledJob `json:"scheduled"`
 	// Status turns on the status graph's checks (#57).
 	Status StatusConfig `json:"status"`
+	// Curator turns on the curators of the state cards, and Expert sets
+	// what ask_expert may spend (#60).
+	Curator CuratorConfig `json:"curator"`
+	Expert  ExpertConfig  `json:"expert"`
 }
 
 // TriagePayload is one triage call's outcome: the answers Go accepted, the
@@ -111,6 +115,10 @@ type Job struct {
 	Model    string
 	Timeout  time.Duration
 	MaxInput int
+	// Tools are the read-only tools the call may use in Dir; none by
+	// default (#60's expert reads the worktree).
+	Tools []string
+	Dir   string
 }
 
 // jobFromConfig is the job the config describes, with its defaults.
@@ -167,7 +175,10 @@ func (j Job) Run(ctx context.Context, system string, schema, input []byte) (json
 		return nil, JobUsage{}, fmt.Errorf("job input is %d bytes, over the %d allowed", len(input), j.MaxInput)
 	}
 	args := []string{"-p", "--model", j.Model, "--output-format", "json", "--json-schema", string(schema),
-		"--system-prompt", system, "--setting-sources", "", "--strict-mcp-config", "--mcp-config", emptyMCP, "--tools", ""}
+		"--system-prompt", system, "--setting-sources", "", "--strict-mcp-config", "--mcp-config", emptyMCP, "--tools", strings.Join(j.Tools, ",")}
+	if len(j.Tools) > 0 {
+		args = append(args, "--allowedTools", strings.Join(j.Tools, ","))
+	}
 	script := `exec "$@"`
 	if j.Account.TokenFile != "" {
 		if err := checkTokenFile(j.Account.TokenFile); err != nil {
@@ -177,7 +188,7 @@ func (j Job) Run(ctx context.Context, system string, schema, input []byte) (json
 	}
 	ctx, cancel := context.WithTimeout(ctx, j.Timeout)
 	defer cancel()
-	cmd := groupCommand(ctx, "", "sh", append([]string{"-c", script, "sh", j.Command}, args...)...)
+	cmd := groupCommand(ctx, j.Dir, "sh", append([]string{"-c", script, "sh", j.Command}, args...)...)
 	cmd.Env = jobEnv(os.Environ(), j.Account)
 	cmd.Stdin = bytes.NewReader(input)
 	var stderr tailBuffer
