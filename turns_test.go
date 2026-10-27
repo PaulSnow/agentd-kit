@@ -183,9 +183,20 @@ func TestTurnShownInConsole(t *testing.T) {
 	if i < 0 || li < 0 || !strings.Contains(body[li:i], `<a href="/session/night/w17">w17</a> <span class="badge">reply</span>`) {
 		t.Fatalf("the turn is not shown with its kind and session:\n%s", body)
 	}
-	// One box, newest last (#59): the owner's earlier instruction is
-	// there, and the oldest turn kept.
-	if strings.Contains(body, "Painted coat 0<") || !strings.Contains(body, "Painted coat 1<") || strings.Index(body, "Ship it on Friday") > strings.Index(body, "Painted coat 1<") {
+	// One box, newest last (#59), its latest entries on the page and
+	// the older ones fetched before them: the owner's earlier
+	// instruction is there, and the oldest turn kept.
+	all := body
+	for page, n := body, 0; n < 10; n++ {
+		i := strings.Index(page, `data-before="`)
+		if i < 0 {
+			break
+		}
+		before := page[i+len(`data-before="`):]
+		page = owner(t, u, "/console/widgets?before="+before[:strings.Index(before, `"`)])
+		all = page + all
+	}
+	if strings.Contains(body, "Painted coat 150<") || strings.Contains(all, "Painted coat 0<") || !strings.Contains(all, "Painted coat 1<") || strings.Index(all, "Ship it on Friday") > strings.Index(all, "Painted coat 1<") {
 		t.Fatalf("the turns are not kept apart:\n%s", body)
 	}
 }
