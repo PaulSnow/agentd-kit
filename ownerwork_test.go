@@ -48,7 +48,7 @@ func TestOwnerWorkStartsSession(t *testing.T) {
 	h := sessionsHarness(t)
 	h.ticks(1, time.Minute)
 	claudeAnswers(t, dir, 1, agentWork("No session covers it: agentd starts one to deploy the update.", "Deploy the update", "Read the deploy notes and ship step 1a."))
-	if err := reply(h, "widgets", "Make step 1a arrive."); err != nil {
+	if err := UIInstruction(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", "", "Make step 1a arrive.", stage(t, upload{name: "notes.txt", body: []byte("the deploy notes")})); err != nil {
 		t.Fatal(err)
 	}
 	h.ticks(3, time.Minute)
@@ -76,6 +76,19 @@ func TestOwnerWorkStartsSession(t *testing.T) {
 		if !strings.Contains(string(brief), want) {
 			t.Fatalf("the brief lacks %q:\n%s", want, brief)
 		}
+	}
+	// Its files are copied into its workdir, and the message is handed
+	// over once, at its launch.
+	if b, err := os.ReadFile(filepath.Join(h.dir, name, workdirAttachments, in.Attachments[0].Hash+".txt")); err != nil || string(b) != "the deploy notes" {
+		t.Fatalf("attachment = %q, %v", b, err)
+	}
+	h.alive(name, "deploying\n"+idleScreen)
+	h.ticks(2, time.Minute)
+	if in = h.sup.st.Instructions[in.ID]; in.Delivered.IsZero() || h.count(KindAction, ActInstruct, name) != 0 {
+		t.Fatalf("delivered %v, instructed %d times", in.Delivered, h.count(KindAction, ActInstruct, name))
+	}
+	if docs := readInstructions(t, filepath.Join(h.dir, name)); len(docs) != 1 || docs[0].Text != "Make step 1a arrive." {
+		t.Fatalf("instructions.json = %+v", docs)
 	}
 	linked := false
 	for _, s := range instructionSteps(h.sup.st, in) {
@@ -122,11 +135,12 @@ func TestOwnerWorkAtMaxNamesHolders(t *testing.T) {
 	if in.Session != "" || !strings.Contains(in.Failed, "its max") || !strings.Contains(in.Failed, w1) || !strings.Contains(in.Failed, w2) {
 		t.Fatalf("instruction = %+v", in)
 	}
-	d := nextDecision(h.sup.cfg, h.sup.st, in)
+	d := nextDecision(h.sup.cfg, h.sup.st, in, h.clock.Now())
 	if d == nil || !contains(decisionOptions(*d), nextEnd+w1) || contains(decisionOptions(*d), nextStart) {
 		t.Fatalf("next step = %+v", d)
 	}
 	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	src.now = h.clock.Now
 	if err := src.respond("widgets", entryNext+in.ID, "", "", &AnswerPayload{Choice: nextStart}, nil); err == nil {
 		t.Fatal("a step not offered was taken")
 	}
@@ -138,7 +152,7 @@ func TestOwnerWorkAtMaxNamesHolders(t *testing.T) {
 	if _, ok := h.sup.st.Runtime[w1]; ok || in.Failed != "" || !in.Started || h.sup.st.Runtime[in.Session].Owner != in.ID {
 		t.Fatalf("after ending %s: instruction = %+v", w1, in)
 	}
-	if src.catchUp(); len(src.nextEntries(h.sup.cfg, "widgets", func(...string) bool { return false })) != 0 {
+	if src.catchUp(); len(src.nextEntries(h.sup.cfg, "widgets", func(...string) bool { return false }, h.clock.Now())) != 0 {
 		t.Fatal("the next step is still offered")
 	}
 }
@@ -163,8 +177,14 @@ func TestHandToDoneAliveReopens(t *testing.T) {
 	if err := reply(h, "widgets", "Ship step 1b too."); err != nil {
 		t.Fatal(err)
 	}
+	// Mid-turn, it is not reopened: the pointer would go into the turn.
+	h.alive(w1, "w1 writes\n"+runningScreen)
+	h.ticks(2, time.Minute)
+	if h.count(KindAction, ActReopen, w1) != 0 || !h.sup.st.Instructions[h.instruction(t).ID].Delivered.IsZero() {
+		t.Fatal("reopened mid-turn")
+	}
 	for i := 0; i < 3; i++ {
-		h.alive(w1, "w1 pane "+itoa(i))
+		h.alive(w1, "w1 pane "+itoa(i)+"\n"+idleScreen)
 		h.ticks(1, time.Minute)
 	}
 	x := agentInput(t, dir, 1)
@@ -213,11 +233,12 @@ func TestHandToDoneGoneFailsWithNextStep(t *testing.T) {
 	if x := agentInput(t, dir, before+1); len(x.Finished) != 1 || x.Finished[0].Alive {
 		t.Fatalf("finished = %+v", x.Finished)
 	}
-	d := nextDecision(h.sup.cfg, h.sup.st, in)
+	d := nextDecision(h.sup.cfg, h.sup.st, in, h.clock.Now())
 	if d == nil || !contains(decisionOptions(*d), nextStart) || !contains(decisionOptions(*d), nextSend+"a") || contains(decisionOptions(*d), nextSend+w1) {
 		t.Fatalf("next step = %+v", d)
 	}
 	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	src.now = h.clock.Now
 	v, err := (&UI{sources: []*uiSource{src}}).consoleView("widgets", h.clock.Now())
 	if err != nil {
 		t.Fatal(err)
@@ -272,5 +293,18 @@ func TestStaleCardMarked(t *testing.T) {
 	}
 	if !strings.Contains(threadSystem, "STATUS.md outranks a card") {
 		t.Fatal("the agent is not told STATUS.md outranks a card")
+	}
+}
+
+// A failure older than the next steps' span offers none: the history of
+// failures is not a list of open questions.
+func TestOldFailureOffersNoNextStep(t *testing.T) {
+	h := sessionsHarness(t)
+	in := &Instruction{InstructionPayload: InstructionPayload{ID: "I1", Repositories: []string{"widgets"}, Route: true}, Failed: "it failed", FailedAt: h.clock.Now()}
+	if nextDecision(h.sup.cfg, h.sup.st, in, h.clock.Now().Add(time.Hour)) == nil {
+		t.Fatal("a fresh failure offers no next step")
+	}
+	if nextDecision(h.sup.cfg, h.sup.st, in, h.clock.Now().Add(nextSpan+time.Hour)) != nil {
+		t.Fatal("an old failure offers a next step")
 	}
 }

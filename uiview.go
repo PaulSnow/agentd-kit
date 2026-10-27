@@ -1076,7 +1076,7 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 					Entry: entryOps + oe.ID}, Src: src.Name}, Decision: &oe.uiDecisionEntry, Open: oe.open})
 			}
 			// What the owner can do with a message whose route failed (#65).
-			for _, ne := range src.nextEntries(cfg, repo, secret) {
+			for _, ne := range src.nextEntries(cfg, repo, secret, now) {
 				ne := ne
 				v.Entries = append(v.Entries, uiEntry{uiMessageView: uiMessageView{uiMessage: uiMessage{At: ne.At, Kind: "decision", From: "agentd",
 					Entry: entryNext + ne.ID}, Src: src.Name}, Decision: &ne.uiDecisionEntry, Open: ne.open})

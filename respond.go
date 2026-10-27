@@ -149,7 +149,7 @@ func (src *uiSource) decisionEntries(cfg *Config, rep Report, repo string) []uiD
 // entryOf finds entry id of repo's console as the page shows it now:
 // what it is about, the session that wrote it ("" for agentd or the
 // owner), and the decision it is, when it is one still open.
-func (src *uiSource) entryOf(cfg *Config, rep Report, repo, id string) (EntryRe, string, *Decision, error) {
+func (src *uiSource) entryOf(cfg *Config, rep Report, repo, id string, now time.Time) (EntryRe, string, *Decision, error) {
 	secret := confidentialMatcher(cfg)
 	switch {
 	case strings.HasPrefix(id, entryDecision):
@@ -189,7 +189,7 @@ func (src *uiSource) entryOf(cfg *Config, rep Report, repo, id string) (EntryRe,
 		in := src.st.Instructions[strings.TrimPrefix(id, entryNext)]
 		var d *Decision
 		if in != nil && len(in.Repositories) > 0 && in.Repositories[0] == repo {
-			d = nextDecision(cfg, src.st, in)
+			d = nextDecision(cfg, src.st, in, now)
 		}
 		if d == nil {
 			return EntryRe{}, "", nil, fmt.Errorf("%s's console holds no next step %q now", repo, id)
@@ -244,12 +244,12 @@ func (src *uiSource) entryOf(cfg *Config, rep Report, repo, id string) (EntryRe,
 func (src *uiSource) respond(repo, id, to, text string, a *AnswerPayload, files []stagedAttachment) error {
 	src.mu.Lock()
 	defer src.mu.Unlock()
-	now := time.Now()
+	now := src.clock()
 	cfg, rep, err := src.view(now)
 	if err != nil {
 		return err
 	}
-	re, writer, dec, err := src.entryOf(cfg, rep, repo, id)
+	re, writer, dec, err := src.entryOf(cfg, rep, repo, id, now)
 	if err != nil {
 		return err
 	}
@@ -287,7 +287,7 @@ func (src *uiSource) respond(repo, id, to, text string, a *AnswerPayload, files 
 			case strings.HasPrefix(id, entryNext):
 				// A next step is Go's to carry out from the instruction
 				// (#65), and only one it offers now.
-				if !contains(decisionOptions(*dec), a.Choice) {
+				if a.Binding() && !contains(decisionOptions(*dec), a.Choice) {
 					return fmt.Errorf("%q is not one of the steps offered", a.Choice)
 				}
 			case !strings.HasPrefix(id, entryOps):

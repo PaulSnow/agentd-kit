@@ -93,7 +93,7 @@ const threadSystem = `You answer the owner of a software project on agentd's con
 	`When the owner asks for work that belongs to one of the running sessions, set hand_to to its name: the owner's message then goes to it, and your answer says so. ` +
 	`hand_to may also name a finished session marked alive, whose tmux session still runs: agentd reopens it with the message. Never a finished one not marked alive. ` +
 	`When the owner's message asks for work, an instruction rather than a question, and no running or alive session covers it, set work with a title, a brief for the session that does it, and the issue when one is its topic: ` +
-	`agentd then starts a work session of the repository for it, briefed with the owner's message, the thread and your facts, and your answer says so. Never answer an instruction with only an explanation. ` +
+	`agentd then starts a work session of the repository for it, briefed with the owner's message, the thread and your facts; your answer says agentd is starting one, never that it started. Never answer an instruction with only an explanation. ` +
 	`When the thread settles a decision about an issue or a request, or reports the outcome of work on one, set outcome: Go posts it there as an agent's comment. ` +
 	`Label what you report: say which entry, issue or session each point is about. ` +
 	`Never state that something does not exist, is not planned or is not happening: you see only your sources. Say what you checked and how fresh each was, ` +

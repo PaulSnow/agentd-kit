@@ -155,6 +155,17 @@ type uiSource struct {
 	// owned is the owner's message each session started for one was
 	// started for, until its first post, which is threaded under it (#65).
 	owned map[string]string
+	// now is the time a response is taken at; a test's clock, else the
+	// wall clock.
+	now func() time.Time
+}
+
+// clock is the time now, by src's clock.
+func (src *uiSource) clock() time.Time {
+	if src.now != nil {
+		return src.now()
+	}
+	return time.Now()
 }
 
 func newUISource(name string, cfg *Config, log *Log, mode, host string) *uiSource {

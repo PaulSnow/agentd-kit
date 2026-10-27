@@ -366,7 +366,7 @@ func (s *Supervisor) routeInstructions(now time.Time) {
 		}
 		// Work the agent named, which no running session covers: Go
 		// starts a work session for it (#65).
-		if a := in.AgentLast; in.Route && in.Agent && in.Session == "" && in.Replied.IsZero() && in.Failed == "" && in.AgentError == "" && a != nil && a.Work != nil && len(in.Repositories) > 0 {
+		if a := in.AgentLast; in.Route && in.Agent && in.Session == "" && in.Replied.IsZero() && in.Failed == "" && in.AgentError == "" && a != nil && a.Work != nil && a.Error == "" && !s.work.busy("thread:"+in.ID) && len(in.Repositories) > 0 {
 			if s.startOwnerWork(in, in.Repositories[0], *a.Work); s.halt != nil {
 				return
 			}
@@ -669,7 +669,7 @@ func (st *LogState) applyRoute(e Event) {
 	case RouteTo:
 		// After a failure, the owner's next step (#65): the message goes
 		// to the session as a new one.
-		if in.Failed != "" {
+		if in.Failed != "" || in.Agent {
 			in.Failed, in.Delivered, in.Taken, in.Activity = "", time.Time{}, time.Time{}, nil
 		}
 		in.Session, in.Started, in.Waiting = p.Session, p.Started, ""

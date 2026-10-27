@@ -803,7 +803,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 	}
 	// A finished session whose tmux session runs, handed the owner's
 	// message, takes it once its DONE is off (#65).
-	if !typed && state == Done && ev.Alive && !t.Limited && s.reopen(name, sess, t) {
+	if !typed && state == Done && ev.Alive && !t.Limited && s.reopen(name, sess, t, ev) {
 		state = Idle
 	}
 	if !typed {

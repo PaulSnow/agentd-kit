@@ -344,17 +344,34 @@ func (s *Supervisor) keepText(text string) string {
 	return cutUTF8(text, agentText)
 }
 
-// ownerBrief is the BRIEF.md body of the session p started for the
-// owner's work: the kept facts, or, with none, what the log holds.
-func (s *Supervisor) ownerBrief(p RuntimePayload) (map[string]any, error) {
-	b, err := os.ReadFile(ownerWorkPath(s.cfg, p.Repository, p.Owner))
+// ownerProvision is what the main loop reads for the provisioning of a
+// session started for the owner's message: its files, and the brief
+// the log gives it when no facts were kept.
+type ownerProvision struct {
+	attachments []AttachmentPayload
+	fallback    []byte
+}
+
+// ownerProvision is p's, nil for a session started for no message.
+func (s *Supervisor) ownerProvision(p RuntimePayload) *ownerProvision {
+	in := s.st.Instructions[p.Owner]
+	if p.Owner == "" || in == nil {
+		return nil
+	}
+	x := s.threadInputFor(in, p.Repository, s.threadCwd(p.Repository))
+	b, _ := json.Marshal(ownerWorkDoc{Title: workTitleOf(in.Text), Message: x.Message, Earlier: x.Earlier, Re: x.Re, At: x.At, Running: x.Running, Finished: x.Finished})
+	return &ownerProvision{attachments: in.Attachments, fallback: b}
+}
+
+// brief is the BRIEF.md body of the session p started for the owner's
+// work: the facts kept for it, or, with none, what the log holds.
+func (o *ownerProvision) brief(cfg *Config, p RuntimePayload) (map[string]any, error) {
+	b, err := os.ReadFile(ownerWorkPath(cfg, p.Repository, p.Owner))
 	if err != nil {
-		in := s.st.Instructions[p.Owner]
-		if in == nil {
+		if o == nil {
 			return nil, fmt.Errorf("no facts are kept for the owner's message %s: %v", p.Owner, err)
 		}
-		x := s.threadInputFor(in, p.Repository, s.threadCwd(p.Repository))
-		b, _ = json.Marshal(ownerWorkDoc{Title: workTitleOf(in.Text), Message: x.Message, Earlier: x.Earlier, Re: x.Re, At: x.At, Running: x.Running})
+		b = o.fallback
 	}
 	var doc map[string]any
 	if err := json.Unmarshal(b, &doc); err != nil {
@@ -366,14 +383,20 @@ func (s *Supervisor) ownerBrief(p RuntimePayload) (map[string]any, error) {
 // reopen takes the DONE off the STATUS.md of name, which finished and
 // whose tmux session runs, so it takes the owner's message routed to it;
 // it says whether it did.
-func (s *Supervisor) reopen(name string, sess Session, t *Track) bool {
+func (s *Supervisor) reopen(name string, sess Session, t *Track, ev Evidence) bool {
 	ids := s.st.freshInstructions(name, false, s.clock.Now())
-	if len(ids) == 0 {
+	// Only at Claude's prompt, no turn running: never into a shell, nor
+	// mid-turn.
+	if len(ids) == 0 || !ev.Prompt {
+		return false
+	}
+	key := "reopen:" + name
+	if !s.retryDue(t, key, s.clock.Now()) || s.failed(t, key) {
 		return false
 	}
 	status := filepath.Join(sess.Workdir, "STATUS.md")
-	// The ids are in the key only: an act naming instructions delivers them.
-	err := s.act(name, ActReopen, &ActPayload{Key: "reopen:" + name + ":" + strings.Join(ids, ",")}, func() error {
+	// The ids are not named: an act naming instructions delivers them.
+	err := s.act(name, ActReopen, &ActPayload{Key: key}, func() error {
 		b, err := readRegular(status, statusLimit)
 		if err != nil {
 			return err
@@ -399,14 +422,19 @@ func reopened(text string) string {
 }
 
 // reopens says whether in waits on a session that finished and whose tmux
-// session runs: it takes in once its DONE is taken off, in its own step.
+// session runs: it takes in once its DONE is taken off, in its own step,
+// unless taking it off failed as often as a restart may.
 func (s *Supervisor) reopens(in *Instruction) bool {
-	return in.Session != "" && in.Delivered.IsZero() && in.Failed == "" && s.doneAlive(in.Session)
+	return in.Session != "" && in.Delivered.IsZero() && in.Failed == "" && s.doneAlive(in.Session) && !s.failed(s.track(in.Session), "reopen:"+in.Session)
 }
 
 // Next steps (#65 §5): a failed route's entry, x:ID, offers the owner
 // what agentd can do with the message instead.
 const entryNext = "x:"
+
+// nextSpan is how long after a failure its next step is offered: an
+// older one is history, not an open question.
+const nextSpan = 3 * 24 * time.Hour
 
 // Next-step choices.
 const (
@@ -453,8 +481,8 @@ func nextOptions(cfg *Config, st *LogState, repo string) []DecisionOption {
 
 // nextDecision is the next-step decision of failed instruction in, nil
 // when there is nothing to offer.
-func nextDecision(cfg *Config, st *LogState, in *Instruction) *Decision {
-	if !in.Route || in.Failed == "" || len(in.Repositories) == 0 || in.Withheld > 0 {
+func nextDecision(cfg *Config, st *LogState, in *Instruction, now time.Time) *Decision {
+	if !in.Route || in.Failed == "" || len(in.Repositories) == 0 || in.Withheld > 0 || now.Sub(in.FailedAt) > nextSpan {
 		return nil
 	}
 	opts := nextOptions(cfg, st, in.Repositories[0])
@@ -489,6 +517,10 @@ func (s *Supervisor) routeNext(in *Instruction) {
 	valid := false
 	for _, o := range nextOptions(s.cfg, s.st, repo) {
 		valid = valid || o.Key == choice
+	}
+	// An end carried out before a halt cut the start short: start now.
+	if _, running := s.st.Runtime[strings.TrimPrefix(choice, nextEnd)]; !valid && strings.HasPrefix(choice, nextEnd) && !running {
+		choice, valid = nextStart, true
 	}
 	if !valid {
 		say("“" + cutUTF8(choice, 120) + "” is not one of the steps offered now; nothing was done. Choose again on the entry.")
@@ -556,14 +588,14 @@ func (st *LogState) nextAnswer(in *Instruction) *Instruction {
 }
 
 // nextEntries are the next steps of repo's failed instructions.
-func (src *uiSource) nextEntries(cfg *Config, repo string, secret func(...string) bool) []uiNextEntry {
+func (src *uiSource) nextEntries(cfg *Config, repo string, secret func(...string) bool, now time.Time) []uiNextEntry {
 	var out []uiNextEntry
 	for _, id := range sortedKeys(src.st.Instructions) {
 		in := src.st.Instructions[id]
 		if len(in.Repositories) == 0 || in.Repositories[0] != repo {
 			continue
 		}
-		d := nextDecision(cfg, src.st, in)
+		d := nextDecision(cfg, src.st, in, now)
 		if d == nil {
 			continue
 		}

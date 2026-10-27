@@ -297,9 +297,12 @@ func (s *Supervisor) provision(name string, sess Session, t *Track, now time.Tim
 		return
 	}
 	pol := *repo.Sessions
+	// The owner's message a session is started for is read here: a
+	// worker's state holds no instructions (#65).
+	owner := s.ownerProvision(p)
 	s.spawn(name, key, func(w *Supervisor, wt *Track) {
 		w.act(name, ActProvision, &ActPayload{Key: key, Cwd: sess.Cwd, Repository: sess.Repository, Ref: p.Branch}, func() error {
-			return w.provisionFiles(sess, p, pol)
+			return w.provisionFiles(sess, p, pol, owner)
 		})
 	})
 }
@@ -310,7 +313,7 @@ func provisionKey(name string, p RuntimePayload) string {
 	return "provision:" + name + ":" + p.ID
 }
 
-func (s *Supervisor) provisionFiles(sess Session, p RuntimePayload, pol SessionsPolicy) error {
+func (s *Supervisor) provisionFiles(sess Session, p RuntimePayload, pol SessionsPolicy, owner *ownerProvision) error {
 	if err := os.MkdirAll(sess.Workdir, 0o755); err != nil {
 		return err
 	}
@@ -320,7 +323,7 @@ func (s *Supervisor) provisionFiles(sess Session, p RuntimePayload, pol Sessions
 	}
 	head := ""
 	if p.Owner != "" {
-		work, err := s.ownerBrief(p)
+		work, err := owner.brief(s.cfg, p)
 		if err != nil {
 			return err
 		}
@@ -338,8 +341,8 @@ func (s *Supervisor) provisionFiles(sess Session, p RuntimePayload, pol Sessions
 	if err := writeStartFiles(sess.Workdir, p.Kind, head, facts); err != nil {
 		return err
 	}
-	if in := s.st.Instructions[p.Owner]; p.Owner != "" && in != nil {
-		if _, missing := copyAttachments(s.cfg, sess.Workdir, in.Attachments); len(missing) > 0 {
+	if owner != nil && len(owner.attachments) > 0 {
+		if _, missing := copyAttachments(s.cfg, sess.Workdir, owner.attachments); len(missing) > 0 {
 			fmt.Fprintf(os.Stderr, "agentd: %s: attachments %s could not be copied into the workdir\n", sess.Workdir, strings.Join(missing, ", "))
 		}
 	}
