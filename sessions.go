@@ -71,7 +71,9 @@ type RuntimePayload struct {
 	Request string `json:"request,omitempty"`
 	// Head is the head a reviewer or judge agentd started was started
 	// for: the one its round is credited to.
-	Head    string `json:"head,omitempty"`
+	Head string `json:"head,omitempty"`
+	// Owner is the owner's message a work session was started for (#65).
+	Owner   string `json:"owner,omitempty"`
 	Account string `json:"account,omitempty"`
 	// Host is the host the session runs on, through its node, when not
 	// here (#15). A start keeps its host: nothing moves a session.
@@ -316,6 +318,14 @@ func (s *Supervisor) provisionFiles(sess Session, p RuntimePayload, pol Sessions
 	if p.Issue > 0 {
 		facts["issue"] = p.Issue
 	}
+	head := ""
+	if p.Owner != "" {
+		work, err := s.ownerBrief(p)
+		if err != nil {
+			return err
+		}
+		facts["owner_work"], head = work, briefOwner
+	}
 	if len(sess.Deliver) > 0 {
 		facts["mr_file"], facts["draft"] = sess.Deliver[0].MRFile, true
 	}
@@ -325,8 +335,13 @@ func (s *Supervisor) provisionFiles(sess Session, p RuntimePayload, pol Sessions
 			facts["agentd_config"] = s.cfg.Path
 		}
 	}
-	if err := writeStartFiles(sess.Workdir, p.Kind, facts); err != nil {
+	if err := writeStartFiles(sess.Workdir, p.Kind, head, facts); err != nil {
 		return err
+	}
+	if in := s.st.Instructions[p.Owner]; p.Owner != "" && in != nil {
+		if _, missing := copyAttachments(s.cfg, sess.Workdir, in.Attachments); len(missing) > 0 {
+			fmt.Fprintf(os.Stderr, "agentd: %s: attachments %s could not be copied into the workdir\n", sess.Workdir, strings.Join(missing, ", "))
+		}
 	}
 	if _, err := os.Stat(sess.Cwd); err == nil {
 		return nil // the worktree an earlier start left
@@ -334,13 +349,17 @@ func (s *Supervisor) provisionFiles(sess Session, p RuntimePayload, pol Sessions
 	return s.git.AddWorktree(pol.Clone, sess.Cwd, p.Branch, pol.Target, p.Kind != KindWork)
 }
 
-// writeStartFiles writes a started session's BRIEF.md from facts, and its
-// STATUS.md unless there is one. The progress an earlier session of the
-// name left stays; only its DONE goes, since a new start has work to do.
-func writeStartFiles(workdir, kind string, facts map[string]any) error {
-	head := briefInstruction
-	if kind == KindChat {
+// writeStartFiles writes a started session's BRIEF.md from facts, under
+// head or its kind's instruction, and its STATUS.md unless there is one.
+// The progress an earlier session of the name left stays; only its DONE
+// goes, since a new start has work to do.
+func writeStartFiles(workdir, kind, head string, facts map[string]any) error {
+	switch {
+	case head != "":
+	case kind == KindChat:
 		head = briefChat
+	default:
+		head = briefInstruction
 	}
 	if err := writeAtomic(filepath.Join(workdir, "BRIEF.md"), []byte(head+"\n\n"+compact(facts)+"\n")); err != nil {
 		return err

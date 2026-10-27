@@ -152,11 +152,14 @@ type uiSource struct {
 	// echo marks a shadow source over a live source's log: the owner's
 	// records and the shared facts are the live source's to show.
 	echo bool
+	// owned is the owner's message each session started for one was
+	// started for, until its first post, which is threaded under it (#65).
+	owned map[string]string
 }
 
 func newUISource(name string, cfg *Config, log *Log, mode, host string) *uiSource {
 	return &uiSource{Name: name, cfg: cfg, log: log, st: NewLogState(cfg, mode), host: host,
-		messages: map[string][]uiMessage{}, events: map[string][]Event{}, askedAt: map[string]time.Time{}, turnRefs: map[string]promptRef{}}
+		messages: map[string][]uiMessage{}, events: map[string][]Event{}, askedAt: map[string]time.Time{}, turnRefs: map[string]promptRef{}, owned: map[string]string{}}
 }
 
 // catchUp applies the events appended since the last look, and keeps the
@@ -226,6 +229,9 @@ func (src *uiSource) catchUp() error {
 			}
 			src.turnRefs[turnMessageID(e.Session, e.Turn.Transcript, e.Turn.Line)] = promptRef{e.Turn.Transcript, e.Turn.Line, e.Turn.Role}
 		}
+		if r := e.Runtime; e.Kind == KindSession && r != nil && r.Action == SessionStart && r.Owner != "" {
+			src.owned[e.Session] = r.Owner
+		}
 		switch {
 		case e.Feed != nil && (e.Feed.Phase == FeedIntent || e.Feed.Phase == FeedWould) && e.Feed.Text != "":
 			add(e.Feed.Repository, uiMessage{At: e.Time, Kind: "feed", From: "agentd", Text: e.Feed.Text, Entry: entryKey(entryFeed, e.Feed.Key, e.Time, e.Feed.Text)})
@@ -288,6 +294,12 @@ func (src *uiSource) catchUp() error {
 			// A session's own post or turn is the session's to answer.
 			if _, ok := cfg.Sessions[e.Message.From]; ok {
 				m.Writer = e.Message.From
+			}
+			// The first post of a session started for the owner's message
+			// is threaded under that message (#65).
+			if o := src.owned[e.Message.From]; o != "" && !m.turn() {
+				m.Re = &EntryRe{ID: entryInstruction + o, Kind: "instruction", Session: e.Message.From}
+				delete(src.owned, e.Message.From)
 			}
 			if m.turn() {
 				m.Session = e.Message.From // a session's turn links to its page

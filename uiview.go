@@ -648,11 +648,13 @@ func uiAttachments(src string, atts []AttachmentPayload) []uiAttachment {
 
 // uiStep is one step of an owner instruction, as the page shows it.
 type uiStep struct {
-	Text   string
-	At     time.Time
-	Failed bool
-	Wait   bool
-	Exit   *int
+	Text string
+	// Session is a session the step links to: one agentd started for it.
+	Session string
+	At      time.Time
+	Failed  bool
+	Wait    bool
+	Exit    *int
 }
 
 // activityStep is a tool line as the page shows it: screened whole, then
@@ -703,9 +705,16 @@ func instructionSteps(st *LogState, in *Instruction) []uiStep {
 		if a != nil && a.Outcome != "" {
 			steps = append(steps, uiStep{Text: "outcome: " + a.Outcome})
 		}
-		if a != nil && a.HandTo != "" {
+		switch {
+		case a != nil && a.HandTo != "":
 			steps = append(steps, uiStep{Text: "the agent handed it to " + a.HandTo + ": " + cutUTF8(a.Answer, 300)})
-		} else {
+		case a != nil && a.Work != nil && a.Error == "":
+			// Work no running session covered: a session started for it.
+			steps = append(steps, uiStep{Text: "the agent asked for a work session: " + cutUTF8(a.Answer, 300)})
+			if in.Session == "" && in.Failed == "" {
+				return append(steps, uiStep{Text: "agentd is starting a session for it", Wait: true})
+			}
+		default:
 			switch {
 			case in.Failed != "":
 				return append(steps, uiStep{Text: "failed: " + in.Failed, Failed: true})
@@ -722,7 +731,7 @@ func instructionSteps(st *LogState, in *Instruction) []uiStep {
 	}
 	if in.Session != "" {
 		if in.Started {
-			steps = append(steps, uiStep{Text: "agentd started " + in.Session + " for it"})
+			steps = append(steps, uiStep{Text: "agentd started a session for it:", Session: in.Session})
 		} else {
 			steps = append(steps, uiStep{Text: "routed to " + in.Session})
 		}
@@ -1053,7 +1062,7 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 			for _, m := range src.messages[repo] {
 				mv := src.messageView(cfg, m, now, secret)
 				v.Live = v.Live || mv.live
-				if m.Kind == "instruction" && m.Re != nil {
+				if m.Re != nil {
 					responses = append(responses, mv)
 					continue
 				}
@@ -1065,6 +1074,12 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 				oe := oe
 				v.Entries = append(v.Entries, uiEntry{uiMessageView: uiMessageView{uiMessage: uiMessage{At: oe.At, Kind: "decision", From: "ops agent",
 					Entry: entryOps + oe.ID}, Src: src.Name}, Decision: &oe.uiDecisionEntry, Open: oe.open})
+			}
+			// What the owner can do with a message whose route failed (#65).
+			for _, ne := range src.nextEntries(cfg, repo, secret) {
+				ne := ne
+				v.Entries = append(v.Entries, uiEntry{uiMessageView: uiMessageView{uiMessage: uiMessage{At: ne.At, Kind: "decision", From: "agentd",
+					Entry: entryNext + ne.ID}, Src: src.Name}, Decision: &ne.uiDecisionEntry, Open: ne.open})
 			}
 			for _, d := range src.decisionEntries(cfg, rep, repo) {
 				d := d

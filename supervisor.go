@@ -688,7 +688,10 @@ func (s *Supervisor) step(name string, sess Session) {
 	if t.Stopped != "" && state != Done && state != Stopped {
 		state, reason = Stopped, "stopped: "+t.Stopped
 	}
-	state = s.actOn(name, sess, t, ev, state, now)
+	classified := state
+	if state = s.actOn(name, sess, t, ev, state, now); classified == Done && state == Idle {
+		reason = "its DONE was taken off for the owner's message"
+	}
 	if ev.Alive && state != Done && state != CrashLooping {
 		s.watchCommand(name, ev.Command, t, now)
 	}
@@ -797,6 +800,11 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 	}
 	if !typed {
 		typed = s.deliverAnswers(name, sess, t, ev, state)
+	}
+	// A finished session whose tmux session runs, handed the owner's
+	// message, takes it once its DONE is off (#65).
+	if !typed && state == Done && ev.Alive && !t.Limited && s.reopen(name, sess, t) {
+		state = Idle
 	}
 	if !typed {
 		typed = s.deliverInstructions(name, sess, t, ev, state)

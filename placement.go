@@ -207,7 +207,7 @@ func (n *Node) startSession(c NodeCommand, r *NodeResult, refuse func(string) *N
 		err = writeAtomic(mark, []byte(c.Start+"\n"))
 	}
 	if err == nil {
-		err = writeStartFiles(workdir, c.Kind, facts)
+		err = writeStartFiles(workdir, c.Kind, "", facts)
 	}
 	if _, serr := os.Stat(work); err == nil && errors.Is(serr, os.ErrNotExist) {
 		err = n.git.AddWorktree(clone, work, c.Branch, c.Target, c.Kind != KindWork)

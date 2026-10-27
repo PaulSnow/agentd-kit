@@ -207,8 +207,11 @@ func (p *OpsPayload) check() error {
 // or no by which instruction of the owner's, and what Go did.
 type OpsRecord struct {
 	OpsChange
-	ID         string
-	Proposed   time.Time
+	ID       string
+	Proposed time.Time
+	// Seq is its place among the proposals, in the log's order: two
+	// proposed at one time are carried out in the order they came.
+	Seq        int
 	Answer     string // "yes" or "no", the owner's first answer on its entry
 	AnsweredBy string // that instruction's id
 	AnsweredAt time.Time
@@ -234,7 +237,7 @@ func (st *LogState) applyOps(e Event) {
 	r := st.Ops[p.ID]
 	if p.Step == OpsProposed {
 		if r == nil {
-			st.Ops[p.ID] = &OpsRecord{OpsChange: *p.Change, ID: p.ID, Proposed: e.Time}
+			st.Ops[p.ID] = &OpsRecord{OpsChange: *p.Change, ID: p.ID, Proposed: e.Time, Seq: len(st.Ops)}
 		}
 		return
 	}
