@@ -20,6 +20,9 @@ const (
 	ToolAskExpert = "ask_expert"
 )
 
+// historyIDs is the most ids one history or ask_expert call names.
+const historyIDs = 50
+
 // contextTools are offered on every server, after a session's own.
 var contextTools = []string{ToolState, ToolFind, ToolHistory, ToolAskExpert}
 
@@ -139,7 +142,7 @@ func (srv *MCPServer) state(cs *ContextStore, topic string, q *QueryPayload) any
 		q.Hit, q.Records = true, 1
 		return map[string]any{"card": c, "history": len(h.OnTopic(topic))}
 	}
-	out := map[string]any{"topic": topic, "card": nil, "history": len(h.OnTopic(topic))}
+	out := map[string]any{"topic": cutUTF8(topic, 200), "card": nil, "history": len(h.OnTopic(topic))}
 	if cardKindOf(topic) == "" {
 		out["say"] = "this topic has no card: state keeps cards for #N, !N, session:NAME and the repository; read history on it, or find the topic"
 	} else {
@@ -239,7 +242,7 @@ func findTopics(cs *ContextStore, repo, q string, limit int, qp *QueryPayload) a
 		qp.Hit = qp.Hit || x.Card
 	}
 	qp.Records = len(out)
-	return map[string]any{"q": q, "topics": out}
+	return map[string]any{"q": cutUTF8(q, 200), "topics": out}
 }
 
 // history is history(ids) or history(topic, since?, kinds?, budget), with
@@ -298,10 +301,10 @@ func (srv *MCPServer) history(cs *ContextStore, args json.RawMessage, q *QueryPa
 		q.Records = len(out["records"].([]histEntry))
 		return out, nil
 	}
-	q.IDs = a.IDs
-	if len(q.IDs) > 50 {
-		q.IDs = q.IDs[:50]
+	if len(a.IDs) > historyIDs {
+		return nil, []problem{{format: "at most %d ids a call", args: []any{historyIDs}}}
 	}
+	q.IDs = a.IDs
 	out := cs.History(repo).ByIDs(a.IDs, a.Budget)
 	if rs, ok := out["records"].([]HistWhole); ok {
 		q.Records = len(rs)

@@ -108,6 +108,30 @@ func (cs *ContextStore) ExpertSpent(repo string, now time.Time) int64 {
 	return n
 }
 
+// expertDeny are the permission rules that keep the expert's tools off
+// every credential agentd knows of: those under the home directory a gate
+// is warned of, and each account's token file and config directory.
+func expertDeny(cfg *Config) []string {
+	var paths []string
+	for _, p := range credentialPaths {
+		paths = append(paths, "~/"+p)
+	}
+	for _, name := range sortedKeys(cfg.Accounts) {
+		for _, p := range []string{cfg.Accounts[name].TokenFile, cfg.Accounts[name].ConfigDir} {
+			if strings.HasPrefix(p, "/") {
+				paths = append(paths, "/"+p) // an absolute path is //path in a rule
+			}
+		}
+	}
+	var out []string
+	for _, t := range expertTools {
+		for _, p := range paths {
+			out = append(out, t+"("+p+")", t+"("+p+"/**)")
+		}
+	}
+	return out
+}
+
 // expertDir is where the expert may read: the session's worktree, or the
 // repository's clone for an agent that has none.
 func (srv *MCPServer) expertDir() string {
@@ -133,6 +157,9 @@ func (srv *MCPServer) askExpert(cs *ContextStore, args json.RawMessage, q *Query
 	}
 	if strings.TrimSpace(a.Question) == "" {
 		return nil, []problem{{format: "question is empty"}}
+	}
+	if len(a.IDs) > historyIDs {
+		return nil, []problem{{format: "at most %d record ids", args: []any{historyIDs}}}
 	}
 	if len(a.Topics) > expertCards {
 		return nil, []problem{{format: "at most %d topics", args: []any{expertCards}}}
@@ -166,7 +193,7 @@ func (srv *MCPServer) askExpert(cs *ContextStore, args json.RawMessage, q *Query
 		job.Timeout = DefaultExpertTimeout
 	}
 	if dir := srv.expertDir(); dir != "" {
-		job.Tools, job.Dir = expertTools, dir
+		job.Tools, job.Deny, job.Dir = expertTools, expertDeny(srv.cfg), dir
 		in["workdir"] = dir
 	}
 	input, _ := json.Marshal(in)
@@ -180,6 +207,9 @@ func (srv *MCPServer) askExpert(cs *ContextStore, args json.RawMessage, q *Query
 	}
 	if err != nil {
 		return nil, []problem{{format: "the expert call failed: %s", args: []any{oneLine(srv.withheld(err.Error()), 500)}}}
+	}
+	if i := withheldBy(cs.patterns(), ans.Answer); i > 0 {
+		ans.Answer = fmt.Sprintf("(withheld: the expert's answer matches confidential pattern %d)", i)
 	}
 	return map[string]any{"answer": ans.Answer, "confidence": ans.Confidence, "used": ans.Used, "model": q.Model,
 		"tokens": usage.tokens()}, nil

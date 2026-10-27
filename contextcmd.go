@@ -23,8 +23,8 @@ type ContextStats struct {
 	Repository string `json:"repository"`
 	Since      string `json:"since"`
 	// Questions start at a state or find call, or at a history call no
-	// state call led to; FromState are those no history call followed
-	// within contextFollowUp.
+	// state call led to; FromState are those state had a card for and no
+	// history call followed within contextFollowUp.
 	Questions int            `json:"questions"`
 	FromState int            `json:"from_state"`
 	StateRate float64        `json:"state_rate"`
@@ -47,11 +47,12 @@ func contextStats(events []Event, repo string, since time.Time) ContextStats {
 	s := ContextStats{Repository: repo, Since: since.UTC().Format(time.RFC3339), Calls: map[string]int{}, HistoryBy: map[string]int{}}
 	type open struct {
 		at      time.Time
+		hit     bool // state had a card for it
 		history bool
 	}
 	asking := map[string]*open{} // each agent's question in progress
 	closeQ := func(q *open) {
-		if q != nil && !q.history {
+		if q != nil && q.hit && !q.history {
 			s.FromState++
 		}
 	}
@@ -84,7 +85,7 @@ func contextStats(events []Event, repo string, since time.Time) ContextStats {
 		switch q.Tool {
 		case ToolState, ToolFind:
 			closeQ(asking[e.Session])
-			asking[e.Session] = &open{at: e.Time}
+			asking[e.Session] = &open{at: e.Time, hit: q.Hit}
 			s.Questions++
 		case ToolHistory:
 			s.HistoryBy[q.Why]++

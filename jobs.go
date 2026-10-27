@@ -115,9 +115,11 @@ type Job struct {
 	Model    string
 	Timeout  time.Duration
 	MaxInput int
-	// Tools are the read-only tools the call may use in Dir; none by
-	// default (#60's expert reads the worktree).
+	// Tools are the read-only tools the call may use in Dir, none by
+	// default, and Deny the permission rules it may never use (#60's
+	// expert reads the worktree, and never a credential).
 	Tools []string
+	Deny  []string
 	Dir   string
 }
 
@@ -176,8 +178,8 @@ func (j Job) Run(ctx context.Context, system string, schema, input []byte) (json
 	}
 	args := []string{"-p", "--model", j.Model, "--output-format", "json", "--json-schema", string(schema),
 		"--system-prompt", system, "--setting-sources", "", "--strict-mcp-config", "--mcp-config", emptyMCP, "--tools", strings.Join(j.Tools, ",")}
-	if len(j.Tools) > 0 {
-		args = append(args, "--allowedTools", strings.Join(j.Tools, ","))
+	if len(j.Deny) > 0 {
+		args = append(args, "--disallowedTools", strings.Join(j.Deny, ","))
 	}
 	script := `exec "$@"`
 	if j.Account.TokenFile != "" {

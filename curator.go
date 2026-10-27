@@ -96,7 +96,7 @@ type curatorInput struct {
 	Kind    string      `json:"kind"`
 	Card    *Card       `json:"card"`
 	New     []HistWhole `json:"new"`
-	Dropped int         `json:"dropped,omitempty"` // older new records left out to fit
+	Left    int         `json:"left,omitempty"`    // newer records left for the next curation, to fit
 	Asked   []string    `json:"asked,omitempty"`   // what agents found missing from the card
 	Refused string      `json:"refused,omitempty"` // why Go refused the last diff
 	Cards   []cardBrief `json:"cards,omitempty"`
@@ -109,31 +109,44 @@ type curatorCall struct {
 	input       []byte
 	through     time.Time
 	last        time.Time // the last curation's through, kept when this one fails
+	refusals    int       // the refusals in a row before this one
 	records     []string
 	src         cardSources
 }
 
-// curatorDue is topic's curator call when it is due now, or nil.
+// curatorRefusals is how many refusals in a row a topic's records are
+// sent again for; after that its curator gives them up, so a diff the
+// model cannot get right is not paid for forever.
+const curatorRefusals = 3
+
+// curatorDue is topic's curator call when it is due now, or nil. New
+// records go oldest first, as many as fit; those left over are due again
+// after the gap.
 func (cs *ContextStore) curatorDue(cfg CuratorConfig, repo, topic string, now time.Time) *curatorCall {
 	last, curated := cs.curated[repo][topic]
 	if curated && now.Sub(last.At) < cfg.gap() {
 		return nil
 	}
 	in := curatorInput{Topic: topic, Kind: cardKindOf(topic), Card: cs.Card(repo, topic), Refused: last.Refused}
-	var fresh []*HistRecord
+	call := &curatorCall{repo: repo, topic: topic, card: in.Card, last: last.Through, refusals: last.Refusals, src: cardSources{fresh: map[string]bool{}}}
 	var oldest, newest time.Time
-	for _, f := range cs.flags[repo][topic] {
-		if f.At.After(last.At) {
-			in.Asked = append(in.Asked, f.Question)
-			if oldest.IsZero() || f.At.Before(oldest) {
-				oldest = f.At
-			}
-			if f.At.After(newest) {
-				newest = f.At
-			}
+	note := func(at time.Time) {
+		if oldest.IsZero() || at.Before(oldest) {
+			oldest = at
+		}
+		if at.After(newest) {
+			newest = at
 		}
 	}
-	through := last.Through
+	// An agent's word that the card lacked something stands until a
+	// curation that was not refused has been sent it.
+	for _, f := range cs.flags[repo][topic] {
+		if f.At.After(last.Through) {
+			in.Asked = append(in.Asked, f.Question)
+			note(f.At)
+		}
+	}
+	var fresh []*HistRecord
 	if topic == TopicRepo {
 		for _, k := range cs.newCards {
 			if t := strings.TrimPrefix(k, repo+"|"); t != k {
@@ -142,12 +155,7 @@ func (cs *ContextStore) curatorDue(cfg CuratorConfig, repo, topic string, now ti
 					continue
 				}
 				in.Cards = append(in.Cards, cardBrief{ID: "card:" + t, Title: c.Title, Status: c.Status, Summary: c.Summary, Open: len(c.Open), Rev: c.Rev})
-				if oldest.IsZero() || c.Updated.Before(oldest) {
-					oldest = c.Updated
-				}
-				if c.Updated.After(newest) {
-					newest = c.Updated
-				}
+				note(c.Updated)
 			}
 		}
 		if len(in.Cards) > curatorCards {
@@ -160,17 +168,9 @@ func (cs *ContextStore) curatorDue(cfg CuratorConfig, repo, topic string, now ti
 				continue
 			}
 			fresh = append(fresh, r)
-			if r.At.After(through) {
-				through = r.At
-			}
 			if contains(curatedKinds, r.Kind) {
 				trigger = true
-				if oldest.IsZero() || r.At.Before(oldest) {
-					oldest = r.At
-				}
-				if r.At.After(newest) {
-					newest = r.At
-				}
+				note(r.At)
 			}
 		}
 		if !trigger && len(in.Asked) == 0 {
@@ -180,18 +180,20 @@ func (cs *ContextStore) curatorDue(cfg CuratorConfig, repo, topic string, now ti
 	if oldest.IsZero() || now.Sub(newest) < cfg.quiet() && now.Sub(oldest) < cfg.maxWait() {
 		return nil
 	}
-	call := &curatorCall{repo: repo, topic: topic, card: in.Card, through: through, last: last.Through, src: cardSources{fresh: map[string]bool{}}}
 	known := map[string]bool{}
 	if in.Card != nil {
-		for _, ids := range cardSrcs(in.Card) {
-			known[ids] = true
+		for _, id := range cardSrcs(in.Card) {
+			known[id] = true
 		}
 	}
 	for _, b := range in.Cards {
 		known[b.ID], call.src.fresh[b.ID] = true, true
+		call.records = append(call.records, b.ID)
 	}
-	// Newest first until the input is full; what is left out is counted.
-	sort.Slice(fresh, func(i, j int) bool { return newerFirst(fresh[i], fresh[j]) })
+	// This curation covers what it is sent: the agents' words and the
+	// cards up to the newest, and the records up to the last that fit.
+	call.through = newest
+	sort.Slice(fresh, func(i, j int) bool { return newerFirst(fresh[j], fresh[i]) })
 	limit := cfg.maxInput()
 	for i, r := range fresh {
 		w := HistWhole{HistRecord: *r}
@@ -203,19 +205,20 @@ func (cs *ContextStore) curatorDue(cfg CuratorConfig, repo, topic string, now ti
 			w.Text, w.Cut = cutUTF8(w.Text, keep), true
 		}
 		in.New = append(in.New, w)
-		if b, _ := json.Marshal(in); len(b) > limit {
+		if b, _ := json.Marshal(in); len(b) > limit && i > 0 {
 			in.New = in.New[:len(in.New)-1]
-			in.Dropped = len(fresh) - i
+			in.Left = len(fresh) - i
+			call.through = fresh[i-1].At
 			break
 		}
 		known[r.ID], call.src.fresh[r.ID] = true, true
 		call.records = append(call.records, r.ID)
+		if r.At.After(call.through) {
+			call.through = r.At
+		}
 	}
 	call.src.known = func(id string) bool { return known[id] }
 	call.input, _ = json.Marshal(in)
-	if call.through.IsZero() {
-		call.through = newest
-	}
 	return call
 }
 
@@ -245,8 +248,8 @@ func cardSrcs(c *Card) []string {
 // curationsToday is how many curations repo had in the day before now.
 func (cs *ContextStore) curationsToday(repo string, now time.Time) int {
 	n := 0
-	for _, c := range cs.curated[repo] {
-		if now.Sub(c.At) < 24*time.Hour {
+	for _, at := range cs.runs[repo] {
+		if now.Sub(at) < 24*time.Hour {
 			n++
 		}
 	}
@@ -334,16 +337,19 @@ func curate(c *curatorCall, job Job, run func(Job, []byte) (json.RawMessage, Job
 	}
 	d, err := readDiff(raw)
 	switch {
-	case err == nil && c.card != nil && reflect.DeepEqual(d, CardDiff{}):
-		p.Unchanged = true
+	case err == nil && reflect.DeepEqual(d, CardDiff{}):
+		p.Unchanged = true // a first card with nothing to say is no card
 	case err == nil:
 		p.Card, err = applyDiff(c.card, c.topic, d, c.src, now)
 	}
 	if err != nil {
 		p.Refused = cutUTF8(err.Error(), 2000)
 	}
-	if p.Refused != "" {
+	switch {
+	case p.Refused != "" && c.refusals+1 < curatorRefusals:
 		p.Through = c.last // what it was sent goes to the next curator again
+	case p.Refused != "":
+		p.Refused = cutUTF8(p.Refused, 1900) + fmt.Sprintf("; given up after %d refusals: these records are not sent again", curatorRefusals)
 	}
 	return p
 }
@@ -360,7 +366,6 @@ func (s *Supervisor) curateCards(now time.Time) {
 		s.cards = NewContextStore(s.cfg)
 	}
 	cs := s.cards
-	cs.cfg = s.cfg
 	if err := cs.Follow(s.log); err != nil {
 		return
 	}
@@ -370,34 +375,31 @@ func (s *Supervisor) curateCards(now time.Time) {
 		return j.Run(s.runCtx, curatorSystem, curatorSchema(), input)
 	}
 	for _, repo := range sortedKeys(s.cfg.Repositories) {
-		repo := repo
-		h := cs.History(repo)
+		started := cs.curationsToday(repo, now)
 		for _, topic := range cs.curatorTopics(repo) {
 			if k := cardKindOf(topic); (k == CardIssue || k == CardRequest) && s.api != nil && cs.threadChanged(repo, topic, now, cfg.lookback()) && cs.ThreadDue(repo, topic, now) {
-				seen := map[string]bool{}
-				for _, r := range h.OnTopic(topic) {
-					seen[r.ID] = true
-				}
-				api, store, ref := s.api, cs, topic
+				tr, api := cs.threadRead(repo, topic), s.api
 				s.spawnShared("thread:"+repo+topic, func(w *Supervisor) {
-					w.emit("", Event{Kind: KindThread, Mode: ModeShared, Thread: store.readThread(api, repo, ref, seen)})
+					w.emit("", Event{Kind: KindThread, Mode: ModeShared, Thread: tr.read(api)})
 				})
 				continue // curated once its thread is read
 			}
-			if cs.curationsToday(repo, now) >= cfg.perDay() {
+			if started >= cfg.perDay() {
 				break
 			}
 			call := cs.curatorDue(cfg, repo, topic, now)
 			if call == nil {
 				continue
 			}
-			s.spawnShared("card:"+repo+"|"+topic, func(w *Supervisor) {
+			if s.spawnShared("card:"+repo+"|"+topic, func(w *Supervisor) {
 				p := curate(call, job, run, w.clock.Now())
 				if w.runCtx.Err() != nil {
 					return // agentd is stopping: the topic is curated next run
 				}
 				w.emit("", Event{Kind: KindCard, Card: p})
-			})
+			}) {
+				started++
+			}
 		}
 	}
 }

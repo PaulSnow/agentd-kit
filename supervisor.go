@@ -198,6 +198,23 @@ func (s *Supervisor) screen(e *Event) {
 	if e.Status != nil {
 		s.screenStatus(e.Status)
 	}
+	if t := e.Thread; t != nil {
+		// Read screened already; screened again with every pattern the
+		// repositories' own files add.
+		if i := s.confidentialMatch(t.Title, t.Body, t.Author, strings.Join(t.Labels, "\n")); i > 0 {
+			t.Title, t.Body, t.Author, t.Labels, t.Withheld = "", "", "", nil, i
+		}
+		for k := range t.Comments {
+			if c := &t.Comments[k]; s.confidentialMatch(c.Body, c.Author) > 0 {
+				c.Body, c.Author, c.Withheld = "", "", s.confidentialMatch(c.Body, c.Author)
+			}
+		}
+	}
+	if c := e.Card; c != nil && c.Card != nil {
+		if i := s.confidentialMatch(compact(c.Card)); i > 0 {
+			c.Card, c.Refused = nil, fmt.Sprintf("the card's words match confidential pattern %d; it is not kept", i)
+		}
+	}
 }
 
 // withheld is text, or what the log says instead when it matches a

@@ -451,8 +451,8 @@ func TestHistoryReadsThread(t *testing.T) {
 	h := caseHarness(t)
 	h.cfg.ConfidentialPatterns = []string{`secret-[0-9]+`}
 	api := &fakeForgeAPI{gitlab: map[string]string{
-		"=/projects/example-org%2Fwidgets/issues/7":                             `{"title":"Spin","description":"Make the widgets spin.","state":"opened","labels":["bug"],"author":{"username":"ann"}}`,
-		"=/projects/example-org%2Fwidgets/issues/7/notes?sort=asc&per_page=100": `[{"id":11,"body":"why not !12?","created_at":"2026-10-27T07:00:00Z","author":{"username":"bob"}},{"id":12,"body":"secret-42","created_at":"2026-10-27T07:01:00Z","author":{"username":"bob"}},{"id":13,"body":"assigned","system":true,"created_at":"2026-10-27T07:02:00Z"}]`,
+		"=/projects/example-org%2Fwidgets/issues/7":                                                  `{"title":"Spin","description":"Make the widgets spin.","state":"opened","labels":["bug"],"author":{"username":"ann"}}`,
+		"=/projects/example-org%2Fwidgets/issues/7/notes?sort=desc&order_by=created_at&per_page=100": `[{"id":11,"body":"why not !12?","created_at":"2026-10-27T07:00:00Z","author":{"username":"bob"}},{"id":12,"body":"secret-42","created_at":"2026-10-27T07:01:00Z","author":{"username":"bob"}},{"id":13,"body":"assigned","system":true,"created_at":"2026-10-27T07:02:00Z"}]`,
 	}}
 	srv := h.queryServer()
 	srv.api = api
@@ -496,7 +496,7 @@ func TestAskExpert(t *testing.T) {
 		t.Fatalf("answer: %v", got)
 	}
 	args := readFake(t, dir, "args.1")
-	if !strings.Contains(args, "opus") || !strings.Contains(args, "Read,Grep,Glob") || !strings.Contains(readFake(t, dir, "in.1"), "never push to main") {
+	if !strings.Contains(args, "opus") || !strings.Contains(args, "Read,Grep,Glob") || !strings.Contains(args, "Read(~/.ssh/**)") || !strings.Contains(readFake(t, dir, "in.1"), "never push to main") {
 		t.Fatalf("call: %s", args)
 	}
 	q := queries(h)[0]
@@ -522,7 +522,7 @@ func TestCardBoundsStatusAnswer(t *testing.T) {
 func TestContextStats(t *testing.T) {
 	at := time.Date(2026, 10, 27, 9, 0, 0, 0, time.UTC)
 	q := func(min int, who, tool, why string) Event {
-		return Event{Time: at.Add(time.Duration(min) * time.Minute), Session: who, Kind: KindQuery, Query: &QueryPayload{Repository: "widgets", Tool: tool, Why: why}}
+		return Event{Time: at.Add(time.Duration(min) * time.Minute), Session: who, Kind: KindQuery, Query: &QueryPayload{Repository: "widgets", Tool: tool, Why: why, Hit: who != "missed" && tool != ToolHistory}}
 	}
 	card := func(min int, tokens int64, refused string) Event {
 		p := &CardPayload{Repository: "widgets", Topic: "#7", Refused: refused, Usage: &JobUsage{InputTokens: tokens}}
@@ -534,15 +534,140 @@ func TestContextStats(t *testing.T) {
 	events := []Event{
 		q(0, "a", ToolState, ""), q(1, "a", ToolFind, ""), q(2, "a", ToolHistory, WhyVerifyClaim), // 2 questions, 1 from state
 		q(3, "b", ToolState, ""), q(20, "b", ToolHistory, WhyMissingFromState), // late: its own question
-		q(30, "a", ToolState, ""), q(31, "other", ToolState, ""),
+		q(30, "a", ToolState, ""), q(31, "other", ToolState, ""), q(32, "missed", ToolState, ""), // no card: not from state
 		card(5, 3000, ""), card(6, 1000, "no src"), card(7, 5000, ""),
 		{Time: at, Kind: KindQuery, Query: &QueryPayload{Repository: "gadgets", Tool: ToolState}},
 	}
 	s := contextStats(events, "widgets", at)
-	if s.Questions != 6 || s.FromState != 4 || s.HistoryBy[WhyMissingFromState] != 1 || s.Calls[ToolState] != 4 {
+	if s.Questions != 7 || s.FromState != 4 || s.HistoryBy[WhyMissingFromState] != 1 || s.Calls[ToolState] != 5 {
 		t.Fatalf("stats: %+v", s)
 	}
 	if s.Curations != 3 || s.Refused != 1 || s.CuratorMedian != 3000 || s.CuratorMax != 5000 || s.Cards != 1 {
 		t.Fatalf("curators: %+v", s)
+	}
+}
+
+// Review regressions (#60 review 1).
+
+// history(ids) of ids history lacks, on a small budget, answers within it
+// and never panics; more than historyIDs ids are refused.
+func TestHistoryIDsOverBudget(t *testing.T) {
+	hist := newHistory("widgets")
+	var ids []string
+	for i := 0; i < 100; i++ {
+		ids = append(ids, fmt.Sprintf("Xunknown%03d", i))
+	}
+	out := hist.ByIDs(ids, 200)
+	if n := len(compact(out)); n > budgetBytes(200) || out["missing_count"] != 100 {
+		t.Fatalf("%d bytes: %v", n, out)
+	}
+	h := caseHarness(t)
+	rs := session(t, h.queryServer(), toolCall(1, ToolHistory, map[string]any{"ids": ids, "why": WhySpec}))
+	if !rs[0].Result.IsError || !strings.Contains(rs[0].Result.Content[0].Text, "at most 50 ids") {
+		t.Fatalf("100 ids: %+v", rs[0])
+	}
+}
+
+// A colour or a number after a colon is no reference; a word's part is
+// none either.
+func TestRefsIn(t *testing.T) {
+	got := refsIn("see #56 and (!12), color: #333; issue-#9, #7-ish, [#8]")
+	if fmt.Sprint(got) != "[#56 !12 #8]" {
+		t.Fatalf("refs %v", got)
+	}
+}
+
+// The repository's curator is not called again for cards it was sent,
+// whatever it made of them; and a topic whose diff is refused three
+// times in a row is given up, not paid for forever.
+func TestCuratorStopsRetrying(t *testing.T) {
+	h, dir := curatorHarness(t)
+	h.appendEvent(ruling("R1", "never push to main"))
+	r1 := onTopic(h, "#7", "never push")
+	curatorAnswers(t, dir, "_7", fmt.Sprintf(`{"status":"open","summary":"s","src":[%q]}`, r1))
+	h.ticks(6, time.Minute)
+	h.ticks(30, 10*time.Minute) // five hours
+	revised := 0
+	for _, p := range cardEvents(h) {
+		if p.Topic != TopicRepo && p.Card != nil {
+			revised++
+		}
+	}
+	if n := countOf(curatorCalls(t, dir), "repo"); n != revised {
+		t.Fatalf("the repository's curator was called %d times for %d revised cards: %v", n, revised, curatorCalls(t, dir))
+	}
+	curatorAnswers(t, dir, "_7", fmt.Sprintf(`{"retire":[{"id":"R9","why":"x","src":[%q]}]}`, r1))
+	before := countOf(curatorCalls(t, dir), "_7")
+	h.appendEvent(Event{Kind: KindCI, Mode: ModeLive, Session: "s1", CI: &CIPayload{Repository: "widgets", Ref: "#7", State: "failed"}})
+	h.ticks(10, 10*time.Minute)
+	if n := countOf(curatorCalls(t, dir), "_7") - before; n != curatorRefusals {
+		t.Fatalf("%d calls on #7 after the CI result, want %d", n, curatorRefusals)
+	}
+	var on7 []*CardPayload
+	for _, p := range cardEvents(h) {
+		if p.Topic == "#7" {
+			on7 = append(on7, p)
+		}
+	}
+	last := on7[len(on7)-1]
+	if !strings.Contains(last.Refused, "given up") || on7[len(on7)-2].Refused == "" || on7[len(on7)-3].Refused == "" {
+		t.Fatalf("last: %+v", last)
+	}
+}
+
+// per_day bounds the curations a repository starts in a day, counting
+// each call, and records that do not fit one input go to the next, none
+// lost.
+func TestCuratorPerDayAndLeftovers(t *testing.T) {
+	h, dir := curatorHarness(t)
+	h.cfg.Jobs.Curator.PerDay = 2
+	h.cfg.Jobs.Curator.MaxInput = 3000
+	for i := 0; i < 6; i++ {
+		h.appendEvent(Event{Kind: KindCI, Mode: ModeLive, Session: "s1", CI: &CIPayload{Repository: "widgets", Ref: "#7", State: "failed", Excerpt: fmt.Sprintf("run %d ", i) + strings.Repeat("x", 900)}})
+		h.clock.advance(time.Second)
+	}
+	h.ticks(30, 10*time.Minute)
+	calls := curatorCalls(t, dir)
+	if len(calls) != 2 {
+		t.Fatalf("calls %v, want 2 in the day", calls)
+	}
+	h.cfg.Jobs.Curator.PerDay = 100
+	h.ticks(12, 10*time.Minute)
+	sent := map[string]bool{}
+	for _, p := range cardEvents(h) {
+		if p.Topic == "#7" {
+			for _, id := range p.Records {
+				sent[id] = true
+			}
+		}
+	}
+	for _, r := range storeOf(h).History("widgets").OnTopic("#7") {
+		if !sent[r.ID] {
+			t.Fatalf("%s never reached a curator", r.ID)
+		}
+	}
+}
+
+// The run reads an issue's thread when an item arrives on it, in a
+// worker, with the title screened, and its comments reach the curator
+// even when written before the last curation.
+func TestCuratorReadsThreads(t *testing.T) {
+	h, dir := curatorHarness(t)
+	h.cfg.ConfidentialPatterns = []string{`secret-[0-9]+`}
+	api := &fakeForgeAPI{gitlab: map[string]string{
+		"=/projects/example-org%2Fwidgets/issues/7":                                                  `{"title":"secret-1 spin","description":"Make the widgets spin.","state":"opened","author":{"username":"ann"}}`,
+		"=/projects/example-org%2Fwidgets/issues/7/notes?sort=desc&order_by=created_at&per_page=100": `[{"id":21,"body":"use the slow path","created_at":"2026-10-01T00:00:00Z","author":{"username":"bob"}}]`,
+	}}
+	h.sup.api = api
+	h.appendEvent(Event{Kind: KindItem, Mode: ModeShared, Item: &ItemPayload{ID: "gitlab/example-org/widgets#7", Kind: ItemIssue, Repository: "gitlab/example-org/widgets", Title: "spin"}})
+	h.ticks(6, time.Minute)
+	if len(api.callList()) != 2 {
+		t.Fatalf("forge calls %v", api.callList())
+	}
+	if strings.Contains(h.buf.String(), "secret-1") {
+		t.Fatal("a confidential title reached the log")
+	}
+	if in := readFake(t, dir, "in._7"); !strings.Contains(in, `"id":"C21"`) || !strings.Contains(in, "bob at 2026-10-01") {
+		t.Fatalf("curator input: %s", in)
 	}
 }

@@ -77,16 +77,21 @@ const (
 )
 
 var (
-	refPattern  = regexp.MustCompile(`(?:^|[^\w&/#!])([#!][0-9]{1,7})\b`)
+	refPattern  = regexp.MustCompile(`(?:^|[\s(\[{,;"'\x60])([#!][0-9]{1,6})\b`)
 	pathPattern = regexp.MustCompile(`(?:^|[\s"'(\x60])((?:[\w.-]+/)*[\w-]+\.(?:go|md|json|jsonl|ya?ml|sh|py|ts|tsx|js|html|css|toml|txt|mod|sql))\b`)
 )
 
 // refsIn are the issue and request references text names, in order.
 func refsIn(text string) []string {
 	var out []string
-	for _, m := range refPattern.FindAllStringSubmatch(text, -1) {
-		if !contains(out, m[1]) {
-			out = append(out, m[1])
+	for _, m := range refPattern.FindAllStringSubmatchIndex(text, -1) {
+		ref := text[m[2]:m[3]]
+		// Not a value after a colon, as a colour is, nor part of a word.
+		if before := strings.TrimRight(text[:m[2]], " \t"); strings.HasSuffix(before, ":") || m[3] < len(text) && text[m[3]] == '-' {
+			continue
+		}
+		if !contains(out, ref) {
+			out = append(out, ref)
 		}
 	}
 	return out
@@ -337,7 +342,7 @@ func (s *histSource) records(e Event) []*HistRecord {
 		}
 	case e.Checkpoint != nil && !e.Checkpoint.Baseline:
 		c := e.Checkpoint
-		return one(HistCommit, c.SHA, c.Subject, c.SHA, "commit:"+c.SHA, nil)
+		return one(HistCommit, c.SHA, c.Subject, c.SHA, "commit:"+c.SHA, own)
 	case e.CI != nil:
 		c := e.CI
 		repo = c.Repository
@@ -494,7 +499,7 @@ func (h *History) ByTopic(q HistoryQuery) map[string]any {
 			if i > 0 {
 				out["more"] = historyCursor(recs[i-1])
 			} else {
-				out["more"] = q.More // not even one fits: the budget is too small
+				out["over_budget"] = true // not even one fits: the budget is too small
 			}
 			break
 		}
@@ -528,22 +533,29 @@ func (h *History) ByIDs(ids []string, budget int) map[string]any {
 	if len(missing) > 0 {
 		out["missing"] = missing
 	}
-	// Cut the longest text in half until the answer fits.
-	for len(compact(out)) > limit {
+	// Cut the longest text to what the answer is over, then drop records
+	// from the end, then the missing ids, until the answer fits.
+	for over := len(compact(out)) - limit; over > 0; over = len(compact(out)) - limit {
 		longest := -1
 		for i := range recs {
 			if longest < 0 || len(recs[i].Text) > len(recs[longest].Text) {
 				longest = i
 			}
 		}
-		if longest < 0 || len(recs[longest].Text) < 64 {
-			recs = recs[:len(recs)-1] // texts are short: the records themselves do not fit
-			out["records"] = recs
+		switch {
+		case longest >= 0 && len(recs[longest].Text) >= 64:
+			keep := max(len(recs[longest].Text)-over-16, len(recs[longest].Text)/2)
+			recs[longest].Text, recs[longest].Cut = cutUTF8(recs[longest].Text, keep), true
+		case len(recs) > 0:
+			recs = recs[:len(recs)-1]
 			out["over_budget"] = true
-			continue
+		default:
+			delete(out, "missing")
+			out["missing_count"] = len(missing)
+			out["over_budget"] = true
+			out["records"] = recs
+			return out
 		}
-		recs[longest].Text = cutUTF8(recs[longest].Text, len(recs[longest].Text)/2)
-		recs[longest].Cut = true
 		out["records"] = recs
 	}
 	return out
