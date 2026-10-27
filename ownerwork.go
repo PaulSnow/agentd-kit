@@ -33,6 +33,8 @@ type ThreadWork struct {
 	// Withheld: the agent's brief matched a confidential pattern and was
 	// left out; the owner's own message, screened, still goes.
 	Withheld bool `json:"withheld,omitempty"`
+	// DoneWhen is the end state Go checks to close the work's item (#66).
+	DoneWhen EndCheck `json:"done_when"`
 }
 
 // Bounds of owner work.

@@ -10,7 +10,7 @@
 //	agentd inventory [--config PATH]
 //	agentd report [--config PATH] [--log PATH] [--shadow] [--host NAME] --out PATH
 //	agentd page [--config PATH] [--log PATH] [--shadow]
-//	agentd items [--config PATH] [--log PATH] [--new] [--seen ID,...]
+//	agentd items [--config PATH] [--log PATH] [--new] [--seen ID,...] [--work [--all] [--json]]
 //	agentd cases [--config PATH] [--log PATH] [--shadow] [--json]
 //	agentd cases [--config PATH] [--log PATH] rule CASE restriction|waiver|close|reopen [TEXT]
 package main
@@ -127,7 +127,7 @@ func usage() {
   agentd report [--config PATH] [--log PATH] [--shadow] [--host NAME] --out PATH
   agentd ui [--config PATH] [--log PATH]
   agentd accounts [--config PATH] [--report [--json]]
-  agentd items [--config PATH] [--log PATH] [--new] [--seen ID,...]
+  agentd items [--config PATH] [--log PATH] [--new] [--seen ID,...] | --work [--all] [--json]
   agentd triage [--config PATH] --items FILE
   agentd status-check [--config PATH] --transcript FILE [--window 5m] [--input] [--call]
   agentd cases [--config PATH] [--log PATH] [--shadow] [--json]
@@ -156,9 +156,10 @@ reply in a console, as its tool hands it on: "SESSION ID ANSWER" answers a
 decision, "seen ID..." marks items seen. inventory lists every repository in the tracking system's
 manifest with its open work and clones, from the tracking snapshot. report
 writes report.json for the tracking site from the event log, atomically.
-items lists what is new since the owner last looked: issues, requests and
-discussions from the tracking snapshots, and mail findings; --seen marks
-items seen. ui serves the owner's UI on ui.address, to the owner only:
+items lists the owner's open work items first (#66), then what is new
+since the owner last looked: issues, requests and discussions from the
+tracking snapshots, and mail findings; --seen marks items seen; --work
+lists the work items alone, the closed ones too with --all. ui serves the owner's UI on ui.address, to the owner only:
 this config's log and ui.logs' merged by repository, with what needs the
 owner, each repository's console and each session; its writes are answers,
 deadlines, items marked seen and console replies. accounts reads every
@@ -510,7 +511,9 @@ func consolePostCmd(verb string, args []string, stdin io.Reader, stdout io.Write
 		}
 		text = string(b)
 	}
-	return PostMessage(cfg, log, ExecTmux{Timeout: cfg.Timeouts.Tmux.Duration}, time.Now(), MessagePost{Console: rest[0], Kind: *kind, From: *from, Text: text, To: *to})
+	// Only a session agentd runs here, configured or started, is typed
+	// into (#66).
+	return PostMessage(projected(cfg, events), log, ExecTmux{Timeout: cfg.Timeouts.Tmux.Duration}, time.Now(), MessagePost{Console: rest[0], Kind: *kind, From: *from, Text: text, To: *to})
 }
 
 // clearCmd is the command-line face of ClearSession.

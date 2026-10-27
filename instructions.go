@@ -384,9 +384,21 @@ func (s *Supervisor) routeInstructions(now time.Time) {
 		if !in.Route || !in.Delivered.IsZero() || in.Failed != "" || in.Session != "" && s.takesInstructions(in.Session) && !s.stranded(in) {
 			continue
 		}
+		// A response on a work item's entry is the item's (#66).
+		if s.routeWork(in) {
+			if s.halt != nil {
+				return
+			}
+			continue
+		}
 		// Handed to a session that finished and whose tmux session runs:
 		// its own step reopens it and types the message (#65).
 		if s.reopens(in) {
+			continue
+		}
+		// Work held as an item whose session is gone: the item is
+		// assigned anew, and the message goes with it (#66).
+		if in.Agent && s.st.Work[workID(in.ID)] != nil {
 			continue
 		}
 		// One agentd routed to a chat session, which no build starts any
@@ -694,7 +706,8 @@ func (st *LogState) applyRoute(e Event) {
 			in.AgentError = a.Error
 		case a.HandTo != "":
 			// Handed over: the session receives the owner's record as
-			// any other, and its reply is the answer.
+			// any other, and its reply is the answer; work the agent read
+			// is the session's item too (#66).
 			in.Session, in.Delivered, in.Taken, in.Activity = a.HandTo, time.Time{}, time.Time{}, nil
 		case a.Work != nil:
 			// Work no running session covers (#65): Go starts a session

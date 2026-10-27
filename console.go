@@ -142,12 +142,16 @@ func (c *Config) knownConsole(name string) bool {
 }
 
 // PostMessage records p as a message event, screened, after typing its
-// text into p.To when it names a session: by its exact name, only into a
-// pane running Claude Code that shows no dialog, as a nudge is typed.
-// Nothing is recorded when the post or the typing is refused.
+// text into p.To when it names a session: by its exact name, only a
+// session agentd supervises here (cfg with its started sessions, #66),
+// only into a pane running Claude Code that shows no dialog, as a nudge
+// is typed. Nothing is recorded when the post or the typing is refused.
 func PostMessage(cfg *Config, log *Log, tmux Tmux, now time.Time, p MessagePost) error {
 	if !cfg.knownConsole(p.Console) {
 		return fmt.Errorf("no console %q", p.Console)
+	}
+	if _, ok := cfg.Sessions[p.To]; p.To != "" && !ok {
+		return fmt.Errorf("agentd does not run session %q here, so nothing typed would reach it; post to the console without --to, or to a session agentd runs", p.To)
 	}
 	if p.Kind == "" {
 		p.Kind = "info"

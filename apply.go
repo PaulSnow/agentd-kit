@@ -36,6 +36,8 @@ type LogState struct {
 	Releases    map[string]*Release
 	ReleaseTags map[string]map[string]bool
 	Fleets      map[string]*FleetReading
+	// Work are the owner's work items (#66), by id.
+	Work map[string]*WorkItem
 	// CI is each watched request's latest CI, by repository and request.
 	CI map[string]CIRecord
 	// Feed is what the consoles' feed has posted.
@@ -198,6 +200,10 @@ func (st *LogState) apply(e Event) {
 		if e.Node.Result != nil && e.Node.Result.Action == NodeDeployStep {
 			st.applyDeployResult(e)
 		}
+		return
+	}
+	if e.Kind == KindWorkItem {
+		st.applyWork(e)
 		return
 	}
 	if e.Session == "" {

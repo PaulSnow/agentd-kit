@@ -46,6 +46,8 @@ type Config struct {
 	// Ops is the operations console (#63): every agentd process on the
 	// host, which the ops agent reads and the owner changes through it.
 	Ops OpsConfig `json:"ops,omitempty"`
+	// Items bounds how long the owner's work items wait (#66).
+	Items ItemsConfig `json:"items"`
 	// Hub, Hosts and Node are agentd on every machine (#29, node.go): the
 	// hub the nodes report to, the hosts it serves, and this machine's
 	// node.
