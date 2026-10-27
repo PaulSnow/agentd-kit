@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -79,6 +80,8 @@ type Instruction struct {
 	AgentRuns  int
 	AgentError string
 	AgentLast  *AgentPayload
+	// Attachments are the files the owner sent with it (#61).
+	Attachments []AttachmentPayload
 }
 
 // Route steps.
@@ -167,7 +170,7 @@ func RecordInstruction(cfg *Config, log *Log, now time.Time, console, text strin
 // one repository (#41), or for a console without one (#42), as a console
 // reply is recorded; to, when set, is the session the owner addressed,
 // which must be one of repo's, or one the console shows.
-func UIInstruction(cfg *Config, log *Log, now time.Time, repo, to, text string) error {
+func UIInstruction(cfg *Config, log *Log, now time.Time, repo, to, text string, files []stagedAttachment) error {
 	if to != "" {
 		sess, ok := cfg.Sessions[to]
 		if !ok {
@@ -181,26 +184,28 @@ func UIInstruction(cfg *Config, log *Log, now time.Time, repo, to, text string) 
 		}
 	}
 	if _, ok := cfg.Consoles[repo]; ok {
-		return recordInstruction(cfg, log, now, nil, repo, to, "ui", text)
+		return recordInstructionRe(cfg, log, now, nil, repo, to, "ui", text, nil, nil, files)
 	}
 	if _, ok := cfg.Repositories[repo]; !ok {
 		return fmt.Errorf("no repository %q", repo)
 	}
-	return recordInstruction(cfg, log, now, []string{repo}, "", to, "ui", text)
+	return recordInstructionRe(cfg, log, now, []string{repo}, "", to, "ui", text, nil, nil, files)
 }
 
 // recordInstruction records text as the owner's instruction for repos, or
 // for console when it has none, screened, from where it was typed, for
 // agentd to route.
 func recordInstruction(cfg *Config, log *Log, now time.Time, repos []string, console, to, from, text string) error {
-	return recordInstructionRe(cfg, log, now, repos, console, to, from, text, nil, nil)
+	return recordInstructionRe(cfg, log, now, repos, console, to, from, text, nil, nil, nil)
 }
 
 // recordInstructionRe is recordInstruction for a response to entry re,
-// which may be no more than answer, its words left out (#59).
-func recordInstructionRe(cfg *Config, log *Log, now time.Time, repos []string, console, to, from, text string, re *EntryRe, answer *EntryAnswer) error {
+// which may be no more than answer, or its files, its words left out
+// (#59). The files are stored once the instruction is known good, then
+// it and their attachment events are logged in one write (#61).
+func recordInstructionRe(cfg *Config, log *Log, now time.Time, repos []string, console, to, from, text string, re *EntryRe, answer *EntryAnswer, files []stagedAttachment) error {
 	text = strings.TrimSpace(text)
-	if text == "" && answer == nil {
+	if text == "" && answer == nil && len(files) == 0 {
 		return errors.New("an empty instruction")
 	}
 	p := &InstructionPayload{Repositories: repos, Console: console, Text: text, Hash: shortHash(HashPane(text)), From: from, To: to, Route: true, Re: re, Answer: answer}
@@ -222,7 +227,21 @@ func recordInstructionRe(cfg *Config, log *Log, now time.Time, repos []string, c
 		}
 	}
 	p.ID = "I" + shortHash(HashPane(now.UTC().Format(time.RFC3339Nano) + "\n" + from + "\n" + p.Hash))[:8]
-	return log.Append(Event{V: EventVersion, Time: now, Kind: KindInstruction, Mode: ModeOwner, Instruction: p})
+	es := []Event{{V: EventVersion, Time: now, Kind: KindInstruction, Mode: ModeOwner, Instruction: p}}
+	if len(files) > 0 {
+		dir := console
+		if dir == "" {
+			dir = repos[0]
+		}
+		atts, err := storeAttachments(cfg, dir, p.ID, files)
+		if err != nil {
+			return err
+		}
+		for i := range atts {
+			es = append(es, Event{V: EventVersion, Time: now, Kind: KindAttachment, Mode: ModeOwner, Attachment: &atts[i]})
+		}
+	}
+	return log.AppendAll(es...)
 }
 
 // ImportLine is one message of the old console's history, as agentd
@@ -536,13 +555,16 @@ type InstructionDoc struct {
 	Re     *EntryRe     `json:"re,omitempty"`
 	Answer *EntryAnswer `json:"answer,omitempty"`
 	Text   string       `json:"text,omitempty"`
-	New    bool         `json:"new,omitempty"`
+	// Attachments are the files the owner sent with it (#61), copied
+	// into the workdir's attachments/, each at a path Read opens.
+	Attachments []AttachmentRef `json:"attachments,omitempty"`
+	New         bool            `json:"new,omitempty"`
 }
 
 // writeInstructions writes the instructions routed to the session to
 // instructions.json in its workdir, through a temporary file, and names
-// the new ones.
-func writeInstructions(workdir string, ins []*Instruction, now time.Time) error {
+// the new ones; their attachments are copied in first.
+func writeInstructions(cfg *Config, workdir string, ins []*Instruction, now time.Time) error {
 	if len(ins) > instructionsKept {
 		ins = ins[len(ins)-instructionsKept:]
 	}
@@ -550,7 +572,12 @@ func writeInstructions(workdir string, ins []*Instruction, now time.Time) error 
 		Instructions []InstructionDoc `json:"instructions"`
 	}{Instructions: []InstructionDoc{}}
 	for _, in := range ins {
-		doc.Instructions = append(doc.Instructions, InstructionDoc{ID: in.ID, Text: in.Text, From: in.From, At: in.At, Re: in.Re, Answer: in.Answer, New: in.Replied.IsZero() && (in.Delivered.IsZero() || now.Sub(in.Delivered) < ChatIdle)})
+		atts, missing := copyAttachments(cfg, workdir, in.Attachments)
+		if len(missing) > 0 {
+			fmt.Fprintf(os.Stderr, "agentd: instruction %s: attachments %s could not be copied into the workdir\n", in.ID, strings.Join(missing, ", "))
+		}
+		doc.Instructions = append(doc.Instructions, InstructionDoc{ID: in.ID, Text: in.Text, From: in.From, At: in.At, Re: in.Re, Answer: in.Answer, Attachments: atts,
+			New: in.Replied.IsZero() && (in.Delivered.IsZero() || now.Sub(in.Delivered) < ChatIdle)})
 	}
 	b, err := json.Marshal(doc)
 	if err != nil {
@@ -591,7 +618,7 @@ func (s *Supervisor) deliverInstructions(name string, sess Session, t *Track, ev
 	ins := s.st.instructionsFor(name, false)
 	pointer := s.cfg.Policies.Instructions.Pointer
 	s.typeInto(name, ActInstruct, &ActPayload{Key: key, Instructions: ids, Message: pointer}, t, ev.PaneHash, func() error {
-		if err := writeInstructions(sess.Workdir, ins, s.clock.Now()); err != nil {
+		if err := writeInstructions(s.cfg, sess.Workdir, ins, s.clock.Now()); err != nil {
 			return err
 		}
 		return s.tmux.Type(name, pointer)

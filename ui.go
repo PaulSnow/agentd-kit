@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"html/template"
 	"math"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -346,13 +347,31 @@ func (src *uiSource) deadline(session, id string, at time.Time) error {
 
 // reply records the owner's console reply as an instruction for repo,
 // addressed to session to when it is set; started sessions count.
-func (src *uiSource) reply(repo, to, text string) error {
+func (src *uiSource) reply(repo, to, text string, files []stagedAttachment) error {
 	src.mu.Lock()
 	defer src.mu.Unlock()
 	if err := src.catchUp(); err != nil {
 		return err
 	}
-	return UIInstruction(withRuntime(src.cfg, src.st.Runtime), src.log, time.Now(), repo, to, text)
+	return UIInstruction(withRuntime(src.cfg, src.st.Runtime), src.log, time.Now(), repo, to, text, files)
+}
+
+// attachment is the attachment id of src's log and where it is stored,
+// when the log holds it.
+func (src *uiSource) attachment(id string) (AttachmentPayload, string, bool) {
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	if err := src.catchUp(); err != nil {
+		return AttachmentPayload{}, "", false
+	}
+	for _, in := range src.st.Instructions {
+		for _, a := range in.Attachments {
+			if a.ID == id {
+				return a, attachmentPath(src.cfg, a), true
+			}
+		}
+	}
+	return AttachmentPayload{}, "", false
 }
 
 // whoisTTL is how long the UI trusts one whois answer for an address, and
@@ -463,7 +482,7 @@ var uiAssets embed.FS
 
 func (u *UI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h := w.Header()
-	h.Set("Content-Security-Policy", "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+	h.Set("Content-Security-Policy", "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' blob:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Cache-Control", "no-store")
 	// same-origin, not no-referrer: under no-referrer a browser sends a
@@ -509,6 +528,12 @@ func (u *UI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		posts[path](w, r)
+	case strings.HasPrefix(path, "/attachment/"):
+		if !get {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		u.serveAttachment(w, r)
 	case path == "/" || strings.HasPrefix(path, "/console/") || strings.HasPrefix(path, "/session/"):
 		if !get {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -683,6 +708,48 @@ func (u *UI) checkPost(w http.ResponseWriter, r *http.Request) bool {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return false
 	}
+	return u.checkToken(w, r)
+}
+
+// maxUpload bounds a message's multipart body: its files, and room for
+// its fields and the parts' headers.
+const maxUpload = maxAttachments*maxAttachment + 1<<20
+
+// checkPostFiles is checkPost for a form that may carry files (#61): a
+// multipart one is read whole, at most maxUpload, its larger files
+// spooled to temporary files the request removes when it ends; then its
+// token, then its files are checked. Nothing is stored until all pass.
+func (u *UI) checkPostFiles(w http.ResponseWriter, r *http.Request) ([]stagedAttachment, bool) {
+	if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+		return nil, u.checkPost(w, r)
+	}
+	if o := r.Header.Get("Origin"); o == "" || !strings.EqualFold(o, "http://"+r.Host) {
+		http.Error(w, "refused: a POST must come from the UI", http.StatusForbidden)
+		return nil, false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxUpload)
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			http.Error(w, fmt.Sprintf("refused: a message carries at most %d files of at most %d MB each", maxAttachments, maxAttachment>>20), http.StatusRequestEntityTooLarge)
+		} else {
+			http.Error(w, "bad form", http.StatusBadRequest)
+		}
+		return nil, false
+	}
+	if !u.checkToken(w, r) {
+		return nil, false
+	}
+	files, err := checkAttachments(r.MultipartForm.File["file"])
+	if err != nil {
+		http.Error(w, "refused: "+err.Error()+"; nothing was sent", http.StatusBadRequest)
+		return nil, false
+	}
+	return files, true
+}
+
+// checkToken checks a read form's token is the UI's.
+func (u *UI) checkToken(w http.ResponseWriter, r *http.Request) bool {
 	if subtle.ConstantTimeCompare([]byte(r.PostForm.Get("token")), []byte(u.token)) != 1 {
 		http.Error(w, "refused: the form's token is not the UI's", http.StatusForbidden)
 		return false
@@ -800,7 +867,8 @@ func answerForm(r *http.Request) (AnswerPayload, error) {
 // decision, an answer as /answer takes it. Without an entry it is a
 // reply to the console, to the session the form names, if any.
 func (u *UI) serveRespond(w http.ResponseWriter, r *http.Request) {
-	if !u.checkPost(w, r) {
+	files, ok := u.checkPostFiles(w, r)
+	if !ok {
 		return
 	}
 	src := u.postSource(w, r)
@@ -820,11 +888,11 @@ func (u *UI) serveRespond(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if entry == "" {
-		if strings.TrimSpace(text) == "" {
+		if strings.TrimSpace(text) == "" && len(files) == 0 {
 			http.Error(w, "write a message", http.StatusBadRequest)
 			return
 		}
-		if err := src.reply(repo, strings.TrimSpace(r.PostForm.Get("session")), text); err != nil {
+		if err := src.reply(repo, strings.TrimSpace(r.PostForm.Get("session")), text, files); err != nil {
 			http.Error(w, "the message was not recorded: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -840,7 +908,7 @@ func (u *UI) serveRespond(w http.ResponseWriter, r *http.Request) {
 	if a.Binding() || a.Other != "" || strings.HasPrefix(entry, entryDecision) {
 		ap = &a
 	}
-	if err := src.respond(repo, entry, strings.TrimSpace(r.PostForm.Get("session")), text, ap); err != nil {
+	if err := src.respond(repo, entry, strings.TrimSpace(r.PostForm.Get("session")), text, ap, files); err != nil {
 		http.Error(w, "the response was not recorded: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -882,7 +950,8 @@ const maxReply = 4000
 // serveReply records a console reply as the owner's instruction for the
 // repository the form names, then sends the owner back to its console.
 func (u *UI) serveReply(w http.ResponseWriter, r *http.Request) {
-	if !u.checkPost(w, r) {
+	files, ok := u.checkPostFiles(w, r)
+	if !ok {
 		return
 	}
 	src := u.postSource(w, r)
@@ -890,15 +959,49 @@ func (u *UI) serveReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	repo, to, text := strings.TrimSpace(r.PostForm.Get("repository")), strings.TrimSpace(r.PostForm.Get("session")), r.PostForm.Get("text")
-	if repo == "" || strings.TrimSpace(text) == "" || len(text) > maxReply {
+	if repo == "" || strings.TrimSpace(text) == "" && len(files) == 0 || len(text) > maxReply {
 		http.Error(w, fmt.Sprintf("name the repository and write a reply of at most %d bytes", maxReply), http.StatusBadRequest)
 		return
 	}
-	if err := src.reply(repo, to, text); err != nil {
+	if err := src.reply(repo, to, text, files); err != nil {
 		http.Error(w, "the reply was not recorded: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	u.back(w, r)
+}
+
+// serveAttachment serves /attachment/SRC/ID, a file the owner sent, from
+// where agentd stored it, as the type its bytes read as: only to the
+// owner, as every page, and never as a page of the UI's that runs
+// anything.
+func (u *UI) serveAttachment(w http.ResponseWriter, r *http.Request) {
+	srcName, id, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/attachment/"), "/")
+	src := u.source(srcName)
+	if src == nil || id == "" {
+		http.NotFound(w, r)
+		return
+	}
+	a, path, ok := src.attachment(id)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		http.Error(w, "the file is gone from agentd's state directory", http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+	h := w.Header()
+	// A PDF opens in the browser's viewer; nothing else of it runs.
+	h.Set("Content-Security-Policy", "default-src 'none'; img-src 'self'; object-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'self'")
+	h.Set("Content-Type", a.Type)
+	if a.Type == "text/plain" {
+		h.Set("Content-Type", "text/plain; charset=utf-8")
+	}
+	h.Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": a.Name}))
+	h.Set("Cache-Control", "private, max-age=86400, immutable")
+	http.ServeContent(w, r, "", time.Time{}, f)
 }
 
 // hostAllowed checks the Host header against the configured names, so a

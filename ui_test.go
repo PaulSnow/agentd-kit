@@ -413,7 +413,7 @@ func TestUIConsoleReply(t *testing.T) {
 			t.Fatalf("messages not newest last %v:\n%s", at, body)
 		}
 	}
-	if !strings.Contains(body, `<input type="hidden" name="src" value="coord"><input type="hidden" name="repository" value="widgets">`) || !strings.Contains(body, `<form id="composer" class="composer" method="post" action="/respond">`) || !strings.Contains(body, "Which &lt;b&gt;colour&lt;/b&gt;?") {
+	if !strings.Contains(body, `<input type="hidden" name="src" value="coord"><input type="hidden" name="repository" value="widgets">`) || !strings.Contains(body, `<form id="composer" class="composer" method="post" action="/respond" enctype="multipart/form-data">`) || !strings.Contains(body, "Which &lt;b&gt;colour&lt;/b&gt;?") {
 		t.Fatalf("console lacks the reply box or the decision:\n%s", body)
 	}
 	w := ownerPost(u, "/reply", url.Values{"src": {"coord"}, "repository": {"widgets"}, "text": {"Paint the **logo** green too"}, "back": {"/console/widgets"}})

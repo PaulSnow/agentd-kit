@@ -115,11 +115,11 @@
 <ol class="entries">{{range .Rendered}}{{.}}{{else}}<li class="empty">No messages yet.</li>{{end}}</ol>
 </section>
 <p class="box-new" hidden><button type="button" class="link">new ↓</button></p>
-{{if .ReplySrc}}<form id="composer" class="composer" method="post" action="/respond"><input type="hidden" name="token" value="{{.Token}}"><input type="hidden" name="back" value="{{.Back}}"><input type="hidden" name="src" value="{{.ReplySrc}}"><input type="hidden" name="repository" value="{{.Repository}}"><input type="hidden" name="entry" value="">
+{{if .ReplySrc}}<form id="composer" class="composer" method="post" action="/respond" enctype="multipart/form-data"><input type="hidden" name="token" value="{{.Token}}"><input type="hidden" name="back" value="{{.Back}}"><input type="hidden" name="src" value="{{.ReplySrc}}"><input type="hidden" name="repository" value="{{.Repository}}"><input type="hidden" name="entry" value="">
 <div class="composer-head"><label>To: <select name="session" aria-label="Send to">{{if not .Other}}<option value="">agent (new thread)</option>{{end}}{{range .To}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
 <span class="re-chip" hidden>Re: <span class="re-label"></span> <button type="button" class="re-clear" aria-label="Respond to no entry">×</button></span>
 <button type="button" class="open-questions"{{if not .Open}} hidden{{end}}>{{len .Open}} open question{{if ne (len .Open) 1}}s{{end}}</button></div>
-<div class="composer-row"><textarea name="text" rows="2" maxlength="4000" aria-label="Your message" required></textarea><button type="submit">Send</button></div>
+<div class="composer-row"><textarea name="text" rows="2" maxlength="4000" aria-label="Your message" required></textarea>{{template "attach"}}<button type="submit">Send</button></div>
 </form>
 {{else}}<p class="muted composer">No live run configures {{.Repository}}, so it takes no message.</p>{{end}}
 </div>
@@ -137,23 +137,27 @@
 {{else if .Prompt}}{{template "prompt-line" .Prompt}}
 {{else if .More}}<div class="fold"><div class="md preview">{{.Body}}</div><details class="more" data-key="m-{{.DOMID}}"><summary><span class="more-label show-all">Show all</span><span class="more-label show-less">Show less</span></summary><div class="md">{{.More}}</div></details></div>
 {{else if .Need}}<p><span class="badge">{{.Need.Kind}}</span> {{.Text}}</p>
-{{else}}<div class="md">{{.Body}}</div>{{end}}
+{{else}}<div class="md">{{.Body}}</div>{{end}}{{template "attachments" .Attachments}}
 {{with .Answer}}<p class="answered">Answer: <strong>{{if .Answer}}{{if yes .Answer}}yes{{else}}no{{end}}{{else if .Choice}}{{.Choice}}{{else if .Choices}}{{range $i, $c := .Choices}}{{if $i}}, {{end}}{{$c}}{{end}}{{else}}{{.Text}}{{end}}</strong></p>{{end}}
 {{template "thread" (ctx $p .)}}
 {{with .Earlier}}<details class="earlier" data-key="s-{{(index . 0).Entry}}"><summary>{{len .}} earlier</summary><ol class="steps">{{range .}}<li><time class="muted">{{$p.When .At}}</time> <div class="md">{{if .More}}{{.More}}{{else}}{{.Body}}{{end}}</div></li>{{end}}</ol></details>{{end}}
 {{with .Responses}}<ol class="responses">{{range .}}<li class="msg msg-instruction response"><div class="msg-head"><span class="from">you</span>{{with .To}} → {{.}}{{end}} <time class="muted">{{$p.When .At}}</time></div>
 {{with .Answer}}<p class="answered">Answer: <strong>{{if .Answer}}{{if yes .Answer}}yes{{else}}no{{end}}{{else if .Choice}}{{.Choice}}{{else if .Choices}}{{range $i, $c := .Choices}}{{if $i}}, {{end}}{{$c}}{{end}}{{else}}{{.Text}}{{end}}</strong></p>{{end}}
-{{if .Text}}<div class="md">{{.Body}}</div>{{end}}{{template "thread" (ctx $p .)}}</li>{{end}}</ol>{{end}}
+{{if .Text}}<div class="md">{{.Body}}</div>{{end}}{{template "attachments" .Attachments}}{{template "thread" (ctx $p .)}}</li>{{end}}</ol>{{end}}
 {{if and .Entry $p.ReplySrc}}<details class="respond" data-key="r-{{.DOMID}}"><summary aria-label="Respond to this entry">Respond</summary>
-<form method="post" action="/respond"><input type="hidden" name="token" value="{{$p.Token}}"><input type="hidden" name="back" value="{{$p.Back}}"><input type="hidden" name="src" value="{{.Src}}"><input type="hidden" name="repository" value="{{$p.Repository}}"><input type="hidden" name="entry" value="{{.Entry}}">
+<form method="post" action="/respond" enctype="multipart/form-data"><input type="hidden" name="token" value="{{$p.Token}}"><input type="hidden" name="back" value="{{$p.Back}}"><input type="hidden" name="src" value="{{.Src}}"><input type="hidden" name="repository" value="{{$p.Repository}}"><input type="hidden" name="entry" value="{{.Entry}}">
 {{if and .Open .Decision}}{{with .Decision}}{{if not .Withheld}}{{template "decision-inputs" .Decision}}{{end}}{{end}}{{end}}
 {{with .Quick}}<div class="choices quick">{{range .}}<button type="submit" name="quick" value="{{.}}">{{.}}</button>{{end}}</div>{{end}}
 <textarea name="text" rows="2" maxlength="4000" aria-label="Your response"></textarea>
-<div class="choices"><button type="submit">Send</button></div></form>
+<div class="choices">{{template "attach"}}<button type="submit">Send</button></div></form>
 {{if and .Open .Decision}}{{with .Decision}}{{with .Default}}<form class="answer default" method="post" action="/deadline"><input type="hidden" name="token" value="{{$p.Token}}"><input type="hidden" name="back" value="{{$p.Back}}"><input type="hidden" name="src" value="{{$.V.Src}}"><input type="hidden" name="session" value="{{$.V.Session}}"><input type="hidden" name="id" value="{{$.V.Decision.ID}}">
 <p class="muted">Default: {{.}}. Applied only if you set a deadline and it passes unanswered.</p><div class="inline"><input type="datetime-local" name="deadline" aria-label="Deadline" required><button type="submit">Apply the default after</button></div></form>{{end}}{{end}}{{end}}
 </details>{{end}}
 </li>{{end}}{{end}}
+
+{{define "attachments"}}{{with .}}<ul class="attachments">{{range .}}<li>{{if .Image}}<a href="{{.URL}}" target="_blank" rel="noreferrer" title="{{.Name}}, {{.Size}}"><img src="{{.URL}}" alt="{{.Name}}" loading="lazy"></a>{{else}}<a class="file" href="{{.URL}}" target="_blank" rel="noreferrer"><span class="file-icon" aria-hidden="true">{{if eq .Type "application/pdf"}}PDF{{else}}TXT{{end}}</span> {{.Name}} <span class="muted">{{.Size}}</span></a>{{end}}</li>{{end}}</ul>{{end}}{{end}}
+
+{{define "attach"}}<div class="attach"><label class="attach-button" title="Attach screenshots, PDFs or text files; or paste or drop them here">📎<input type="file" name="file" multiple accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/plain,.txt,.log"></label><ul class="attach-list"></ul></div>{{end}}
 
 {{define "thread"}}{{$p := .P}}{{with .V}}{{with .Steps}}<ol class="steps">{{range .}}<li class="step{{if .Failed}} step-failed{{else if .Wait}} step-wait{{end}}">{{.Text}}{{if not .At.IsZero}} <time class="muted">{{$p.When .At}}</time>{{end}}</li>{{end}}</ol>{{end}}
 {{if .Activity}}<details class="tools" data-key="a-{{.Entry}}"><summary>{{.ToolsLine}}</summary><ol class="activity">{{range .Activity}}<li class="tool{{if .Failed}} tool-failed{{end}}"><code>{{.Text}}</code>{{if .Failed}} <span class="badge">failed{{with .Exit}}, exit {{.}}{{end}}</span>{{end}}</li>{{end}}</ol></details>{{end}}
@@ -194,8 +198,9 @@
 </section>
 {{if .MessageTo}}<section id="message" aria-labelledby="message-h">
 <h2 id="message-h">Message {{.Row.Name}}</h2>
-<form class="answer" method="post" action="/reply"><input type="hidden" name="token" value="{{.Token}}"><input type="hidden" name="back" value="/console/{{.MessageTo}}"><input type="hidden" name="src" value="{{.Src}}"><input type="hidden" name="repository" value="{{.MessageTo}}"><input type="hidden" name="session" value="{{.Row.Name}}">
+<form class="answer" method="post" action="/reply" enctype="multipart/form-data"><input type="hidden" name="token" value="{{.Token}}"><input type="hidden" name="back" value="/console/{{.MessageTo}}"><input type="hidden" name="src" value="{{.Src}}"><input type="hidden" name="repository" value="{{.MessageTo}}"><input type="hidden" name="session" value="{{.Row.Name}}">
 <textarea name="text" rows="3" maxlength="4000" aria-label="Your message to {{.Row.Name}}" required></textarea>
+{{template "attach"}}
 <p class="muted">agentd types a pointer to it into {{.Row.Name}} at once, even mid-turn; its activity and reply show under your message on the {{.MessageTo}} console.</p>
 <div class="choices"><button type="submit">Send</button></div></form>
 </section>{{end}}
