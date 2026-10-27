@@ -79,3 +79,31 @@ func TestSessionPageActivity(t *testing.T) {
 		t.Fatal("the activity leaked or was logged")
 	}
 }
+
+// The console shows a panel per session under the repository's box and
+// above the history: its state, the tool it runs now, its last reply and
+// a box addressed to it; a finished session takes no message.
+func TestConsolePanels(t *testing.T) {
+	h := turnsHarness(t)
+	at := h.clock.Now()
+	running, _ := json.Marshal(map[string]any{"type": "assistant", "uuid": "u9", "timestamp": at.Format(time.RFC3339Nano),
+		"message": map[string]any{"id": "m9", "stop_reason": "tool_use", "content": []map[string]any{{"type": "tool_use", "id": "c9", "name": "Bash", "input": map[string]any{"command": "./bin/check"}}}}})
+	h.transcriptOf("a", "t1", promptLine("u1", "Build the widget.", at)+summaryLine("u2", "m1", "Primed the widget.", at, 100)+
+		promptLine("u3", "Now paint it.", at)+string(running)+"\n")
+	h.status("b", "# b\n\nDONE\n")
+	h.ticks(2, time.Minute)
+	u, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
+	page := owner(t, u, "/console/widgets")
+	box, panels, history := strings.Index(page, `id="reply-h"`), strings.Index(page, `id="panels"`), strings.Index(page, `id="messages"`)
+	if box < 0 || panels < box || history < panels {
+		t.Fatalf("the boxes and panels are not above the history (%d, %d, %d):\n%s", box, panels, history, page)
+	}
+	for _, want := range []string{`<a href="/session/night/a">a</a>`, "Now: <code>Bash: ./bin/check</code>", "Primed the widget.", `name="session" value="a">`, "Send to a<"} {
+		if !strings.Contains(page[panels:history], want) {
+			t.Fatalf("the panels lack %q:\n%s", want, page[panels:history])
+		}
+	}
+	if !strings.Contains(page[panels:history], `<a href="/session/night/b">b</a>`) || strings.Contains(page, "Send to b<") {
+		t.Fatalf("the finished session's panel is missing or takes a message:\n%s", page[panels:history])
+	}
+}

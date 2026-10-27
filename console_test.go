@@ -51,8 +51,8 @@ func TestConsolePostShownInItsConsole(t *testing.T) {
 	}
 	body := owner(t, u, "/console/widgets")
 	i, j := strings.Index(body, "Delivered <strong>!4</strong> for review"), strings.Index(body, "Starting the paint")
-	if i < 0 || j < i || !strings.Contains(body, `<span class="badge">delivered</span>`) || strings.LastIndex(body, "Ship it on Friday") > i {
-		t.Fatalf("the posts are not shown newest last with their kind:\n%s", body)
+	if j < 0 || i < j || !strings.Contains(body, `<span class="badge">delivered</span>`) || strings.Index(body, "Ship it on Friday") < i {
+		t.Fatalf("the posts are not shown newest first with their kind:\n%s", body)
 	}
 	for _, bad := range []MessagePost{
 		{Console: "nowhere", Text: "x"},

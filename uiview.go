@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -647,14 +648,38 @@ type uiConsole struct {
 	// Live: a message waits on its session's answer, so the page
 	// refreshes every few seconds.
 	Live bool
+	// Panels are the console's sessions, one each (#56 D).
+	Panels []uiPanel
+	// Page is the page of history shown, newest first, of Pages; Newer
+	// and Older are the pages beside it, -1 when there is none.
+	Page, Pages, Newer, Older int
 }
+
+// uiPanel is one session on its console: its state, what it does now,
+// whether it waits on the owner, its last reply, and a box to message it.
+type uiPanel struct {
+	Src       string
+	Name      string
+	Kind      string
+	State     string
+	Since     time.Time
+	Doing     *uiStep
+	Questions int
+	Reply     template.HTML
+	ReplyMore template.HTML
+	ReplyAt   time.Time
+	MessageTo string
+}
+
+// historyPage is how many messages a page of a console's history holds.
+const historyPage = 50
 
 // withheldMessage stands in for a message that matches a confidential
 // pattern.
 const withheldMessage = "(withheld: it matched a confidential pattern)"
 
 // consoleView is repo's console, nil when no source knows the repository.
-func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
+func (u *UI) consoleView(repo string, page int, now time.Time) (*uiConsole, error) {
 	v := &uiConsole{uiPage: uiPage{Title: repo + " console", Token: u.token, Back: "/console/" + repo, Now: now, loc: u.loc}, Repository: repo}
 	known, loops := false, false
 	for _, src := range u.sources {
@@ -715,6 +740,9 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 					v.Needs = append(v.Needs, n)
 				}
 			}
+			if !src.echo {
+				v.Panels = append(v.Panels, src.panels(cfg, repo, v.Needs, secret)...)
+			}
 			return nil
 		}()
 		if err != nil {
@@ -724,9 +752,81 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 	if !known && len(v.Messages) == 0 {
 		return nil, nil
 	}
+	// Newest first, a page at a time, the later of two at one time first:
+	// against the order they came when their times are the same.
 	sort.SliceStable(v.Messages, func(i, j int) bool { return v.Messages[i].At.Before(v.Messages[j].At) })
+	for i, j := 0, len(v.Messages)-1; i < j; i, j = i+1, j-1 {
+		v.Messages[i], v.Messages[j] = v.Messages[j], v.Messages[i]
+	}
+	v.Pages = (len(v.Messages) + historyPage - 1) / historyPage
+	if v.Pages == 0 {
+		v.Pages = 1
+	}
+	v.Page = min(max(page, 1), v.Pages)
+	v.Messages = v.Messages[(v.Page-1)*historyPage : min(v.Page*historyPage, len(v.Messages))]
+	v.Newer, v.Older = v.Page-1, v.Page+1
+	if v.Newer < 1 {
+		v.Newer = -1
+	}
+	if v.Older > v.Pages {
+		v.Older = -1
+	}
+	if v.Page > 1 {
+		v.Back += "?page=" + strconv.Itoa(v.Page)
+	}
+	sort.SliceStable(v.Panels, func(i, j int) bool { return v.Panels[i].Name < v.Panels[j].Name })
 	sortNeeds(v.Needs)
 	return v, nil
+}
+
+// panels are the sessions of src that console repo shows: a repository's,
+// or those a console without one takes; each with what it does now, read
+// from its transcript, and its last reply.
+func (src *uiSource) panels(cfg *Config, repo string, needs []uiNeed, secret func(...string) bool) []uiPanel {
+	var out []uiPanel
+	for _, name := range cfg.SessionNames() {
+		sess := cfg.Sessions[name]
+		if sess.Repository != repo && !(sess.Repository == "" && cfg.Console(name) == repo) {
+			continue
+		}
+		p := uiPanel{Src: src.Name, Name: name, Kind: sess.Kind, State: "unknown"}
+		t := src.st.Tracks[name]
+		if t != nil && t.State != "" {
+			p.State, p.Since = string(t.State), t.Since
+		}
+		// A finished session takes no message: one addressed to it fails.
+		if sess.Role == "" && src.st.Mode == ModeLive && (t == nil || t.State != Done) {
+			p.MessageTo = repo
+		}
+		if a, ok := sessionActivity(cfg, sess, t); ok {
+			if a.Now != nil {
+				doing := activityStep(*a.Now, secret)
+				p.Doing = &doing
+			} else if n := len(a.Ran); n > 0 && (t == nil || t.State == Working) {
+				last := activityStep(a.Ran[n-1], secret)
+				p.Doing = &last
+			}
+		}
+		for _, n := range needs {
+			if n.Session == name {
+				p.Questions++
+			}
+		}
+		if t != nil {
+			for i := len(t.Turns) - 1; i >= 0; i-- {
+				if tr := t.Turns[i]; tr.Role == TurnSummary {
+					p.ReplyAt = tr.At
+					p.Reply, p.ReplyMore = folded(tr.Text)
+					if tr.Withheld || secret(tr.Text) {
+						p.Reply, p.ReplyMore = template.HTML(template.HTMLEscapeString(withheldMessage)), ""
+					}
+					break
+				}
+			}
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // uiEvent is one line of a session's timeline.

@@ -120,8 +120,21 @@
 <div class="choices"><button type="submit">Send</button></div></form>
 {{else}}<p class="muted">No live run configures {{.Repository}}, so it takes no reply.</p>{{end}}
 </section>
+{{with .Panels}}<section id="panels" data-refresh aria-labelledby="panels-h">
+<h2 id="panels-h">Sessions</h2>
+<div class="panels">{{range .}}<article class="card panel">
+<header class="card-head"><h3><a href="/session/{{.Src}}/{{.Name}}">{{.Name}}</a></h3>{{with .Kind}}<span class="badge">{{.}}</span>{{end}}</header>
+<p class="meta"><span class="state state-{{.State}}">{{.State}}</span>{{if not .Since.IsZero}} since {{$.When .Since}}{{end}}{{if .Questions}} · <a href="#console-needs">{{.Questions}} waiting on you</a>{{end}}</p>
+{{with .Doing}}<p class="doing">Now: <code>{{.Text}}</code>{{if .Failed}} <span class="badge">failed{{with .Exit}}, exit {{.}}{{end}}</span>{{end}}</p>{{end}}
+{{if .Reply}}<div class="msg msg-reply"><div class="msg-head"><span class="badge">last reply</span> <time class="muted">{{$.When .ReplyAt}}</time></div>{{if .ReplyMore}}<details class="more"><summary><div class="md">{{.Reply}}</div><span class="more-label">Show all</span></summary><div class="md">{{.ReplyMore}}</div></details>{{else}}<div class="md">{{.Reply}}</div>{{end}}</div>{{end}}
+{{if .MessageTo}}<form class="answer" method="post" action="/reply"><input type="hidden" name="token" value="{{$.Token}}"><input type="hidden" name="back" value="{{$.Back}}"><input type="hidden" name="src" value="{{.Src}}"><input type="hidden" name="repository" value="{{.MessageTo}}"><input type="hidden" name="session" value="{{.Name}}">
+<textarea name="text" rows="2" maxlength="4000" aria-label="Your message to {{.Name}}" required></textarea>
+<div class="choices"><button type="submit">Send to {{.Name}}</button></div></form>{{end}}
+</article>{{end}}</div>
+</section>{{end}}
 <section id="messages" data-refresh aria-labelledby="messages-h"{{if .Live}} data-live{{end}}>
-<h2 id="messages-h">Messages</h2>
+<h2 id="messages-h">History{{if gt .Pages 1}} <span class="count">page {{.Page}} of {{.Pages}}</span>{{end}}</h2>
+<p class="muted">Newest first.</p>
 <ol class="messages">{{range .Messages}}<li class="msg msg-{{.Kind}}">
 <div class="msg-head"><span class="from">{{if .From}}{{.From}}{{else}}unknown{{end}}</span>{{if .Session}} <a href="/session/{{.Src}}/{{.Session}}">{{.Session}}</a>{{end}} <span class="badge">{{.Kind}}</span> <time class="muted">{{$.When .At}}</time></div>
 {{if .More}}<details class="more"><summary><div class="md">{{.Body}}</div><span class="more-label">Show all</span></summary><div class="md">{{.More}}</div></details>{{else}}<div class="md">{{.Body}}</div>{{end}}
@@ -129,6 +142,7 @@
 {{with .Activity}}<ol class="activity">{{range .}}<li class="tool{{if .Failed}} tool-failed{{end}}"><code>{{.Text}}</code>{{if .Failed}} <span class="badge">failed{{with .Exit}}, exit {{.}}{{end}}</span>{{end}}</li>{{end}}</ol>{{end}}
 {{if .ReplyBy}}<div class="msg msg-reply thread"><div class="msg-head"><a href="/session/{{.Src}}/{{.ReplyBy}}">{{.ReplyBy}}</a> <span class="badge">reply</span> <time class="muted">{{$.When .Replied}}</time></div>{{if .ReplyMore}}<details class="more"><summary><div class="md">{{.Reply}}</div><span class="more-label">Show all</span></summary><div class="md">{{.ReplyMore}}</div></details>{{else}}<div class="md">{{.Reply}}</div>{{end}}</div>{{end}}
 </li>{{else}}<li class="empty">No messages yet.</li>{{end}}</ol>
+{{if gt .Pages 1}}<nav class="pager" aria-label="History pages">{{if ge .Newer 1}}<a href="/console/{{.Repository}}?page={{.Newer}}">Newer</a>{{end}} {{if ge .Older 1}}<a href="/console/{{.Repository}}?page={{.Older}}">Older</a>{{end}}</nav>{{end}}
 </section>
 {{template "foot" .}}{{end}}
 
