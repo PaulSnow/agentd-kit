@@ -409,11 +409,11 @@ func TestUIConsoleReply(t *testing.T) {
 		at = append(at, strings.Index(body, s))
 	}
 	for i := range at {
-		if at[i] < 0 || i > 0 && at[i] > at[i-1] {
-			t.Fatalf("messages not newest first %v:\n%s", at, body)
+		if at[i] < 0 || i > 0 && at[i] < at[i-1] {
+			t.Fatalf("messages not newest last %v:\n%s", at, body)
 		}
 	}
-	if !strings.Contains(body, `<input type="hidden" name="src" value="coord"><input type="hidden" name="repository" value="widgets">`) || !strings.Contains(body, `action="/reply"`) || !strings.Contains(body, "Which &lt;b&gt;colour&lt;/b&gt;?") {
+	if !strings.Contains(body, `<input type="hidden" name="src" value="coord"><input type="hidden" name="repository" value="widgets">`) || !strings.Contains(body, `<form id="composer" class="composer" method="post" action="/respond">`) || !strings.Contains(body, "Which &lt;b&gt;colour&lt;/b&gt;?") {
 		t.Fatalf("console lacks the reply box or the decision:\n%s", body)
 	}
 	w := ownerPost(u, "/reply", url.Values{"src": {"coord"}, "repository": {"widgets"}, "text": {"Paint the **logo** green too"}, "back": {"/console/widgets"}})
@@ -795,7 +795,7 @@ func TestConsoleImport(t *testing.T) {
 	u, _ := testUI(t, UIConfig{}, newUISource("night", f.night, log, ModeLive, "host-a"))
 	body := owner(t, u, "/console/widgets")
 	first, second, old := strings.Index(body, "First line"), strings.Index(body, "Second line"), strings.Index(body, "Old console line")
-	if old < 0 || second < old || first < second || !strings.Contains(body, withheldMessage) {
+	if old < 0 || second > old || first > second || first < 0 || !strings.Contains(body, withheldMessage) {
 		t.Fatalf("imported lines out of order (%d, %d, %d):\n%s", first, second, old, body)
 	}
 	// Old history never pushes what is new out of the console.

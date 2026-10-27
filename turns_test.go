@@ -179,18 +179,13 @@ func TestTurnShownInConsole(t *testing.T) {
 	}
 	body := owner(t, u, "/console/widgets")
 	i := strings.Index(body, "Painted coat 200")
-	li := strings.LastIndex(body[:max(i, 0)], `<li class="msg msg-reply">`)
+	li := strings.LastIndex(body[:max(i, 0)], `<li class="entry msg msg-reply"`)
 	if i < 0 || li < 0 || !strings.Contains(body[li:i], `<a href="/session/night/w17">w17</a> <span class="badge">reply</span>`) {
 		t.Fatalf("the turn is not shown with its kind and session:\n%s", body)
 	}
-	// The history is paged, newest first: the owner's earlier
-	// instruction is on the last page, and the oldest turn kept on a page.
-	var all string
-	for p := 1; p <= 5; p++ {
-		all += owner(t, u, fmt.Sprintf("/console/widgets?page=%d", p))
-	}
-	last := owner(t, u, "/console/widgets?page=99")
-	if strings.Contains(all, "Painted coat 0<") || !strings.Contains(all, "Painted coat 1<") || !strings.Contains(last, "Ship it on Friday") || !strings.Contains(body, `?page=2">Older</a>`) {
+	// One box, newest last (#59): the owner's earlier instruction is
+	// there, and the oldest turn kept.
+	if strings.Contains(body, "Painted coat 0<") || !strings.Contains(body, "Painted coat 1<") || strings.Index(body, "Ship it on Friday") > strings.Index(body, "Painted coat 1<") {
 		t.Fatalf("the turns are not kept apart:\n%s", body)
 	}
 }

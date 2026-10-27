@@ -49,7 +49,7 @@ func TestOnlyRealPromptsAndWholeReplies(t *testing.T) {
 	}
 	u, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
 	page := owner(t, u, "/console/widgets")
-	if strings.Contains(page, "task-notification") || !strings.Contains(page, `<details class="more" data-key="m-night-a-`) || !strings.Contains(page, "Show all") ||
+	if strings.Contains(page, "task-notification") || !strings.Contains(page, `<details class="more" data-key="m-e-`) || !strings.Contains(page, "Show all") ||
 		!strings.Contains(page, `<a href="/session/night/a/prompt/t1.7">Context compacted →</a>`) || strings.Contains(page, "being continued") {
 		t.Fatalf("console:\n%s", page)
 	}
@@ -84,10 +84,10 @@ func TestSessionPageActivity(t *testing.T) {
 	}
 }
 
-// The console shows a panel per session under the repository's box and
-// above the history: its state, the tool it runs now, its last reply and
-// a box addressed to it; a finished session takes no message.
-func TestConsolePanels(t *testing.T) {
+// The console shows its sessions as one line of chips above the box
+// (#59 §3), each with its state and the tool it runs now, and the
+// composer pinned below the box; a finished session takes no message.
+func TestConsoleChips(t *testing.T) {
 	h := turnsHarness(t)
 	h.cfg.ConfidentialPatterns = []string{`hunter2`}
 	h.restart(false)
@@ -102,19 +102,20 @@ func TestConsolePanels(t *testing.T) {
 	h.ticks(2, time.Minute)
 	u, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
 	page := owner(t, u, "/console/widgets")
-	box, panels, history := strings.Index(page, `id="reply-h"`), strings.Index(page, `id="panels"`), strings.Index(page, `id="messages"`)
-	if box < 0 || panels < box || history < panels {
-		t.Fatalf("the boxes and panels are not above the history (%d, %d, %d):\n%s", box, panels, history, page)
+	chips, box, composer := strings.Index(page, `id="chips"`), strings.Index(page, `id="box"`), strings.Index(page, `id="composer"`)
+	if chips < 0 || box < chips || composer < box || strings.Contains(page, `id="panels"`) {
+		t.Fatalf("not chips, box, composer (%d, %d, %d):\n%s", chips, box, composer, page)
 	}
-	for _, want := range []string{`<a href="/session/night/a">a</a>`, "Now: <code>Bash: ./bin/check</code>", "Primed the widget.", `name="session" value="a">`, "Send to a<"} {
-		if !strings.Contains(page[panels:history], want) {
-			t.Fatalf("the panels lack %q:\n%s", want, page[panels:history])
+	line := page[chips:box]
+	for _, want := range []string{`data-session="a" data-to="a"`, `<span class="doing">Bash: ./bin/check</span>`, `href="/session/night/a"`, `data-session="b">`} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("the chips lack %q:\n%s", want, line)
 		}
 	}
-	if strings.Contains(page, "hunter2") || !strings.Contains(page[panels:history], withheldMessage) || strings.Contains(page, "sleep 9") {
-		t.Fatalf("the panels leak or show a finished session's open call:\n%s", page[panels:history])
+	if strings.Contains(page, "hunter2") || strings.Contains(page, "sleep 9") || strings.Contains(line, "Primed the widget.") {
+		t.Fatalf("the chips leak, show a finished session's open call, or hold a reply:\n%s", line)
 	}
-	if !strings.Contains(page[panels:history], `<a href="/session/night/b">b</a>`) || strings.Contains(page, "Send to b<") {
-		t.Fatalf("the finished session's panel is missing or takes a message:\n%s", page[panels:history])
+	if to := page[composer:]; !strings.Contains(to, `<option value="a">a</option>`) || strings.Contains(to, `<option value="b">`) {
+		t.Fatalf("the composer's To: offers the finished session or not the working one:\n%s", to)
 	}
 }

@@ -107,48 +107,64 @@
 {{template "foot" .}}{{end}}
 
 {{define "console"}}{{template "head" .}}
-<p class="crumbs"><a href="/">All repositories</a></p>
-<section id="console-needs" data-refresh aria-labelledby="console-needs-h">
-<h2 id="console-needs-h">Needs you{{with .Needs}} <span class="count">{{len .}}</span>{{end}}</h2>
-{{range .Needs}}{{template "need" (ctx $ .)}}{{else}}<p class="empty">Nothing in {{.Repository}} waits on you.</p>{{end}}
+<div class="console">
+<p class="crumbs"><a href="/">All repositories</a>{{if .StatusTokens}} <span class="muted">· status checks today: {{.Tokens .StatusTokens}} tokens</span>{{end}}</p>
+{{template "chips" .}}
+<section id="box" class="box" aria-label="Conversation" data-entries="/console/{{.Repository}}/entries"{{if .Live}} data-live{{end}}>
+<ol class="entries">{{range .Entries}}{{template "entry" (ctx $ .)}}{{else}}<li class="empty">No messages yet.</li>{{end}}</ol>
 </section>
-<section id="reply" aria-labelledby="reply-h">
-<h2 id="reply-h">Reply</h2>
-{{if .ReplySrc}}<form class="answer" method="post" action="/reply"><input type="hidden" name="token" value="{{.Token}}"><input type="hidden" name="back" value="{{.Back}}"><input type="hidden" name="src" value="{{.ReplySrc}}"><input type="hidden" name="repository" value="{{.Repository}}">
-<textarea name="text" rows="3" maxlength="4000" aria-label="Your instruction" required></textarea>
-<p class="muted">{{if .Other}}A console without a repository has no chat session: message one of its sessions from its page.{{else}}Your message goes to {{.Repository}}'s chat session, which agentd starts if it is not running; its activity and its answer show under your message as it works.{{end}}</p>
-<div class="choices"><button type="submit">Send</button></div></form>
-{{else}}<p class="muted">No live run configures {{.Repository}}, so it takes no reply.</p>{{end}}
-</section>
-{{with .Panels}}<section id="panels" data-refresh aria-labelledby="panels-h">
-<h2 id="panels-h">Sessions</h2>
-{{if $.StatusTokens}}<p class="muted">Status checks today: {{$.Tokens $.StatusTokens}} tokens.</p>{{end}}
-<div class="panels">{{range .}}<article class="card panel">
-<header class="card-head"><h3><a href="/session/{{.Src}}/{{.Name}}">{{.Name}}</a></h3>{{with .Kind}}<span class="badge">{{.}}</span>{{end}}</header>
-<p class="meta"><span class="state state-{{.State}}">{{.State}}</span>{{if not .Since.IsZero}} since {{$.When .Since}}{{end}}{{if .Questions}} · <a href="#console-needs">{{.Questions}} waiting on you</a>{{end}}</p>
-{{with .Doing}}<p class="doing">Now: <code>{{.Text}}</code>{{if .Failed}} <span class="badge">failed{{with .Exit}}, exit {{.}}{{end}}</span>{{end}}</p>{{end}}
-{{with .Status}}<figure class="status-graph"><svg viewBox="0 0 {{.Width}} 24" preserveAspectRatio="none" role="img" aria-label="Status over the last 6 hours: {{.Checks}} checks today{{if .Gaps}}, {{.Gaps}} failed{{end}}">{{range .Slots}}<rect x="{{.X}}" y="{{.Y}}" width="3" height="{{.H}}" class="{{.Class}}"><title>{{.Title}}</title></rect>{{end}}</svg>
-<figcaption class="meta">{{with .Last}}<span class="badge">{{.Phase}}</span> {{$.Percent .Progress}} · risk {{.Risk}}{{if .Blocked}} · <strong>blocked</strong>: {{.Blocker}}{{end}}{{end}}{{if .Last}} · {{$.When .LastAt}}{{end}}{{if .Gaps}} · {{.Gaps}} failed checks{{end}} · {{$.Tokens .Tokens}} tokens today</figcaption>
-{{with .Last}}<p class="status-now">{{.Summary}}{{with .Next}} <span class="muted">Next: {{.}}</span>{{end}}</p>{{end}}</figure>{{end}}
-{{if .Reply}}<div class="msg msg-reply"><div class="msg-head"><span class="badge">last reply</span> <time class="muted">{{$.When .ReplyAt}}</time></div>{{if .ReplyMore}}<div class="fold"><div class="md preview">{{.Reply}}</div><details class="more" data-key="p-{{.Src}}-{{.Name}}-{{.ReplyAt.UnixNano}}"><summary><span class="more-label show-all">Show all</span><span class="more-label show-less">Show less</span></summary><div class="md">{{.ReplyMore}}</div></details></div>{{else}}<div class="md">{{.Reply}}</div>{{end}}</div>{{end}}
-{{if .MessageTo}}<form class="answer" method="post" action="/reply"><input type="hidden" name="token" value="{{$.Token}}"><input type="hidden" name="back" value="{{$.Back}}"><input type="hidden" name="src" value="{{.Src}}"><input type="hidden" name="repository" value="{{.MessageTo}}"><input type="hidden" name="session" value="{{.Name}}">
-<textarea name="text" rows="2" maxlength="4000" aria-label="Your message to {{.Name}}" required></textarea>
-<div class="choices"><button type="submit">Send to {{.Name}}</button></div></form>{{end}}
-</article>{{end}}</div>
-</section>{{end}}
-<section id="messages" data-refresh aria-labelledby="messages-h"{{if .Live}} data-live{{end}}>
-<h2 id="messages-h">History{{if gt .Pages 1}} <span class="count">page {{.Page}} of {{.Pages}}</span>{{end}}</h2>
-<p class="muted">Newest first.</p>
-<ol class="messages">{{range .Messages}}<li class="msg msg-{{.Kind}}">
-<div class="msg-head"><span class="from">{{if .From}}{{.From}}{{else}}unknown{{end}}</span>{{if .Session}} <a href="/session/{{.Src}}/{{.Session}}">{{.Session}}</a>{{end}} <span class="badge">{{.Kind}}</span> <time class="muted">{{$.When .At}}</time></div>
-{{with .Prompt}}{{template "prompt-line" .}}{{else}}{{if .More}}<div class="fold"><div class="md preview">{{.Body}}</div><details class="more" data-key="m-{{.Src}}-{{.Session}}-{{.At.UnixNano}}"><summary><span class="more-label show-all">Show all</span><span class="more-label show-less">Show less</span></summary><div class="md">{{.More}}</div></details></div>{{else}}<div class="md">{{.Body}}</div>{{end}}{{end}}
-{{with .Steps}}<ol class="steps">{{range .}}<li class="step{{if .Failed}} step-failed{{else if .Wait}} step-wait{{end}}">{{.Text}}{{if not .At.IsZero}} <time class="muted">{{$.When .At}}</time>{{end}}</li>{{end}}</ol>{{end}}
-{{with .Activity}}<ol class="activity">{{range .}}<li class="tool{{if .Failed}} tool-failed{{end}}"><code>{{.Text}}</code>{{if .Failed}} <span class="badge">failed{{with .Exit}}, exit {{.}}{{end}}</span>{{end}}</li>{{end}}</ol>{{end}}
-{{if .ReplyBy}}<div class="msg msg-reply thread"><div class="msg-head"><a href="/session/{{.Src}}/{{.ReplyBy}}">{{.ReplyBy}}</a> <span class="badge">reply</span> <time class="muted">{{$.When .Replied}}</time></div>{{if .ReplyMore}}<div class="fold"><div class="md preview">{{.Reply}}</div><details class="more" data-key="r-{{.Src}}-{{.ReplyBy}}-{{.Replied.UnixNano}}"><summary><span class="more-label show-all">Show all</span><span class="more-label show-less">Show less</span></summary><div class="md">{{.ReplyMore}}</div></details></div>{{else}}<div class="md">{{.Reply}}</div>{{end}}</div>{{end}}
-</li>{{else}}<li class="empty">No messages yet.</li>{{end}}</ol>
-{{if gt .Pages 1}}<nav class="pager" aria-label="History pages">{{if ge .Newer 1}}<a href="/console/{{.Repository}}?page={{.Newer}}">Newer</a>{{end}} {{if ge .Older 1}}<a href="/console/{{.Repository}}?page={{.Older}}">Older</a>{{end}}</nav>{{end}}
-</section>
+<p class="box-new" hidden><button type="button" class="link">new ↓</button></p>
+{{if .ReplySrc}}<form id="composer" class="composer" method="post" action="/respond"><input type="hidden" name="token" value="{{.Token}}"><input type="hidden" name="back" value="{{.Back}}"><input type="hidden" name="src" value="{{.ReplySrc}}"><input type="hidden" name="repository" value="{{.Repository}}"><input type="hidden" name="entry" value="">
+<div class="composer-head"><label>To: <select name="session" aria-label="Send to">{{if not .Other}}<option value="">chat</option>{{end}}{{range .To}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
+<span class="re-chip" hidden>Re: <span class="re-label"></span> <button type="button" class="re-clear" aria-label="Respond to no entry">×</button></span>
+<button type="button" class="open-questions"{{if not .Open}} hidden{{end}}>{{len .Open}} open question{{if ne (len .Open) 1}}s{{end}}</button></div>
+<div class="composer-row"><textarea name="text" rows="2" maxlength="4000" aria-label="Your message" required></textarea><button type="submit">Send</button></div>
+</form>
+{{else}}<p class="muted composer">No live run configures {{.Repository}}, so it takes no message.</p>{{end}}
+</div>
 {{template "foot" .}}{{end}}
+
+{{define "chips"}}<nav id="chips" class="session-chips" aria-label="Sessions">{{range .Panels}}<span class="chip session-chip" data-session="{{.Name}}"><button type="button" class="chip-filter" data-session="{{.Name}}"{{if .MessageTo}} data-to="{{.Name}}"{{end}}><span class="dot state-{{.State}}" title="{{.State}}"></span> {{.Name}}{{with .Doing}} <span class="doing">{{.Text}}</span>{{end}}{{if .Questions}} <span class="badge alert">{{.Questions}}?</span>{{end}}</button><a class="chip-page" href="/session/{{.Src}}/{{.Name}}" aria-label="{{.Name}}'s page">→</a>{{with .Status}}<span class="spark status-graph" role="img" aria-label="Status over the last 6 hours"><svg viewBox="0 0 {{.Width}} 24" preserveAspectRatio="none">{{range .Slots}}<rect x="{{.X}}" y="{{.Y}}" width="3" height="{{.H}}" class="{{.Class}}"><title>{{.Title}}</title></rect>{{end}}</svg><span class="spark-now">{{with .Last}}{{.Phase}} {{$.Percent .Progress}} · risk {{.Risk}}{{if .Blocked}} · <strong>blocked</strong>: {{.Blocker}}{{end}} · {{.Summary}}{{with .Next}} Next: {{.}}{{end}}{{end}}{{if .Gaps}} · {{.Gaps}} failed checks{{end}} · {{$.Tokens .Tokens}} tokens today</span></span>{{end}}</span>{{else}}<span class="muted">No sessions.</span>{{end}}</nav>{{end}}
+
+{{define "entry"}}{{$p := .P}}{{with .V}}<li class="entry msg msg-{{.Kind}}{{if .Open}} entry-open{{end}}" id="{{.DOMID}}" data-entry="{{.Entry}}" data-src="{{.Src}}" data-session="{{.Session}}" data-to="{{.Writer}}">
+<div class="msg-head"><span class="from">{{if .From}}{{.From}}{{else}}unknown{{end}}</span>{{if .Session}} <a href="/session/{{.Src}}/{{.Session}}">{{.Session}}</a>{{end}} <span class="badge">{{.Kind}}</span> <time class="muted">{{$p.When .At}}</time>{{if and .Entry $p.ReplySrc}} <button type="button" class="reply-to" aria-label="Respond in the composer">↩</button>{{end}}</div>
+{{with .Re}}<blockquote class="re">Re {{.Kind}}{{with .Session}} of {{.}}{{end}}{{with .Decision}} {{.}}{{end}}: {{if .Question}}{{.Question}}{{else}}{{.Text}}{{end}}</blockquote>{{end}}
+{{if .Decision}}{{with .Decision}}{{if .Withheld}}<p class="muted">{{.Withheld}}</p>{{else}}<div class="question md">{{markdown .Question}}</div>
+{{with .Context}}<div class="context md">{{markdown .}}</div>{{end}}
+{{if or .Why .IfWrong .Recommendation}}<dl class="facts">{{with .Why}}<dt>Why</dt><dd>{{.}}</dd>{{end}}{{with .IfWrong}}<dt>If wrong</dt><dd>{{.}}</dd>{{end}}{{with .Recommendation}}<dt>Recommended</dt><dd>{{.}}</dd>{{end}}</dl>{{end}}{{end}}
+{{with .Answer}}<p class="answered">Answered: <strong>{{if .Answer}}{{if yes .Answer}}yes{{else}}no{{end}}{{else if .Choice}}{{.Choice}}{{else if .Choices}}{{range $i, $c := .Choices}}{{if $i}}, {{end}}{{$c}}{{end}}{{else if .Value}}{{.ValueText}}{{else}}{{.Text}}{{end}}</strong>{{with .Note}} · {{.}}{{end}}</p>{{end}}{{end}}
+{{else if .Prompt}}{{template "prompt-line" .Prompt}}
+{{else if .More}}<div class="fold"><div class="md preview">{{.Body}}</div><details class="more" data-key="m-{{.DOMID}}"><summary><span class="more-label show-all">Show all</span><span class="more-label show-less">Show less</span></summary><div class="md">{{.More}}</div></details></div>
+{{else if .Need}}<p><span class="badge">{{.Need.Kind}}</span> {{.Text}}</p>
+{{else}}<div class="md">{{.Body}}</div>{{end}}
+{{with .Answer}}<p class="answered">Answer: <strong>{{if .Answer}}{{if yes .Answer}}yes{{else}}no{{end}}{{else if .Choice}}{{.Choice}}{{else if .Choices}}{{range $i, $c := .Choices}}{{if $i}}, {{end}}{{$c}}{{end}}{{else}}{{.Text}}{{end}}</strong></p>{{end}}
+{{template "thread" (ctx $p .)}}
+{{with .Responses}}<ol class="responses">{{range .}}<li class="msg msg-instruction response"><div class="msg-head"><span class="from">you</span>{{with .To}} → {{.}}{{end}} <time class="muted">{{$p.When .At}}</time></div>
+{{with .Answer}}<p class="answered">Answer: <strong>{{if .Answer}}{{if yes .Answer}}yes{{else}}no{{end}}{{else if .Choice}}{{.Choice}}{{else if .Choices}}{{range $i, $c := .Choices}}{{if $i}}, {{end}}{{$c}}{{end}}{{else}}{{.Text}}{{end}}</strong></p>{{end}}
+{{if .Text}}<div class="md">{{.Body}}</div>{{end}}{{template "thread" (ctx $p .)}}</li>{{end}}</ol>{{end}}
+{{if and .Entry $p.ReplySrc}}<details class="respond" data-key="r-{{.DOMID}}"><summary aria-label="Respond to this entry">Respond</summary>
+<form method="post" action="/respond"><input type="hidden" name="token" value="{{$p.Token}}"><input type="hidden" name="back" value="{{$p.Back}}"><input type="hidden" name="src" value="{{.Src}}"><input type="hidden" name="repository" value="{{$p.Repository}}"><input type="hidden" name="entry" value="{{.Entry}}">
+{{if and .Open .Decision}}{{with .Decision}}{{if not .Withheld}}{{template "decision-inputs" .Decision}}{{end}}{{end}}{{end}}
+{{with .Quick}}<div class="choices quick">{{range .}}<button type="submit" name="quick" value="{{.}}">{{.}}</button>{{end}}</div>{{end}}
+<textarea name="text" rows="2" maxlength="4000" aria-label="Your response"></textarea>
+<div class="choices"><button type="submit">Send</button></div></form>
+{{if and .Open .Decision}}{{with .Decision}}{{with .Default}}<form class="answer default" method="post" action="/deadline"><input type="hidden" name="token" value="{{$p.Token}}"><input type="hidden" name="back" value="{{$p.Back}}"><input type="hidden" name="src" value="{{$.V.Src}}"><input type="hidden" name="session" value="{{$.V.Session}}"><input type="hidden" name="id" value="{{$.V.Decision.ID}}">
+<p class="muted">Default: {{.}}. Applied only if you set a deadline and it passes unanswered.</p><div class="inline"><input type="datetime-local" name="deadline" aria-label="Deadline" required><button type="submit">Apply the default after</button></div></form>{{end}}{{end}}{{end}}
+</details>{{end}}
+</li>{{end}}{{end}}
+
+{{define "thread"}}{{$p := .P}}{{with .V}}{{with .Steps}}<ol class="steps">{{range .}}<li class="step{{if .Failed}} step-failed{{else if .Wait}} step-wait{{end}}">{{.Text}}{{if not .At.IsZero}} <time class="muted">{{$p.When .At}}</time>{{end}}</li>{{end}}</ol>{{end}}
+{{with .Activity}}<ol class="activity">{{range .}}<li class="tool{{if .Failed}} tool-failed{{end}}"><code>{{.Text}}</code>{{if .Failed}} <span class="badge">failed{{with .Exit}}, exit {{.}}{{end}}</span>{{end}}</li>{{end}}</ol>{{end}}
+{{if .ReplyBy}}<div class="msg msg-reply thread"><div class="msg-head"><a href="/session/{{.Src}}/{{.ReplyBy}}">{{.ReplyBy}}</a> <span class="badge">reply</span> <time class="muted">{{$p.When .Replied}}</time></div>{{if .ReplyMore}}<div class="fold"><div class="md preview">{{.Reply}}</div><details class="more" data-key="r-{{.Src}}-{{.ReplyBy}}-{{.Replied.UnixNano}}"><summary><span class="more-label show-all">Show all</span><span class="more-label show-less">Show less</span></summary><div class="md">{{.ReplyMore}}</div></details></div>{{else}}<div class="md">{{.Reply}}</div>{{end}}</div>{{end}}{{end}}{{end}}
+
+{{define "decision-inputs"}}{{if eq .Type "yes_no"}}<div class="choices"><button type="submit" name="answer" value="yes">Yes</button><button type="submit" name="answer" value="no">No</button></div>
+{{else if eq .Type "choose_one"}}{{$rec := .Recommendation}}<div class="choices">{{range .Options}}<button type="submit" name="choice" value="{{.Key}}"{{if eq .Key $rec}} class="recommended"{{end}}><span class="option-label">{{.Label}}</span>{{with .Consequence}}<span class="option-note">{{.}}</span>{{end}}</button>{{end}}</div>
+{{else if eq .Type "choose_many"}}<fieldset class="options">{{range .Options}}<label><input type="checkbox" name="choices" value="{{.Key}}"> <span class="option-label">{{.Label}}</span>{{with .Consequence}} <span class="option-note">{{.}}</span>{{end}}</label>{{end}}</fieldset>
+{{with .Limits}}<p class="muted">Choose{{with .MinText}} at least {{.}}{{end}}{{with .MaxText}} at most {{.}}{{end}}.</p>{{end}}
+{{else if eq .Type "number"}}<div class="inline"><input type="number" name="value" aria-label="Your answer"{{with .Limits}}{{with .MinText}} min="{{.}}"{{end}}{{with .MaxText}} max="{{.}}"{{end}}{{end}} step="any"></div>
+{{else if eq .Type "date"}}<div class="inline"><input type="date" name="value" aria-label="Your answer"{{with .Limits}}{{with .MinText}} min="{{.}}"{{end}}{{with .MaxText}} max="{{.}}"{{end}}{{end}}></div>
+{{end}}
+<p class="muted">{{if eq .Type "text"}}Your words below are the answer.{{else}}Words below an option go with it; words alone answer in your own words, which settles nothing.{{end}}</p>{{end}}
 
 {{define "prompt-line"}}<p class="prompt-line">{{with .Lead}}{{.}} {{end}}<a href="{{.Href}}">{{.Link}} →</a></p>{{end}}
 
