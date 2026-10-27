@@ -537,13 +537,15 @@ type uiMessageView struct {
 	uiMessage
 	Src  string
 	Body template.HTML
+	More template.HTML // the whole text of a long one, folded (#56)
 	// An instruction's steps (#56), the tools the session ran on it, and
 	// the reply threaded under it.
-	Steps    []uiStep
-	Activity []uiStep
-	Reply    template.HTML
-	ReplyBy  string
-	Replied  time.Time
+	Steps     []uiStep
+	Activity  []uiStep
+	Reply     template.HTML
+	ReplyMore template.HTML
+	ReplyBy   string
+	Replied   time.Time
 }
 
 // uiStep is one step of an owner instruction, as the page shows it.
@@ -553,6 +555,22 @@ type uiStep struct {
 	Failed bool
 	Wait   bool
 	Exit   *int
+}
+
+// foldAt is how much of a message the page shows before the fold.
+const foldAt = 1200
+
+// folded renders text: whole when it is short; else its start, cut at a
+// line, with the whole text to show under a fold.
+func folded(text string) (body, more template.HTML) {
+	if len(text) <= foldAt {
+		return markdown(text), ""
+	}
+	start := cutUTF8(text, foldAt)
+	if i := strings.LastIndex(start, "\n"); i > foldAt/2 {
+		start = text[:i] + "\n\n…"
+	}
+	return markdown(start), markdown(text)
 }
 
 // takesLine says whether a message routed to a session with track t will
@@ -657,11 +675,11 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 			}
 			secret := confidentialMatcher(cfg)
 			for _, m := range src.messages[repo] {
-				body := markdown(m.Text)
+				body, more := folded(m.Text)
 				if m.Text == "" || secret(m.Text) {
-					body = template.HTML(template.HTMLEscapeString(withheldMessage))
+					body, more = template.HTML(template.HTMLEscapeString(withheldMessage)), ""
 				}
-				mv := uiMessageView{uiMessage: m, Src: src.Name, Body: body}
+				mv := uiMessageView{uiMessage: m, Src: src.Name, Body: body, More: more}
 				if in := src.st.Instructions[m.ID]; in != nil && m.Kind == "instruction" {
 					mv.Steps = instructionSteps(src.st, in)
 					for _, tn := range in.Activity {
@@ -673,9 +691,10 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 					}
 					v.Live = v.Live || in.open(src.st, now) || in.Route && in.Failed == "" && in.Waiting == "" && in.Delivered.IsZero() && now.Sub(in.At) < ChatIdle && takesLine(src.st.Tracks[in.Session])
 					if !in.Replied.IsZero() {
-						mv.ReplyBy, mv.Replied, mv.Reply = in.Session, in.Replied, markdown(in.Reply)
+						mv.ReplyBy, mv.Replied = in.Session, in.Replied
+						mv.Reply, mv.ReplyMore = folded(in.Reply)
 						if in.Reply == "" || in.ReplyWithheld || secret(in.Reply) {
-							mv.Reply = template.HTML(template.HTMLEscapeString(withheldMessage))
+							mv.Reply, mv.ReplyMore = template.HTML(template.HTMLEscapeString(withheldMessage)), ""
 						}
 					}
 				}
@@ -712,6 +731,7 @@ type uiTurn struct {
 	Role string
 	At   time.Time
 	Body template.HTML
+	More template.HTML // the whole text of a long one, folded
 }
 
 // uiSessionPage is a session's view: its row, its latest turns, its
@@ -772,11 +792,11 @@ func (u *UI) sessionView(src *uiSource, name string, now time.Time) (*uiSessionP
 		turns = turns[len(turns)-uiTurns:]
 	}
 	for _, tr := range turns {
-		body := markdown(tr.Text)
+		body, more := folded(tr.Text)
 		if tr.Withheld || secret(tr.Text) {
-			body = template.HTML(template.HTMLEscapeString(withheldMessage))
+			body, more = template.HTML(template.HTMLEscapeString(withheldMessage)), ""
 		}
-		v.Turns = append(v.Turns, uiTurn{Role: tr.Role, At: tr.At, Body: body})
+		v.Turns = append(v.Turns, uiTurn{Role: tr.Role, At: tr.At, Body: body, More: more})
 	}
 	if sess, ok := cfg.Sessions[name]; ok && sess.Workdir != "" {
 		b, err := readRegular(filepath.Join(sess.Workdir, "STATUS.md"), statusLimit)

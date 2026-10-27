@@ -55,8 +55,9 @@ type SessionPolicy struct {
 }
 
 // DefaultTurnLength is how much of a turn is posted, in bytes, unless
-// policies.feed.turn_length says otherwise.
-const DefaultTurnLength = 300
+// policies.feed.turn_length says otherwise: a reply whole, as it is logged
+// (#56); the page folds a long one.
+const DefaultTurnLength = replyText
 
 // checkTurns checks every turns rule and the turn length, which can be no
 // more than what is read of a turn.
@@ -175,21 +176,28 @@ type TurnRecord struct {
 	At       time.Time `json:"at"`
 }
 
+// harnessLine is the start of a user entry Claude Code wrote itself, not a
+// prompt anyone typed: a <task-notification>, a <system-reminder>, a
+// <bash-input> or <bash-stdout>, a <command-name> and the like (#56).
+var harnessLine = regexp.MustCompile(`^<[a-z][a-z0-9-]*>`)
+
 // turnOf reads a transcript line as a turn: a main-chain user prompt in
-// the user's own words (not a tool result or a meta line), or a main-chain
-// assistant line that ends its turn with text.
+// the user's own words (not a tool result, a meta line, a compaction's
+// summary or an entry the harness injected), or a main-chain assistant
+// line that ends its turn with text.
 func turnOf(line []byte, n int) (TurnPayload, bool) {
 	var l struct {
 		Type        string `json:"type"`
 		IsSidechain bool   `json:"isSidechain"`
 		IsMeta      bool   `json:"isMeta"`
+		IsCompact   bool   `json:"isCompactSummary"`
 		Timestamp   string `json:"timestamp"`
 		Message     struct {
 			StopReason string          `json:"stop_reason"`
 			Content    json.RawMessage `json:"content"`
 		} `json:"message"`
 	}
-	if json.Unmarshal(line, &l) != nil || l.IsSidechain || l.IsMeta {
+	if json.Unmarshal(line, &l) != nil || l.IsSidechain || l.IsMeta || l.IsCompact {
 		return TurnPayload{}, false
 	}
 	var role string
@@ -221,7 +229,7 @@ func turnOf(line []byte, n int) (TurnPayload, bool) {
 		}
 		text = strings.Join(parts, "\n")
 	}
-	if text = strings.TrimSpace(text); text == "" {
+	if text = strings.TrimSpace(text); text == "" || role == TurnPrompt && harnessLine.MatchString(text) {
 		return TurnPayload{}, false
 	}
 	at, _ := time.Parse(time.RFC3339Nano, l.Timestamp)

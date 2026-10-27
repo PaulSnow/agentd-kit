@@ -124,10 +124,10 @@
 <h2 id="messages-h">Messages</h2>
 <ol class="messages">{{range .Messages}}<li class="msg msg-{{.Kind}}">
 <div class="msg-head"><span class="from">{{if .From}}{{.From}}{{else}}unknown{{end}}</span>{{if .Session}} <a href="/session/{{.Src}}/{{.Session}}">{{.Session}}</a>{{end}} <span class="badge">{{.Kind}}</span> <time class="muted">{{$.When .At}}</time></div>
-<div class="md">{{.Body}}</div>
+{{if .More}}<details class="more"><summary><div class="md">{{.Body}}</div><span class="more-label">Show all</span></summary><div class="md">{{.More}}</div></details>{{else}}<div class="md">{{.Body}}</div>{{end}}
 {{with .Steps}}<ol class="steps">{{range .}}<li class="step{{if .Failed}} step-failed{{else if .Wait}} step-wait{{end}}">{{.Text}}{{if not .At.IsZero}} <time class="muted">{{$.When .At}}</time>{{end}}</li>{{end}}</ol>{{end}}
 {{with .Activity}}<ol class="activity">{{range .}}<li class="tool{{if .Failed}} tool-failed{{end}}"><code>{{.Text}}</code>{{if .Failed}} <span class="badge">failed{{with .Exit}}, exit {{.}}{{end}}</span>{{end}}</li>{{end}}</ol>{{end}}
-{{if .ReplyBy}}<div class="msg msg-reply thread"><div class="msg-head"><a href="/session/{{.Src}}/{{.ReplyBy}}">{{.ReplyBy}}</a> <span class="badge">reply</span> <time class="muted">{{$.When .Replied}}</time></div><div class="md">{{.Reply}}</div></div>{{end}}
+{{if .ReplyBy}}<div class="msg msg-reply thread"><div class="msg-head"><a href="/session/{{.Src}}/{{.ReplyBy}}">{{.ReplyBy}}</a> <span class="badge">reply</span> <time class="muted">{{$.When .Replied}}</time></div>{{if .ReplyMore}}<details class="more"><summary><div class="md">{{.Reply}}</div><span class="more-label">Show all</span></summary><div class="md">{{.ReplyMore}}</div></details>{{else}}<div class="md">{{.Reply}}</div>{{end}}</div>{{end}}
 </li>{{else}}<li class="empty">No messages yet.</li>{{end}}</ol>
 </section>
 {{template "foot" .}}{{end}}
@@ -148,7 +148,7 @@
 </section>{{end}}
 <section id="turns" data-refresh aria-labelledby="turns-h">
 <h2 id="turns-h">Latest turns</h2>
-<ol class="messages">{{range .Turns}}<li class="msg msg-{{.Role}}"><div class="msg-head"><span class="from">{{.Role}}</span> <time class="muted">{{$.When .At}}</time></div><div class="md">{{.Body}}</div></li>{{else}}<li class="empty">No turns read yet.</li>{{end}}</ol>
+<ol class="messages">{{range .Turns}}<li class="msg msg-{{.Role}}"><div class="msg-head"><span class="from">{{.Role}}</span> <time class="muted">{{$.When .At}}</time></div>{{if .More}}<details class="more"><summary><div class="md">{{.Body}}</div><span class="more-label">Show all</span></summary><div class="md">{{.More}}</div></details>{{else}}<div class="md">{{.Body}}</div>{{end}}</li>{{else}}<li class="empty">No turns read yet.</li>{{end}}</ol>
 </section>
 <section id="status" data-refresh aria-labelledby="status-h">
 <h2 id="status-h">STATUS.md</h2>
