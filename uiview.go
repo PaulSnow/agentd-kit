@@ -555,6 +555,12 @@ type uiStep struct {
 	Exit   *int
 }
 
+// takesLine says whether a message routed to a session with track t will
+// be typed into it soon: it is working or idle, or not yet seen.
+func takesLine(t *Track) bool {
+	return t == nil || t.State == "" || t.State == Working || t.State == Idle || t.State == Starting
+}
+
 // instructionSteps is what became of instruction in, as the run's fold
 // holds it: received, routed or started, delivered, taken, or waiting
 // and why, or failed and why.
@@ -576,7 +582,11 @@ func instructionSteps(st *LogState, in *Instruction) []uiStep {
 	case in.Waiting != "":
 		steps = append(steps, uiStep{Text: "waiting: " + in.Waiting, Wait: true})
 	case in.Session != "" && in.Delivered.IsZero():
-		steps = append(steps, uiStep{Text: "waiting for " + in.Session + " to take a line; it is " + string(stateOf(st.Tracks[in.Session])), Wait: true})
+		why := "waiting for " + in.Session + " to take a line; it is " + string(stateOf(st.Tracks[in.Session]))
+		if t := st.Tracks[in.Session]; t != nil && t.State == BlockedOnOwner {
+			why = "waiting: " + in.Session + " waits on your answer to its questions; answer them, and agentd hands it the message"
+		}
+		steps = append(steps, uiStep{Text: why, Wait: true})
 	}
 	if !in.Delivered.IsZero() {
 		steps = append(steps, uiStep{Text: "delivered to " + in.Session, At: in.Delivered})
@@ -661,7 +671,7 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 						}
 						mv.Activity = append(mv.Activity, uiStep{Text: text, At: tn.At, Failed: tn.Failed, Exit: tn.Exit})
 					}
-					v.Live = v.Live || in.open(src.st, now) || in.Route && in.Failed == "" && in.Delivered.IsZero() && now.Sub(in.At) < ChatIdle
+					v.Live = v.Live || in.open(src.st, now) || in.Route && in.Failed == "" && in.Waiting == "" && in.Delivered.IsZero() && now.Sub(in.At) < ChatIdle && takesLine(src.st.Tracks[in.Session])
 					if !in.Replied.IsZero() {
 						mv.ReplyBy, mv.Replied, mv.Reply = in.Session, in.Replied, markdown(in.Reply)
 						if in.Reply == "" || in.ReplyWithheld || secret(in.Reply) {

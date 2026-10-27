@@ -317,7 +317,7 @@ func (s *Supervisor) measure(name string, sess Session, t *Track, toolsSince tim
 			for _, tn := range s.usage.turns(dir, id, t.TurnLines[id]) {
 				// A tool is logged only while the owner waits on the
 				// session's answer (#56): it is that answer's activity.
-				if tn.Role == TurnTool && (toolsSince.IsZero() || !tn.At.IsZero() && tn.At.Before(toolsSince.Add(-routeSkew))) {
+				if tn.Role == TurnTool && (toolsSince.IsZero() || tn.At.IsZero() || tn.At.Before(toolsSince.Add(-routeSkew))) {
 					continue
 				}
 				tn, raw := tn, tn // a turn of its own for the queued event; raw, as read, for its post

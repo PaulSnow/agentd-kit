@@ -479,7 +479,7 @@ func (st *LogState) instructionsFor(name string, undelivered bool) []*Instructio
 const instructionsKept = 20
 
 // InstructionDoc is one instruction as instructions.json holds it. New
-// marks one not answered yet.
+// marks one not answered yet, within ChatIdle of its delivery.
 type InstructionDoc struct {
 	ID   string    `json:"id"`
 	Text string    `json:"text"`
@@ -491,7 +491,7 @@ type InstructionDoc struct {
 // writeInstructions writes the instructions routed to the session to
 // instructions.json in its workdir, through a temporary file, and names
 // the new ones.
-func writeInstructions(workdir string, ins []*Instruction) error {
+func writeInstructions(workdir string, ins []*Instruction, now time.Time) error {
 	if len(ins) > instructionsKept {
 		ins = ins[len(ins)-instructionsKept:]
 	}
@@ -499,7 +499,7 @@ func writeInstructions(workdir string, ins []*Instruction) error {
 		Instructions []InstructionDoc `json:"instructions"`
 	}{Instructions: []InstructionDoc{}}
 	for _, in := range ins {
-		doc.Instructions = append(doc.Instructions, InstructionDoc{ID: in.ID, Text: in.Text, From: in.From, At: in.At, New: in.Replied.IsZero()})
+		doc.Instructions = append(doc.Instructions, InstructionDoc{ID: in.ID, Text: in.Text, From: in.From, At: in.At, New: in.Replied.IsZero() && (in.Delivered.IsZero() || now.Sub(in.Delivered) < ChatIdle)})
 	}
 	b, err := json.Marshal(doc)
 	if err != nil {
@@ -509,12 +509,13 @@ func writeInstructions(workdir string, ins []*Instruction) error {
 }
 
 // freshInstructions names the instructions routed to session name and not
-// yet delivered; with unanswered, also those delivered and not answered,
-// which a fresh session launched in its place is handed again.
-func (st *LogState) freshInstructions(name string, unanswered bool) []string {
+// yet delivered; with unanswered, also those delivered and not answered
+// within ChatIdle, which a fresh session launched in its place is handed
+// again. One older is let go: the owner has moved on.
+func (st *LogState) freshInstructions(name string, unanswered bool, now time.Time) []string {
 	var ids []string
 	for _, in := range st.instructionsFor(name, false) {
-		if in.Delivered.IsZero() || unanswered && in.Replied.IsZero() {
+		if in.Delivered.IsZero() || unanswered && in.Replied.IsZero() && now.Sub(in.Delivered) < ChatIdle {
 			ids = append(ids, in.ID)
 		}
 	}
@@ -526,7 +527,7 @@ func (st *LogState) freshInstructions(name string, unanswered bool) []string {
 // written to instructions.json, then the fixed pointer line typed, only
 // into a session that can take a line. It says whether it tried to type.
 func (s *Supervisor) deliverInstructions(name string, sess Session, t *Track, ev Evidence, state State) bool {
-	ids := s.st.freshInstructions(name, false)
+	ids := s.st.freshInstructions(name, false, s.clock.Now())
 	// Only a session that can take a line: never one waiting on the
 	// owner, whose answers reach it through deliverAnswers.
 	if len(ids) == 0 || !ev.Alive || t.Limited || ev.Dialog != "" || ev.TrustPrompt || state != Working && state != Idle {
@@ -539,7 +540,7 @@ func (s *Supervisor) deliverInstructions(name string, sess Session, t *Track, ev
 	ins := s.st.instructionsFor(name, false)
 	pointer := s.cfg.Policies.Instructions.Pointer
 	s.typeInto(name, ActInstruct, &ActPayload{Key: key, Instructions: ids, Message: pointer}, t, ev.PaneHash, func() error {
-		if err := writeInstructions(sess.Workdir, ins); err != nil {
+		if err := writeInstructions(sess.Workdir, ins, s.clock.Now()); err != nil {
 			return err
 		}
 		return s.tmux.Type(name, pointer)
@@ -582,7 +583,9 @@ func (st *LogState) instructionsDelivered(session string, a *ActPayload, at time
 // turn with is its answer.
 func (st *LogState) instructionTurn(session string, tn *TurnPayload) {
 	for _, in := range st.Instructions {
-		if in.Session != session || in.Delivered.IsZero() || !in.Replied.IsZero() {
+		// A turn ChatIdle after the delivery, by its own time, so a
+		// replay agrees, answers it no more: the owner has moved on.
+		if in.Session != session || in.Delivered.IsZero() || !in.Replied.IsZero() || !tn.At.IsZero() && tn.At.Sub(in.Delivered) >= ChatIdle {
 			continue
 		}
 		switch {

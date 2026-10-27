@@ -326,9 +326,10 @@ func (s *Supervisor) surfaceCutShort() {
 
 // Run passes until the context ends. A pass stopped by a failed append is
 // reported and the next pass tries again; with once, its error is returned.
-// The next pass comes after the poll interval, or sooner when another
-// process appended an owner record to the log (looked for every WakeCheck),
-// so a clear is acted on within a minute. What a worker finished is applied
+// The next pass comes after the poll interval (ChatPoll while a message
+// waits on its answer), or sooner when another process appended an owner
+// record to the log (looked for every WakeCheck), so a clear or a message
+// is acted on within seconds. What a worker finished is applied
 // at the next pass; it is in the log already. A run waits for its jobs
 // before it stops: a --once run for all of them, one told to stop for up
 // to StopWait.
@@ -797,7 +798,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 		// file is written first, and the prompt names it.
 		why := "restart"
 		ids, at := t.freshAnswers()
-		iids := s.st.freshInstructions(name, true)
+		iids := s.st.freshInstructions(name, true, now)
 		switch {
 		case len(ids) > 0 && len(iids) > 0:
 			why = "answered-instructed"
@@ -827,7 +828,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 				}
 			}
 			if len(iids) > 0 {
-				if err := writeInstructions(sess.Workdir, ins); err != nil {
+				if err := writeInstructions(sess.Workdir, ins, now); err != nil {
 					return err
 				}
 			}

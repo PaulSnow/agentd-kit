@@ -394,3 +394,24 @@ func TestAddressedMessageEdges(t *testing.T) {
 		t.Fatalf("the log folds to %+v, the run holds %+v", folded, live)
 	}
 }
+
+// A message its session never answers within ChatIdle is let go: a later
+// turn is not taken as its answer, nor is it handed over again.
+func TestUnansweredMessageLetGo(t *testing.T) {
+	h := turnsHarness(t)
+	h.ticks(3, time.Minute)
+	if err := UIInstruction(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", "b", "Rebase on main."); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(1, time.Minute)
+	h.clock.advance(ChatIdle)
+	at := h.clock.Now()
+	h.transcriptOf("b", "t1", promptLine("u1", "something else", at)+summaryLine("u2", "m1", "Done with something else.", at, 100))
+	h.ticks(2, time.Minute)
+	if in := h.instruction(t); in.Delivered.IsZero() || !in.Taken.IsZero() || in.Reply != "" || h.sup.st.chatInFlight(h.clock.Now()) {
+		t.Fatalf("an old message took a later turn: %+v", in)
+	}
+	if ids := h.sup.st.freshInstructions("b", true, h.clock.Now()); len(ids) != 0 {
+		t.Fatalf("an old message would be handed over again: %v", ids)
+	}
+}
