@@ -122,6 +122,21 @@
         "review": {"rounds": {"max": 3}},
         "scope": {"reserved": {"labels": ["owner-only"]}},
         "sessions": {"accounts": ["work"], "max": 2, "budget": {"session_tokens": 2000000}, "fallback": ["work", "spare"]}
+      },
+      "deploy": {
+        "clone": "~/repos/gitlab.example.com/example-org/widgets",
+        "tags": "^v[0-9]",
+        "gate": {"argv": ["scripts/parity.sh", "{tag}"], "timeout": "45m"},
+        "targets": {
+          "browser": {
+            "host": "service-host", "via": "ssh", "node": "host-b",
+            "check": {"url": "https://browser.example.com/api/version", "json_path": "version"},
+            "steps": [
+              {"name": "install", "run": ["/opt/widgets/install.sh", "{tag}"], "check": ["/opt/widgets/selftest.sh"], "rollback": ["/opt/widgets/install.sh", "previous"]}
+            ]
+          },
+          "signers": {"kind": "fleet", "heartbeats": "https://browser.example.com/api/heartbeats", "threshold": 5, "escalate_after": "24h"}
+        }
       }
     },
     "gadgets": {

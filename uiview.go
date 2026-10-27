@@ -726,6 +726,9 @@ func instructionSteps(st *LogState, in *Instruction) []uiStep {
 			case in.Replied.IsZero():
 				return append(steps, uiStep{Text: "the agent is working on it", Wait: true})
 			}
+			if a != nil && a.By != "" {
+				return append(steps, uiStep{Text: a.By + " answered", At: in.Replied})
+			}
 			return append(steps, uiStep{Text: "the agent answered", At: in.Replied})
 		}
 	}
