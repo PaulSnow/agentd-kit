@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -46,7 +47,7 @@ func issueBodySchema() json.RawMessage {
 // quoted, the facts, the records with their ids, and each topic's rules
 // in force and open questions, each with its sources. It refuses ids the
 // history does not hold, so a body never cites what cannot be read.
-func issueBody(cs *ContextStore, repo string, a issueBodyArgs, withheld func(string) string) (string, []problem) {
+func issueBody(cs *ContextStore, repo string, a issueBodyArgs) (string, []problem) {
 	h := cs.History(repo)
 	var problems []problem
 	if strings.TrimSpace(a.Title) == "" {
@@ -58,6 +59,11 @@ func issueBody(cs *ContextStore, repo string, a issueBodyArgs, withheld func(str
 	for _, id := range append(append([]string{}, a.Owner...), a.IDs...) {
 		if h.Record(id) == nil {
 			problems = append(problems, problem{format: "history holds no record %s", args: []any{id}})
+		}
+	}
+	for _, id := range a.Owner {
+		if r := h.Record(id); r != nil && !inList(r.Kind, ownerKinds) {
+			problems = append(problems, problem{format: "%s is a %s, not the owner's words: those are an instruction, a ruling or an answer", args: []any{id, r.Kind}})
 		}
 	}
 	if len(problems) > 0 {
@@ -78,13 +84,17 @@ func issueBody(cs *ContextStore, repo string, a issueBodyArgs, withheld func(str
 	}
 	b.WriteString("\n## What was observed\n\n")
 	for _, f := range a.Facts {
-		b.WriteString("- " + oneLine(withheld(f), 600) + "\n")
+		b.WriteString("- " + oneLine(f, 600) + "\n")
 	}
 	if len(a.IDs) > 0 {
 		b.WriteString("\n## Records\n\n")
 		for _, id := range a.IDs {
 			r := h.Record(id)
-			fmt.Fprintf(&b, "- `%s` %s, %s: %s\n", r.ID, r.Kind, r.At.UTC().Format("2006-01-02 15:04Z"), r.summary())
+			line := fmt.Sprintf("- `%s` %s, %s", r.ID, r.Kind, r.At.UTC().Format("2006-01-02 15:04Z"))
+			if !inList(r.Kind, []string{HistComment, HistIssue, HistRequest, HistItem}) {
+				line += ": " + r.summary() // a forge record's begins with a person's login
+			}
+			b.WriteString(line + "\n")
 		}
 	}
 	var decisions []string
@@ -107,7 +117,28 @@ func issueBody(cs *ContextStore, repo string, a issueBodyArgs, withheld func(str
 	if len(decisions) > 0 {
 		b.WriteString("\n## Decisions so far\n\n" + strings.Join(decisions, "\n") + "\n")
 	}
-	return cutUTF8(b.String(), issueBodyMax), nil
+	body := noMentions(b.String())
+	if len(body) > issueBodyMax {
+		return "", []problem{{format: "the body would be %d bytes, over %d: name fewer records or facts", args: []any{len(body), issueBodyMax}}}
+	}
+	// Screened whole, with every pattern, file-added ones too: an issue is
+	// public.
+	if i := withheldBy(cs.patterns(), body, a.Title); i > 0 {
+		return "", []problem{{format: "the body or title matches confidential pattern %d: leave that record or fact out", args: []any{i}}}
+	}
+	return body, nil
+}
+
+// ownerKinds are the records that hold the owner's own words.
+var ownerKinds = []string{HistInstruction, HistRuling, HistAnswer}
+
+// mentionPattern is an @-mention, which a forge would notify.
+var mentionPattern = regexp.MustCompile(`@([A-Za-z0-9])`)
+
+// noMentions keeps what Go writes to a forge from notifying anyone: a
+// zero-width joiner after each @ breaks the mention and reads the same.
+func noMentions(s string) string {
+	return mentionPattern.ReplaceAllString(s, "@\u200d$1")
 }
 
 func codeList(ids []string) string {
@@ -148,16 +179,21 @@ func outcomeComment(o ThreadOutcome) string {
 	if len(o.Records) > 0 {
 		body += "\n\nSources: " + codeList(o.Records)
 	}
-	return body
+	return noMentions(body)
 }
 
 // ActComment is a comment agentd posted on an issue or a request.
 const ActComment = "comment"
 
+// threadIDPattern is a thread's id as an outcome may name it.
+var threadIDPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
+
 // PostOutcome posts a thread's outcome on its issue or request, where the
 // repository's delivery allows comments, and logs it: intent, then the
-// action or the error. A shadow run logs what it would post. An outcome
-// whose words match a confidential pattern is refused.
+// action or the error. One already posted, by thread and reference, is
+// not posted again. A shadow run logs what it would post. An outcome
+// whose words match a confidential pattern is refused. It runs on the
+// loop or in a worker (spawnShared), as every write does.
 func (s *Supervisor) PostOutcome(o ThreadOutcome) error {
 	switch {
 	case o.Kind != OutcomeDecision && o.Kind != OutcomeResult:
@@ -166,14 +202,26 @@ func (s *Supervisor) PostOutcome(o ThreadOutcome) error {
 		return fmt.Errorf("%q is not an issue or request reference", o.Ref)
 	case strings.TrimSpace(o.Text) == "" || len(o.Text) > outcomeMax:
 		return fmt.Errorf("an outcome's text is 1 to %d bytes", outcomeMax)
-	case o.Thread == "":
-		return errors.New("an outcome names its thread")
+	case !threadIDPattern.MatchString(o.Thread):
+		return errors.New("an outcome names its thread by its id")
+	}
+	for _, id := range o.Records {
+		if !threadIDPattern.MatchString(id) {
+			return fmt.Errorf("%q is not a record id", id)
+		}
+	}
+	key := "outcome:" + o.Thread + ":" + o.Ref
+	if _, done := s.st.Commented[key]; done {
+		return nil
+	}
+	if err := s.forge.allowed(o.Repository, ActComment); err != nil {
+		return err // refused before anything is logged, in a shadow run too
 	}
 	body := outcomeComment(o)
 	if i := s.confidentialMatch(body); i > 0 {
 		return fmt.Errorf("the outcome matches confidential pattern %d: post it by hand, if at all", i)
 	}
-	a := &ActPayload{Repository: o.Repository, Ref: o.Ref, Key: "outcome:" + o.Thread + ":" + o.Ref, Message: body}
+	a := &ActPayload{Repository: o.Repository, Ref: o.Ref, Key: key, Message: body}
 	return s.act("", ActComment, a, func() error { return s.forge.CommentAllowed(o.Repository, o.Ref, body) })
 }
 

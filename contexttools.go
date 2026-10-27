@@ -118,9 +118,9 @@ func (srv *MCPServer) contextCall(tool string, args json.RawMessage) (string, bo
 		var a issueBodyArgs
 		if problems = srv.decodeArgs(args, &a); problems == nil {
 			var body string
-			if body, problems = issueBody(cs, repo, a, srv.withheld); problems == nil {
+			if body, problems = issueBody(cs, repo, a); problems == nil {
 				q.IDs, q.Records = append(append([]string{}, a.Owner...), a.IDs...), len(a.Owner)+len(a.IDs)
-				reply = map[string]any{"title": oneLine(srv.withheld(a.Title), 300), "body": body}
+				reply = map[string]any{"title": noMentions(oneLine(a.Title, 300)), "body": body}
 			}
 		}
 	}
