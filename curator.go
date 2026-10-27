@@ -39,8 +39,10 @@ const (
 	DefaultCuratorMaxInput = 16 * 1024
 	DefaultCuratorPerDay   = 300
 	DefaultCuratorLookback = 72 * time.Hour
-	// curatorRecordText is the most of one record a curator is sent.
+	// curatorRecordText is the most of one record a curator is sent, and
+	// curatorOwnerText of what the owner or an issue's thread says.
 	curatorRecordText = 1500
+	curatorOwnerText  = 6000
 	// curatorCards is the most topic cards the repository's curator is sent.
 	curatorCards = 20
 )
@@ -193,8 +195,12 @@ func (cs *ContextStore) curatorDue(cfg CuratorConfig, repo, topic string, now ti
 	limit := cfg.maxInput()
 	for i, r := range fresh {
 		w := HistWhole{HistRecord: *r}
-		if len(w.Text) > curatorRecordText {
-			w.Text, w.Cut = cutUTF8(w.Text, curatorRecordText), true
+		keep := curatorRecordText
+		if inList(r.Kind, []string{HistIssue, HistRequest, HistComment, HistInstruction, HistRuling, HistAnswer}) {
+			keep = curatorOwnerText
+		}
+		if len(w.Text) > keep {
+			w.Text, w.Cut = cutUTF8(w.Text, keep), true
 		}
 		in.New = append(in.New, w)
 		if b, _ := json.Marshal(in); len(b) > limit {
@@ -273,6 +279,7 @@ const curatorSystem = `You keep one state card of a software repository: what is
 	`add_rules: rules the owner set that are in force. add_questions: questions open for the owner, with their options. add_problems: known problems. ` +
 	`retire a rule only when a new record supersedes it, a question only when a new record answers it, a problem when it is fixed, and cite that record. ` +
 	`When two sources disagree, as two rulings that conflict, do not choose: add a conflict naming the rule's id, with the question and each side as an option. ` +
+	`A record with cut true was shortened for you: what it leaves out is not a question for the owner. ` +
 	`Mark a claim you are unsure of with confidence "low". Leave out what has not changed. Keep the card small: retire what no longer holds. ` +
 	`asked lists what agents found missing from the card: add it when the records show it. refused, when set, is why your last diff was refused: do not repeat it. ` +
 	`For the repository's card, cards lists the topic cards that changed: cite them as card:TOPIC.`

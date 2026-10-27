@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -117,7 +119,7 @@ func contextStats(events []Event, repo string, since time.Time) ContextStats {
 // contextCmd is agentd context: stats measures a repository's use of the
 // context tools; card prints a topic's card, or the repository's.
 func contextCmd(args []string, w io.Writer) error {
-	usage := errors.New("usage: agentd context [--config PATH] [--log PATH] stats REPO [--since 24h] | card REPO [TOPIC]")
+	usage := errors.New("usage: agentd context [--config PATH] [--log PATH] stats REPO [--since 24h] | card REPO [TOPIC] | curate REPO TOPIC [--call]")
 	fs := flag.NewFlagSet("context", flag.ContinueOnError)
 	cfg, _, err := loadConfigFlag(fs, args)
 	if err != nil {
@@ -148,6 +150,16 @@ func contextCmd(args []string, w io.Writer) error {
 		}
 		_, err = fmt.Fprintln(w, compact(contextStats(events, rest[1], time.Now().Add(-*span))))
 		return err
+	case "curate":
+		sub := flag.NewFlagSet("context curate", flag.ContinueOnError)
+		call := sub.Bool("call", false, "make the call; without it only the input is printed")
+		if len(rest) < 3 {
+			return usage
+		}
+		if err := sub.Parse(rest[3:]); err != nil {
+			return err
+		}
+		return curateOnce(cfg, events, rest[1], rest[2], *call, w)
 	case "card":
 		if len(rest) > 3 {
 			return usage
@@ -168,4 +180,42 @@ func contextCmd(args []string, w io.Writer) error {
 		return err
 	}
 	return usage
+}
+
+// curateOnce builds topic's curator input from the log, and an issue's or
+// request's thread as the forge has it, as if it were due now, prints it, and with call makes the one call and prints the card
+// Go would make of the answer, or why it refuses it. It logs nothing.
+func curateOnce(cfg *Config, events []Event, repo, topic string, call bool, w io.Writer) error {
+	if cardKindOf(topic) == "" {
+		return fmt.Errorf("%s keeps no card", topic)
+	}
+	cs := NewContextStore(projected(cfg, events))
+	for _, e := range events {
+		cs.Apply(e)
+	}
+	if k := cardKindOf(topic); k == CardIssue || k == CardRequest {
+		p := cs.ReadThread(ExecForgeAPI{Timeout: cfg.Timeouts.Forge.Duration}, repo, topic)
+		if p.Error != "" {
+			fmt.Fprintln(w, "thread:", p.Error)
+		}
+		cs.Apply(Event{Time: time.Now(), Kind: KindThread, Mode: ModeShared, Thread: p})
+	}
+	k := cfg.Jobs.Curator
+	k.Quiet, k.MaxWait, k.Gap, k.Lookback = Duration{time.Nanosecond}, Duration{time.Nanosecond}, Duration{time.Nanosecond}, Duration{100 * 365 * 24 * time.Hour}
+	c := cs.curatorDue(k, repo, topic, time.Now())
+	if c == nil {
+		return fmt.Errorf("nothing new on %s since its last curation", topic)
+	}
+	fmt.Fprintf(w, "input: %d bytes, %d records\n", len(c.input), len(c.records))
+	if !call {
+		_, err := fmt.Fprintln(w, string(c.input))
+		return err
+	}
+	job := jobFromConfig(cfg)
+	job.MaxInput = k.maxInput() + 1024
+	p := curate(c, job, func(j Job, input []byte) (json.RawMessage, JobUsage, error) {
+		return j.Run(context.Background(), curatorSystem, curatorSchema(), input)
+	}, time.Now())
+	_, err := fmt.Fprintln(w, compact(p))
+	return err
 }

@@ -515,7 +515,7 @@ type HistWhole struct {
 // answer fits the budget; an unknown id is named in missing.
 func (h *History) ByIDs(ids []string, budget int) map[string]any {
 	limit := budgetBytes(budgetOf(budget))
-	var recs []HistWhole
+	recs := []HistWhole{}
 	var missing []string
 	for _, id := range ids {
 		if r := h.byID[id]; r != nil {

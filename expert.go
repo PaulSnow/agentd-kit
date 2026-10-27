@@ -156,6 +156,9 @@ func (srv *MCPServer) askExpert(cs *ContextStore, args json.RawMessage, q *Query
 		}
 	}
 	in := map[string]any{"question": a.Question, "repository": repo, "cards": cards, "records": recs["records"]}
+	if m, ok := recs["missing"]; ok {
+		in["missing"] = m // ids history does not hold, so the expert does not guess at them
+	}
 	job := jobFromConfig(srv.cfg)
 	job.Model = q.Model
 	job.Timeout = srv.cfg.Jobs.Expert.Timeout.Duration
