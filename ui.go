@@ -93,10 +93,13 @@ func parseWhois(out []byte) (string, error) {
 
 // uiKeptMessages is how many console messages a source keeps for each
 // repository, and as many of its sessions' turns besides; uiKeptEvents
-// is how many events for each session.
+// is how many events for each session; uiTurnRefs bounds the prompts
+// read whose console message has not come, which a prompt the console
+// rule does not post never has.
 const (
 	uiKeptMessages = 200
 	uiKeptEvents   = 40
+	uiTurnRefs     = 1024
 )
 
 // uiMessage is one line of a repository's console, or of a console
@@ -110,6 +113,9 @@ type uiMessage struct {
 	Session string
 	Text    string
 	ID      string // an instruction's, whose steps the view reads from the fold
+	// Ref is where a session's turn was read, when its turn is logged,
+	// for its prompt page (#58).
+	Ref *promptRef
 }
 
 // turn says whether m is a session's turn (#38).
@@ -132,6 +138,9 @@ type uiSource struct {
 	messages map[string][]uiMessage // by repository or console without one, oldest first
 	events   map[string][]Event     // by session, oldest first
 	askedAt  map[string]time.Time   // when each decision was first seen, by session and id
+	// turnRefs holds where each prompt logged was read, by the id of the
+	// console message it is posted as, until that message comes.
+	turnRefs map[string]promptRef
 	// echo marks a shadow source over a live source's log: the owner's
 	// records and the shared facts are the live source's to show.
 	echo bool
@@ -139,7 +148,7 @@ type uiSource struct {
 
 func newUISource(name string, cfg *Config, log *Log, mode, host string) *uiSource {
 	return &uiSource{Name: name, cfg: cfg, log: log, st: NewLogState(cfg, mode), host: host,
-		messages: map[string][]uiMessage{}, events: map[string][]Event{}, askedAt: map[string]time.Time{}}
+		messages: map[string][]uiMessage{}, events: map[string][]Event{}, askedAt: map[string]time.Time{}, turnRefs: map[string]promptRef{}}
 }
 
 // catchUp applies the events appended since the last look, and keeps the
@@ -201,6 +210,12 @@ func (src *uiSource) catchUp() error {
 			}
 			src.events[e.Session] = es
 		}
+		if e.Kind == KindTurn && e.Turn != nil && e.Session != "" && (e.Turn.Role == TurnPrompt || e.Turn.Role == TurnCompact) {
+			if len(src.turnRefs) >= uiTurnRefs {
+				clear(src.turnRefs)
+			}
+			src.turnRefs[turnMessageID(e.Session, e.Turn.Transcript, e.Turn.Line)] = promptRef{e.Turn.Transcript, e.Turn.Line, e.Turn.Role}
+		}
 		switch {
 		case e.Feed != nil && (e.Feed.Phase == FeedIntent || e.Feed.Phase == FeedWould) && e.Feed.Text != "":
 			add(e.Feed.Repository, uiMessage{At: e.Time, Kind: "feed", From: "agentd", Text: e.Feed.Text})
@@ -238,6 +253,10 @@ func (src *uiSource) catchUp() error {
 			m := uiMessage{At: e.Time, Kind: e.Message.Kind, From: e.Message.From, Text: e.Message.Text}
 			if m.turn() {
 				m.Session = e.Message.From // a session's turn links to its page
+				if ref, ok := src.turnRefs[e.Message.ID]; ok && m.Kind == MessagePrompt {
+					m.Ref = &ref
+					delete(src.turnRefs, e.Message.ID)
+				}
 			}
 			if _, ok := cfg.Consoles[e.Message.Console]; ok {
 				add(e.Message.Console, m)
@@ -486,6 +505,16 @@ func (u *UI) serveView(w http.ResponseWriter, r *http.Request) {
 	default:
 		parts := strings.Split(strings.TrimPrefix(path, "/session/"), "/")
 		src := u.source(parts[0])
+		if len(parts) == 4 && parts[2] == "prompt" && src != nil {
+			name = "prompt"
+			var v *uiPromptPage
+			if v, err = u.promptView(src, parts[1], parts[3], now); err == nil && v == nil {
+				http.NotFound(w, r)
+				return
+			}
+			view = v
+			break
+		}
 		if len(parts) != 2 || src == nil {
 			http.NotFound(w, r)
 			return

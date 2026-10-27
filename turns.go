@@ -107,7 +107,7 @@ func (s *Supervisor) postTurn(name string, tn TurnPayload) {
 		return
 	case tn.Role == TurnSummary && rule == TurnsAll:
 		kind = MessageReply
-	case tn.Role != TurnPrompt:
+	case tn.Role != TurnPrompt && tn.Role != TurnCompact:
 		return
 	}
 	// A turn without a time is as old as a backlog's, and so is one
@@ -119,13 +119,24 @@ func (s *Supervisor) postTurn(name string, tn TurnPayload) {
 	if !s.cfg.knownConsole(console) {
 		return
 	}
-	m := &MessagePayload{ID: "T" + shortHash(HashPane(name + "\n" + tn.Transcript + "\n" + fmt.Sprint(tn.Line)))[:8],
+	m := &MessagePayload{ID: turnMessageID(name, tn.Transcript, tn.Line),
 		Console: console, Kind: kind, From: name, Text: cutUTF8(tn.Text, s.cfg.Policies.Feed.TurnLength)}
 	// The session's name stays, as it does in every event of the session.
 	if i := s.confidentialMatch(tn.Text, name); i > 0 {
 		m.Text, m.Withheld = "", i
 	}
+	// A compaction's summary is no prompt: the console says what it is,
+	// and its page shows it (#58).
+	if tn.Role == TurnCompact {
+		m.Text, m.Withheld = compactPosted, 0
+	}
 	s.emit("", Event{Kind: KindMessage, Mode: ModeShared, Message: m})
+}
+
+// turnMessageID is the id of the console message session name's turn at
+// line of transcript is posted as: the console finds the turn by it.
+func turnMessageID(name, transcript string, line int) string {
+	return "T" + shortHash(HashPane(name + "\n" + transcript + "\n" + fmt.Sprint(line)))[:8]
 }
 
 const (
@@ -141,7 +152,15 @@ const (
 	TurnPrompt  = "prompt"  // what the session was asked
 	TurnSummary = "summary" // the text it ended a turn with
 	TurnTool    = "tool"    // a tool it ran: its one-line target and outcome (#56)
+	TurnCompact = "compact" // the summary a compaction began its context with (#58): no prompt
 )
+
+// compactOpening is how Claude Code begins a compaction's summary, read
+// as one where the line does not say so.
+const compactOpening = "This session is being continued from a previous conversation"
+
+// compactPosted is what the console is told of a compaction.
+const compactPosted = "Context compacted."
 
 // toolsPending bounds the tool calls a transcript reader holds awaiting
 // their results, and toolsRead the tools run it holds until they are
@@ -170,10 +189,13 @@ type TurnPayload struct {
 
 // TurnRecord is a turn as a Track holds it.
 type TurnRecord struct {
-	Role     string    `json:"role"`
-	Text     string    `json:"text,omitempty"`
-	Withheld bool      `json:"withheld,omitempty"`
-	At       time.Time `json:"at"`
+	// Where it was read, so its page reads it whole (#58).
+	Transcript string    `json:"transcript,omitempty"`
+	Line       int       `json:"line,omitempty"`
+	Role       string    `json:"role"`
+	Text       string    `json:"text,omitempty"`
+	Withheld   bool      `json:"withheld,omitempty"`
+	At         time.Time `json:"at"`
 }
 
 // harnessLine is the start of a user entry Claude Code wrote itself, not a
@@ -189,11 +211,18 @@ func injected(text string) bool {
 	return m != nil && strings.Contains(text, "</"+m[1]+">")
 }
 
-// turnOf reads a transcript line as a turn: a main-chain user prompt in
-// the user's own words (not a tool result, a meta line, a compaction's
-// summary or an entry the harness injected), or a main-chain assistant
-// line that ends its turn with text.
+// turnOf reads a transcript line as a turn, its text cut at turnRead.
 func turnOf(line []byte, n int) (TurnPayload, bool) {
+	tn, ok := wholeTurn(line, n)
+	tn.Text = cutUTF8(tn.Text, turnRead)
+	return tn, ok
+}
+
+// wholeTurn reads a transcript line as a turn, its text whole: a
+// main-chain user prompt in the user's own words (not a tool result, a
+// meta line or an entry the harness injected), a compaction's summary,
+// or a main-chain assistant line that ends its turn with text.
+func wholeTurn(line []byte, n int) (TurnPayload, bool) {
 	var l struct {
 		Type        string `json:"type"`
 		IsSidechain bool   `json:"isSidechain"`
@@ -205,11 +234,13 @@ func turnOf(line []byte, n int) (TurnPayload, bool) {
 			Content    json.RawMessage `json:"content"`
 		} `json:"message"`
 	}
-	if json.Unmarshal(line, &l) != nil || l.IsSidechain || l.IsMeta || l.IsCompact {
+	if json.Unmarshal(line, &l) != nil || l.IsSidechain || l.IsMeta && !l.IsCompact {
 		return TurnPayload{}, false
 	}
 	var role string
 	switch {
+	case l.Type == "user" && l.IsCompact:
+		role = TurnCompact
 	case l.Type == "user":
 		role = TurnPrompt
 	case l.Type == "assistant" && l.Message.StopReason == "end_turn":
@@ -244,8 +275,11 @@ func turnOf(line []byte, n int) (TurnPayload, bool) {
 	if text = strings.TrimSpace(text); text == "" || role == TurnPrompt && injected(text) {
 		return TurnPayload{}, false
 	}
+	if role == TurnPrompt && strings.HasPrefix(text, compactOpening) {
+		role = TurnCompact
+	}
 	at, _ := time.Parse(time.RFC3339Nano, l.Timestamp)
-	return TurnPayload{Line: n, Role: role, Text: cutUTF8(text, turnRead), At: at}, true
+	return TurnPayload{Line: n, Role: role, Text: text, At: at}, true
 }
 
 // noteTurn keeps a turn read from the transcript until it is logged; the
@@ -392,7 +426,8 @@ func (r *usageReader) turns(dir, id string, after int) []TurnPayload {
 
 // applyTurn folds a logged turn into the session's Track. A tool turn
 // only moves the line read: it is the instructions' activity, not a turn
-// rotation or the nudges count.
+// rotation or the nudges count. A compaction is kept to show, and counts
+// as no turn.
 func (t *Track) applyTurn(tn *TurnPayload) {
 	if t.TurnLines == nil {
 		t.TurnLines = map[string]int{}
@@ -403,13 +438,15 @@ func (t *Track) applyTurn(tn *TurnPayload) {
 	if tn.Role == TurnTool {
 		return
 	}
-	t.TurnCount++
+	if tn.Role != TurnCompact {
+		t.TurnCount++
+	}
 	// A turn ended since the last nudge answered it, however soon after:
 	// the idle clock and the nudge count start again from its end.
 	if tn.Role == TurnSummary && t.Nudges > 0 && tn.At.After(t.LastNudge) {
 		t.Nudges, t.HashSince = 0, tn.At
 	}
-	r := TurnRecord{Role: tn.Role, Text: tn.Text, Withheld: tn.Withheld > 0, At: tn.At}
+	r := TurnRecord{Transcript: tn.Transcript, Line: tn.Line, Role: tn.Role, Text: tn.Text, Withheld: tn.Withheld > 0, At: tn.At}
 	if len(t.Turns) == turnsKept {
 		t.Turns = t.Turns[1:len(t.Turns):len(t.Turns)]
 	}

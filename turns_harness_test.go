@@ -20,9 +20,9 @@ func injectedLine(uuid, text string, at time.Time, extra map[string]any) string 
 }
 
 // Only real prompts are turns: a task notification, a system reminder, a
-// shell escape's input and output, a slash command and a compaction's
-// summary are the harness's, not anyone's prompt. A long reply is posted
-// whole, and the page folds it.
+// shell escape's input and output and a slash command are the harness's,
+// not anyone's prompt; a compaction's summary is posted as one, linked to
+// its text (#58). A long reply is posted whole, and the page folds it.
 func TestOnlyRealPromptsAndWholeReplies(t *testing.T) {
 	h := turnsHarness(t)
 	at := h.clock.Now()
@@ -40,7 +40,7 @@ func TestOnlyRealPromptsAndWholeReplies(t *testing.T) {
 		promptLine("u10", "<b>bold</b> renders raw", at))
 	h.ticks(3, time.Minute)
 	got := h.turnMessages()
-	if len(got) != 4 || got[3].Text != "<b>bold</b> renders raw" || got[0].Text != "Build the widget." || got[1].Kind != MessageReply || got[1].Text != strings.TrimSpace(long) || got[2].Text != "<div> breaks on mobile" {
+	if len(got) != 5 || got[4].Text != "<b>bold</b> renders raw" || got[0].Text != "Build the widget." || got[1].Text != compactPosted || got[2].Kind != MessageReply || got[2].Text != strings.TrimSpace(long) || got[3].Text != "<div> breaks on mobile" {
 		var kinds []string
 		for _, m := range got {
 			kinds = append(kinds, m.Kind+":"+cutUTF8(m.Text, 30))
@@ -49,7 +49,8 @@ func TestOnlyRealPromptsAndWholeReplies(t *testing.T) {
 	}
 	u, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
 	page := owner(t, u, "/console/widgets")
-	if strings.Contains(page, "task-notification") || !strings.Contains(page, `<details class="more" data-key="m-night-a-`) || !strings.Contains(page, "Show all") {
+	if strings.Contains(page, "task-notification") || !strings.Contains(page, `<details class="more" data-key="m-night-a-`) || !strings.Contains(page, "Show all") ||
+		!strings.Contains(page, `<a href="/session/night/a/prompt/t1.7">Context compacted →</a>`) || strings.Contains(page, "being continued") {
 		t.Fatalf("console:\n%s", page)
 	}
 	if !strings.Contains(owner(t, u, "/session/night/a"), `<details class="more" data-key="t-`) {

@@ -420,8 +420,8 @@ func (e Event) check() error {
 		return errors.New("a deadline event is the owner's, for one session")
 	case e.Kind == KindDecision && (e.Mode == ModeOwner || e.Session == ""):
 		return errors.New("a decision event is a run's, for one session")
-	case e.Kind == KindTurn && (e.Mode == ModeOwner || e.Mode == ModeShared || e.Session == "" || e.Turn.Role != TurnPrompt && e.Turn.Role != TurnSummary && e.Turn.Role != TurnTool):
-		return errors.New("a turn event is a run's, for one session, and a prompt, a summary or a tool")
+	case e.Kind == KindTurn && (e.Mode == ModeOwner || e.Mode == ModeShared || e.Session == "" || e.Turn.Role != TurnPrompt && e.Turn.Role != TurnSummary && e.Turn.Role != TurnTool && e.Turn.Role != TurnCompact):
+		return errors.New("a turn event is a run's, for one session, and a prompt, a summary, a tool or a compaction")
 	case e.Kind == KindCoordinator && (e.Coordinator.Repository == "" || !(e.Mode == ModeShared && e.Session != "" || e.Mode == ModeOwner && e.Session == "")):
 		return errors.New("a coordinator claim is a shared fact of one session; a release is the owner's, for no session")
 	case e.Kind == KindCI && (e.Mode == ModeOwner || e.Mode == ModeShared || e.Session == "" || e.CI.Repository == "" || e.CI.Ref == ""):

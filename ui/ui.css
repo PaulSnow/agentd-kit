@@ -108,6 +108,10 @@ details[open] > summary { margin-bottom: var(--space-2); }
 .md code { font-family: var(--mono); font-size: .9em; background: var(--chip-bg); padding: 0 .2em; border-radius: .2em; }
 .md pre { background: var(--chip-bg); padding: var(--space-2) var(--space-3); border-radius: var(--radius); white-space: pre-wrap; overflow-wrap: anywhere; }
 .md pre code { background: none; padding: 0; }
+pre.json { font-family: var(--mono); font-size: .9em; background: var(--chip-bg); padding: var(--space-2) var(--space-3); border-radius: var(--radius); white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+.prompt-line { margin: 0; }
+.prompt-line a { white-space: nowrap; }
+.card-head code { overflow-wrap: anywhere; }
 .question { font-size: var(--size-m); font-weight: 600; margin-bottom: var(--space-2); }
 .context { border-left: 3px solid var(--line); padding-left: var(--space-3); margin: var(--space-2) 0; }
 .facts { display: grid; grid-template-columns: auto 1fr; gap: var(--space-1) var(--space-3); margin: var(--space-2) 0; font-size: var(--size-s); }
