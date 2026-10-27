@@ -154,6 +154,9 @@ func UIInstruction(cfg *Config, log *Log, now time.Time, repo, to, text string) 
 		if !ok {
 			return fmt.Errorf("no session %q", to)
 		}
+		if sess.Role != "" {
+			return fmt.Errorf("%s is a %s and takes no messages", to, sess.Role)
+		}
 		if sess.Repository != repo && cfg.Console(to) != repo {
 			return fmt.Errorf("session %q is not %s's", to, repo)
 		}
@@ -312,10 +315,12 @@ func (s *Supervisor) endIdleChats(now time.Time) {
 		}
 		last, open := s.st.StartedAt[name], false
 		for _, in := range s.st.instructionsFor(name, false) {
-			if in.At.After(last) {
-				last = in.At
+			for _, at := range []time.Time{in.At, in.Replied} {
+				if at.After(last) {
+					last = at
+				}
 			}
-			open = open || in.Replied.IsZero()
+			open = open || in.open(s.st, now)
 		}
 		if !open && now.Sub(last) >= ChatIdle {
 			if s.emit(name, Event{Kind: KindSession, Mode: ModeShared, Runtime: &RuntimePayload{ID: newIntentID(), Action: SessionEnd, Repository: p.Repository, By: "agentd"}}); s.halt != nil {
@@ -325,15 +330,35 @@ func (s *Supervisor) endIdleChats(now time.Time) {
 	}
 }
 
-// chatInFlight says whether an instruction is delivered and not yet
-// answered, for a pass every ChatPoll.
-func (st *LogState) chatInFlight() bool {
+// open says whether in is delivered and not yet answered, by a session
+// that may still answer it, within ChatIdle of its delivery.
+func (in *Instruction) open(st *LogState, now time.Time) bool {
+	t := st.Tracks[in.Session]
+	return in.Route && in.Failed == "" && !in.Delivered.IsZero() && in.Replied.IsZero() && now.Sub(in.Delivered) < ChatIdle &&
+		(t == nil || !t.Parked && t.State != Done && t.State != Stopped && t.State != CrashLooping)
+}
+
+// chatInFlight says whether an instruction is open, for a pass every
+// ChatPoll.
+func (st *LogState) chatInFlight(now time.Time) bool {
 	for _, in := range st.Instructions {
-		if in.Route && !in.Delivered.IsZero() && in.Replied.IsZero() && in.Failed == "" {
+		if in.open(st, now) {
 			return true
 		}
 	}
 	return false
+}
+
+// openSince is the earliest delivery of the instructions open on session
+// name, zero when none is: the tools it runs from then on are logged.
+func (st *LogState) openSince(name string, now time.Time) time.Time {
+	var since time.Time
+	for _, in := range st.Instructions {
+		if in.Session == name && in.open(st, now) && (since.IsZero() || in.Delivered.Before(since)) {
+			since = in.Delivered
+		}
+	}
+	return since
 }
 
 // routeOne finds the session for in, starting one when it must.
@@ -342,8 +367,18 @@ func (s *Supervisor) routeOne(in *Instruction, now time.Time) {
 		s.routeStep(in, RouteFail, "", false, fmt.Sprintf("its text matched confidential pattern %d, so it was never logged and agentd cannot deliver it; reword it, or type it into the session yourself", in.Withheld))
 		return
 	}
-	if in.To != "" && s.takesInstructions(in.To) {
-		s.routeStep(in, RouteTo, in.To, false, "")
+	if in.To != "" {
+		// A message the owner addressed goes to that session or nowhere:
+		// another session has not its context.
+		t := s.st.Tracks[in.To]
+		switch sess, ok := s.cfg.Sessions[in.To]; {
+		case s.takesInstructions(in.To):
+			s.routeStep(in, RouteTo, in.To, false, "")
+		case !ok || sess.Role != "" || t != nil && t.State == Done:
+			s.routeStep(in, RouteFail, "", false, in.To+" is not running, or finished, or takes no messages; write to the console's chat instead")
+		default:
+			s.routeStep(in, RouteWait, "", false, in.To+" is "+string(stateOf(t))+"; agentd hands it the message once it can take one")
+		}
 		return
 	}
 	if len(in.Repositories) == 0 {
@@ -444,7 +479,7 @@ func (st *LogState) instructionsFor(name string, undelivered bool) []*Instructio
 const instructionsKept = 20
 
 // InstructionDoc is one instruction as instructions.json holds it. New
-// marks one not handed over before.
+// marks one not answered yet.
 type InstructionDoc struct {
 	ID   string    `json:"id"`
 	Text string    `json:"text"`
@@ -464,7 +499,7 @@ func writeInstructions(workdir string, ins []*Instruction) error {
 		Instructions []InstructionDoc `json:"instructions"`
 	}{Instructions: []InstructionDoc{}}
 	for _, in := range ins {
-		doc.Instructions = append(doc.Instructions, InstructionDoc{ID: in.ID, Text: in.Text, From: in.From, At: in.At, New: in.Delivered.IsZero()})
+		doc.Instructions = append(doc.Instructions, InstructionDoc{ID: in.ID, Text: in.Text, From: in.From, At: in.At, New: in.Replied.IsZero()})
 	}
 	b, err := json.Marshal(doc)
 	if err != nil {
@@ -474,11 +509,14 @@ func writeInstructions(workdir string, ins []*Instruction) error {
 }
 
 // freshInstructions names the instructions routed to session name and not
-// yet delivered.
-func (st *LogState) freshInstructions(name string) []string {
+// yet delivered; with unanswered, also those delivered and not answered,
+// which a fresh session launched in its place is handed again.
+func (st *LogState) freshInstructions(name string, unanswered bool) []string {
 	var ids []string
-	for _, in := range st.instructionsFor(name, true) {
-		ids = append(ids, in.ID)
+	for _, in := range st.instructionsFor(name, false) {
+		if in.Delivered.IsZero() || unanswered && in.Replied.IsZero() {
+			ids = append(ids, in.ID)
+		}
 	}
 	return ids
 }
@@ -488,11 +526,10 @@ func (st *LogState) freshInstructions(name string) []string {
 // written to instructions.json, then the fixed pointer line typed, only
 // into a session that can take a line. It says whether it tried to type.
 func (s *Supervisor) deliverInstructions(name string, sess Session, t *Track, ev Evidence, state State) bool {
-	ids := s.st.freshInstructions(name)
-	if len(ids) == 0 || !ev.Alive || t.Limited || ev.Dialog != "" || ev.TrustPrompt {
-		return false
-	}
-	if state != Working && state != Idle && !(state == BlockedOnOwner && ev.Status.Questions != "") {
+	ids := s.st.freshInstructions(name, false)
+	// Only a session that can take a line: never one waiting on the
+	// owner, whose answers reach it through deliverAnswers.
+	if len(ids) == 0 || !ev.Alive || t.Limited || ev.Dialog != "" || ev.TrustPrompt || state != Working && state != Idle {
 		return false
 	}
 	key := "instruct:" + name
@@ -528,11 +565,13 @@ func (st *LogState) applyRoute(e Event) {
 }
 
 // instructionsDelivered marks the instructions an instruct or a restart
-// handed over, a would-be one's too, so shadow mode records each once.
+// handed over, a would-be one's too, so shadow mode records each once. A
+// restart hands an unanswered one over again: what the session before it
+// did is not its answer, and its own launch prompt is it taking it.
 func (st *LogState) instructionsDelivered(session string, a *ActPayload, at time.Time) {
 	for _, id := range a.Instructions {
-		if in := st.Instructions[id]; in != nil && in.Session == session && in.Delivered.IsZero() {
-			in.Delivered = at
+		if in := st.Instructions[id]; in != nil && in.Session == session && in.Replied.IsZero() {
+			in.Delivered, in.Taken, in.Activity, in.Waiting = at, time.Time{}, nil, ""
 		}
 	}
 }

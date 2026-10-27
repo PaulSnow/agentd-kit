@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -142,8 +143,12 @@ const (
 )
 
 // toolsPending bounds the tool calls a transcript reader holds awaiting
-// their results.
-const toolsPending = 64
+// their results, and toolsRead the tools run it holds until they are
+// logged, apart from the prompts and summaries.
+const (
+	toolsPending = 64
+	toolsRead    = 64
+)
 
 // TurnPayload is one prompt or end-of-turn summary of a session's
 // transcript, at its line, so each is logged once however often the
@@ -237,7 +242,10 @@ func (f *transcriptFile) noteTurn(line []byte) {
 		keep(tn)
 	}
 	for _, tn := range f.toolTurns(line) {
-		keep(tn)
+		if len(f.ran) == toolsRead {
+			f.ran = f.ran[1:]
+		}
+		f.ran = append(f.ran, tn)
 	}
 }
 
@@ -319,7 +327,7 @@ func resultText(raw json.RawMessage) string {
 // toolTargetLength bounds a tool line's text.
 const toolTargetLength = 160
 
-// toolTarget is a tool call as one line: the tool and what it ran on, the
+// toolTarget is a tool call as one line, as read: the tool and what it ran on, the
 // command's first line, the file, the pattern or the description.
 func toolTarget(name string, input json.RawMessage) string {
 	var in map[string]any
@@ -331,14 +339,17 @@ func toolTarget(name string, input json.RawMessage) string {
 			break
 		}
 	}
+	// Cut at what is read, not shown: the log cuts it at
+	// toolTargetLength once it is screened whole.
 	target, _, _ = strings.Cut(strings.TrimSpace(target), "\n")
 	if target == "" {
-		return cutUTF8(name, toolTargetLength)
+		return cutUTF8(name, turnRead)
 	}
-	return cutUTF8(name+": "+target, toolTargetLength)
+	return cutUTF8(name+": "+target, turnRead)
 }
 
-// turns are the turns of transcript id in dir read so far, after line.
+// turns are the turns of transcript id in dir read so far, after line,
+// in the transcript's order.
 func (r *usageReader) turns(dir, id string, after int) []TurnPayload {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -347,12 +358,15 @@ func (r *usageReader) turns(dir, id string, after int) []TurnPayload {
 		return nil
 	}
 	var out []TurnPayload
-	for _, tn := range f.turns {
-		if tn.Line > after {
-			tn.Transcript = id
-			out = append(out, tn)
+	for _, list := range [][]TurnPayload{f.turns, f.ran} {
+		for _, tn := range list {
+			if tn.Line > after {
+				tn.Transcript = id
+				out = append(out, tn)
+			}
 		}
 	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Line < out[j].Line })
 	return out
 }
 

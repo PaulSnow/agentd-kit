@@ -93,7 +93,7 @@ func TestInstructionToWorkingSessionAtOnce(t *testing.T) {
 	if n := len(h.typed("a")); n != 0 {
 		t.Fatalf("typed into a %d times", n)
 	}
-	if !h.sup.st.chatInFlight() || h.sup.passWait() != ChatPoll {
+	if !h.sup.st.chatInFlight(h.clock.Now()) || h.sup.passWait() != ChatPoll {
 		t.Fatalf("pass wait %v while the message is unanswered", h.sup.passWait())
 	}
 	at := h.clock.Now()
@@ -109,7 +109,7 @@ func TestInstructionToWorkingSessionAtOnce(t *testing.T) {
 	if len(in.Activity) != 2 || in.Activity[1].Failed || in.Reply != "The squeak fix now goes first; the docs follow." {
 		t.Fatalf("instruction after the turn = %+v", in)
 	}
-	if h.sup.st.chatInFlight() || h.sup.passWait() != h.cfg.PollInterval.Duration {
+	if h.sup.st.chatInFlight(h.clock.Now()) || h.sup.passWait() != h.cfg.PollInterval.Duration {
 		t.Fatal("still in flight after the reply")
 	}
 	h.restart(false)
@@ -254,6 +254,7 @@ func TestConsoleShowsTurnLive(t *testing.T) {
 	h := turnsHarness(t)
 	h.ticks(3, time.Minute)
 	u, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
+	u.now = h.clock.Now
 	page := owner(t, u, "/session/night/b")
 	if !strings.Contains(page, `<input type="hidden" name="session" value="b">`) {
 		t.Fatalf("no message box on b's page:\n%s", page)
@@ -320,5 +321,76 @@ func TestChatLatency(t *testing.T) {
 	h.sup.Wait()
 	if in := h.instruction(t); in.Reply != "Yes; the test passes." || h.sup.passWait() != h.cfg.PollInterval.Duration {
 		t.Fatalf("after the answer's pass: %+v", in)
+	}
+}
+
+// A message addressed to a session goes to it or nowhere: to a finished
+// session it fails, and no chat session is started in its place; a
+// reviewer takes none. A session that is gone before it answers is
+// launched again with the message, and what it ends that turn with is the
+// answer. Tools are logged only while a message waits on its session, and
+// the log's fold of the messages agrees with the running one.
+func TestAddressedMessageEdges(t *testing.T) {
+	h := sessionsHarness(t)
+	rev := h.startSession("request-4", KindReviewer, 0)
+	if err := UIInstruction(h.sup.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", rev, "Look again."); err == nil || !strings.Contains(err.Error(), "reviewer") {
+		t.Fatalf("a reviewer took a message: %v", err)
+	}
+	h.status("a", "# Status\n\nDONE\n")
+	h.ticks(3, time.Minute)
+	if err := UIInstruction(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", "a", "One more thing."); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(2, time.Minute)
+	in := h.instruction(t)
+	if _, chat := h.sup.st.Runtime[runtimeName("widgets", chatBranch, KindChat)]; in.Failed == "" || in.Session != "" || chat {
+		t.Fatalf("a message to a finished session: %+v, started %v", in, sortedKeys(h.sup.st.Runtime))
+	}
+	at := h.clock.Now()
+	h.transcriptOf("b", "t1", toolLines("u1", "c1", "ls", 0, at))
+	h.ticks(2, time.Minute)
+	if n := h.count(KindTurn, "", "b"); n != 0 {
+		t.Fatalf("%d turns logged with no message open", n)
+	}
+	if err := UIInstruction(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", "b", "Rebase on main."); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(1, time.Minute)
+	if len(h.typed("b")) != 1 {
+		t.Fatalf("typed into b %q", h.typed("b"))
+	}
+	// b takes it, runs a tool, and is gone before it answers.
+	at = h.clock.Now()
+	h.transcriptOf("b", "t1", promptLine("u2", h.cfg.Policies.Instructions.Pointer, at)+toolLines("u3", "c2", "git rebase origin/main", 1, at))
+	h.ticks(1, time.Minute)
+	h.tmux.alive["b"] = false
+	h.ticks(3, time.Minute)
+	_, act := h.launchOf("b")
+	if act == nil || len(act.Instructions) != 1 || !strings.Contains(act.Command, `"why":"instructed"`) {
+		t.Fatalf("restart = %+v", act)
+	}
+	var b *Instruction
+	for _, x := range h.logState().Instructions {
+		if x.To == "b" {
+			b = x
+		}
+	}
+	if b.Delivered.IsZero() || !b.Taken.IsZero() || len(b.Activity) != 0 || b.Reply != "" {
+		t.Fatalf("after the restart: %+v", b)
+	}
+	if docs := readInstructions(t, h.cfg.Sessions["b"].Workdir); len(docs) != 1 || !docs[0].New {
+		t.Fatalf("instructions.json = %+v", docs)
+	}
+	transcript, _ := h.launchOf("b")
+	at = h.clock.Now()
+	h.transcriptOf("b", transcript, promptLine("u4", "launch prompt", at)+summaryLine("u5", "m1", "Rebased.", at, 100))
+	h.ticks(2, time.Minute)
+	live := h.sup.st.Instructions[b.ID]
+	if live.Reply != "Rebased." {
+		t.Fatalf("after the new session's turn: %+v", live)
+	}
+	folded := h.logState().Instructions[b.ID]
+	if folded.Session != live.Session || !folded.Delivered.Equal(live.Delivered) || !folded.Taken.Equal(live.Taken) || folded.Reply != live.Reply || len(folded.Activity) != len(live.Activity) {
+		t.Fatalf("the log folds to %+v, the run holds %+v", folded, live)
 	}
 }

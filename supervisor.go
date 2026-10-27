@@ -370,7 +370,7 @@ func (s *Supervisor) Run(ctx context.Context, once bool) error {
 // an owner instruction is delivered and not answered, so its activity
 // shows as it goes, else the poll interval.
 func (s *Supervisor) passWait() time.Duration {
-	if d := s.cfg.PollInterval.Duration; s.st.chatInFlight() && ChatPoll < d {
+	if d := s.cfg.PollInterval.Duration; s.st.chatInFlight(s.clock.Now()) && ChatPoll < d {
 		return ChatPoll
 	}
 	return s.cfg.PollInterval.Duration
@@ -654,7 +654,8 @@ func (s *Supervisor) step(name string, sess Session) {
 	// The transcript and the worktree are read in a worker, from what the
 	// transcript gained since the last read; the next pass acts on them.
 	if s.halt == nil {
-		s.spawn(name, "measure:"+name, func(w *Supervisor, wt *Track) { w.measure(name, sess, wt) })
+		since := s.st.openSince(name, now)
+		s.spawn(name, "measure:"+name, func(w *Supervisor, wt *Track) { w.measure(name, sess, wt, since) })
 	}
 }
 
@@ -735,7 +736,8 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 	pol := s.cfg.Policies
 	// A work session is rotated at the end of its round too, DONE once
 	// its branch is delivered (#48).
-	if (state == Working || state == Idle || state == Done && sess.Kind == KindWork && delivered(name, sess, t)) && !t.Limited && s.rotate(name, sess, t, ev, now) {
+	// Nor while the owner waits on its answer to a message (#56).
+	if (state == Working || state == Idle || state == Done && sess.Kind == KindWork && delivered(name, sess, t)) && !t.Limited && s.st.openSince(name, now).IsZero() && s.rotate(name, sess, t, ev, now) {
 		return Starting
 	}
 	// The limit has cleared. Only a session that can take a line is told to
@@ -795,7 +797,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 		// file is written first, and the prompt names it.
 		why := "restart"
 		ids, at := t.freshAnswers()
-		iids := s.st.freshInstructions(name)
+		iids := s.st.freshInstructions(name, true)
 		switch {
 		case len(ids) > 0 && len(iids) > 0:
 			why = "answered-instructed"

@@ -661,7 +661,7 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 						}
 						mv.Activity = append(mv.Activity, uiStep{Text: text, At: tn.At, Failed: tn.Failed, Exit: tn.Exit})
 					}
-					v.Live = v.Live || in.Route && in.Failed == "" && in.Session != "" && in.Replied.IsZero()
+					v.Live = v.Live || in.open(src.st, now) || in.Route && in.Failed == "" && in.Delivered.IsZero() && now.Sub(in.At) < ChatIdle
 					if !in.Replied.IsZero() {
 						mv.ReplyBy, mv.Replied, mv.Reply = in.Session, in.Replied, markdown(in.Reply)
 						if in.Reply == "" || in.ReplyWithheld || secret(in.Reply) {
