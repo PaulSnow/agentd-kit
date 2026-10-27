@@ -261,3 +261,10 @@ form.attach-over { outline: 2px dashed var(--accent); outline-offset: 2px; }
 .attachments .file { display: inline-flex; align-items: center; gap: var(--space-1); border: 1px solid var(--line); border-radius: 4px; padding: var(--space-1) var(--space-2); }
 .file-icon { font-size: var(--size-s); font-weight: 600; color: var(--accent); }
 
+.work-items { margin-bottom: var(--space-3); }
+.work-items h2 { font-size: var(--size-s); margin: 0 0 var(--space-1); }
+.work-items ol { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
+.work-item { border: 1px solid var(--chip-bg); border-radius: 0.5em; padding: var(--space-2); }
+.work-item p { margin: var(--space-1) 0; }
+.item-answer .inline { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+.item-answer input[type=text] { flex: 1 1 12em; min-width: 0; }

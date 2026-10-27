@@ -30,6 +30,8 @@ type LogState struct {
 	Instructions map[string]*Instruction
 	// Ops are the changes proposed on the ops console (#63), by id.
 	Ops map[string]*OpsRecord
+	// Work are the owner's work items (#66), by id.
+	Work map[string]*WorkItem
 	// CI is each watched request's latest CI, by repository and request.
 	CI map[string]CIRecord
 	// Feed is what the consoles' feed has posted.
@@ -178,6 +180,10 @@ func (st *LogState) apply(e Event) {
 	}
 	if e.Kind == KindOps {
 		st.applyOps(e)
+		return
+	}
+	if e.Kind == KindWorkItem {
+		st.applyWork(e)
 		return
 	}
 	if e.Session == "" {

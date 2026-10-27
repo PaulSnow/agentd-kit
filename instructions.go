@@ -363,6 +363,13 @@ func (s *Supervisor) routeInstructions(now time.Time) {
 		if !in.Route || !in.Delivered.IsZero() || in.Failed != "" || in.Session != "" && s.takesInstructions(in.Session) && !s.stranded(in) {
 			continue
 		}
+		// A response on a work item's entry is the item's (#66).
+		if s.routeWork(in) {
+			if s.halt != nil {
+				return
+			}
+			continue
+		}
 		// One agentd routed to a chat session, which no build starts any
 		// more, or to a session that is gone or never started, goes to a
 		// thread agent instead, once (#59).
@@ -661,9 +668,10 @@ func (st *LogState) applyRoute(e Event) {
 		switch {
 		case a.Error != "":
 			in.AgentError = a.Error
-		case a.HandTo != "":
+		case a.HandTo != "" && a.Work == nil:
 			// Handed over: the session receives the owner's record as
-			// any other, and its reply is the answer.
+			// any other, and its reply is the answer. Work the agent read
+			// is the work item's to hand over (#66).
 			in.Session, in.Delivered, in.Taken, in.Activity = a.HandTo, time.Time{}, time.Time{}, nil
 		default:
 			in.Reply, in.ReplyWithheld, in.Replied, in.Waiting = a.Answer, a.Withheld > 0, e.Time, ""

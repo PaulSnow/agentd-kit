@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -285,12 +286,15 @@ func itemsCmd(args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("items", flag.ContinueOnError)
 	unseen := fs.Bool("new", false, "only the items not yet marked seen")
 	seen := fs.String("seen", "", "mark these items seen, comma-separated ids")
+	work := fs.Bool("work", false, "only the owner's work items (#66)")
+	all := fs.Bool("all", false, "with --work, the closed work items too")
+	asJSON := fs.Bool("json", false, "with --work, as JSON")
 	cfg, _, err := loadConfigFlag(fs, args)
 	if err != nil {
 		return err
 	}
-	if fs.NArg() > 0 || *seen != "" && *unseen {
-		return errors.New("usage: agentd items [--new] | agentd items --seen ID,...")
+	if fs.NArg() > 0 || *seen != "" && (*unseen || *work) || (*all || *asJSON) && !*work {
+		return errors.New("usage: agentd items [--new] | agentd items --seen ID,... | agentd items --work [--all] [--json]")
 	}
 	log, events, err := openLoaded(cfg.EventLog)
 	if err != nil {
@@ -298,6 +302,23 @@ func itemsCmd(args []string, w io.Writer) error {
 	}
 	defer log.Close()
 	st := NewLogState(cfg, ModeLive).Fold(events)
+	// The owner's open work items come first (#66): told means done.
+	views := WorkViews(st, "", *all, time.Now(), confidentialMatcher(cfg))
+	if *work {
+		if *asJSON {
+			if views == nil {
+				views = []WorkView{}
+			}
+			return json.NewEncoder(w).Encode(views)
+		}
+		PrintWork(w, views)
+		return nil
+	}
+	if len(views) > 0 && *seen == "" {
+		fmt.Fprintln(w, "Open work:")
+		PrintWork(w, views)
+		fmt.Fprintln(w)
+	}
 	if *seen != "" {
 		ids := strings.Split(*seen, ",")
 		for _, id := range ids {

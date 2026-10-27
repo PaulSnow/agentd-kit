@@ -113,6 +113,7 @@
 <div class="console">
 <p class="crumbs"><a href="/">All repositories</a>{{if .StatusTokens}} <span class="muted">· status checks today: {{.Tokens .StatusTokens}} tokens</span>{{end}}</p>
 {{template "chips" .}}
+{{template "work-items" .}}
 <section id="box" class="box" aria-label="Conversation" data-entries="/console/{{.Repository}}/entries"{{if .Live}} data-live{{end}}>
 {{if .More}}{{with index .Entries 0}}<p class="older"><a href="/console/{{$.Repository}}?before={{.DOMID}}" data-before="{{.DOMID}}">Older entries</a></p>{{end}}{{end}}
 <ol class="entries">{{range .Rendered}}{{.}}{{else}}<li class="empty">No messages yet.</li>{{end}}</ol>
@@ -127,6 +128,15 @@
 {{else}}<p class="muted composer">No live run configures {{.Repository}}, so it takes no message.</p>{{end}}
 </div>
 {{template "foot" .}}{{end}}
+
+{{define "work-items"}}{{with .Items}}<section class="work-items" aria-label="Open work items"><h2>Open work</h2><ol>{{range .}}{{$src := .Src}}<li class="work-item" id="item-{{.ID}}">
+<div class="msg-head"><strong>{{.ID}}</strong> <span class="badge{{if or .Question .Claim}} alert{{end}}">{{.State}}</span> <span>{{.Title}}</span> <span class="muted">{{.Age}}{{with .Session}} · <a href="/session/{{$src}}/{{.}}">{{.}}</a>{{end}}</span></div>
+{{with .Words}}<blockquote class="re">{{.}}</blockquote>{{end}}
+{{with .Question}}<p><strong>Asks you:</strong> {{.}}</p>{{end}}{{with .Claim}}<p><strong>Says done:</strong> {{.}}</p>{{end}}
+<p class="muted">Done when {{.DoneWhen}}{{with .LastCheck}} · last check: {{.}}{{end}}</p>{{with .Progress}}<p class="muted">{{.}}</p>{{end}}
+{{if $.ReplySrc}}<form class="item-answer" method="post" action="/respond" enctype="multipart/form-data"><input type="hidden" name="token" value="{{$.Token}}"><input type="hidden" name="back" value="{{$.Back}}"><input type="hidden" name="src" value="{{.Src}}"><input type="hidden" name="repository" value="{{$.Repository}}"><input type="hidden" name="entry" value="{{.Entry}}">
+<div class="inline"><input type="text" name="text" maxlength="4000" placeholder="{{if .Question}}Your answer, to {{.Session}}{{else}}A word (optional){{end}}" aria-label="Your words on {{.ID}}">{{if .Question}}<button type="submit">Send</button>{{end}}{{range .Options}}<button type="submit" name="choice" value="{{.}}">{{.}}</button>{{end}}</div></form>{{end}}
+</li>{{end}}</ol></section>{{end}}{{end}}
 
 {{define "chips"}}<nav id="chips" class="session-chips" aria-label="Sessions">{{range .Panels}}<span class="chip session-chip" data-session="{{.Name}}"><button type="button" class="chip-filter" data-session="{{.Name}}"{{if .MessageTo}} data-to="{{.Name}}"{{end}}><span class="dot state-{{.State}}" title="{{.State}}"></span> {{.Name}}{{with .Doing}} <span class="doing">{{.Text}}</span>{{end}}{{if .Questions}} <span class="badge alert">{{.Questions}}?</span>{{end}}</button><a class="chip-page" href="/session/{{.Src}}/{{.Name}}" aria-label="{{.Name}}'s page">→</a>{{with .Status}}<span class="spark status-graph" role="img" aria-label="Status over the last 6 hours"><svg viewBox="0 0 {{.Width}} 24" preserveAspectRatio="none">{{range .Slots}}<rect x="{{.X}}" y="{{.Y}}" width="3" height="{{.H}}" class="{{.Class}}"><title>{{.Title}}</title></rect>{{end}}</svg><span class="spark-now">{{with .Last}}{{.Phase}} {{$.Percent .Progress}} · risk {{.Risk}}{{if .Blocked}} · <strong>blocked</strong>: {{.Blocker}}{{end}} · {{.Summary}}{{with .Next}} Next: {{.}}{{end}}{{end}}{{if .Gaps}} · {{.Gaps}} failed checks{{end}} · {{$.Tokens .Tokens}} tokens today</span></span>{{end}}</span>{{else}}<span class="muted">No sessions.</span>{{end}}</nav>{{end}}
 

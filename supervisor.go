@@ -72,6 +72,10 @@ type Supervisor struct {
 	// ops is what the ops console's changes run on (#63), nil without an
 	// ops block.
 	ops *opsEnv
+	// checkedAt is when each work item's done_when was last checked, and
+	// dueRetype the items due to be typed again (#66): the loop's alone.
+	checkedAt map[string]time.Time
+	dueRetype map[string]bool
 
 	checkpointRe *regexp.Regexp
 
@@ -120,6 +124,9 @@ func NewSupervisor(cfg *Config, log *Log, clock Clock, tmux Tmux, git Git, forge
 		status: &statusCopies{},
 		live:   &liveIssues{},
 		usage:  newUsageReader(),
+
+		checkedAt: map[string]time.Time{},
+		dueRetype: map[string]bool{},
 
 		checkpointRe: regexp.MustCompile(cfg.Policies.Context.Checkpoint),
 		runCtx:       context.Background(),
@@ -450,6 +457,7 @@ func (s *Supervisor) Pass() error {
 	// Instructions are routed before the sessions' steps, so one is
 	// delivered in the pass that read it.
 	s.routeInstructions(s.clock.Now())
+	s.driveItems(s.clock.Now())
 	s.runOps(s.clock.Now())
 	for _, name := range s.cfg.SessionNames() {
 		if s.halt != nil {
@@ -800,6 +808,9 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 	}
 	if !typed {
 		typed = s.deliverInstructions(name, sess, t, ev, state)
+	}
+	if !typed {
+		typed = s.deliverItems(name, sess, t, ev, state)
 	}
 	if !typed && s.fixCI(name, sess, t, ev, state, now) {
 		return Starting

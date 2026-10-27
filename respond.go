@@ -185,6 +185,23 @@ func (src *uiSource) entryOf(cfg *Config, rep Report, repo, id string) (EntryRe,
 			return re, "", nil, nil
 		}
 		return re, "", &Decision{ID: r.ID, Type: DecisionYesNo, Question: r.Summary}, nil
+	case strings.HasPrefix(id, entryWork):
+		it := src.st.Work[strings.TrimPrefix(id, entryWork)]
+		if it == nil || it.Repository != repo && cfg.RepositoryConsole(it.Repository) != repo {
+			return EntryRe{}, "", nil, fmt.Errorf("%s's console holds no work item %q", repo, id)
+		}
+		re := EntryRe{ID: id, Kind: "work", Session: it.Session, At: it.Opened, Decision: it.ID, Options: it.workOptions()}
+		if !secret(it.Title) {
+			re.Question = it.Title
+		}
+		if it.terminal() {
+			return re, "", nil, nil
+		}
+		d := Decision{ID: it.ID, Type: DecisionChooseOne, Question: re.Question}
+		for _, o := range re.Options {
+			d.Options = append(d.Options, DecisionOption{Key: o, Label: o})
+		}
+		return re, "", &d, nil
 	case strings.HasPrefix(id, entryNeed):
 		for _, n := range src.needs(cfg, rep, src.askedAt) {
 			if n.Repository != repo || n.Decision != nil || needEntry(n.Session, n.Kind) != id {
@@ -265,7 +282,7 @@ func (src *uiSource) respond(repo, id, to, text string, a *AnswerPayload, files 
 		if a.Binding() || a.Other != "" {
 			// A change's yes or no is the instruction's alone (#63): Go
 			// carries the change out from it, and from nothing else.
-			if !strings.HasPrefix(id, entryOps) {
+			if !strings.HasPrefix(id, entryOps) && !strings.HasPrefix(id, entryWork) {
 				if err := RecordAnswer(src.log, src.st, now, writer, *a); err != nil {
 					return err
 				}
