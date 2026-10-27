@@ -65,6 +65,9 @@ func (p uiPage) Ago(t time.Time) string {
 	return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
 }
 
+// Percent is a fraction as a whole percent: "60%".
+func (uiPage) Percent(f float64) string { return fmt.Sprintf("%d%%", int(f*100+0.5)) }
+
 // Tokens is a token count, shortly: "950", "12k", "1.2M".
 func (uiPage) Tokens(n int64) string {
 	switch {
@@ -649,6 +652,8 @@ type uiConsole struct {
 	Live bool
 	// Panels are the console's sessions, one each (#56 D).
 	Panels []uiPanel
+	// StatusTokens is what the sessions' status checks cost today.
+	StatusTokens int64
 	// Page is the page of history shown, newest first, of Pages; Newer
 	// and Older are the pages beside it, -1 when there is none.
 	Page, Pages, Newer, Older int
@@ -668,6 +673,87 @@ type uiPanel struct {
 	ReplyMore template.HTML
 	ReplyAt   time.Time
 	MessageTo string
+	// Status is the session's status graph (#57), nil when it has no
+	// check today or in the hours drawn.
+	Status *uiStatus
+}
+
+// uiStatus is a session's status graph: a bar per check over the last
+// statusHours, its height the progress and its colour the phase, an
+// outlined gap where a check failed; the latest record; and what the
+// checks cost today.
+type uiStatus struct {
+	Slots  []uiSlot
+	Width  int
+	Last   *StatusRecord
+	LastAt time.Time
+	Tokens int64
+	Checks int
+	Gaps   int
+}
+
+// uiSlot is one bar of a status graph, in the graph's units.
+type uiSlot struct {
+	X, Y, H int
+	Class   string
+	Title   string
+}
+
+// The status graph's shape: the hours drawn, a bar's width and the
+// graph's height.
+const (
+	statusHours  = 6
+	statusBar    = 4
+	statusHeight = 24
+)
+
+// statusGraph draws t's checks up to now, every apart, with today's
+// cost in zone loc; nil when there is nothing to draw or count.
+func statusGraph(t *Track, every time.Duration, now time.Time, loc *time.Location, secret func(...string) bool) *uiStatus {
+	if t == nil || len(t.StatusPoints) == 0 {
+		return nil
+	}
+	slots := int(statusHours * time.Hour / every)
+	start := now.Add(-time.Duration(slots) * every)
+	y, m, d := now.In(loc).Date()
+	g := &uiStatus{Width: slots * statusBar}
+	for _, p := range t.StatusPoints {
+		if py, pm, pd := p.At.In(loc).Date(); py == y && pm == m && pd == d {
+			g.Tokens += p.Tokens
+			g.Checks++
+		}
+		if !p.At.After(start) || p.At.After(now) {
+			continue
+		}
+		i := min(int(p.At.Sub(start)/every), slots-1)
+		s := uiSlot{X: i * statusBar, Y: 0, H: statusHeight, Class: "gap", Title: p.At.In(loc).Format("15:04") + " check failed"}
+		if r := p.Record; r != nil {
+			h := max(int(r.Progress*statusHeight+0.5), 2)
+			s = uiSlot{X: i * statusBar, Y: statusHeight - h, H: h, Class: "phase-" + r.Phase,
+				Title: fmt.Sprintf("%s %s %d%%", p.At.In(loc).Format("15:04"), r.Phase, int(r.Progress*100+0.5))}
+			if r.Blocked {
+				s.Class += " blocked"
+				s.Title += " blocked"
+			}
+		} else {
+			g.Gaps++
+		}
+		g.Slots = append(g.Slots, s)
+	}
+	for i := len(t.StatusPoints) - 1; i >= 0; i-- {
+		if p := t.StatusPoints[i]; p.Record != nil {
+			r := *p.Record
+			if secret(r.Summary, r.Next, r.Blocker) {
+				r.Summary, r.Next, r.Blocker = withheldMessage, "", ""
+			}
+			g.Last, g.LastAt = &r, p.At
+			break
+		}
+	}
+	if len(g.Slots) == 0 && g.Checks == 0 {
+		return nil
+	}
+	return g
 }
 
 // historyPage is how many messages a page of a console's history holds.
@@ -740,7 +826,13 @@ func (u *UI) consoleView(repo string, page int, now time.Time) (*uiConsole, erro
 				}
 			}
 			if !src.echo {
-				v.Panels = append(v.Panels, src.panels(cfg, repo, v.Needs, secret)...)
+				for _, p := range src.panels(cfg, repo, v.Needs, secret) {
+					p.Status = statusGraph(src.st.Tracks[p.Name], cfg.Jobs.Status.every(), now, u.loc, secret)
+					if p.Status != nil {
+						v.StatusTokens += p.Status.Tokens
+					}
+					v.Panels = append(v.Panels, p)
+				}
 			}
 			return nil
 		}()

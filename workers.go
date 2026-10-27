@@ -177,6 +177,12 @@ func (t *Track) clone() *Track {
 	c.Gated = append([]string(nil), t.Gated...)
 	c.Escalated = append([]EscalationRecord(nil), t.Escalated...)
 	c.Turns = append([]TurnRecord(nil), t.Turns...)
+	c.StatusPoints = append([]StatusPoint(nil), t.StatusPoints...)
+	c.StatusCI = append([]CIChange(nil), t.StatusCI...)
+	if t.StatusLast != nil {
+		r := *t.StatusLast
+		c.StatusLast = &r
+	}
 	c.TurnLines = copyMap(t.TurnLines)
 	c.CIFixes = append([]CIFixRecord(nil), t.CIFixes...)
 	c.CIRaised = copyMap(t.CIRaised)

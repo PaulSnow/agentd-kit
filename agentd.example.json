@@ -39,7 +39,8 @@
     "model": "haiku",
     "timeout": "2m",
     "max_input": 16384,
-    "batch": 20
+    "batch": 20,
+    "status": {"enabled": false, "every": "5m", "max_input": 49152}
   },
   "policies": {
     "restart": {

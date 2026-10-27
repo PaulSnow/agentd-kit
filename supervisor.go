@@ -58,6 +58,9 @@ type Supervisor struct {
 	shadow bool
 	worker bool       // this copy runs one job off the loop
 	work   *workState // shared by the loop and its workers
+	// status holds each session's STATUS.md as its last status check
+	// read it, shared by the loop and its workers.
+	status *statusCopies
 	usage  *usageReader
 	api    ForgeAPI // the forges' APIs for the poll, or nil for none
 
@@ -105,6 +108,7 @@ func NewSupervisor(cfg *Config, log *Log, clock Clock, tmux Tmux, git Git, forge
 		shadow: shadow,
 		st:     NewLogState(cfg, mode(shadow)),
 		work:   newWorkState(),
+		status: &statusCopies{},
 		usage:  newUsageReader(),
 
 		checkpointRe: regexp.MustCompile(cfg.Policies.Context.Checkpoint),
@@ -184,6 +188,9 @@ func (s *Supervisor) screen(e *Event) {
 	}
 	if e.Job != nil {
 		e.Job.Error = s.withheld(e.Job.Error)
+	}
+	if e.Status != nil {
+		s.screenStatus(e.Status)
 	}
 }
 
@@ -427,6 +434,7 @@ func (s *Supervisor) Pass() error {
 		s.triageItems(s.clock.Now())
 		s.readAccounts(s.clock.Now())
 		s.runJobs(s.clock.Now())
+		s.checkStatuses(s.clock.Now())
 	}
 	return s.halt
 }

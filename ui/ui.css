@@ -154,6 +154,18 @@ textarea { width: 100%; resize: vertical; }
 .panels { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 22rem), 1fr)); gap: var(--space-3); }
 .panel textarea { width: 100%; }
 .doing code { white-space: pre-wrap; word-break: break-all; }
+.status-graph { margin: var(--space-2) 0; }
+.status-graph svg { display: block; width: 100%; height: 2rem; background: var(--chip-bg); border-radius: var(--space-1); }
+.status-graph rect { fill: var(--muted); }
+.status-graph rect.gap { fill: none; stroke: var(--alert); stroke-width: .5; stroke-dasharray: 1 1; }
+.status-graph rect.blocked { fill: var(--alert); }
+.status-now { margin: var(--space-1) 0 0; font-size: var(--size-s); }
+.status-graph .phase-design { fill: #8e6bd8; }
+.status-graph .phase-code { fill: var(--accent); }
+.status-graph .phase-test { fill: #c77d1a; }
+.status-graph .phase-review { fill: #1a8f8f; }
+.status-graph .phase-merge, .status-graph .phase-ci { fill: var(--ok); }
+.status-graph .phase-idle { fill: var(--line); }
 .pager { display: flex; gap: var(--space-3); margin-top: var(--space-2); }
 .thread { margin: var(--space-2) 0 0 var(--space-3); }
 .msg-head { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: baseline; font-size: var(--size-s); margin-bottom: var(--space-1); }

@@ -122,10 +122,14 @@
 </section>
 {{with .Panels}}<section id="panels" data-refresh aria-labelledby="panels-h">
 <h2 id="panels-h">Sessions</h2>
+{{if $.StatusTokens}}<p class="muted">Status checks today: {{$.Tokens $.StatusTokens}} tokens.</p>{{end}}
 <div class="panels">{{range .}}<article class="card panel">
 <header class="card-head"><h3><a href="/session/{{.Src}}/{{.Name}}">{{.Name}}</a></h3>{{with .Kind}}<span class="badge">{{.}}</span>{{end}}</header>
 <p class="meta"><span class="state state-{{.State}}">{{.State}}</span>{{if not .Since.IsZero}} since {{$.When .Since}}{{end}}{{if .Questions}} · <a href="#console-needs">{{.Questions}} waiting on you</a>{{end}}</p>
 {{with .Doing}}<p class="doing">Now: <code>{{.Text}}</code>{{if .Failed}} <span class="badge">failed{{with .Exit}}, exit {{.}}{{end}}</span>{{end}}</p>{{end}}
+{{with .Status}}<figure class="status-graph"><svg viewBox="0 0 {{.Width}} 24" preserveAspectRatio="none" role="img" aria-label="Status over the last 6 hours: {{.Checks}} checks today{{if .Gaps}}, {{.Gaps}} failed{{end}}">{{range .Slots}}<rect x="{{.X}}" y="{{.Y}}" width="3" height="{{.H}}" class="{{.Class}}"><title>{{.Title}}</title></rect>{{end}}</svg>
+<figcaption class="meta">{{with .Last}}<span class="badge">{{.Phase}}</span> {{$.Percent .Progress}} · risk {{.Risk}}{{if .Blocked}} · <strong>blocked</strong>: {{.Blocker}}{{end}}{{end}}{{if .Last}} · {{$.When .LastAt}}{{end}}{{if .Gaps}} · {{.Gaps}} failed checks{{end}} · {{$.Tokens .Tokens}} tokens today</figcaption>
+{{with .Last}}<p class="status-now">{{.Summary}}{{with .Next}} <span class="muted">Next: {{.}}</span>{{end}}</p>{{end}}</figure>{{end}}
 {{if .Reply}}<div class="msg msg-reply"><div class="msg-head"><span class="badge">last reply</span> <time class="muted">{{$.When .ReplyAt}}</time></div>{{if .ReplyMore}}<div class="fold"><div class="md preview">{{.Reply}}</div><details class="more" data-key="p-{{.Src}}-{{.Name}}-{{.ReplyAt.UnixNano}}"><summary><span class="more-label show-all">Show all</span><span class="more-label show-less">Show less</span></summary><div class="md">{{.ReplyMore}}</div></details></div>{{else}}<div class="md">{{.Reply}}</div>{{end}}</div>{{end}}
 {{if .MessageTo}}<form class="answer" method="post" action="/reply"><input type="hidden" name="token" value="{{$.Token}}"><input type="hidden" name="back" value="{{$.Back}}"><input type="hidden" name="src" value="{{.Src}}"><input type="hidden" name="repository" value="{{.MessageTo}}"><input type="hidden" name="session" value="{{.Name}}">
 <textarea name="text" rows="2" maxlength="4000" aria-label="Your message to {{.Name}}" required></textarea>

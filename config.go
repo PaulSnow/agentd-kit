@@ -474,6 +474,9 @@ func (c *Config) finish(base string) error {
 	if c.Jobs.Timeout.Duration < 0 || c.Jobs.MaxInput < 0 || c.Jobs.Batch < 0 {
 		errs = append(errs, errors.New("jobs.timeout, jobs.max_input and jobs.batch must not be negative"))
 	}
+	if s := c.Jobs.Status; s.Every.Duration < 0 || s.Every.Duration > 0 && s.Every.Duration < time.Minute || s.MaxInput < 0 {
+		errs = append(errs, errors.New("jobs.status.every must be a minute or more, and jobs.status.max_input not negative"))
+	}
 	if c.Poll.Every.Duration <= 0 || c.Poll.CIEvery.Duration <= 0 {
 		errs = append(errs, errors.New("poll.every and poll.ci_every must be positive"))
 	}
