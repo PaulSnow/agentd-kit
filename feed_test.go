@@ -147,14 +147,17 @@ func TestConsoleReplyWakesTheLoopAndAnswers(t *testing.T) {
 	if err := ConsoleReply(h.cfg, NewLogWriter(buf), fold(), h.clock.Now(), "widgets", "s1 Q1@"+asked+" b"); err != nil {
 		t.Fatal(err)
 	}
-	start := h.clock.Now()
+	start, logged := h.clock.Now(), len(buf.Bytes())
 	waitFor(t, "the answer to reach the session", func() bool {
 		if doc, ok := readAnswers(t, h, "s1"); ok && len(doc.Answers) == 1 {
 			return true
 		}
 		// The clock moves only while the loop waits on it, so a slow
-		// machine's pass does not count as time the reply waited.
-		if h.clock.waiting() == 2 {
+		// machine's pass does not count as time the reply waited. Once
+		// woken, the loop's poll timer stays among the waiters, so the
+		// count alone cannot tell: the pass is known by the log it
+		// writes, which nothing else writes before the wake.
+		if h.clock.waiting() == 2 && len(buf.Bytes()) == logged {
 			h.clock.advance(time.Second)
 		}
 		return false
