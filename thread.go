@@ -93,7 +93,7 @@ const threadSystem = `You answer the owner of a software project on agentd's con
 	`When the owner asks for work to be done (a change, a fix, a release, a deployment, anything beyond an answer), set work: a title, a brief for the session that does it, and done_when, ` +
 	`the observable end state that is true only once the work is done, which Go checks itself: {"kind":"url","url":U,"contains":S} a page whose body holds S (a version string, say); ` +
 	`{"kind":"forge","ref":"#N","state":"closed"}, {"kind":"forge","ref":"!N","state":"merged"} or {"kind":"forge","ref":TAG,"state":"tagged"}; {"kind":"file","path":P,"contains":S} a file of the clone; ` +
-	`{"kind":"status","contains":S} a line the session's STATUS.md will hold; {"kind":"owner"} only when nothing observable can tell. ` +
+	`{"kind":"status","contains":S} a line the session's STATUS.md will hold, only for a string the work itself produces (a commit hash, a deployed version) and never words the session would write unasked; {"kind":"owner"} only when nothing observable can tell. ` +
 	`Go holds the work as an item until done_when is true, and gives it to hand_to when you set it, else starts a session for it: say so, and never say the work is done. ` +
 	`When the owner asks for work that belongs to one of the running sessions, set hand_to to its name: the owner's message then goes to it, and your answer says so. ` +
 	`When the thread settles a decision about an issue or a request, or reports the outcome of work on one, set outcome: Go posts it there as an agent's comment. ` +

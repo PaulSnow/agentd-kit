@@ -23,6 +23,8 @@ type versionPage struct {
 func (p *versionPage) set(v string) { p.mu.Lock(); p.version = v; p.mu.Unlock() }
 
 func (p *versionPage) serve(t *testing.T) string {
+	itemLoopback = true
+	t.Cleanup(func() { itemLoopback = false })
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
@@ -133,6 +135,15 @@ func TestWorkItemClosedOnlyByItsCheck(t *testing.T) {
 	if typed := h.typed(name); len(typed) == 0 || !strings.HasPrefix(typed[len(typed)-1], "agentd checked work item "+it.ID) {
 		t.Fatalf("typed = %q", typed)
 	}
+	// Told once, however many polls find it still not done; an unchanged
+	// result is not logged again.
+	for i := 0; i < 30; i++ {
+		h.alive(name, "deploying "+itoa(i))
+		h.ticks(1, time.Minute)
+	}
+	if n := len(h.typed(name)); n != 1 {
+		t.Fatalf("typed %d lines: %q", n, h.typed(name))
+	}
 
 	// The deploy lands: the next check closes it, with its evidence.
 	page.set("3.38.2")
@@ -165,6 +176,9 @@ func TestWorkItemReopenedWhenSessionFinishesEarly(t *testing.T) {
 	if it.Session == "" || it.Session == first || it.State != WorkAssigned || !it.Started {
 		t.Fatalf("not re-assigned: item = %+v", it)
 	}
+	if _, ok := h.sup.st.Runtime[first]; ok {
+		t.Fatalf("%s, started for the item and taken off it, still holds a place", first)
+	}
 }
 
 // An item handed to a running session is typed into it with its id; one
@@ -188,8 +202,13 @@ func TestWorkItemUnacknowledgedRetypedThenReassigned(t *testing.T) {
 		return n
 	}
 	for i := 0; i < 9; i++ {
-		h.alive("a", "a works "+itoa(i))
+		// The screen keeps the line agentd typed, which acknowledges
+		// nothing.
+		h.alive("a", "> "+pointer+": read it in items.json\na works "+itoa(i))
 		h.ticks(1, time.Minute)
+	}
+	if st := h.item(it.ID).State; st != WorkAssigned {
+		t.Fatalf("agentd's own line acknowledged it: %s", st)
 	}
 	if n := count(); n != 1 {
 		t.Fatalf("typed %d times within ack_within", n)
@@ -351,6 +370,13 @@ func TestEndCheckKinds(t *testing.T) {
 			t.Errorf("%+v was accepted", d)
 		}
 	}
+	// A url check reads no service of this machine's, nor the cloud's
+	// metadata.
+	for _, u := range []string{"http://169.254.169.254/latest/meta-data", "http://127.0.0.1:1/version"} {
+		if ok, seen := checkURL(u, "x"); ok || !strings.Contains(seen, "dials no address") {
+			t.Errorf("%s: %v %s", u, ok, seen)
+		}
+	}
 	h := sessionsHarness(t)
 	os.WriteFile(filepath.Join(h.dir, "clone", "VERSION"), []byte("3.38.2\n"), 0o644)
 	if ok, seen := h.sup.runCheck(EndCheck{Kind: DoneFile, Path: "VERSION", Contains: "3.38.2"}, Repository{}, filepath.Join(h.dir, "clone"), ""); !ok || !strings.Contains(seen, "VERSION contains") {
@@ -398,7 +424,7 @@ func TestWorkItemOnThePage(t *testing.T) {
 		t.Fatal("a declined item is still shown as open")
 	}
 	var out strings.Builder
-	PrintWork(&out, WorkViews(h.sup.st, "", true, h.clock.Now(), func(...string) bool { return false }))
+	PrintWork(&out, WorkViews(h.cfg, h.sup.st, "", true, h.clock.Now(), func(...string) bool { return false }))
 	if !strings.Contains(out.String(), it.ID) || !strings.Contains(out.String(), "declined") {
 		t.Fatalf("agentd items --work --all:\n%s", out.String())
 	}

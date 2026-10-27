@@ -5,12 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 )
@@ -60,6 +63,10 @@ const (
 	WorkStepEscalate = "escalate" // told the owner
 	WorkStepTold     = "told"     // the session was told its claim was refuted
 )
+
+// workSteps are the steps a work item event may take.
+var workSteps = map[string]bool{WorkStepOpen: true, WorkStepAssign: true, WorkStepTyped: true, WorkStepAck: true, WorkStepWorking: true, WorkStepBlocked: true,
+	WorkStepClaim: true, WorkStepCheck: true, WorkStepReopen: true, WorkStepDone: true, WorkStepDeclined: true, WorkStepEscalate: true, WorkStepTold: true}
 
 // done_when kinds.
 const (
@@ -203,6 +210,11 @@ type WorkCheck struct {
 	Claim  bool   `json:"claim,omitempty"`
 }
 
+// evidence is the check as an item's evidence: what was seen, timed.
+func (c WorkCheck) evidence(at time.Time) string {
+	return c.Detail + " (checked " + at.UTC().Format("2006-01-02 15:04:05Z") + ")"
+}
+
 // WorkPayload is a step of a work item. Open carries the item; the other
 // steps what changed: the session, a note (a question, a claim, the
 // STATUS.md a session left, why the owner was told), a check, and the
@@ -225,8 +237,8 @@ type WorkPayload struct {
 // check says what a work item step lacks.
 func (p *WorkPayload) check() error {
 	switch {
-	case p.ID == "" || p.Step == "":
-		return errors.New("a work item step names its item and step")
+	case p.ID == "" || !workSteps[p.Step]:
+		return errors.New("a work item step names its item and a known step")
 	case p.Step == WorkStepOpen && (p.Work == nil || p.Repository == "" || p.Instruction == ""):
 		return errors.New("an opened work item carries its work, repository and instruction")
 	case p.Step == WorkStepAssign && p.Session == "":
@@ -270,17 +282,16 @@ type WorkItem struct {
 	Claimed   time.Time
 	Check     *WorkCheck
 	Checked   time.Time
-	// Refuted is a claim its check refuted, Told when the session was
-	// told so.
-	Refuted  string
-	Told     time.Time
-	Evidence string
-	DoneAt   time.Time
-	DoneBy   string
+	// Refuted is a claim its check refuted, RefutedAt when, and Told
+	// when the session was last told so.
+	Refuted   string
+	RefutedAt time.Time
+	Told      time.Time
+	Evidence  string
+	DoneAt    time.Time
+	DoneBy    string
 	// Escalated are the keys the owner was told of.
 	Escalated map[string]bool
-	// Answered are the owner's instructions on its entry taken.
-	Answered map[string]bool
 }
 
 // terminal says whether the item is closed.
@@ -301,15 +312,12 @@ func (st *LogState) applyWork(e Event) {
 	if p.Step == WorkStepOpen {
 		if it == nil {
 			st.Work[p.ID] = &WorkItem{ID: p.ID, Repository: p.Repository, Instruction: p.Instruction, WorkRequest: *p.Work, HandTo: p.HandTo,
-				State: WorkOpen, Opened: e.Time, Progress: e.Time, Escalated: map[string]bool{}, Answered: map[string]bool{}}
+				State: WorkOpen, Opened: e.Time, Progress: e.Time, Escalated: map[string]bool{}}
 		}
 		return
 	}
 	if it == nil {
 		return
-	}
-	if p.Instruction != "" {
-		it.Answered[p.Instruction] = true
 	}
 	// A closed item stays closed: only the owner's word on it is logged.
 	if it.terminal() && p.Step != WorkStepEscalate {
@@ -357,9 +365,9 @@ func (st *LogState) applyWork(e Event) {
 		switch {
 		case c.OK:
 			moved(WorkDone)
-			it.Evidence, it.DoneAt, it.DoneBy = c.Detail, e.Time, "agentd"
+			it.Evidence, it.DoneAt, it.DoneBy = c.evidence(e.Time), e.Time, "agentd"
 		case c.Claim && it.Claim != "":
-			it.Refuted = it.Claim
+			it.Refuted, it.RefutedAt = it.Claim, e.Time
 		}
 	case WorkStepTold:
 		it.Told = e.Time
@@ -482,7 +490,7 @@ func (s *Supervisor) driveItem(it *WorkItem, now time.Time) {
 			return
 		}
 		if it.DoneWhen.Kind == DoneOwner {
-			s.escalateItem(it, "claim:"+shortHash(HashPane(marks.done))[:8],
+			s.escalateItem(it, fmt.Sprintf("claim:%s:%d", shortHash(HashPane(marks.done))[:8], it.Claimed.UnixNano()),
 				fmt.Sprintf("%s says %s is done: %s Only you can say: answer done or not done on the item's entry.", it.Session, it.ID, marks.done))
 		} else {
 			s.checkItem(it, now, true)
@@ -538,10 +546,19 @@ func itemMarks(id, status string) itemMarksOf {
 	return m
 }
 
-// onScreen says whether the item's session shows the item's id.
+// onScreen says whether the item's session shows the item's id on a line
+// agentd did not type: its own lines acknowledge nothing.
 func (s *Supervisor) onScreen(it *WorkItem) bool {
 	pane, err := s.tmux.CapturePane(it.Session, PaneLines)
-	return err == nil && strings.Contains(pane, it.ID)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(pane, "\n") {
+		if strings.Contains(line, it.ID) && !strings.Contains(line, itemPointerHead) && !strings.Contains(line, itemRefutedHead) {
+			return true
+		}
+	}
+	return false
 }
 
 // unacknowledged types an item its session has not named within
@@ -579,7 +596,7 @@ func (s *Supervisor) finishedItem(it *WorkItem, status string, now time.Time) {
 			return
 		}
 		if it.DoneWhen.Kind == DoneOwner {
-			s.escalateItem(it, "claim:"+shortHash(HashPane(claim))[:8],
+			s.escalateItem(it, fmt.Sprintf("claim:%s:%d", shortHash(HashPane(claim))[:8], it.Claimed.UnixNano()),
 				fmt.Sprintf("%s finished and says %s is done: %s Only you can say: answer done or not done on the item's entry.", it.Session, it.ID, claim))
 			return
 		}
@@ -608,7 +625,33 @@ func (s *Supervisor) reopenItem(it *WorkItem, why, status string) {
 		}
 		note += "\nSTATUS.md:\n" + status
 	}
-	s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepReopen, Session: it.Session, Note: note})
+	session := it.Session
+	delete(s.dueRetype, it.ID)
+	if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepReopen, Session: session, Note: note}); s.halt != nil {
+		return
+	}
+	s.letGo(it, session)
+}
+
+// letGo takes session off an item it no longer holds: a session started
+// for the item alone is ended, so it holds no place and does the work no
+// more; any other has its items.json written without it.
+func (s *Supervisor) letGo(it *WorkItem, session string) {
+	if session == "" {
+		return
+	}
+	if p, ok := s.st.Runtime[session]; ok && p.Item == it.ID {
+		s.emit(session, Event{Kind: KindSession, Mode: ModeShared, Runtime: &RuntimePayload{ID: newIntentID(), Action: SessionEnd, Repository: p.Repository, By: "agentd"}})
+		s.refreshRuntime()
+		return
+	}
+	if sess, ok := s.cfg.Sessions[session]; ok && sess.Workdir != "" {
+		if _, err := os.Stat(filepath.Join(sess.Workdir, ItemsFile)); err == nil {
+			if err := writeItems(sess.Workdir, s.itemDocs(session, sess.Workdir)); err != nil {
+				s.emit(session, Event{Kind: KindError, Error: &ErrorPayload{Step: "work item " + it.ID + ": items.json", Error: err.Error()}})
+			}
+		}
+	}
 }
 
 // assignItem assigns an open item: to the session the agent handed it
@@ -646,9 +689,12 @@ func (s *Supervisor) assignItem(it *WorkItem, now time.Time) {
 		return
 	}
 	holders := sessionsOf(s.st.Runtime, repo)
-	s.escalateItem(it, "start:"+shortHash(HashPane(why))[:8], fmt.Sprintf("agentd cannot start a session for %s: %s. Holding places: %s. End one, and agentd starts it.",
+	s.escalateItem(it, "start:"+shortHash(HashPane(digits.ReplaceAllString(why, "N")))[:8], fmt.Sprintf("agentd cannot start a session for %s: %s. Holding places: %s. End one, and agentd starts it.",
 		it.ID, why, strings.Join(holders, ", ")))
 }
+
+// digits are the counts a reason names, which change while it holds.
+var digits = regexp.MustCompile(`[0-9]+`)
 
 // itemSlug is a title as a branch's word.
 func itemSlug(title string) string {
@@ -740,7 +786,12 @@ func (s *Supervisor) checkItem(it *WorkItem, now time.Time, claim bool) {
 	}
 	s.checkedAt[it.ID] = now
 	repo := s.cfg.Repositories[it.Repository]
+	// A file is read where the work is done: the session's worktree, else
+	// the clone.
 	clone := s.threadCwd(it.Repository)
+	if cwd := s.cfg.Sessions[it.Session].Cwd; cwd != "" {
+		clone = cwd
+	}
 	workdir := s.cfg.Sessions[it.Session].Workdir
 	last := it.Check
 	id := it.ID
@@ -756,7 +807,6 @@ func (s *Supervisor) checkItem(it *WorkItem, now time.Time, claim bool) {
 
 // runCheck checks d: whether it holds, and what was seen, timed.
 func (s *Supervisor) runCheck(d EndCheck, repo Repository, clone, workdir string) (bool, string) {
-	at := s.clock.Now().UTC().Format("15:04:05Z")
 	ok, seen := false, ""
 	switch d.Kind {
 	case DoneURL:
@@ -765,18 +815,44 @@ func (s *Supervisor) runCheck(d EndCheck, repo Repository, clone, workdir string
 		ok, seen = s.checkForge(d, repo)
 	case DoneFile:
 		if clone == "" {
-			seen = "no clone here to read " + d.Path + " in"
+			seen = "no worktree or clone here to read " + d.Path + " in"
 			break
 		}
 		ok, seen = checkFile(filepath.Join(clone, filepath.Clean(d.Path)), d.Path, d.Contains)
 	case DoneStatus:
 		ok, seen = checkFile(filepath.Join(workdir, "STATUS.md"), "STATUS.md", d.Contains)
 	}
-	return ok, fmt.Sprintf("%s: %s (checked %s)", d, seen, at)
+	return ok, fmt.Sprintf("%s: %s", d, seen)
 }
 
-// itemHTTP is the client a url check uses.
-var itemHTTP = &http.Client{Timeout: itemCheckTimeout}
+// itemHTTP is the client a url check uses: it follows redirects on the
+// URL's own host only, and dials no loopback, link-local or unspecified
+// address, so an agent's URL reads no service of this machine's or the
+// cloud's metadata.
+var itemHTTP = &http.Client{Timeout: itemCheckTimeout,
+	CheckRedirect: func(r *http.Request, via []*http.Request) error {
+		if len(via) >= 5 || r.URL.Host != via[0].URL.Host {
+			return errors.New("a redirect off the URL's host")
+		}
+		return nil
+	},
+	Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: (&net.Dialer{Timeout: itemCheckTimeout, Control: dialPublic}).DialContext}}
+
+// itemLoopback lets a url check dial loopback, for tests alone.
+var itemLoopback = false
+
+// dialPublic refuses a loopback, link-local or unspecified address.
+func dialPublic(network, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return err
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsLoopback() && !itemLoopback {
+		return fmt.Errorf("a url check dials no address %s", host)
+	}
+	return nil
+}
 
 // checkURL reads u and says whether its body contains want.
 func checkURL(u, want string) (bool, string) {
@@ -919,8 +995,10 @@ func writeItems(workdir string, docs []itemDoc) error {
 // Lines typed into a session about its items: fixed, with the item's id
 // only, never the owner's words.
 const (
-	itemPointer = "agentd assigned you work item %[1]s: read it in " + ItemsFile + " in your workdir. Name %[1]s in STATUS.md as you take it; write \"%[1]s done: EVIDENCE\" or \"%[1]s blocked: QUESTION\" there."
-	itemRefuted = "agentd checked work item %[1]s and it is not done: its check is in " + ItemsFile + ". Carry on, or write \"%[1]s blocked: QUESTION\" in STATUS.md."
+	itemPointerHead = "agentd assigned you work item "
+	itemRefutedHead = "agentd checked work item "
+	itemPointer     = itemPointerHead + "%[1]s: read it in " + ItemsFile + " in your workdir. Name %[1]s in STATUS.md as you take it; write \"%[1]s done: EVIDENCE\" or \"%[1]s blocked: QUESTION\" there."
+	itemRefuted     = itemRefutedHead + "%[1]s and it is not done: its check is in " + ItemsFile + ". Carry on, or write \"%[1]s blocked: QUESTION\" in STATUS.md."
 )
 
 // deliverItems types into a live session that can take a line the
@@ -935,7 +1013,7 @@ func (s *Supervisor) deliverItems(name string, sess Session, t *Track, ev Eviden
 		switch {
 		case it.State == WorkAssigned && it.Typed.IsZero() && !it.Started, s.dueRetype[it.ID]:
 			line = fmt.Sprintf(itemPointer, it.ID)
-		case it.Refuted != "" && it.Check != nil && !it.Check.OK && it.Told.Before(it.Checked):
+		case it.Refuted != "" && it.Told.Before(it.RefutedAt):
 			line = fmt.Sprintf(itemRefuted, it.ID)
 		default:
 			continue
@@ -953,7 +1031,7 @@ func (s *Supervisor) deliverItems(name string, sess Session, t *Track, ev Eviden
 		})
 		if err == nil && s.halt == nil {
 			step := WorkStepTyped
-			if strings.HasPrefix(line, "agentd checked") {
+			if strings.HasPrefix(line, itemRefutedHead) {
 				step = WorkStepTold
 			}
 			delete(s.dueRetype, it.ID)
@@ -1083,13 +1161,13 @@ type WorkView struct {
 // workWords bounds the owner's words an item shows.
 const workWords = 200
 
-// WorkViews are st's items of repo, or of every repository for "", the
-// closed ones too with all, oldest first, screened.
-func WorkViews(st *LogState, repo string, all bool, now time.Time, secret func(...string) bool) []WorkView {
+// WorkViews are st's items on console, or of every repository for "",
+// the closed ones too with all, oldest first, screened.
+func WorkViews(cfg *Config, st *LogState, console string, all bool, now time.Time, secret func(...string) bool) []WorkView {
 	var out []WorkView
 	for _, id := range st.sortedWork() {
 		it := st.Work[id]
-		if repo != "" && it.Repository != repo || !all && it.terminal() {
+		if console != "" && it.Repository != console && cfg.RepositoryConsole(it.Repository) != console || !all && it.terminal() {
 			continue
 		}
 		v := WorkView{ID: it.ID, Repository: it.Repository, Title: it.Title, State: it.State, Opened: it.Opened, Age: ago(now, it.Opened), Session: it.Session,

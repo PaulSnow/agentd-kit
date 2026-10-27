@@ -303,7 +303,7 @@ func itemsCmd(args []string, w io.Writer) error {
 	defer log.Close()
 	st := NewLogState(cfg, ModeLive).Fold(events)
 	// The owner's open work items come first (#66): told means done.
-	views := WorkViews(st, "", *all, time.Now(), confidentialMatcher(cfg))
+	views := WorkViews(cfg, st, "", *all, time.Now(), confidentialMatcher(cfg))
 	if *work {
 		if *asJSON {
 			if views == nil {
