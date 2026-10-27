@@ -70,6 +70,7 @@ type Event struct {
 	Card        *CardPayload        `json:"card,omitempty"`
 	Thread      *ThreadPayload      `json:"thread,omitempty"`
 	Query       *QueryPayload       `json:"query,omitempty"`
+	Fact        *FactPayload        `json:"fact,omitempty"`
 }
 
 // Event kinds.
@@ -376,7 +377,7 @@ func (e Event) check() error {
 		KindSkip: e.Skip != nil, KindCrash: e.Crash != nil, KindClear: e.Clear != nil, KindError: e.Error != nil, KindWarning: e.Warning != nil,
 		KindItem: e.Item != nil, KindSeen: e.Seen != nil, KindCursor: e.Cursor != nil, KindUsage: e.Usage != nil,
 		KindCheckpoint: e.Checkpoint != nil, KindPoll: e.Poll != nil, KindTriage: e.Triage != nil, KindDecision: e.Decision != nil,
-		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, KindApproval: e.Approval != nil, KindAccount: e.Account != nil, KindMessage: e.Message != nil, KindInbox: e.Inbox != nil, KindJob: e.Job != nil, KindLoop: e.Loop != nil, KindNode: e.Node != nil, KindRoute: e.Route != nil, KindStatus: e.Status != nil, KindCard: e.Card != nil, KindThread: e.Thread != nil, KindQuery: e.Query != nil, "act": e.Act != nil,
+		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, KindApproval: e.Approval != nil, KindAccount: e.Account != nil, KindMessage: e.Message != nil, KindInbox: e.Inbox != nil, KindJob: e.Job != nil, KindLoop: e.Loop != nil, KindNode: e.Node != nil, KindRoute: e.Route != nil, KindStatus: e.Status != nil, KindCard: e.Card != nil, KindThread: e.Thread != nil, KindQuery: e.Query != nil, KindFact: e.Fact != nil, "act": e.Act != nil,
 	}
 	want := e.Kind
 	switch e.Kind {
@@ -411,6 +412,8 @@ func (e Event) check() error {
 		return errors.New("a card event is a run's, for no one session, names its repository and topic, and carries a card, or why there is none")
 	case e.Kind == KindThread && (e.Session != "" || e.Mode != ModeShared || e.Thread.Repository == "" || e.Thread.Ref == ""):
 		return errors.New("a thread event is a shared fact, for no one session, and names its repository and reference")
+	case e.Kind == KindFact && (e.Session != "" || e.Mode != ModeLive && e.Mode != ModeShadow || e.Fact.check() != nil):
+		return errors.New("a fact is a run's, for no one session, and names its repository, a change, and a session or a reference")
 	case e.Kind == KindQuery && (e.Mode != ModeShared || e.Query.Repository == "" || e.Query.Tool == ""):
 		return errors.New("a query event is a shared fact and names its repository and tool")
 	case e.Kind == KindAccount && (e.Session != "" || e.Mode != ModeShared || e.Account.Account == ""):

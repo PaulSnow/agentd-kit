@@ -78,7 +78,7 @@ func (c CuratorConfig) perDay() int {
 // curatedKinds are the records whose arrival calls a topic's curator; the
 // rest (prompts, replies, tool failures, posts) go with them as context.
 var curatedKinds = []string{HistIssue, HistRequest, HistComment, HistItem, HistDecision, HistAnswer, HistInstruction, HistRuling,
-	HistStatus, HistCommit, HistCI, HistMerge, HistEscalation}
+	HistStatus, HistCommit, HistCI, HistMerge, HistEscalation, HistFact}
 
 // cardBrief is a topic card as the repository's curator sees it.
 type cardBrief struct {

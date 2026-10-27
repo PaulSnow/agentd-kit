@@ -150,7 +150,16 @@ func (srv *MCPServer) state(cs *ContextStore, topic string, q *QueryPayload) any
 	h := cs.History(srv.sess.Repository)
 	if c := cs.Card(srv.sess.Repository, topic); c != nil {
 		q.Hit, q.Records = true, 1
-		return map[string]any{"card": c, "history": len(h.OnTopic(topic))}
+		out := map[string]any{"card": c, "history": len(h.OnTopic(topic))}
+		// How fresh it is (#62): its sources' newest time, and the topic's
+		// newest record, which a curator may not have read yet.
+		if at := cardSourcesAt(cs, srv.sess.Repository, c); !at.IsZero() {
+			out["sources_at"] = at
+		}
+		if rs := h.OnTopic(topic); len(rs) > 0 {
+			out["newest_record_at"] = rs[len(rs)-1].At
+		}
+		return out
 	}
 	out := map[string]any{"topic": cutUTF8(topic, 200), "card": nil, "history": len(h.OnTopic(topic))}
 	if cardKindOf(topic) == "" {
@@ -320,4 +329,25 @@ func (srv *MCPServer) history(cs *ContextStore, args json.RawMessage, q *QueryPa
 		q.Records = len(rs)
 	}
 	return out, nil
+}
+
+// cardSourcesAt is the newest time of what card cites: its records, and
+// the cards it cites as card:TOPIC.
+func cardSourcesAt(cs *ContextStore, repo string, card *Card) time.Time {
+	var at time.Time
+	h := cs.History(repo)
+	for _, id := range cardSrcs(card) {
+		var t time.Time
+		if topic, ok := strings.CutPrefix(id, "card:"); ok {
+			if c := cs.Card(repo, topic); c != nil {
+				t = c.Updated
+			}
+		} else if r := h.Record(id); r != nil {
+			t = r.At
+		}
+		if t.After(at) {
+			at = t
+		}
+	}
+	return at
 }
