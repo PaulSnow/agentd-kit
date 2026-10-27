@@ -117,7 +117,7 @@
 {{if .ReplySrc}}<form id="composer" class="composer" method="post" action="/respond"><input type="hidden" name="token" value="{{.Token}}"><input type="hidden" name="back" value="{{.Back}}"><input type="hidden" name="src" value="{{.ReplySrc}}"><input type="hidden" name="repository" value="{{.Repository}}"><input type="hidden" name="entry" value="">
 <div class="composer-head"><label>To: <select name="session" aria-label="Send to">{{if not .Other}}<option value="">chat</option>{{end}}{{range .To}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
 <span class="re-chip" hidden>Re: <span class="re-label"></span> <button type="button" class="re-clear" aria-label="Respond to no entry">×</button></span>
-{{if .Open}}<button type="button" class="open-questions" data-open="{{len .Open}}">{{len .Open}} open question{{if ne (len .Open) 1}}s{{end}}</button>{{end}}</div>
+<button type="button" class="open-questions"{{if not .Open}} hidden{{end}}>{{len .Open}} open question{{if ne (len .Open) 1}}s{{end}}</button></div>
 <div class="composer-row"><textarea name="text" rows="2" maxlength="4000" aria-label="Your message" required></textarea><button type="submit">Send</button></div>
 </form>
 {{else}}<p class="muted composer">No live run configures {{.Repository}}, so it takes no message.</p>{{end}}
@@ -126,7 +126,7 @@
 
 {{define "chips"}}<nav id="chips" class="session-chips" aria-label="Sessions">{{range .Panels}}<span class="chip session-chip" data-session="{{.Name}}"><button type="button" class="chip-filter" data-session="{{.Name}}"{{if .MessageTo}} data-to="{{.Name}}"{{end}}><span class="dot state-{{.State}}" title="{{.State}}"></span> {{.Name}}{{with .Doing}} <span class="doing">{{.Text}}</span>{{end}}{{if .Questions}} <span class="badge alert">{{.Questions}}?</span>{{end}}</button><a class="chip-page" href="/session/{{.Src}}/{{.Name}}" aria-label="{{.Name}}'s page">→</a>{{with .Status}}<span class="spark status-graph" role="img" aria-label="Status over the last 6 hours"><svg viewBox="0 0 {{.Width}} 24" preserveAspectRatio="none">{{range .Slots}}<rect x="{{.X}}" y="{{.Y}}" width="3" height="{{.H}}" class="{{.Class}}"><title>{{.Title}}</title></rect>{{end}}</svg><span class="spark-now">{{with .Last}}{{.Phase}} {{$.Percent .Progress}} · risk {{.Risk}}{{if .Blocked}} · <strong>blocked</strong>: {{.Blocker}}{{end}} · {{.Summary}}{{with .Next}} Next: {{.}}{{end}}{{end}}{{if .Gaps}} · {{.Gaps}} failed checks{{end}} · {{$.Tokens .Tokens}} tokens today</span></span>{{end}}</span>{{else}}<span class="muted">No sessions.</span>{{end}}</nav>{{end}}
 
-{{define "entry"}}{{$p := .P}}{{with .V}}<li class="entry msg msg-{{.Kind}}{{if .Open}} entry-open{{end}}" id="{{.DOMID}}" data-entry="{{.Entry}}" data-session="{{.Session}}" data-to="{{.Writer}}">
+{{define "entry"}}{{$p := .P}}{{with .V}}<li class="entry msg msg-{{.Kind}}{{if .Open}} entry-open{{end}}" id="{{.DOMID}}" data-entry="{{.Entry}}" data-src="{{.Src}}" data-session="{{.Session}}" data-to="{{.Writer}}">
 <div class="msg-head"><span class="from">{{if .From}}{{.From}}{{else}}unknown{{end}}</span>{{if .Session}} <a href="/session/{{.Src}}/{{.Session}}">{{.Session}}</a>{{end}} <span class="badge">{{.Kind}}</span> <time class="muted">{{$p.When .At}}</time>{{if and .Entry $p.ReplySrc}} <button type="button" class="reply-to" aria-label="Respond in the composer">↩</button>{{end}}</div>
 {{with .Re}}<blockquote class="re">Re {{.Kind}}{{with .Session}} of {{.}}{{end}}{{with .Decision}} {{.}}{{end}}: {{if .Question}}{{.Question}}{{else}}{{.Text}}{{end}}</blockquote>{{end}}
 {{if .Decision}}{{with .Decision}}{{if .Withheld}}<p class="muted">{{.Withheld}}</p>{{else}}<div class="question md">{{markdown .Question}}</div>
@@ -163,8 +163,8 @@
 {{with .Limits}}<p class="muted">Choose{{with .MinText}} at least {{.}}{{end}}{{with .MaxText}} at most {{.}}{{end}}.</p>{{end}}
 {{else if eq .Type "number"}}<div class="inline"><input type="number" name="value" aria-label="Your answer"{{with .Limits}}{{with .MinText}} min="{{.}}"{{end}}{{with .MaxText}} max="{{.}}"{{end}}{{end}} step="any"></div>
 {{else if eq .Type "date"}}<div class="inline"><input type="date" name="value" aria-label="Your answer"{{with .Limits}}{{with .MinText}} min="{{.}}"{{end}}{{with .MaxText}} max="{{.}}"{{end}}{{end}}></div>
-{{else}}<p class="muted">Your words below are the answer.</p>{{end}}
-<p class="muted">Words below an option go with it; words alone answer in your own words, which settles nothing{{if eq .Type "text"}}, except for this question{{end}}.</p>{{end}}
+{{end}}
+<p class="muted">{{if eq .Type "text"}}Your words below are the answer.{{else}}Words below an option go with it; words alone answer in your own words, which settles nothing.{{end}}</p>{{end}}
 
 {{define "prompt-line"}}<p class="prompt-line">{{with .Lead}}{{.}} {{end}}<a href="{{.Href}}">{{.Link}} →</a></p>{{end}}
 

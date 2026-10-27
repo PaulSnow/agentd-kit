@@ -770,7 +770,7 @@ func (u *UI) serveRespond(w http.ResponseWriter, r *http.Request) {
 	if a.Binding() || a.Other != "" || strings.HasPrefix(entry, entryDecision) {
 		ap = &a
 	}
-	if err := src.respond(repo, entry, text, ap); err != nil {
+	if err := src.respond(repo, entry, strings.TrimSpace(r.PostForm.Get("session")), text, ap); err != nil {
 		http.Error(w, "the response was not recorded: "+err.Error(), http.StatusBadRequest)
 		return
 	}

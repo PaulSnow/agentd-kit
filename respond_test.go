@@ -219,3 +219,67 @@ func TestBoxThreadsResponsesUnderTheirEntries(t *testing.T) {
 		t.Fatalf("open %q, chips %q", doc.Open, doc.Chips)
 	}
 }
+
+// Words about a decision already answered leave its answer as it is and
+// reach its session; another answer to it is refused. Words the owner
+// adds to an answer go into it only when they may be logged and fit; a
+// long or confidential comment still goes, screened, as the response.
+// A session waiting on the owner takes a response too (#59 review).
+func TestResponseEdges(t *testing.T) {
+	h, u, entries := respondFixture(t)
+	h.cfg.ConfidentialPatterns = []string{`hunter2`}
+	u, _ = testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
+	u.now = h.clock.Now
+	post := func(form url.Values) int {
+		t.Helper()
+		form.Set("src", "night")
+		form.Set("repository", "widgets")
+		return ownerPost(u, "/respond", form).Code
+	}
+	if c := post(url.Values{"entry": {entries[2]}, "answer": {"yes"}, "text": {strings.Repeat("Only after CI is green. ", 40)}}); c != http.StatusSeeOther {
+		t.Fatalf("a yes with a long comment: %d", c)
+	}
+	if c := post(url.Values{"entry": {entries[2]}, "text": {"Thanks."}}); c != http.StatusSeeOther {
+		t.Fatalf("words about an answered decision: %d", c)
+	}
+	if c := post(url.Values{"entry": {entries[2]}, "answer": {"no"}}); c != http.StatusBadRequest {
+		t.Fatalf("a second answer: %d", c)
+	}
+	if c := post(url.Values{"entry": {entries[0]}, "answer": {"yes"}, "text": {"the password is hunter2"}}); c != http.StatusSeeOther {
+		t.Fatalf("a yes with a confidential comment: %d", c)
+	}
+	st := h.logState()
+	if a := st.Tracks["c"].Answers["Q1"]; a.Answer == nil || !*a.Answer || a.Note != "" || a.Other != "" {
+		t.Fatalf("c's answer after the words about it: %+v", a)
+	}
+	if a := st.Tracks["a"].Answers["Q1"]; a.Answer == nil || !*a.Answer || a.Note != "" {
+		t.Fatalf("a's answer: %+v", a)
+	}
+	if strings.Contains(h.buf.String(), "hunter2") {
+		t.Fatal("the confidential comment was logged")
+	}
+	var words []string
+	for _, in := range st.Instructions {
+		if in.Re != nil && in.Re.ID == entries[2] && in.Answer == nil {
+			words = append(words, in.Text)
+		}
+	}
+	if fmt.Sprint(words) != "[Thanks.]" {
+		t.Fatalf("words about c's answered decision: %q", words)
+	}
+	// A need: b is stopped by the owner, and a response to it is bound.
+	if err := h.sup.log.Append(Event{V: EventVersion, Time: h.clock.Now(), Session: "b", Kind: KindTransition, Mode: ModeLive,
+		Transition: &TransitionPayload{From: string(Working), To: string(UsageLimited), Reason: "usage limit until 14:00"}}); err != nil {
+		t.Fatal(err)
+	}
+	if c := post(url.Values{"entry": {needEntry("b", "usage-limited")}, "quick": {"Go ahead"}}); c != http.StatusSeeOther {
+		t.Fatalf("a response to a need: %d", c)
+	}
+	found := false
+	for _, in := range h.logState().Instructions {
+		found = found || in.Re != nil && in.Re.Kind == "need" && in.To == "b" && in.Text == "Go ahead"
+	}
+	if !found {
+		t.Fatal("the response to the need is not bound to it")
+	}
+}

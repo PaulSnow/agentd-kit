@@ -161,7 +161,6 @@ textarea { width: 100%; resize: vertical; }
 .status-graph rect { fill: var(--muted); }
 .status-graph rect.gap { fill: none; stroke: var(--alert); stroke-width: .5; stroke-dasharray: 1 1; }
 .status-graph rect.blocked { fill: var(--alert); }
-.status-now { margin: var(--space-1) 0 0; font-size: var(--size-s); }
 .status-graph .phase-design { fill: #8e6bd8; }
 .status-graph .phase-code { fill: var(--accent); }
 .status-graph .phase-test { fill: #c77d1a; }
@@ -211,7 +210,8 @@ body:has(.console) > .foot { display: none; }
 .answered { margin: var(--space-1) 0 0; font-size: var(--size-s); }
 .responses { list-style: none; margin: var(--space-2) 0 0 var(--space-3); padding: 0; }
 .respond { margin-top: var(--space-2); }
-.js .respond > summary { display: none; }
+.respond > summary { font-size: var(--size-s); padding: 0; }
+.js .respond:not([open]) > summary { position: absolute; right: var(--space-3); bottom: var(--space-1); }
 .respond[open] > form, .respond[open] > .default { background: var(--surface); border: 1px solid var(--accent); border-radius: var(--radius); padding: var(--space-2) var(--space-3); box-shadow: 0 4px 12px rgb(0 0 0 / .12); cursor: auto; }
 .respond[open] > .default { margin-top: var(--space-2); }
 .quick button { background: var(--surface); color: var(--accent); }

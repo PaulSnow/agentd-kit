@@ -676,9 +676,6 @@ type uiPanel struct {
 	Since     time.Time
 	Doing     *uiStep
 	Questions int
-	Reply     template.HTML
-	ReplyMore template.HTML
-	ReplyAt   time.Time
 	MessageTo string
 	// Status is the session's status graph (#57), nil when it has no
 	// check today or in the hours drawn.
@@ -787,6 +784,19 @@ type uiEntry struct {
 	Open  bool
 }
 
+// sortEntries puts entries newest last; of two at one time, in the order
+// they came. An open decision whose time is not known goes last, where
+// the owner sees it.
+func sortEntries(es []uiEntry) {
+	key := func(e uiEntry) time.Time {
+		if e.At.IsZero() && e.Open {
+			return time.Unix(1<<40, 0)
+		}
+		return e.At
+	}
+	sort.SliceStable(es, func(i, j int) bool { return key(es[i]).Before(key(es[j])) })
+}
+
 // quickWords are what an entry of a kind offers to say to it.
 func quickWords(kind string) []string {
 	switch kind {
@@ -803,7 +813,7 @@ func quickWords(kind string) []string {
 }
 
 // needEntry is the entry id of a session's need of a kind.
-func needEntry(session, kind string) string { return "n:" + session + ":" + kind }
+func needEntry(session, kind string) string { return entryNeed + session + ":" + kind }
 
 // consoleView is repo's console, nil when no source knows the repository:
 // its entries newest last, the owner's responses threaded under the
@@ -881,10 +891,34 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 	if !known && len(v.Entries) == 0 && len(responses) == 0 {
 		return nil, nil
 	}
-	// Newest last; of two at one time, in the order they came.
-	sort.SliceStable(v.Entries, func(i, j int) bool { return v.Entries[i].At.Before(v.Entries[j].At) })
-	if len(v.Entries) > consoleEntries {
-		v.Entries = v.Entries[len(v.Entries)-consoleEntries:]
+	// An id the log gave more than one line, a feed post tried again,
+	// is the latest of them.
+	latest := map[string]int{}
+	for i, e := range v.Entries {
+		if j, ok := latest[e.Src+"\n"+e.Entry]; !ok || !e.At.Before(v.Entries[j].At) {
+			latest[e.Src+"\n"+e.Entry] = i
+		}
+	}
+	kept := v.Entries[:0]
+	for i, e := range v.Entries {
+		if latest[e.Src+"\n"+e.Entry] == i {
+			kept = append(kept, e)
+		}
+	}
+	v.Entries = kept
+	sortEntries(v.Entries)
+	// The box holds the latest entries, and every open decision however
+	// old: none waits on the owner out of sight.
+	if n := len(v.Entries) - consoleEntries; n > 0 {
+		kept := v.Entries[:0]
+		for _, e := range v.Entries {
+			if n > 0 && !e.Open {
+				n--
+				continue
+			}
+			kept = append(kept, e)
+		}
+		v.Entries = kept
 	}
 	at := map[string]int{}
 	for i := range v.Entries {
@@ -907,7 +941,7 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 		e.DOMID = "e-" + shortHash(HashPane(e.Src + "\n" + e.Entry))[:12]
 		v.Entries = append(v.Entries, e)
 	}
-	sort.SliceStable(v.Entries, func(i, j int) bool { return v.Entries[i].At.Before(v.Entries[j].At) })
+	sortEntries(v.Entries)
 	sort.SliceStable(v.Panels, func(i, j int) bool { return v.Panels[i].Name < v.Panels[j].Name })
 	for _, p := range v.Panels {
 		if p.MessageTo != "" {
@@ -997,18 +1031,6 @@ func (src *uiSource) panels(cfg *Config, repo string, needs []uiNeed, secret fun
 		for _, n := range needs {
 			if n.Session == name && n.Src == src.Name && (n.Kind == "decision" || n.Kind == "blocked") {
 				p.Questions++
-			}
-		}
-		if t != nil {
-			for i := len(t.Turns) - 1; i >= 0; i-- {
-				if tr := t.Turns[i]; tr.Role == TurnSummary {
-					p.ReplyAt = tr.At
-					p.Reply, p.ReplyMore = folded(tr.Text)
-					if tr.Withheld || secret(tr.Text) {
-						p.Reply, p.ReplyMore = template.HTML(template.HTMLEscapeString(withheldMessage)), ""
-					}
-					break
-				}
 			}
 		}
 		out = append(out, p)

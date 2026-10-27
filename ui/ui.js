@@ -103,6 +103,20 @@
   var unseen = 0;
   var filter = "";
   var hashes = {};
+  var replySrc = composer ? composer.querySelector('input[name="src"]').value : "";
+
+  // pick sets select sel to value when it offers it, else to its first
+  // option.
+  function pick(sel, value) {
+    for (var i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].value === value) {
+        sel.selectedIndex = i;
+        return true;
+      }
+    }
+    sel.selectedIndex = 0;
+    return false;
+  }
 
   function atBottom() {
     return box.scrollHeight - box.scrollTop - box.clientHeight < 24;
@@ -147,17 +161,21 @@
     var bottom = atBottom();
     var prev = null;
     var empty = list.querySelector(".empty");
+    var keep = {};
     for (var i = 0; i < doc.entries.length; i++) {
       var d = doc.entries[i];
+      keep[d.id] = true;
       var el = document.getElementById(d.id);
       if (el) {
-        if (hashes[d.id] === undefined) {
-          hashes[d.id] = d.hash;
-        } else if (hashes[d.id] !== d.hash && !busy(el)) {
+        // Unknown until now, an entry is compared as the page parsed it.
+        var changed = hashes[d.id] === undefined ? !element(d.html).isEqualNode(el) : hashes[d.id] !== d.hash;
+        if (changed && !busy(el)) {
           var next = element(d.html);
           reopen(el, next);
           el.replaceWith(next);
           el = next;
+          hashes[d.id] = d.hash;
+        } else if (!changed) {
           hashes[d.id] = d.hash;
         }
       } else {
@@ -180,6 +198,14 @@
       }
       prev = el;
     }
+    // An entry the console no longer holds goes, unless the owner is in it.
+    var shown = list.querySelectorAll(".entry");
+    for (var k = 0; k < shown.length; k++) {
+      if (!keep[shown[k].id] && !busy(shown[k])) {
+        shown[k].remove();
+        delete hashes[shown[k].id];
+      }
+    }
     openIDs = doc.open;
     var q = document.querySelector(".open-questions");
     if (q) {
@@ -187,7 +213,7 @@
       q.textContent = doc.open.length + " open question" + (doc.open.length === 1 ? "" : "s");
     }
     var chips = document.getElementById("chips");
-    if (chips && doc.chips && !busy(chips)) {
+    if (chips && doc.chips) {
       chips.replaceWith(element(doc.chips));
     }
     applyFilter();
@@ -269,6 +295,7 @@
       return;
     }
     composer.querySelector('input[name="entry"]').value = "";
+    composer.querySelector('input[name="src"]').value = replySrc;
     composer.querySelector(".re-chip").hidden = true;
   }
 
@@ -278,16 +305,17 @@
       return;
     }
     composer.querySelector('input[name="entry"]').value = el.getAttribute("data-entry");
+    // The entry is found in the run that shows it.
+    composer.querySelector('input[name="src"]').value = el.getAttribute("data-src") || replySrc;
     var head = el.querySelector(".msg-head");
     var body = el.querySelector(".md, .prompt-line, .question, p");
     var label = (head ? head.querySelector(".from").textContent + " " + (head.querySelector(".badge") || {}).textContent : "") +
       ": " + (body ? body.textContent.trim().slice(0, 80) : "");
     composer.querySelector(".re-label").textContent = label;
     composer.querySelector(".re-chip").hidden = false;
-    var to = el.getAttribute("data-to");
     var sel = composer.querySelector('select[name="session"]');
     if (sel) {
-      sel.value = sel.querySelector('option[value="' + to + '"]') ? to : sel.options[0].value;
+      pick(sel, el.getAttribute("data-to"));
     }
     composer.querySelector("textarea").focus();
   }
@@ -334,7 +362,7 @@
       var sel = composer && composer.querySelector('select[name="session"]');
       var to = chip.getAttribute("data-to");
       if (sel && to && filter !== "") {
-        sel.value = to;
+        pick(sel, to);
       }
       return;
     }

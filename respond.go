@@ -60,6 +60,7 @@ const (
 	entryEscalation  = "e:" // agentd escalating a session
 	entryInstruction = "i:" // the owner's own message
 	entryDecision    = "d:" // a session's decision: d:SESSION:ID
+	entryNeed        = "n:" // a session waiting on the owner: n:SESSION:KIND
 )
 
 // entryKey is an entry's id: prefix and the id the log gives it, or a
@@ -104,9 +105,11 @@ type uiDecisionEntry struct {
 func (src *uiSource) decisionEntries(cfg *Config, rep Report, repo string) []uiDecisionEntry {
 	secret := confidentialMatcher(cfg)
 	var out []uiDecisionEntry
+	open := map[string]bool{}
 	for _, d := range DecisionsFrom(cfg, src.st, rep) {
 		if d.Repository == repo {
 			out = append(out, uiDecisionEntry{UIDecision: d, At: src.askedAt[d.Session+" "+d.ID]})
+			open[d.Session+" "+d.ID] = true
 		}
 	}
 	for _, rr := range rep.Repositories {
@@ -121,7 +124,9 @@ func (src *uiSource) decisionEntries(cfg *Config, rep Report, repo string) []uiD
 			for _, id := range sortedKeys(t.Answers) {
 				a := t.Answers[id]
 				d, ok := t.decision(id)
-				if !ok || !a.Binding() {
+				// Only the answer to the decision as it is raised now: one
+				// raised again under its id is open, and shown as such.
+				if !ok || !a.Binding() || open[c.Session+" "+id] || a.Asked != decisionHash(d) {
 					continue
 				}
 				e := uiDecisionEntry{UIDecision: UIDecision{Session: c.Session, Repository: repo, Decision: d}, At: src.askedAt[c.Session+" "+id], Answer: &a}
@@ -142,10 +147,11 @@ func (src *uiSource) decisionEntries(cfg *Config, rep Report, repo string) []uiD
 
 // entryOf finds entry id of repo's console as the page shows it now:
 // what it is about, the session that wrote it ("" for agentd or the
-// owner), and the decision it is, when it is one.
+// owner), and the decision it is, when it is one still open.
 func (src *uiSource) entryOf(cfg *Config, rep Report, repo, id string) (EntryRe, string, *Decision, error) {
 	secret := confidentialMatcher(cfg)
-	if strings.HasPrefix(id, entryDecision) {
+	switch {
+	case strings.HasPrefix(id, entryDecision):
 		for _, d := range src.decisionEntries(cfg, rep, repo) {
 			if decisionEntry(d.Session, d.ID) != id {
 				continue
@@ -154,12 +160,33 @@ func (src *uiSource) entryOf(cfg *Config, rep Report, repo, id string) (EntryRe,
 			if d.Withheld == "" {
 				re.Question, re.Options, re.Text = d.Question, decisionOptions(d.Decision), d.Context
 			}
+			// An answered decision takes words about it, never another
+			// answer that would replace the owner's.
+			if d.Answer != nil {
+				return re, d.Session, nil, nil
+			}
 			dec := d.Decision
 			return re, d.Session, &dec, nil
 		}
 		return EntryRe{}, "", nil, fmt.Errorf("%s has no decision %q on its console", repo, id)
+	case strings.HasPrefix(id, entryNeed):
+		for _, n := range src.needs(cfg, rep, src.askedAt) {
+			if n.Repository != repo || n.Decision != nil || needEntry(n.Session, n.Kind) != id {
+				continue
+			}
+			re := EntryRe{ID: id, Kind: "need", Session: n.Session, At: n.Since, Text: n.Kind}
+			if n.Text != "" && !secret(n.Text) {
+				re.Text += ": " + n.Text
+			}
+			return re, n.Session, nil, nil
+		}
+		return EntryRe{}, "", nil, fmt.Errorf("%s's console holds no entry %q now", repo, id)
 	}
-	for _, m := range src.messages[repo] {
+	// The latest of an id the log gave more than one line, as the box
+	// shows it.
+	ms := src.messages[repo]
+	for i := len(ms) - 1; i >= 0; i-- {
+		m := ms[i]
 		if m.Entry != id {
 			continue
 		}
@@ -176,10 +203,11 @@ func (src *uiSource) entryOf(cfg *Config, rep Report, repo, id string) (EntryRe,
 }
 
 // respond records the owner's response to entry id of repo's console:
-// an answer to it, when it is a decision and the response gives one,
-// then the response as an instruction carrying the entry, for the
-// session that wrote it, else routed as a reply to the console is.
-func (src *uiSource) respond(repo, id, text string, a *AnswerPayload) error {
+// an answer to it, when it is an open decision and the response gives
+// one, then the response as an instruction carrying the entry, for
+// session to when the owner chose one, else the session that wrote it,
+// else routed as a reply to the console is.
+func (src *uiSource) respond(repo, id, to, text string, a *AnswerPayload) error {
 	src.mu.Lock()
 	defer src.mu.Unlock()
 	now := time.Now()
@@ -192,19 +220,30 @@ func (src *uiSource) respond(repo, id, text string, a *AnswerPayload) error {
 		return err
 	}
 	text = strings.TrimSpace(text)
+	if a != nil && dec == nil && (a.Binding() || a.Other != "") {
+		if strings.HasPrefix(id, entryDecision) {
+			return errors.New("that decision is answered already; write about it instead")
+		}
+		return errors.New("only a decision takes an answer")
+	}
 	var answer *EntryAnswer
 	if a != nil && dec != nil {
 		a.ID = dec.ID
-		if !a.Binding() && a.Other == "" && text != "" {
+		// The owner's words go into the answer only when they may be
+		// logged and fit it; they always go in the instruction, which
+		// screens them and withholds them whole on a match.
+		words := text != "" && !confidentialMatcher(cfg)(text)
+		if !a.Binding() && a.Other == "" && words {
 			// Words alone answer a text decision; any other they
 			// answer in the owner's own words, which settles nothing.
-			if dec.Type == DecisionText {
+			switch {
+			case dec.Type == DecisionText && len([]rune(text)) <= maxAnswerText:
 				a.Text = text
-			} else {
+			case dec.Type != DecisionText && len([]rune(text)) <= maxAnswerText:
 				a.Other = text
 			}
 		}
-		if a.Binding() && a.Text != text {
+		if a.Binding() && a.Text != text && words && len([]rune(text)) <= maxNote {
 			a.Note = text
 		}
 		if a.Binding() || a.Other != "" {
@@ -213,17 +252,18 @@ func (src *uiSource) respond(repo, id, text string, a *AnswerPayload) error {
 			}
 			answer = entryAnswer(*a)
 		}
-	} else if a != nil {
-		return errors.New("only a decision takes an answer")
 	}
 	if text == "" && answer == nil {
 		return errors.New("an empty response")
 	}
-	to := ""
-	if writer != "" {
-		if sess, ok := cfg.Sessions[writer]; ok && sess.Role == "" {
+	// The session the owner chose; else the entry's writer, when it is
+	// one of this console's that takes messages; else the console's chat.
+	if to == "" {
+		if sess, ok := cfg.Sessions[writer]; ok && sess.Role == "" && (sess.Repository == repo || cfg.Console(writer) == repo) {
 			to = writer
 		}
+	} else if sess, ok := cfg.Sessions[to]; !ok || sess.Role != "" || sess.Repository != repo && cfg.Console(to) != repo {
+		return fmt.Errorf("session %q takes no message from %s's console", to, repo)
 	}
 	if err := src.catchUp(); err != nil {
 		return err
