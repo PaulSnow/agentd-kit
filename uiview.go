@@ -711,7 +711,10 @@ func instructionSteps(st *LogState, in *Instruction) []uiStep {
 		case a != nil && a.Work != nil && a.Error == "":
 			// Work no running session covered: a session started for it.
 			steps = append(steps, uiStep{Text: "the agent asked for a work session: " + cutUTF8(a.Answer, 300)})
-			if in.Session == "" && in.Failed == "" {
+			if in.Session == "" && in.Failed == "" && in.Replied.IsZero() {
+				if in.Waiting != "" {
+					return append(steps, uiStep{Text: "waiting: " + in.Waiting, Wait: true})
+				}
 				return append(steps, uiStep{Text: "agentd is starting a session for it", Wait: true})
 			}
 		default:
@@ -1081,6 +1084,13 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 				oe := oe
 				v.Entries = append(v.Entries, uiEntry{uiMessageView: uiMessageView{uiMessage: uiMessage{At: oe.At, Kind: "decision", From: "ops agent",
 					Entry: entryOps + oe.ID}, Src: src.Name}, Decision: &oe.uiDecisionEntry, Open: oe.open})
+			}
+			// The designs of the owner's work, each a go, change or decline
+			// (#68).
+			for _, de := range src.designEntries(cfg, repo, secret) {
+				de := de
+				v.Entries = append(v.Entries, uiEntry{uiMessageView: uiMessageView{uiMessage: uiMessage{At: de.At, Kind: "decision", From: "designer",
+					Entry: entryDesign + de.ID}, Src: src.Name}, Decision: &de.uiDecisionEntry, Open: de.open})
 			}
 			// What the owner can do with a message whose route failed (#65).
 			for _, ne := range src.nextEntries(cfg, repo, secret, now) {

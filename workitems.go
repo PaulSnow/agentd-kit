@@ -66,7 +66,8 @@ const (
 
 // workSteps are the steps a work item event may take.
 var workSteps = map[string]bool{WorkStepOpen: true, WorkStepAssign: true, WorkStepTyped: true, WorkStepAck: true, WorkStepWorking: true, WorkStepBlocked: true,
-	WorkStepClaim: true, WorkStepCheck: true, WorkStepReopen: true, WorkStepDone: true, WorkStepDeclined: true, WorkStepEscalate: true, WorkStepTold: true}
+	WorkStepClaim: true, WorkStepCheck: true, WorkStepReopen: true, WorkStepDone: true, WorkStepDeclined: true, WorkStepEscalate: true, WorkStepTold: true,
+	WorkStepDesign: true, WorkStepChange: true, WorkStepGo: true}
 
 // done_when kinds.
 const (
@@ -222,6 +223,10 @@ type WorkPayload struct {
 	Key         string      `json:"key,omitempty"` // an escalation's: one per key
 	Check       *WorkCheck  `json:"check,omitempty"`
 	By          string      `json:"by,omitempty"`
+	// Designer opens an item a designer designs before any session
+	// starts, and Design is a round's design (#68).
+	Designer bool        `json:"designer,omitempty"`
+	Design   *WorkDesign `json:"design,omitempty"`
 }
 
 // check says what a work item step lacks.
@@ -235,6 +240,8 @@ func (p *WorkPayload) check() error {
 		return errors.New("an assignment names its session")
 	case p.Step == WorkStepCheck && p.Check == nil:
 		return errors.New("a check carries its result")
+	case p.Step == WorkStepDesign && p.Design == nil:
+		return errors.New("a design step carries its design")
 	}
 	return nil
 }
@@ -282,6 +289,22 @@ type WorkItem struct {
 	DoneBy    string
 	// Escalated are the keys the owner was told of.
 	Escalated map[string]bool
+	// Designer marks an item designed before its work starts (#68):
+	// Round is the round designed now or last, Design its brief,
+	// DesignError and DesignFails the round's failures, DesignCost what
+	// every round cost, Change the owner's words on the last, and
+	// Approved when it went on, by whom.
+	Designer     bool
+	Round        int
+	Design       *WorkDesign
+	DesignError  string
+	DesignFails  int
+	DesignCost   *JobUsage
+	Designed     time.Time
+	Change       string
+	Approved     time.Time
+	ApprovedBy   string
+	ApprovedNote string
 }
 
 // terminal says whether the item is closed.
@@ -301,8 +324,12 @@ func (st *LogState) applyWork(e Event) {
 	it := st.Work[p.ID]
 	if p.Step == WorkStepOpen {
 		if it == nil {
-			st.Work[p.ID] = &WorkItem{ID: p.ID, Repository: p.Repository, Instruction: p.Instruction, ThreadWork: *p.Work, HandTo: p.HandTo,
+			it = &WorkItem{ID: p.ID, Repository: p.Repository, Instruction: p.Instruction, ThreadWork: *p.Work, HandTo: p.HandTo,
 				State: WorkOpen, Opened: e.Time, Progress: e.Time, Escalated: map[string]bool{}}
+			if p.Designer {
+				it.Designer, it.State, it.Round = true, WorkDesigning, 1
+			}
+			st.Work[p.ID] = it
 		}
 		return
 	}
@@ -379,6 +406,8 @@ func (st *LogState) applyWork(e Event) {
 		it.DoneAt, it.DoneBy = e.Time, p.By
 	case WorkStepEscalate:
 		it.Escalated[p.Key] = true
+	case WorkStepDesign, WorkStepChange, WorkStepGo:
+		it.applyDesign(p, e.Time)
 	}
 }
 
@@ -439,6 +468,10 @@ func (s *Supervisor) driveItems(now time.Time) {
 
 // driveItem takes one open item a step.
 func (s *Supervisor) driveItem(it *WorkItem, now time.Time) {
+	if it.State == WorkDesigning || it.State == WorkDesigned {
+		s.driveDesign(it, now)
+		return
+	}
 	if it.State == WorkOpen {
 		s.assignItem(it, now)
 		return
@@ -701,7 +734,14 @@ func (s *Supervisor) assignItem(it *WorkItem, now time.Time) {
 	}
 	if why == "" {
 		s.refreshRuntime()
-		s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepAssign, Session: name, Started: true})
+		if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepAssign, Session: name, Started: true}); s.halt != nil {
+			return
+		}
+		// A designed item's message goes to the session started for it,
+		// whose reply answers it (#68).
+		if in := s.st.Instructions[it.Instruction]; it.Designer && in != nil && in.Session == "" && in.Replied.IsZero() {
+			s.routeStep(in, RouteTo, name, true, "started "+name)
+		}
 		return
 	}
 	holders := sessionsOf(s.st.Runtime, repo)
@@ -973,6 +1013,8 @@ type itemDoc struct {
 	Notes       []WorkNote      `json:"notes,omitempty"`
 	Check       *WorkCheck      `json:"last_check,omitempty"`
 	Refuted     string          `json:"refuted_claim,omitempty"`
+	// Designed: Brief is the design the owner approved (#68).
+	Designed bool `json:"designed,omitempty"`
 }
 
 // itemProtocol is how a session tells Go of an item, as items.json and
@@ -989,6 +1031,14 @@ func (s *Supervisor) itemDocs(name, workdir string) []itemDoc {
 		d := itemDoc{ID: it.ID, Title: it.Title, Brief: it.Brief, Issue: it.Issue, DoneWhen: it.DoneWhen, State: it.State, Notes: it.Notes, Check: it.Check, Refuted: it.Refuted}
 		if in := s.st.Instructions[it.Instruction]; in != nil {
 			d.Owner, d.Withheld = in.Text, in.Withheld > 0
+			// A designed item's brief is its design (#68).
+			if it.Designer && !it.Approved.IsZero() {
+				words := ""
+				if in.Withheld == 0 {
+					words = in.Text
+				}
+				d.Brief, d.Designed = designMarkdown(it, words), true
+			}
 			if workdir != "" {
 				d.Attachments, _ = copyAttachments(s.cfg, workdir, in.Attachments)
 			}
@@ -1073,6 +1123,10 @@ func (it *WorkItem) workOptions() []string {
 	if it.terminal() {
 		return nil
 	}
+	// Being designed, it takes its design's answers on its design entry.
+	if it.State == WorkDesigning || it.State == WorkDesigned {
+		return []string{WorkAnswerDecline}
+	}
 	opts := []string{WorkAnswerDone}
 	if it.DoneWhen.Kind == DoneOwner && it.Claim != "" {
 		opts = append(opts, WorkAnswerNotDone)
@@ -1107,6 +1161,9 @@ func (s *Supervisor) routeWork(in *Instruction) bool {
 		return true
 	case it.terminal():
 		answer(it.ID + " is " + it.State + " already; nothing was changed.")
+		return true
+	case !contains(it.workOptions(), in.Answer.Choice) && (it.State == WorkDesigning || it.State == WorkDesigned):
+		answer(it.ID + " is " + it.State + ": answer go, change or decline on its design entry, " + entryDesign + it.ID + "; nothing was changed.")
 		return true
 	}
 	word := strings.TrimSpace(in.Text)
@@ -1143,8 +1200,11 @@ func (s *Supervisor) routeWork(in *Instruction) bool {
 		s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepReopen, Session: it.Session, Instruction: in.ID, Note: note, By: "owner"})
 		answer(it.ID + " is open again; agentd assigns it to a new session.")
 	case WorkAnswerDecline:
-		s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepDeclined, Instruction: in.ID, Note: oneLine(word, 300), By: "owner"})
+		if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepDeclined, Instruction: in.ID, Note: oneLine(word, 300), By: "owner"}); s.halt != nil {
+			return true
+		}
 		answer(it.ID + " is declined; agentd drops it.")
+		s.declinedMessage(it)
 	default:
 		answer(in.Answer.Choice + " is not an answer a work item takes; nothing was changed.")
 	}
@@ -1197,6 +1257,10 @@ func WorkViews(cfg *Config, st *LogState, console string, all bool, now time.Tim
 			v.LastCheck = it.Check.Detail
 		}
 		switch {
+		case it.State == WorkDesigning:
+			v.Progress = fmt.Sprintf("the designer is writing round %d", it.Round)
+		case it.State == WorkDesigned:
+			v.Progress = "its design waits on your go, change or decline: " + entryDesign + it.ID
 		case len(it.Notes) > 0 && it.Notes[len(it.Notes)-1].At.After(it.Progress.Add(-time.Second)):
 			v.Progress = oneLine(it.Notes[len(it.Notes)-1].Text, 300)
 		case it.Session != "":

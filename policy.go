@@ -36,6 +36,8 @@ type RepoPolicy struct {
 	ConfidentialPatterns []string      `json:"confidential_patterns"`
 	// Feed is which of its sessions' turns its console receives (turns.go).
 	Feed FeedRules `json:"feed"`
+	// Design is whether a contained design goes on without a go (#68).
+	Design DesignRules `json:"design"`
 }
 
 // DeliveryRules: Allow is the writes delivery may make, push and open.
@@ -547,6 +549,19 @@ func narrowKey(eff *RepoPolicy, key string, raw json.RawMessage) bool {
 			return false
 		}
 		eff.Review.OthersMaxAge = d
+		return true
+	case "design.auto":
+		if strictJSON(raw, &b) != nil || b && !eff.Design.Auto {
+			return false
+		}
+		eff.Design.Auto = b
+		return true
+	case "design.spend_limit_usd":
+		var f float64
+		if strictJSON(raw, &f) != nil || f < 0 || f > eff.Design.SpendLimitUSD {
+			return false
+		}
+		eff.Design.SpendLimitUSD = f
 		return true
 	case "ci.required", "ci.retest_on_base_move":
 		have := &eff.CI.Required

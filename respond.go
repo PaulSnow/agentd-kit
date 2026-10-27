@@ -202,6 +202,25 @@ func (src *uiSource) entryOf(cfg *Config, rep Report, repo, id string, now time.
 			d.Options = append(d.Options, DecisionOption{Key: o, Label: o})
 		}
 		return re, "", &d, nil
+	case strings.HasPrefix(id, entryDesign):
+		it := src.st.Work[strings.TrimPrefix(id, entryDesign)]
+		if it == nil || !it.Designer || it.Repository != repo && cfg.RepositoryConsole(it.Repository) != repo {
+			return EntryRe{}, "", nil, fmt.Errorf("%s's console holds no design %q", repo, id)
+		}
+		re := EntryRe{ID: id, Kind: "decision", At: it.Designed, Decision: it.ID, Options: it.designOptions()}
+		if !secret(it.Title) {
+			re.Question = it.Title
+		}
+		// Only a design that waits on the owner takes an answer.
+		if it.State != WorkDesigned {
+			return re, "", nil, nil
+		}
+		d := designDecision(it, "")
+		d.Context = ""
+		if secret(d.Question) {
+			d.Question = ""
+		}
+		return re, "", &d, nil
 	case strings.HasPrefix(id, entryNext):
 		in := src.st.Instructions[strings.TrimPrefix(id, entryNext)]
 		var d *Decision
@@ -301,7 +320,7 @@ func (src *uiSource) respond(repo, id, to, text string, a *AnswerPayload, files 
 			// A change's yes or no is the instruction's alone (#63): Go
 			// carries the change out from it, and from nothing else.
 			switch {
-			case strings.HasPrefix(id, entryNext), strings.HasPrefix(id, entryWork):
+			case strings.HasPrefix(id, entryNext), strings.HasPrefix(id, entryWork), strings.HasPrefix(id, entryDesign):
 				// A next step (#65) or a work item's answer (#66) is Go's to
 				// carry out from the instruction, and only one it offers now.
 				if a.Binding() && !contains(decisionOptions(*dec), a.Choice) {
