@@ -717,6 +717,9 @@ func instructionSteps(st *LogState, in *Instruction) []uiStep {
 			return append(steps, uiStep{Text: "the agent answered", At: in.Replied})
 		}
 	}
+	if a := in.AgentLast; a != nil && a.By != "" && !in.Replied.IsZero() {
+		return append(steps, uiStep{Text: a.By + " posted the outcome", At: in.Replied})
+	}
 	if in.Session != "" {
 		if in.Started {
 			steps = append(steps, uiStep{Text: "agentd started " + in.Session + " for it"})
@@ -761,6 +764,8 @@ type uiConsole struct {
 	uiPage
 	Repository string
 	Other      bool
+	// Ops: the operations console (#63), whose agent takes a new thread.
+	Ops bool
 	// Entries are the conversation box's, newest last (#59), and Open
 	// the DOM ids of the decisions among them that wait on an answer;
 	// More, that the box holds older entries than those shown.
@@ -1027,6 +1032,7 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 			}
 			if con, ok := cfg.Consoles[repo]; ok {
 				known, v.Other = true, true
+				v.Ops = v.Ops || repo == cfg.opsConsole()
 				if con.Title != "" {
 					v.Title = con.Title + " console"
 				}
@@ -1052,6 +1058,13 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 					continue
 				}
 				v.Entries = append(v.Entries, uiEntry{uiMessageView: mv, Quick: quickWords(m.Kind)})
+			}
+			// The changes proposed on the ops console, each a yes or no
+			// showing exactly what it does (#63).
+			for _, oe := range src.opsEntries(cfg, repo, secret) {
+				oe := oe
+				v.Entries = append(v.Entries, uiEntry{uiMessageView: uiMessageView{uiMessage: uiMessage{At: oe.At, Kind: "decision", From: "ops agent",
+					Entry: entryOps + oe.ID}, Src: src.Name}, Decision: &oe.uiDecisionEntry, Open: oe.open})
 			}
 			for _, d := range src.decisionEntries(cfg, rep, repo) {
 				d := d
@@ -1213,6 +1226,9 @@ func (src *uiSource) messageView(cfg *Config, m uiMessage, now time.Time, secret
 		mv.ReplyBy, mv.Replied = in.Session, in.Replied
 		if in.Session == "" {
 			mv.ReplyBy, mv.ReplyAgent = "thread agent", true
+			if in.AgentLast != nil && in.AgentLast.By != "" {
+				mv.ReplyBy = in.AgentLast.By // the outcome of an ops change (#63)
+			}
 		}
 		mv.Reply = markdown(in.Reply)
 		if in.Reply == "" || in.ReplyWithheld || secret(in.Reply) {

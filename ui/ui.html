@@ -119,7 +119,7 @@
 </section>
 <p class="box-new" hidden><button type="button" class="link">new ↓</button></p>
 {{if .ReplySrc}}<form id="composer" class="composer" method="post" action="/respond" enctype="multipart/form-data"><input type="hidden" name="token" value="{{.Token}}"><input type="hidden" name="back" value="{{.Back}}"><input type="hidden" name="src" value="{{.ReplySrc}}"><input type="hidden" name="repository" value="{{.Repository}}"><input type="hidden" name="entry" value="">
-<div class="composer-head"><label>To: <select name="session" aria-label="Send to">{{if not .Other}}<option value="">agent (new thread)</option>{{end}}{{range .To}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
+<div class="composer-head"><label>To: <select name="session" aria-label="Send to">{{if or (not .Other) .Ops}}<option value="">agent (new thread)</option>{{end}}{{range .To}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
 <span class="re-chip" hidden>Re: <span class="re-label"></span> <button type="button" class="re-clear" aria-label="Respond to no entry">×</button></span>
 <button type="button" class="open-questions"{{if not .Open}} hidden{{end}}>{{len .Open}} open question{{if ne (len .Open) 1}}s{{end}}</button></div>
 <div class="composer-row"><textarea name="text" rows="2" maxlength="4000" aria-label="Your message" required></textarea>{{template "attach"}}<button type="submit">Send</button></div>

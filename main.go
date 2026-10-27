@@ -87,7 +87,11 @@ func main() {
 	case "nodes":
 		err = nodesCmd(os.Args[2:], os.Stdout)
 	case "version", "--version":
-		fmt.Println("agentd", version)
+		if c := buildCommit(); c != "" {
+			fmt.Println("agentd", version, c)
+		} else {
+			fmt.Println("agentd", version)
+		}
 		return
 	case "-h", "--help", "help":
 		usage()
@@ -128,6 +132,7 @@ func usage() {
   agentd cases [--config PATH] [--log PATH] goal CASE FILE|-
   agentd mcp [--config PATH] [--log PATH] --session NAME
   agentd mcp [--config PATH] [--log PATH] --repository NAME [--as NAME]
+  agentd mcp [--config PATH] [--log PATH] --ops [--as NAME]
   agentd context [--config PATH] [--log PATH] stats REPO [--since 24h] | card REPO [TOPIC]
   agentd hub [--config PATH] [--log PATH]
   agentd node [--config PATH] [--once]
@@ -169,7 +174,8 @@ status-check builds the status graph's input from the window at the end
 of a transcript and prints its size; with --call it makes the one call
 and prints the checked record and its cost. It logs nothing.
 mcp --repository serves the context tools alone (state, find, history,
-ask_expert) on a repository, for an agent that works no case. context
+ask_expert) on a repository, for an agent that works no case; mcp --ops
+serves the ops tools and ask_expert, for the ops console's agent (#63). context
 stats measures how agents used them, how often state alone answered,
 and what the curators and the expert cost; context card prints a
 topic's state card, or the repository's.
@@ -235,6 +241,9 @@ func runCmd(args []string) error {
 		sup.api = ExecForgeAPI{Timeout: to.Forge.Duration}
 	}
 	sup.home, _ = os.UserHomeDir()
+	if cfg.Ops.on() {
+		sup.ops = newOpsEnv(cfg)
+	}
 	sup.Replay(events)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

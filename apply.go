@@ -28,6 +28,8 @@ type LogState struct {
 	Cases   map[string]*Case      // each case by id
 	// Instructions are the owner's console instructions, by id.
 	Instructions map[string]*Instruction
+	// Ops are the changes proposed on the ops console (#63), by id.
+	Ops map[string]*OpsRecord
 	// CI is each watched request's latest CI, by repository and request.
 	CI map[string]CIRecord
 	// Feed is what the consoles' feed has posted.
@@ -174,6 +176,10 @@ func (st *LogState) apply(e Event) {
 		st.applyFact(e)
 		return
 	}
+	if e.Kind == KindOps {
+		st.applyOps(e)
+		return
+	}
 	if e.Session == "" {
 		switch e.Kind {
 		case KindAccount:
@@ -206,6 +212,7 @@ func (st *LogState) apply(e Event) {
 		case KindInstruction:
 			if _, ok := st.Instructions[e.Instruction.ID]; !ok {
 				st.Instructions[e.Instruction.ID] = &Instruction{InstructionPayload: *e.Instruction, At: e.Time}
+				st.opsAnswer(st.Instructions[e.Instruction.ID], e.Time)
 			}
 		case KindAttachment:
 			if in := st.Instructions[e.Attachment.Message]; in != nil && !hasAttachment(in.Attachments, e.Attachment.ID) {

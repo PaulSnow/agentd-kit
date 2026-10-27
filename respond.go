@@ -170,6 +170,21 @@ func (src *uiSource) entryOf(cfg *Config, rep Report, repo, id string) (EntryRe,
 			return re, d.Session, &dec, nil
 		}
 		return EntryRe{}, "", nil, fmt.Errorf("%s has no decision %q on its console", repo, id)
+	case strings.HasPrefix(id, entryOps):
+		r := src.st.Ops[strings.TrimPrefix(id, entryOps)]
+		if r == nil || repo != cfg.opsConsole() {
+			return EntryRe{}, "", nil, fmt.Errorf("%s's console holds no change %q", repo, id)
+		}
+		re := EntryRe{ID: id, Kind: "decision", At: r.Proposed, Decision: r.ID}
+		if !secret(r.Summary, r.Diff) {
+			re.Question, re.Text = r.Summary, cutUTF8(r.Diff, agentText)
+		}
+		re.Options = []string{"yes", "no"}
+		// Only a change that waits on the owner takes the yes or the no.
+		if !r.open() || r.Auto {
+			return re, "", nil, nil
+		}
+		return re, "", &Decision{ID: r.ID, Type: DecisionYesNo, Question: r.Summary}, nil
 	case strings.HasPrefix(id, entryNeed):
 		for _, n := range src.needs(cfg, rep, src.askedAt) {
 			if n.Repository != repo || n.Decision != nil || needEntry(n.Session, n.Kind) != id {
@@ -248,10 +263,18 @@ func (src *uiSource) respond(repo, id, to, text string, a *AnswerPayload, files 
 			a.Note = text
 		}
 		if a.Binding() || a.Other != "" {
-			if err := RecordAnswer(src.log, src.st, now, writer, *a); err != nil {
-				return err
+			// A change's yes or no is the instruction's alone (#63): Go
+			// carries the change out from it, and from nothing else.
+			if !strings.HasPrefix(id, entryOps) {
+				if err := RecordAnswer(src.log, src.st, now, writer, *a); err != nil {
+					return err
+				}
 			}
-			answer = entryAnswer(*a)
+			// Words alone are words to the ops agent: a change settles on
+			// yes or no only.
+			if !strings.HasPrefix(id, entryOps) || a.Answer != nil {
+				answer = entryAnswer(*a)
+			}
 		}
 	}
 	if text == "" && answer == nil && len(files) == 0 {

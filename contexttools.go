@@ -64,6 +64,9 @@ func (srv *MCPServer) tools() []string {
 	if srv.sess.Role == RoleQuery {
 		return contextTools
 	}
+	if srv.sess.Role == RoleOps {
+		return append(append([]string{}, opsTools...), ToolAskExpert)
+	}
 	tools := toolsFor(srv.sess.Role)
 	if srv.sess.Repository != "" {
 		tools = append(append([]string{}, tools...), contextTools...)
@@ -82,6 +85,9 @@ func (srv *MCPServer) contextStore() (*ContextStore, error) {
 // contextCall answers one context tool call and logs it.
 func (srv *MCPServer) contextCall(tool string, args json.RawMessage) (string, bool) {
 	repo := srv.sess.Repository
+	if srv.sess.Role == RoleOps {
+		repo = srv.cfg.opsConsole() // the ops agent's expert budget and queries are its console's
+	}
 	cs, err := srv.contextStore()
 	if err != nil {
 		return compact(map[string]any{"refused": "agentd could not read its log: " + err.Error()}), true

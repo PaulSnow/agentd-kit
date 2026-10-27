@@ -160,10 +160,13 @@ func TestLogRoundTrip(t *testing.T) {
 func TestExampleConfigLoads(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	for _, d := range []string{"work-17", "repos/widgets-wt/17", "work-42", "repos/gadgets"} {
+	for _, d := range []string{"work-17", "repos/widgets-wt/17", "work-42", "repos/gadgets", "repos/agentd-kit/.git"} {
 		if err := os.MkdirAll(filepath.Join(home, d), 0o755); err != nil {
 			t.Fatal(err)
 		}
+	}
+	for _, f := range []string{"agentd.json", "page.json"} {
+		writeFile(t, filepath.Join(home, ".config", "agentd-kit", f), "{}\n")
 	}
 	token := filepath.Join(home, ".config", "agentd-kit", "spare.token")
 	writeFile(t, token, "a token\n")
@@ -182,6 +185,9 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 	if !filepath.IsAbs(cfg.Sessions["w17"].Deliver[0].MRFile) || !filepath.IsAbs(cfg.EventLog) {
 		t.Fatalf("paths not expanded: %+v", cfg.Sessions["w17"])
+	}
+	if _, ok := cfg.Consoles["ops"]; !ok || cfg.Ops.Repo != filepath.Join(home, "repos", "agentd-kit") {
+		t.Fatalf("ops = %+v", cfg.Ops)
 	}
 	if cfg.Policies.Escalate.Command[0] == "~/bin/post-to-console" {
 		t.Fatal("escalate command not expanded")
