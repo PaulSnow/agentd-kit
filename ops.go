@@ -249,6 +249,13 @@ type OpsRecord struct {
 	Failed     bool
 }
 
+// noYes says whether change r is carried out without the owner's yes: a
+// restart of a supervisor that was down, and an install Go proposed while
+// ops.auto_install is on now (#68).
+func (r *OpsRecord) noYes(cfg *Config) bool {
+	return r.Auto && (r.Op == OpsRestart || r.Op == OpsInstall && cfg.Ops.AutoInstall && cfg.Ops.Watch != "")
+}
+
 // open says whether the change waits on the owner.
 func (r *OpsRecord) open() bool { return r.Answer == "" && r.Started.IsZero() && r.Ended.IsZero() }
 

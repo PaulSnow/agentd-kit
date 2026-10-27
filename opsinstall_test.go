@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,4 +131,49 @@ func TestOpsAutoInstallRollsBackOnFailedCheck(t *testing.T) {
 	if len(es) != 1 || es[0].open || es[0].Answer == nil || !strings.Contains(es[0].Answer.Text, "ops.auto_install") {
 		t.Fatalf("entries = %+v", es)
 	}
+}
+
+// A forge that cannot be asked is logged once, not each look; a tip with
+// no check runs is green by its combined status; an auto install whose
+// policy is off waits on the owner's yes.
+func TestOpsWatchEdges(t *testing.T) {
+	h, api := opsWatchH(t, true)
+	tip := h.commitMain()
+	api.githubErr = errors.New("HTTP 403: resource not accessible")
+	h.ticks(4, 10*time.Minute)
+	errs := 0
+	for _, e := range h.events() {
+		if e.Kind == KindError && strings.HasPrefix(e.Error.Step, "ops watch") && strings.Contains(e.Error.Error, "403") {
+			errs++
+		}
+	}
+	if errs != 1 || len(h.installs()) != 0 {
+		t.Fatalf("%d errors logged, %d installs", errs, len(h.installs()))
+	}
+
+	// Statuses alone: green. The policy is off by the time it would run.
+	api.githubErr = nil
+	api.github["/repos/example-org/agentd-kit/commits/"+tip+"/check-runs?per_page=100"] = `{"total_count":0,"check_runs":[]}`
+	api.github["/repos/example-org/agentd-kit/commits/"+tip+"/status"] = `{"state":"success","total_count":2}`
+	h.sup.cfg.Ops.AutoInstall = false
+	h.ticks(3, 10*time.Minute)
+	rs := h.installs()
+	if len(rs) != 1 || !strings.Contains(rs[0].Why, "2 statuses are success") || !rs[0].open() || h.builds != 0 {
+		t.Fatalf("installs = %+v, %d builds", *rs[0], h.builds)
+	}
+	src := h.page()
+	src.catchUp()
+	if es := src.opsEntries(h.sup.cfg, "ops", func(...string) bool { return false }); len(es) != 1 || !es[0].open {
+		t.Fatalf("the install does not wait on a yes: %+v", es)
+	}
+	// An install proposed while auto_install was on needs a yes once it
+	// is off.
+	r := &OpsRecord{OpsChange: OpsChange{Op: OpsInstall, Auto: true}}
+	if cfg := (&Config{Ops: OpsConfig{Watch: "agentd-kit"}}); r.noYes(cfg) {
+		t.Fatal("an auto install runs with auto_install off")
+	}
+	if cfg := (&Config{Ops: OpsConfig{Watch: "agentd-kit", AutoInstall: true}}); !r.noYes(cfg) {
+		t.Fatal("an auto install waits with auto_install on")
+	}
+
 }

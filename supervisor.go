@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -82,6 +83,9 @@ type Supervisor struct {
 	// watchedAt is when the ops watch last looked at the branch to
 	// install from (#68).
 	watchedAt time.Time
+	// watchErr is the watch's last failure, shared with its workers, so
+	// a failure is logged once until it changes.
+	watchErr *atomic.Value
 
 	checkpointRe *regexp.Regexp
 
@@ -134,6 +138,7 @@ func NewSupervisor(cfg *Config, log *Log, clock Clock, tmux Tmux, git Git, forge
 		checkedAt:   map[string]time.Time{},
 		dueRetype:   map[string]bool{},
 		designTried: map[string]time.Time{},
+		watchErr:    emptyValue(),
 
 		checkpointRe: regexp.MustCompile(cfg.Policies.Context.Checkpoint),
 		runCtx:       context.Background(),
