@@ -111,6 +111,7 @@
 <p class="crumbs"><a href="/">All repositories</a>{{if .StatusTokens}} <span class="muted">· status checks today: {{.Tokens .StatusTokens}} tokens</span>{{end}}</p>
 {{template "chips" .}}
 <section id="box" class="box" aria-label="Conversation" data-entries="/console/{{.Repository}}/entries"{{if .Live}} data-live{{end}}>
+{{if .More}}{{with index .Entries 0}}<p class="older"><a href="/console/{{$.Repository}}?before={{.DOMID}}" data-before="{{.DOMID}}">Older entries</a></p>{{end}}{{end}}
 <ol class="entries">{{range .Entries}}{{template "entry" (ctx $ .)}}{{else}}<li class="empty">No messages yet.</li>{{end}}</ol>
 </section>
 <p class="box-new" hidden><button type="button" class="link">new ↓</button></p>
@@ -139,6 +140,7 @@
 {{else}}<div class="md">{{.Body}}</div>{{end}}
 {{with .Answer}}<p class="answered">Answer: <strong>{{if .Answer}}{{if yes .Answer}}yes{{else}}no{{end}}{{else if .Choice}}{{.Choice}}{{else if .Choices}}{{range $i, $c := .Choices}}{{if $i}}, {{end}}{{$c}}{{end}}{{else}}{{.Text}}{{end}}</strong></p>{{end}}
 {{template "thread" (ctx $p .)}}
+{{with .Earlier}}<details class="earlier" data-key="s-{{$.V.DOMID}}"><summary>{{len .}} earlier</summary><ol class="steps">{{range .}}<li><time class="muted">{{$p.When .At}}</time> <div class="md">{{.Body}}</div></li>{{end}}</ol></details>{{end}}
 {{with .Responses}}<ol class="responses">{{range .}}<li class="msg msg-instruction response"><div class="msg-head"><span class="from">you</span>{{with .To}} → {{.}}{{end}} <time class="muted">{{$p.When .At}}</time></div>
 {{with .Answer}}<p class="answered">Answer: <strong>{{if .Answer}}{{if yes .Answer}}yes{{else}}no{{end}}{{else if .Choice}}{{.Choice}}{{else if .Choices}}{{range $i, $c := .Choices}}{{if $i}}, {{end}}{{$c}}{{end}}{{else}}{{.Text}}{{end}}</strong></p>{{end}}
 {{if .Text}}<div class="md">{{.Body}}</div>{{end}}{{template "thread" (ctx $p .)}}</li>{{end}}</ol>{{end}}
@@ -154,7 +156,7 @@
 </li>{{end}}{{end}}
 
 {{define "thread"}}{{$p := .P}}{{with .V}}{{with .Steps}}<ol class="steps">{{range .}}<li class="step{{if .Failed}} step-failed{{else if .Wait}} step-wait{{end}}">{{.Text}}{{if not .At.IsZero}} <time class="muted">{{$p.When .At}}</time>{{end}}</li>{{end}}</ol>{{end}}
-{{with .Activity}}<ol class="activity">{{range .}}<li class="tool{{if .Failed}} tool-failed{{end}}"><code>{{.Text}}</code>{{if .Failed}} <span class="badge">failed{{with .Exit}}, exit {{.}}{{end}}</span>{{end}}</li>{{end}}</ol>{{end}}
+{{if .Activity}}<details class="tools" data-key="a-{{.Entry}}"><summary>{{.ToolsLine}}</summary><ol class="activity">{{range .Activity}}<li class="tool{{if .Failed}} tool-failed{{end}}"><code>{{.Text}}</code>{{if .Failed}} <span class="badge">failed{{with .Exit}}, exit {{.}}{{end}}</span>{{end}}</li>{{end}}</ol></details>{{end}}
 {{if .ReplyBy}}<div class="msg msg-reply thread"><div class="msg-head"><a href="/session/{{.Src}}/{{.ReplyBy}}">{{.ReplyBy}}</a> <span class="badge">reply</span> <time class="muted">{{$p.When .Replied}}</time></div>{{if .ReplyMore}}<div class="fold"><div class="md preview">{{.Reply}}</div><details class="more" data-key="r-{{.Src}}-{{.ReplyBy}}-{{.Replied.UnixNano}}"><summary><span class="more-label show-all">Show all</span><span class="more-label show-less">Show less</span></summary><div class="md">{{.ReplyMore}}</div></details></div>{{else}}<div class="md">{{.Reply}}</div>{{end}}</div>{{end}}{{end}}{{end}}
 
 {{define "decision-inputs"}}{{if eq .Type "yes_no"}}<div class="choices"><button type="submit" name="answer" value="yes">Yes</button><button type="submit" name="answer" value="no">No</button></div>

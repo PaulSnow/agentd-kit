@@ -652,9 +652,11 @@ type uiConsole struct {
 	Repository string
 	Other      bool
 	// Entries are the conversation box's, newest last (#59), and Open
-	// the DOM ids of the decisions among them that wait on an answer.
+	// the DOM ids of the decisions among them that wait on an answer;
+	// More, that the box holds older entries than those shown.
 	Entries  []uiEntry
 	Open     []string
+	More     bool
 	ReplySrc string // the source a reply is recorded in, or "" when none configures the repository
 	// Live: a message waits on its session's answer.
 	Live bool
@@ -782,6 +784,60 @@ type uiEntry struct {
 	// marks a decision that waits on its answer.
 	Quick []string
 	Open  bool
+	// Earlier are the session's status lines this one, its latest,
+	// collapsed, oldest first.
+	Earlier []uiMessageView
+}
+
+// statusRun is how close a session's status lines come to collapse
+// into one entry (#59 §4).
+const statusRun = 5 * time.Minute
+
+// collapseStatus folds each run of a session's status lines, its posts
+// and progress reports each within statusRun of the one before, into the
+// latest of them; an entry the owner responded to stays its own.
+func collapseStatus(es []uiEntry) []uiEntry {
+	status := func(e uiEntry) bool {
+		return (e.Kind == "info" || e.Kind == "progress") && e.Writer != "" && len(e.Responses) == 0
+	}
+	out := es[:0]
+	last := map[string]int{} // a writer's latest status entry in out
+	for _, e := range es {
+		if !status(e) {
+			out = append(out, e)
+			continue
+		}
+		if i, ok := last[e.Writer]; ok && i == len(out)-1 && e.At.Sub(out[i].At) <= statusRun {
+			prev := out[i]
+			e.Earlier = append(append(prev.Earlier, prev.uiMessageView), e.Earlier...)
+			out[i] = e
+			continue
+		}
+		last[e.Writer] = len(out)
+		out = append(out, e)
+	}
+	return out
+}
+
+// consoleWindow is how many entries a console's page, and each poll of
+// its box, carries; older ones come as the owner scrolls up.
+const consoleWindow = 50
+
+// window is the n entries of es before the entry with DOM id before, or
+// the latest n without it, and whether older ones remain.
+func window(es []uiEntry, before string, n int) ([]uiEntry, bool) {
+	end := len(es)
+	if before != "" {
+		end = 0
+		for i, e := range es {
+			if e.DOMID == before {
+				end = i
+				break
+			}
+		}
+	}
+	start := max(end-n, 0)
+	return es[start:end], start > 0
 }
 
 // sortEntries puts entries newest last; of two at one time, in the order
@@ -942,6 +998,7 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 		v.Entries = append(v.Entries, e)
 	}
 	sortEntries(v.Entries)
+	v.Entries = collapseStatus(v.Entries)
 	sort.SliceStable(v.Panels, func(i, j int) bool { return v.Panels[i].Name < v.Panels[j].Name })
 	for _, p := range v.Panels {
 		if p.MessageTo != "" {
@@ -951,11 +1008,33 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 	return v, nil
 }
 
+// ToolsLine is an instruction's tool activity as one line: how many
+// tools it ran, and how many failed (#59 §4).
+func (mv uiMessageView) ToolsLine() string {
+	failed := 0
+	for _, a := range mv.Activity {
+		if a.Failed {
+			failed++
+		}
+	}
+	line := fmt.Sprintf("%d tool", len(mv.Activity))
+	if len(mv.Activity) != 1 {
+		line += "s"
+	}
+	if failed > 0 {
+		line += fmt.Sprintf(", %d failed", failed)
+	}
+	return line
+}
+
 // messageView is console message m as the box shows it: screened, a
 // prompt as its line, an owner's instruction with its steps, the tools
 // the session ran on it and its reply.
 func (src *uiSource) messageView(cfg *Config, m uiMessage, now time.Time, secret func(...string) bool) uiMessageView {
 	body, more := folded(m.Text)
+	if m.Kind == MessageReply {
+		body, more = markdown(m.Text), "" // a reply is shown whole (#59 §4)
+	}
 	if m.Text == "" || secret(m.Text) {
 		body, more = template.HTML(template.HTMLEscapeString(withheldMessage)), ""
 	}
@@ -988,7 +1067,7 @@ func (src *uiSource) messageView(cfg *Config, m uiMessage, now time.Time, secret
 	}
 	if !in.Replied.IsZero() {
 		mv.ReplyBy, mv.Replied = in.Session, in.Replied
-		mv.Reply, mv.ReplyMore = folded(in.Reply)
+		mv.Reply = markdown(in.Reply)
 		if in.Reply == "" || in.ReplyWithheld || secret(in.Reply) {
 			mv.Reply, mv.ReplyMore = template.HTML(template.HTMLEscapeString(withheldMessage)), ""
 		}

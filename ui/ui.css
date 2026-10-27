@@ -215,6 +215,9 @@ body:has(.console) > .foot { display: none; }
 .respond[open] > form, .respond[open] > .default { background: var(--surface); border: 1px solid var(--accent); border-radius: var(--radius); padding: var(--space-2) var(--space-3); box-shadow: 0 4px 12px rgb(0 0 0 / .12); cursor: auto; }
 .respond[open] > .default { margin-top: var(--space-2); }
 .quick button { background: var(--surface); color: var(--accent); }
+.older { margin: 0 0 var(--space-2); text-align: center; font-size: var(--size-s); }
+.tools > summary, .earlier > summary { font-size: var(--size-s); }
+.earlier .steps li::before { content: none; }
 .box-new { margin: 0; text-align: center; position: relative; }
 .box-new button { position: absolute; bottom: var(--space-2); left: 50%; transform: translateX(-50%); flex-direction: row; }
 .composer { flex: none; margin: var(--space-2) 0 var(--space-2); padding: var(--space-2) var(--space-3); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }

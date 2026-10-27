@@ -252,6 +252,16 @@ func (src *uiSource) catchUp() error {
 					add(r, m)
 				}
 			}
+		case e.Kind == KindCase && e.Case != nil && e.Case.Call != nil && e.Case.Call.Progress != nil && e.Case.Call.Refused == "":
+			// A session's progress, reported through its tool (#59): an
+			// entry of its own, labelled by the call, to respond to.
+			p := e.Case.Call.Progress
+			text := p.Summary
+			if p.NextAction != "" {
+				text += "\n\nNext: " + p.NextAction
+			}
+			add(repoOf(e.Session), uiMessage{At: e.Time, Kind: "progress", From: e.Session, Session: e.Session, Writer: e.Session, Text: text,
+				Entry: entryKey(entryProgress, e.Case.Case+"-"+e.Case.Call.Hash, e.Time, text)})
 		case e.Kind == KindInstruction && e.Instruction != nil:
 			m := uiMessage{At: e.Time, Kind: "instruction", From: e.Instruction.From, Text: e.Instruction.Text, ID: e.Instruction.ID,
 				Entry: entryInstruction + e.Instruction.ID, Re: e.Instruction.Re}
@@ -517,8 +527,13 @@ func (u *UI) serveView(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if entries && err == nil {
-			u.serveEntries(w, v)
+			u.serveEntries(w, v, r.URL.Query().Get("before"), r.URL.Query().Get("have"))
 			return
+		}
+		// The page carries the latest entries only; older ones come as
+		// the owner scrolls up, so a long console stays light (#59).
+		if v != nil {
+			v.Entries, v.More = window(v.Entries, r.URL.Query().Get("before"), consoleWindow)
 		}
 		view = v
 	default:
@@ -557,11 +572,13 @@ func (u *UI) serveView(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// uiEntriesDoc is a console's box as its page polls it (#59): each entry
-// rendered as the page renders it, with a hash that says when it changed;
-// the open decisions; and the session chips.
+// uiEntriesDoc is a console's box as its page polls it (#59): the latest
+// entries, or those before one, each rendered as the page renders it,
+// with a hash that says when it changed; whether older ones remain; the
+// open decisions; and the session chips.
 type uiEntriesDoc struct {
 	Entries []uiEntryDoc `json:"entries"`
+	More    bool         `json:"more"`
 	Open    []string     `json:"open"`
 	Chips   string       `json:"chips"`
 }
@@ -573,9 +590,17 @@ type uiEntryDoc struct {
 	HTML string `json:"html"`
 }
 
-// serveEntries answers a console page's poll with its box as JSON.
-func (u *UI) serveEntries(w http.ResponseWriter, v *uiConsole) {
-	doc := uiEntriesDoc{Entries: []uiEntryDoc{}, Open: v.Open}
+// serveEntries answers a console page's poll with its box as JSON: the
+// latest consoleWindow entries, or with before, the ones before it. An
+// entry the page has as it is, by have's ID.HASH list, comes without its
+// HTML, so a poll of a quiet console is small.
+func (u *UI) serveEntries(w http.ResponseWriter, v *uiConsole, before, have string) {
+	v.Entries, v.More = window(v.Entries, before, consoleWindow)
+	known := map[string]bool{}
+	for _, h := range strings.Split(have, ",") {
+		known[h] = true
+	}
+	doc := uiEntriesDoc{Entries: []uiEntryDoc{}, More: v.More, Open: v.Open}
 	if doc.Open == nil {
 		doc.Open = []string{}
 	}
@@ -587,7 +612,11 @@ func (u *UI) serveEntries(w http.ResponseWriter, v *uiConsole) {
 			http.Error(w, "the console could not be rendered", http.StatusInternalServerError)
 			return
 		}
-		doc.Entries = append(doc.Entries, uiEntryDoc{ID: e.DOMID, Hash: shortHash(HashPane(b.String())), HTML: b.String()})
+		d := uiEntryDoc{ID: e.DOMID, Hash: shortHash(HashPane(b.String())), HTML: b.String()}
+		if known[d.ID+"."+d.Hash] {
+			d.HTML = ""
+		}
+		doc.Entries = append(doc.Entries, d)
 	}
 	b.Reset()
 	if err := uiTemplates.ExecuteTemplate(&b, "chips", v); err == nil {

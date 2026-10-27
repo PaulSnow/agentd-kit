@@ -61,6 +61,7 @@ const (
 	entryInstruction = "i:" // the owner's own message
 	entryDecision    = "d:" // a session's decision: d:SESSION:ID
 	entryNeed        = "n:" // a session waiting on the owner: n:SESSION:KIND
+	entryProgress    = "p:" // a session's report_progress: p:CASE-HASH
 )
 
 // entryKey is an entry's id: prefix and the id the log gives it, or a

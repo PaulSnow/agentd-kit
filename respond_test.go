@@ -283,3 +283,87 @@ func TestResponseEdges(t *testing.T) {
 		t.Fatal("the response to the need is not bound to it")
 	}
 }
+
+// The page and each poll carry the latest consoleWindow entries; older
+// ones come before them on asking, until none is left. A session's
+// status lines within minutes of each other are one entry, its latest,
+// with the earlier ones folded under it; its progress reports are
+// entries too; an instruction's tools are one line (#59 §4).
+func TestConsoleWindowAndCompactEntries(t *testing.T) {
+	h, u, _ := respondFixture(t)
+	log := NewLogWriter(h.buf)
+	at := h.clock.Now()
+	for i := 0; i < 120; i++ {
+		if err := log.Append(Event{V: EventVersion, Time: at.Add(time.Duration(i) * time.Hour), Kind: KindMessage, Mode: ModeShared,
+			Message: &MessagePayload{ID: fmt.Sprintf("M%03d", i), Console: "widgets", Kind: MessageReply, From: "a", Text: fmt.Sprintf("Coat %03d done.", i)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	late := at.Add(200 * time.Hour)
+	for i, text := range []string{"Sanding.", "Priming.", "Painting."} {
+		if err := log.Append(Event{V: EventVersion, Time: late.Add(time.Duration(i) * time.Minute), Kind: KindMessage, Mode: ModeShared,
+			Message: &MessagePayload{ID: fmt.Sprintf("S%d", i), Console: "widgets", Kind: "info", From: "b", Text: text}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := log.Append(Event{V: EventVersion, Time: late.Add(time.Hour), Session: "c", Kind: KindCase, Mode: ModeShared,
+		Case: &CasePayload{Case: "gitlab/example-org/widgets#7", Call: &CaseCall{Tool: ToolReportProgress, Hash: "h1", Progress: &CaseProgress{Summary: "Two of three widgets painted.", NextAction: "Paint the third."}}}}); err != nil {
+		t.Fatal(err)
+	}
+	u.now = func() time.Time { return late.Add(2 * time.Hour) }
+	page := owner(t, u, "/console/widgets")
+	if n := strings.Count(page, `<li class="entry `); n != consoleWindow || !strings.Contains(page, `class="older"`) || strings.Contains(page, "Coat 060 done.") || !strings.Contains(page, "Coat 119 done.") {
+		t.Fatalf("the page holds %d entries:\n%s", n, page)
+	}
+	if !strings.Contains(page, "Painting.") || strings.Count(page, `<li class="entry msg msg-info"`) != 1 || !strings.Contains(page, "2 earlier") || strings.Index(page, "Sanding.") < strings.Index(page, "2 earlier") {
+		t.Fatalf("the status lines are not one entry:\n%s", page)
+	}
+	if !strings.Contains(page, "Two of three widgets painted.") || !strings.Contains(page, "Next: Paint the third.") || !strings.Contains(page, `class="entry msg msg-progress"`) {
+		t.Fatalf("the progress report is no entry:\n%s", page)
+	}
+	seen, before, rounds := map[string]bool{}, "", 0
+	for {
+		target := "/console/widgets/entries"
+		if before != "" {
+			target += "?before=" + before
+		}
+		var doc uiEntriesDoc
+		if err := json.Unmarshal(get(u, "GET", target, pageAddr, "192.0.2.20:51000").Body.Bytes(), &doc); err != nil || len(doc.Entries) == 0 {
+			t.Fatalf("%s: %v, %d entries", target, err, len(doc.Entries))
+		}
+		for _, e := range doc.Entries {
+			if seen[e.ID] {
+				t.Fatalf("%s repeats %s", target, e.ID)
+			}
+			seen[e.ID] = true
+		}
+		rounds++
+		if !doc.More {
+			break
+		}
+		before = doc.Entries[0].ID
+	}
+	if rounds != 3 || len(seen) != 120+1+1+5 {
+		t.Fatalf("%d rounds, %d entries", rounds, len(seen))
+	}
+	// A poll naming what the page has gets those without their HTML.
+	var doc, quiet uiEntriesDoc
+	json.Unmarshal(get(u, "GET", "/console/widgets/entries", pageAddr, "192.0.2.20:51000").Body.Bytes(), &doc)
+	var have []string
+	for _, e := range doc.Entries[1:] {
+		have = append(have, e.ID+"."+e.Hash)
+	}
+	json.Unmarshal(get(u, "GET", "/console/widgets/entries?have="+url.QueryEscape(strings.Join(have, ",")), pageAddr, "192.0.2.20:51000").Body.Bytes(), &quiet)
+	if len(quiet.Entries) != consoleWindow || quiet.Entries[0].HTML == "" {
+		t.Fatalf("a quiet poll: %d entries", len(quiet.Entries))
+	}
+	for _, e := range quiet.Entries[1:] {
+		if e.HTML != "" {
+			t.Fatalf("%s sent again", e.ID)
+		}
+	}
+	mv := uiMessageView{Activity: []uiStep{{Text: "Bash: go test"}, {Text: "Bash: ./bin/check", Failed: true}, {Text: "Read: a.go"}}}
+	if got := mv.ToolsLine(); got != "3 tools, 1 failed" {
+		t.Fatalf("tools line %q", got)
+	}
+}
