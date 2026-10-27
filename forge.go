@@ -49,6 +49,9 @@ type Git interface {
 	FirstSubject(dir, target string) (string, error)
 	// Messages is every commit message, in full, in origin/target..HEAD.
 	Messages(dir, target string) (string, error)
+	// Subjects are the short hash and subject of each commit in
+	// from..HEAD, newest first, at most max.
+	Subjects(dir, from string, max int) ([]string, error)
 	// LastMerge is the newest merge commit reachable from HEAD, its
 	// subject and its commit time, or "" when there is none.
 	LastMerge(dir string) (sha, subject string, at time.Time, err error)
@@ -654,6 +657,14 @@ func (g ExecGit) FirstSubject(dir, target string) (string, error) {
 
 func (g ExecGit) Messages(dir, target string) (string, error) {
 	return gitOut(g.Timeout, dir, "log", "--format=%B", "origin/"+target+"..HEAD")
+}
+
+func (g ExecGit) Subjects(dir, from string, max int) ([]string, error) {
+	out, err := gitOut(g.Timeout, dir, "log", "--format=%h %s", "--max-count="+strconv.Itoa(max), from+"..HEAD")
+	if err != nil || strings.TrimSpace(out) == "" {
+		return nil, err
+	}
+	return strings.Split(strings.TrimSpace(out), "\n"), nil
 }
 
 func (g ExecGit) LastMerge(dir string) (string, string, time.Time, error) {

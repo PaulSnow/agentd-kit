@@ -166,13 +166,23 @@ func lineTime(line []byte) time.Time {
 	return at
 }
 
-// sessionActivity reads session sess's activity, from the transcript it
-// was last launched with, else its newest; none when it has no transcript
-// here, such as a session on another host.
+// sessionActivity reads session sess's activity, from its transcript;
+// none when it has no transcript here, such as a session on another host.
 func sessionActivity(cfg *Config, sess Session, t *Track) (Activity, bool) {
+	path := sessionTranscript(cfg, sess, t)
+	if path == "" {
+		return Activity{}, false
+	}
+	a, err := readActivity(path)
+	return a, err == nil
+}
+
+// sessionTranscript is the path of the transcript session sess was last
+// launched with, else its newest, or "" when it has none here.
+func sessionTranscript(cfg *Config, sess Session, t *Track) string {
 	root := transcriptRootOf(cfg, sess)
 	if root == "" || sess.Cwd == "" {
-		return Activity{}, false
+		return ""
 	}
 	dir := TranscriptDir(root, sess.Cwd)
 	id := ""
@@ -183,8 +193,7 @@ func sessionActivity(cfg *Config, sess Session, t *Track) (Activity, bool) {
 		id = newestTranscript(dir)
 	}
 	if id == "" {
-		return Activity{}, false
+		return ""
 	}
-	a, err := readActivity(filepath.Join(dir, id+".jsonl"))
-	return a, err == nil
+	return filepath.Join(dir, id+".jsonl")
 }

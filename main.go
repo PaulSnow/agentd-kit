@@ -72,6 +72,8 @@ func main() {
 		err = itemsCmd(os.Args[2:], os.Stdout)
 	case "triage":
 		err = triageCmd(os.Args[2:], os.Stdout)
+	case "status-check":
+		err = statusCheckCmd(os.Args[2:], os.Stdout)
 	case "cases":
 		err = casesCmd(os.Args[2:], os.Stdout)
 	case "mcp":
@@ -118,6 +120,7 @@ func usage() {
   agentd accounts [--config PATH]
   agentd items [--config PATH] [--log PATH] [--new] [--seen ID,...]
   agentd triage [--config PATH] --items FILE
+  agentd status-check [--config PATH] --transcript FILE [--window 5m] [--input] [--call]
   agentd cases [--config PATH] [--log PATH] [--shadow] [--json]
   agentd cases [--config PATH] [--log PATH] rule CASE restriction|waiver|close|reopen [TEXT]
   agentd cases [--config PATH] [--log PATH] goal CASE FILE|-
@@ -158,6 +161,9 @@ into that tmux session. console inbox prints the owner's replies for a
 console that NAME has not read, one JSON object a line, and records them
 read. triage tries the triage job on the items in
 FILE with one call (retried once on failure) and prints its checked answer and cost; it logs nothing.
+status-check builds the status graph's input from the window at the end
+of a transcript and prints its size; with --call it makes the one call
+and prints the checked record and its cost. It logs nothing.
 cases lists the cases, one per issue, ranked: the owner's pins and the
 repositories' order from tracking.priorities when that file exists, then
 what needs the owner, triage urgency and age; rule records the owner's

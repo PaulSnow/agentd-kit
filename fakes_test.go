@@ -341,7 +341,8 @@ type fakeGit struct {
 	ahead        int
 	aheads       map[string]int // ahead per worktree, over ahead
 	subject      string
-	messages     string // the commit messages ahead of the target
+	messages     string   // the commit messages ahead of the target
+	subjects     []string // the commits since the head a status check last saw
 	head         string
 	inTarget     map[string]bool // commits the target contains
 	remote       string
@@ -463,6 +464,12 @@ func (g *fakeGit) LastMerge(string) (string, string, time.Time, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.merge, g.mergeSubject, g.mergeAt[g.merge], nil
+}
+
+func (g *fakeGit) Subjects(string, string, int) ([]string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.subjects, nil
 }
 
 func (g *fakeGit) Messages(string, string) (string, error) {

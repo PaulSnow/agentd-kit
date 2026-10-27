@@ -113,6 +113,16 @@ type Track struct {
 	Turns     []TurnRecord
 	TurnCount int
 	TurnLines map[string]int
+	// Status (#57): the latest status check, where its window ended in
+	// which transcript and at which head; the model's latest record; the
+	// checks the graph draws, oldest first; and the CI changes since.
+	StatusAt         time.Time
+	StatusTranscript string
+	StatusOffset     int64
+	StatusHead       string
+	StatusLast       *StatusRecord
+	StatusPoints     []StatusPoint
+	StatusCI         []CIChange
 	// CI: the fix sessions started for the requests the session delivered,
 	// oldest first, and the decisions raised on a repeated failure, by
 	// request and cause.

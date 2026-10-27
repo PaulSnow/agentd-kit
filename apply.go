@@ -130,6 +130,7 @@ func (st *LogState) apply(e Event) {
 	}
 	if e.Kind == KindCI {
 		st.applyCI(e)
+		st.track(e.Session).noteCI(e.Time, e.CI)
 		return
 	}
 	if e.Kind == KindSession {
@@ -256,6 +257,8 @@ func (st *LogState) apply(e Event) {
 		}
 	case KindCheckpoint:
 		t.Checkpoint = Checkpoint{CheckpointPayload: *e.Checkpoint, At: e.Time}
+	case KindStatus:
+		t.applyStatus(e.Time, e.Status)
 	case KindTurn:
 		t.applyTurn(e.Turn)
 		st.instructionTurn(e.Session, e.Turn)

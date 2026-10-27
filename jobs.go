@@ -67,6 +67,8 @@ type JobsConfig struct {
 	Batch    int      `json:"batch"`
 	// Scheduled are the jobs agentd runs on a schedule, by name (#51).
 	Scheduled map[string]ScheduledJob `json:"scheduled"`
+	// Status turns on the status graph's checks (#57).
+	Status StatusConfig `json:"status"`
 }
 
 // TriagePayload is one triage call's outcome: the answers Go accepted, the
