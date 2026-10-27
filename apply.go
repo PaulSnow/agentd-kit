@@ -35,6 +35,7 @@ type LogState struct {
 	// for; Fleets each fleet's latest reading, by repository/target.
 	Releases    map[string]*Release
 	ReleaseTags map[string]map[string]bool
+	ReleaseRead map[string]bool // the repositories whose tags Go has read
 	Fleets      map[string]*FleetReading
 	// Work are the owner's work items (#66), by id.
 	Work map[string]*WorkItem

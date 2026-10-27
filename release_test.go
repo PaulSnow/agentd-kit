@@ -242,7 +242,14 @@ func TestParseHeartbeats(t *testing.T) {
 	if _, err := parseHeartbeats([]byte(`{"ok":true}`), HeartbeatFields{}); err == nil {
 		t.Error("a body with no members was read")
 	}
-	if !versionIs("3.38.2", "v3.38.2") || !versionIs("v3.38.2+abc", "v3.38.2") || versionIs("v3.38.20", "v3.38.2") {
+	if ms, err := parseHeartbeats([]byte(`{"heartbeats":[]}`), HeartbeatFields{}); err != nil || len(ms) != 0 {
+		t.Errorf("no member reporting is a reading of none: %v %v", ms, err)
+	}
+	if ms, _ := parseHeartbeats([]byte(`[{"member":"x'; rm -rf ~; '","version":"v1"}]`), HeartbeatFields{}); len(ms) != 1 || strings.ContainsAny(ms[0].Member, "'; ~") {
+		t.Errorf("a member's name is kept to safe characters: %+v", ms)
+	}
+	if !versionIs("3.38.2", "v3.38.2") || !versionIs("v3.38.2+abc", "v3.38.2") || !versionIs("v3.38.2-3-gabc1234", "v3.38.2") ||
+		versionIs("v3.38.20", "v3.38.2") || versionIs("v3.38.2-rc1", "v3.38.2") {
 		t.Error("versionIs")
 	}
 }
@@ -313,15 +320,19 @@ func TestSSHTargetRefusedWithoutNode(t *testing.T) {
 	if errs := check(ok); len(errs) != 0 {
 		t.Fatal(errs)
 	}
-	for name, mod := range map[string]func(*DeployTarget){
-		"no node":         func(t *DeployTarget) { t.Node = "" },
-		"node not a host": func(t *DeployTarget) { t.Node = "laptop" },
-		"agentd's host":   func(t *DeployTarget) { t.OwnHost = false },
-		"node target":     func(t *DeployTarget) { t.Via, t.Host = ViaNode, "host-b" },
+	for name, tc := range map[string]struct {
+		mod  func(*DeployTarget)
+		want string
+	}{
+		"no node":         {func(t *DeployTarget) { t.Node = "" }, `an ssh target names the node that holds the ssh access, a host in hosts; "" is none`},
+		"node not a host": {func(t *DeployTarget) { t.Node = "laptop" }, `"laptop" is none`},
+		"agentd's host":   {func(t *DeployTarget) { t.OwnHost = false }, `"host-a" is agentd's own host; set own_host`},
+		"node target":     {func(t *DeployTarget) { t.Via, t.Host = ViaNode, "host-b" }, `"host-b" has no agentd node`},
+		"no {tag}":        {func(t *DeployTarget) { t.Check.Value = "ok" }, "must name {tag}"},
 	} {
 		tt := ok
-		mod(&tt)
-		if errs := check(tt); len(errs) != 1 || !strings.Contains(errs[0].Error(), "node") && !strings.Contains(errs[0].Error(), "host") {
+		tc.mod(&tt)
+		if errs := check(tt); len(errs) != 1 || !strings.Contains(errs[0].Error(), tc.want) {
 			t.Errorf("%s: %v", name, errs)
 		}
 	}
@@ -443,5 +454,98 @@ func TestOwnerOpensAndRetriesARelease(t *testing.T) {
 	}
 	if err := RetryRelease(h.cfg, log, events, h.clock.Now(), "widgets", "v1.0.0"); err == nil {
 		t.Fatal("a release with no failed step was retried")
+	}
+}
+
+// A retry asks again for the step that failed, never for those done
+// before it.
+func TestReleaseRetryResumesAtTheFailedStep(t *testing.T) {
+	h, _ := releaseHarness(t)
+	w := h.cfg.Repositories["widgets"]
+	b := w.Deploy.Targets["browser"]
+	b.Steps = append(b.Steps, DeployStep{Name: "restart", Run: []string{"restart"}, Timeout: Duration{time.Minute}})
+	w.Deploy.Targets["browser"] = b
+	every := h.cfg.Poll.Every.Duration
+	h.ticks(2, every)
+	r := h.tag("v1.1.0", "")
+	h.ticks(2, every)
+	h.stepResult("v1.1.0", 0, 0, NodeDone, 1)
+	id := deployStepID("widgets", "v1.1.0", "browser", 1, 0)
+	h.sup.emit("", Event{Kind: KindNode, Mode: ModeShared, Node: &NodePayload{Host: "host-a", Seq: 2, At: h.clock.Now(), Result: &NodeResult{
+		Command: id, Action: NodeDeployStep, Repository: "widgets", Outcome: NodeFailed, Error: "step 2 (restart): the run failed",
+		Deploy: &DeployStepResult{Tag: "v1.1.0", Target: "browser", Index: 1, Name: "restart"}}}})
+	// A result from a host that does not run the steps counts for nothing.
+	h.sup.emit("", Event{Kind: KindNode, Mode: ModeShared, Node: &NodePayload{Host: "host-z", Seq: 1, At: h.clock.Now(), Result: &NodeResult{
+		Command: "x", Action: NodeDeployStep, Repository: "widgets", Outcome: NodeDone, Deploy: &DeployStepResult{Tag: "v1.1.0", Target: "browser", Index: 1}}}})
+	if r.State != ReleaseBlocked || r.Targets["browser"].StepsDone != 1 {
+		t.Fatalf("state %s, %+v", r.State, r.Targets["browser"])
+	}
+	h.ticks(1, every)
+	if told := h.messages("Retry it with agentd releases retry widgets v1.1.0"); len(told) != 1 {
+		t.Fatalf("told = %q", h.messages("blocked"))
+	}
+	retry := Event{V: EventVersion, Time: h.clock.Now(), Kind: KindRelease, Mode: ModeOwner, Release: &ReleasePayload{Repository: "widgets", Tag: "v1.1.0", Step: ReleaseRetry}}
+	h.sup.st.apply(retry)
+	rec := newNodeRecord("host-a")
+	for _, e := range h.events() {
+		if e.Kind == KindNode && e.Node.Host == "host-a" {
+			rec.apply(e)
+		}
+	}
+	cmds := deployCommands(h.cfg, h.sup.st, rec)
+	if len(cmds) != 1 || cmds[0].Deploy.Index != 1 || cmds[0].Deploy.Attempt != 1 {
+		t.Fatalf("commands = %+v", cmds)
+	}
+}
+
+// A check that holds before the steps are done does not end the deploy;
+// a newer release supersedes an older one still open, which deploys no
+// more.
+func TestReleaseEndsWithItsStepsAndTheNewestDeploys(t *testing.T) {
+	h, svc := releaseHarness(t)
+	every := h.cfg.Poll.Every.Duration
+	h.ticks(2, every)
+	r := h.tag("v1.1.0", "")
+	svc.set("v1.1.0", beat("op-a", "v1.1.0"), beat("op-b", "v1.1.0"), beat("op-c", "v1.1.0"))
+	h.ticks(4, every)
+	if !r.Targets["browser"].OK || !r.Targets["signers"].OK || r.State != ReleaseDeploying {
+		t.Fatalf("the checks hold but the step is not done: the item stays open: %s %+v", r.State, r.Targets["browser"])
+	}
+	r2 := h.tag("v1.2.0", "")
+	h.ticks(2, every)
+	if r.State != ReleaseOver || r2.State != ReleaseDeploying {
+		t.Fatalf("states %s %s", r.State, r2.State)
+	}
+	cmds := deployCommands(h.cfg, h.sup.st, newNodeRecord("host-a"))
+	if len(cmds) != 1 || cmds[0].Deploy.Tag != "v1.2.0" {
+		t.Fatalf("commands = %+v", cmds)
+	}
+	if vs := WorkViews(h.cfg, h.sup.st, "widgets", false, h.clock.Now(), func(...string) bool { return false }); len(vs) != 1 || vs[0].ID != "release:v1.2.0" {
+		t.Fatalf("views = %+v", vs)
+	}
+}
+
+// An owner's opening before Go first read the tags opens nothing else:
+// the first read still only records what is there.
+func TestOwnerOpenBeforeTheFirstReadFloodsNothing(t *testing.T) {
+	h, _ := releaseHarness(t)
+	h.git.tags = []string{"v0.9.0", "v1.0.0", "nightly"}
+	h.sup.st.apply(Event{V: EventVersion, Time: h.clock.Now(), Kind: KindRelease, Mode: ModeOwner, Release: &ReleasePayload{Repository: "widgets", Tag: "v1.0.0", Step: ReleaseOpened}})
+	h.ticks(4, h.cfg.Poll.Every.Duration)
+	if len(h.sup.st.Releases) != 1 || len(h.releaseSteps(ReleaseOpened)) != 0 {
+		t.Fatalf("releases = %v", h.sup.st.Releases)
+	}
+	if seen := h.releaseSteps(ReleaseSeen); len(seen) != 1 || strings.Join(seen[0].Tags, ",") != "v0.9.0,nightly" {
+		t.Fatalf("seen = %+v", seen)
+	}
+}
+
+// A shadow run reads, posts and deploys nothing.
+func TestShadowRunLeavesReleasesAlone(t *testing.T) {
+	h, _ := releaseHarness(t)
+	h.restart(true)
+	h.ticks(4, h.cfg.Poll.Every.Duration)
+	if n := len(h.events()); h.count(KindRelease, "", "") != 0 || h.count(KindFleet, "", "") != 0 || h.count(KindMessage, "", "") != 0 {
+		t.Fatalf("a shadow run logged release events (%d events)", n)
 	}
 }

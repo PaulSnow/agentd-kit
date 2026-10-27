@@ -174,6 +174,12 @@ func nested[V any](m map[string]map[string]V, k string) map[string]V {
 // Apply folds one event.
 func (cs *ContextStore) Apply(e Event) {
 	switch {
+	case e.Card != nil && cardKindOf(e.Card.Topic) == CardFleet:
+		// A fleet's card is Go's reading (#67): no curation, and no
+		// curator run counted.
+		if e.Card.Card != nil {
+			nested(cs.cards, e.Card.Repository)[e.Card.Topic] = e.Card.Card
+		}
 	case e.Card != nil:
 		p := e.Card
 		c := curation{Through: p.Through, At: e.Time, Refused: p.Refused, Failed: p.Error != ""}

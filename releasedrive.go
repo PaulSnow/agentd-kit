@@ -43,8 +43,12 @@ func (r *releaseRun) failedOnce(key, err string) bool {
 }
 
 // driveReleases reads each deploying repository's tags and fleets on
-// poll.every, and drives each open release item a step.
+// poll.every, and drives each open release item a step. A shadow run
+// does none of it: the live run reads, posts and deploys.
 func (s *Supervisor) driveReleases(now time.Time) {
+	if s.shadow {
+		return
+	}
 	if s.rel == nil {
 		s.rel = &releaseRun{last: map[string]time.Time{}, failed: map[string]string{}}
 	}
@@ -56,7 +60,7 @@ func (s *Supervisor) driveReleases(now time.Time) {
 		}
 		if s.rel.due("tags:"+repo, every, now) {
 			known := copyMap(s.st.ReleaseTags[repo])
-			first := s.st.ReleaseTags[repo] == nil
+			first := !s.st.ReleaseRead[repo]
 			s.spawnShared("release-tags:"+repo, func(w *Supervisor) { w.readTags(repo, d, known, first) })
 		}
 		for _, tn := range sortedKeys(d.Targets) {
@@ -98,15 +102,21 @@ func (s *Supervisor) readTags(repo string, d *DeployConfig, known map[string]boo
 	if err != nil {
 		return
 	}
+	if first { // every tag, so a broader deploy.tags later opens none of them
+		var seen []string
+		for _, t := range tags {
+			if !known[t] {
+				seen = append(seen, t)
+			}
+		}
+		s.releaseEmit(ReleasePayload{Repository: repo, Step: ReleaseSeen, Tags: seen})
+		return
+	}
 	var fresh []string
 	for _, t := range tags {
 		if d.tags.MatchString(t) && releaseTagPattern.MatchString(t) && !strings.Contains(t, "..") && !known[t] {
 			fresh = append(fresh, t)
 		}
-	}
-	if first {
-		s.releaseEmit(ReleasePayload{Repository: repo, Step: ReleaseSeen, Tags: fresh})
-		return
 	}
 	for _, t := range fresh {
 		notes, _ := s.git.TagNotes(d.Clone, t)
@@ -166,8 +176,6 @@ func (s *Supervisor) driveRelease(r *Release, d *DeployConfig, now time.Time) {
 		switch {
 		case len(d.Gate.Argv) == 0:
 			s.releaseEmit(ReleasePayload{Repository: r.Repository, Tag: r.Tag, Step: ReleaseGate, Gate: &ReleaseGateResult{Passed: true, None: true}})
-		case s.shadow:
-			// A shadow run runs no gate: the live run does.
 		case s.rel.due("gate:"+key, every, now):
 			repo, tag := r.Repository, r.Tag
 			s.spawnShared("release-gate:"+key, func(w *Supervisor) { w.runReleaseGate(repo, tag, d) })
@@ -219,10 +227,11 @@ func (s *Supervisor) driveRelease(r *Release, d *DeployConfig, now time.Time) {
 	}
 }
 
-// releaseHolds says whether every target's check holds.
+// releaseHolds says whether every target's check holds, and every step
+// of ours is done: a check that holds midway does not end the deploy.
 func releaseHolds(r *Release, d *DeployConfig) bool {
-	for tn := range d.Targets {
-		if t := r.Targets[tn]; t == nil || !t.OK {
+	for tn, dt := range d.Targets {
+		if t := r.Targets[tn]; t == nil || !t.OK || dt.own() && t.StepsDone < len(dt.Steps) {
 			return false
 		}
 	}
@@ -235,19 +244,25 @@ func releaseHolds(r *Release, d *DeployConfig) bool {
 // run is logged and tried again on the next poll.
 func (s *Supervisor) runReleaseGate(repo, tag string, d *DeployConfig) {
 	res := &ReleaseGateResult{}
+	key := "gate:" + releaseKey(repo, tag)
+	failed := func(step, msg string) {
+		if s.rel.failedOnce(key, msg) {
+			s.emit("", Event{Kind: KindError, Error: &ErrorPayload{Step: step, Error: msg}})
+		}
+	}
 	tmp, err := os.MkdirTemp("", "agentd-release-")
 	if err != nil {
-		s.emit("", Event{Kind: KindError, Error: &ErrorPayload{Step: "release gate of " + repo + " " + tag, Error: err.Error()}})
+		failed("release gate of "+repo+" "+tag, err.Error())
 		return
 	}
 	defer os.RemoveAll(tmp)
 	dir, home := filepath.Join(tmp, "copy"), filepath.Join(tmp, "home")
 	if err := os.Mkdir(home, 0o700); err != nil {
-		s.emit("", Event{Kind: KindError, Error: &ErrorPayload{Step: "release gate of " + repo + " " + tag, Error: err.Error()}})
+		failed("release gate of "+repo+" "+tag, err.Error())
 		return
 	}
 	if err := s.git.TagWorktree(d.Clone, dir, tag); err != nil {
-		s.emit("", Event{Kind: KindError, Error: &ErrorPayload{Step: "copying " + repo + " at " + tag + " for its release gate", Error: oneLine(err.Error(), 300)}})
+		failed("copying "+repo+" at "+tag+" for its release gate", oneLine(err.Error(), 300))
 		return
 	}
 	defer s.git.RemoveWorktree(d.Clone, dir)
@@ -336,7 +351,7 @@ func runDeployCheck(c DeployCheck, tag string) (bool, string) {
 // tag: with the fleet's notify command when it has one, and on the
 // repository's console in any case.
 func (s *Supervisor) tellOperators(r *Release, d *DeployConfig) {
-	if r.Told || s.shadow {
+	if r.Told {
 		return
 	}
 	var lines []string
@@ -411,7 +426,7 @@ func (s *Supervisor) releaseBlocked(r *Release, d *DeployConfig) {
 		case f.Rollback != "":
 			back = f.Rollback
 		}
-		text := fmt.Sprintf("Release %s of %s is blocked: %s's step %s failed (%s); %s. Retry it with agentd release retry %s %s. Its output ends: %s",
+		text := fmt.Sprintf("Release %s of %s is blocked: %s's step %s failed (%s); %s. Retry it with agentd releases retry %s %s. Its output ends: %s",
 			r.Tag, r.Repository, tn, stepLabel(f.Index, f.Name), f.Error, back, r.Repository, r.Tag, cutUTF8(f.Output, 600))
 		s.releaseMessage(r.Repository, r.Tag, fmt.Sprintf("blocked:%s:%d:%d", tn, f.Index, f.Attempt), text)
 	}

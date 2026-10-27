@@ -123,7 +123,7 @@
       "deploy": {
         "clone": "~/repos/gitlab.example.com/example-org/widgets",
         "tags": "^v[0-9]",
-        "gate": {"argv": ["scripts/resilience/parity.sh", "{tag}"], "timeout": "45m"},
+        "gate": {"argv": ["scripts/parity.sh", "{tag}"], "timeout": "45m"},
         "targets": {
           "browser": {
             "host": "service-host", "via": "ssh", "node": "host-b",

@@ -60,7 +60,8 @@ type Git interface {
 	// origin/target. A detached one is at the branch's commit, so a
 	// reviewer's worktree beside its worker's, which has the branch out.
 	AddWorktree(clone, dir, branch, target string, detach bool) error
-	// Tags fetches the clone's tags and lists them (#67); TagNotes is a
+	// Tags fetches the clone's tags and lists them, the oldest first
+	// (#67); TagNotes is a
 	// tag's own message, a NUL, and the CHANGELOG.md the tag holds.
 	Tags(clone string) ([]string, error)
 	TagNotes(clone, tag string) (string, error)
@@ -576,7 +577,7 @@ func (g ExecGit) Tags(clone string) ([]string, error) {
 	if _, err := gitOut(g.Timeout, clone, "fetch", "-q", "--tags", "origin"); err != nil {
 		return nil, err
 	}
-	out, err := gitOut(g.Timeout, clone, "tag", "--list")
+	out, err := gitOut(g.Timeout, clone, "tag", "--list", "--sort=creatordate")
 	if err != nil {
 		return nil, err
 	}

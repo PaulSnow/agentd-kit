@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -99,8 +100,17 @@ func (p *FleetPayload) onTag(tag string) (on int, behind []string) {
 // without a leading v, or the tag with a build suffix.
 func versionIs(version, tag string) bool {
 	v, t := strings.TrimPrefix(strings.TrimSpace(version), "v"), strings.TrimPrefix(tag, "v")
-	return t != "" && (v == t || strings.HasPrefix(v, t+"+") || strings.HasPrefix(v, t+"-"))
+	return t != "" && (v == t || strings.HasPrefix(v, t+"+") || strings.HasPrefix(v, t+"-") && describeSuffix.MatchString(v[len(t):]))
 }
+
+// describeSuffix is git describe's suffix to a tag, commits since it and
+// the commit, perhaps dirty: a build of the tag. A pre-release (-rc1) is
+// not the tag.
+var describeSuffix = regexp.MustCompile(`^-[0-9]+-g[0-9a-f]{4,40}(-dirty)?$`)
+
+// unsafeName is what a member's name or version may not hold: they come
+// from another party, and reach a notify command's {message}.
+var unsafeName = regexp.MustCompile(`[^A-Za-z0-9._@:+/-]`)
 
 // fleetHTTP is the client a fleet's heartbeats and a target's check are
 // read with.
@@ -163,9 +173,10 @@ func parseHeartbeats(b []byte, f HeartbeatFields) ([]FleetMember, error) {
 	}
 	var hbs []heartbeat
 	var list []any
+	listed := false // the body holds a list, though it may be empty
 	switch x := v.(type) {
 	case []any:
-		list = x
+		list, listed = x, true
 	case map[string]any:
 		keys := heartbeatLists
 		if f.List != "" {
@@ -173,7 +184,7 @@ func parseHeartbeats(b []byte, f HeartbeatFields) ([]FleetMember, error) {
 		}
 		for _, k := range keys {
 			if l, ok := x[k].([]any); ok {
-				list = l
+				list, listed = l, true
 				break
 			}
 			if m, ok := x[k].(map[string]any); ok {
@@ -193,6 +204,9 @@ func parseHeartbeats(b []byte, f HeartbeatFields) ([]FleetMember, error) {
 		if o, ok := e.(map[string]any); ok {
 			hbs = append(hbs, heartbeat{"", o})
 		}
+	}
+	if len(hbs) == 0 && listed {
+		return nil, nil // no member reports
 	}
 	if len(hbs) == 0 {
 		return nil, errors.New("the heartbeats hold no list of members")
@@ -237,7 +251,7 @@ func field(o map[string]any, key string, guesses []string) string {
 	for _, k := range guesses {
 		switch x := o[k].(type) {
 		case string:
-			return oneLine(x, 200)
+			return unsafeName.ReplaceAllString(cutUTF8(x, 100), "_")
 		case json.Number:
 			return x.String()
 		}

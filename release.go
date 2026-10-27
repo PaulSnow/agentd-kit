@@ -230,6 +230,9 @@ func (c *Config) checkOwnTarget(t DeployTarget, bad func(format string, a ...any
 	if (t.Check.Contains == "") == (t.Check.JSONPath == "") {
 		bad(".check names contains or json_path, not both")
 	}
+	if t.Check.Contains != "" && !strings.Contains(t.Check.Contains, "{tag}") || t.Check.Value != "" && !strings.Contains(t.Check.Value, "{tag}") {
+		bad(".check: what it looks for must name {tag}, or it holds for every release")
+	}
 	for i, st := range t.Steps {
 		if len(st.Run) == 0 {
 			bad(".steps[%d].run is empty", i)
@@ -284,11 +287,12 @@ var releaseSteps = []string{ReleaseSeen, ReleaseOpened, ReleaseGate, ReleaseWith
 
 // Release states.
 const (
-	ReleaseBuilt     = "built"     // tagged; the gate has not passed
-	ReleaseDeploying = "deploying" // the gate passed: Go deploys and checks
-	ReleaseBlocked   = "blocked"   // a step of ours failed and was rolled back: the owner is told
-	ReleaseDone      = "running"   // every target's check holds
-	ReleaseOut       = "withdrawn" // the gate failed
+	ReleaseBuilt     = "built"      // tagged; the gate has not passed
+	ReleaseDeploying = "deploying"  // the gate passed: Go deploys and checks
+	ReleaseBlocked   = "blocked"    // a step of ours failed and was rolled back: the owner is told
+	ReleaseDone      = "running"    // every target's check holds
+	ReleaseOut       = "withdrawn"  // the gate failed
+	ReleaseOver      = "superseded" // a newer release of the repository was opened: it deploys instead
 )
 
 // ReleasePayload is one step of a release item.
@@ -363,7 +367,9 @@ type ReleaseTarget struct {
 }
 
 // terminal says whether r is closed.
-func (r *Release) terminal() bool { return r.State == ReleaseDone || r.State == ReleaseOut }
+func (r *Release) terminal() bool {
+	return r.State == ReleaseDone || r.State == ReleaseOut || r.State == ReleaseOver
+}
 
 func releaseKey(repo, tag string) string { return repo + " " + tag }
 
@@ -396,6 +402,10 @@ func (st *LogState) applyRelease(e Event) {
 		st.ReleaseTags[p.Repository] = tags
 	}
 	if p.Step == ReleaseSeen {
+		if st.ReleaseRead == nil {
+			st.ReleaseRead = map[string]bool{}
+		}
+		st.ReleaseRead[p.Repository] = true
 		for _, t := range p.Tags {
 			tags[t] = true
 		}
@@ -406,6 +416,12 @@ func (st *LogState) applyRelease(e Event) {
 	if p.Step == ReleaseOpened {
 		tags[p.Tag] = true
 		if r == nil {
+			// One release of a repository deploys at a time: the newest.
+			for _, o := range st.Releases {
+				if o.Repository == p.Repository && !o.terminal() {
+					o.State = ReleaseOver
+				}
+			}
 			st.Releases[k] = &Release{Repository: p.Repository, Tag: p.Tag, Compat: p.Compat, Opened: e.Time, State: ReleaseBuilt,
 				Targets: map[string]*ReleaseTarget{}, Posted: map[string]bool{}}
 		}
@@ -456,14 +472,21 @@ func (st *LogState) applyDeployResult(e Event) {
 		return
 	}
 	r := st.Releases[releaseKey(res.Repository, d.Tag)]
-	if r == nil || r.terminal() || d.Attempt != r.Retries {
+	if r == nil || r.terminal() {
 		return
+	}
+	// Only the node that runs the target's steps reports them.
+	if st.cfg != nil {
+		dc := st.cfg.Repositories[res.Repository].Deploy
+		if dc == nil || !dc.Targets[d.Target].own() || dc.Targets[d.Target].runsOn() != e.Node.Host {
+			return
+		}
 	}
 	t := r.target(d.Target)
 	switch {
 	case res.Outcome == NodeDone && d.Index == t.StepsDone:
 		t.StepsDone++
-	case res.Outcome != NodeDone && t.Failed == nil:
+	case res.Outcome != NodeDone && t.Failed == nil && d.Attempt == r.Retries && d.Index == t.StepsDone:
 		f := *d
 		f.Error = res.Error
 		if f.Error == "" {
@@ -499,8 +522,9 @@ func deployStepID(repo, tag, target string, index, attempt int) string {
 
 // deployCommands are what rec's host is to run for the releases now: for
 // each release deploying, each of its targets whose steps run on the
-// host, its first step not done, unless one failed. A step the node
-// refused or that failed waits for the owner's retry.
+// host, its first step not done, unless it failed. A step the node
+// refused or that failed waits for the owner's retry, which asks for it
+// again under a new id; the steps done before it are not.
 func deployCommands(cfg *Config, st *LogState, rec *NodeRecord) []NodeCommand {
 	var out []NodeCommand
 	for _, r := range st.sortedReleases() {
@@ -513,7 +537,8 @@ func deployCommands(cfg *Config, st *LogState, rec *NodeRecord) []NodeCommand {
 			if !t.own() || t.runsOn() != rec.Host {
 				continue
 			}
-			for i, step := range t.Steps {
+			for i := r.at(tn).StepsDone; i < len(t.Steps); i++ {
+				step := t.Steps[i]
 				id := deployStepID(r.Repository, r.Tag, tn, i, r.Retries)
 				if rec.Done[id] {
 					continue

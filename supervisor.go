@@ -225,6 +225,20 @@ func (s *Supervisor) screen(e *Event) {
 			}
 		}
 	}
+	// What a fleet's heartbeats and a release's checks said is another
+	// party's text (#67).
+	if f := e.Fleet; f != nil {
+		f.Error = s.withheld(f.Error)
+		for i := range f.Members {
+			f.Members[i].Member, f.Members[i].Version = s.withheld(f.Members[i].Member), s.withheld(f.Members[i].Version)
+		}
+	}
+	if r := e.Release; r != nil {
+		r.Text, r.Seen, r.Compat, r.Error = s.withheld(r.Text), s.withheld(r.Seen), s.withheld(r.Compat), s.withheld(r.Error)
+		for i := range r.Behind {
+			r.Behind[i] = s.withheld(r.Behind[i])
+		}
+	}
 	if c := e.Card; c != nil && c.Card != nil {
 		if i := s.confidentialMatch(compact(c.Card)); i > 0 {
 			c.Card, c.Refused = nil, fmt.Sprintf("the card's words match confidential pattern %d; it is not kept", i)
