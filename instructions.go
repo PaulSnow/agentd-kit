@@ -335,14 +335,38 @@ func (s *Supervisor) routeInstructions(now time.Time) {
 			}
 			continue
 		}
-		if !in.Route || !in.Delivered.IsZero() || in.Failed != "" || in.Session != "" && s.takesInstructions(in.Session) {
+		if !in.Route || !in.Delivered.IsZero() || in.Failed != "" || in.Session != "" && s.takesInstructions(in.Session) && !s.stranded(in) {
 			continue
+		}
+		// One agentd routed to a chat session, which no build starts any
+		// more, or to a session that is gone or never started, goes to a
+		// thread agent instead, once (#59).
+		if s.stranded(in) && len(in.Repositories) > 0 {
+			if repo := in.Repositories[0]; !s.shadow && s.threadCwd(repo) != "" {
+				s.startThread(in, repo, s.threadCwd(repo))
+				if s.halt != nil {
+					return
+				}
+				continue
+			}
 		}
 		if s.routeOne(in, now); s.halt != nil {
 			return
 		}
 	}
 	s.endChats(now)
+}
+
+// stranded says whether in, routed by agentd and not by the owner's
+// address, waits on a session that will never take it: a chat session,
+// or one that is gone, or no longer takes messages. A thread agent has
+// not had it yet.
+func (s *Supervisor) stranded(in *Instruction) bool {
+	if in.Session == "" || in.To != "" || in.Agent || !in.Delivered.IsZero() || in.Failed != "" {
+		return false
+	}
+	sess, ok := s.cfg.Sessions[in.Session]
+	return !ok || sess.Kind == KindChat || !s.takesInstructions(in.Session)
 }
 
 // endChats ends each chat session an agentd before the thread agents
