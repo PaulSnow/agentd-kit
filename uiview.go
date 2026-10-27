@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -556,7 +557,33 @@ type uiMessageView struct {
 	To     string // the session an instruction went to
 	// ReplyAgent: the reply is a thread agent's, which has no page.
 	ReplyAgent bool
-	live       bool
+	// Attachments are the files the owner sent with it (#61).
+	Attachments []uiAttachment
+	live        bool
+}
+
+// uiAttachment is a file the owner sent, as the page shows it: an image
+// as a thumbnail, anything else as its name.
+type uiAttachment struct {
+	URL   string
+	Name  string
+	Type  string
+	Size  string
+	Image bool
+}
+
+// uiAttachments are atts of source src as the page shows them.
+func uiAttachments(src string, atts []AttachmentPayload) []uiAttachment {
+	var out []uiAttachment
+	for _, a := range atts {
+		size := fmt.Sprintf("%d KB", (a.Bytes+1023)/1024)
+		if a.Bytes >= 1<<20 {
+			size = fmt.Sprintf("%.1f MB", float64(a.Bytes)/(1<<20))
+		}
+		out = append(out, uiAttachment{URL: "/attachment/" + url.PathEscape(src) + "/" + url.PathEscape(a.ID), Name: a.Name, Type: a.Type, Size: size,
+			Image: strings.HasPrefix(a.Type, "image/")})
+	}
+	return out
 }
 
 // uiStep is one step of an owner instruction, as the page shows it.
@@ -1106,6 +1133,11 @@ func (src *uiSource) messageView(cfg *Config, m uiMessage, now time.Time, secret
 		return mv
 	}
 	mv.Steps, mv.To = instructionSteps(src.st, in), in.Session
+	mv.Attachments = uiAttachments(src.Name, in.Attachments)
+	// Files sent alone are a message without words, not a withheld one.
+	if in.Text == "" && in.Withheld == 0 && len(in.Attachments) > 0 {
+		mv.Body, mv.More = "", ""
+	}
 	for _, tn := range in.Activity {
 		text := tn.Text
 		if tn.Withheld > 0 || secret(text) {

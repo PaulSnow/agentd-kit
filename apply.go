@@ -202,6 +202,10 @@ func (st *LogState) apply(e Event) {
 			if _, ok := st.Instructions[e.Instruction.ID]; !ok {
 				st.Instructions[e.Instruction.ID] = &Instruction{InstructionPayload: *e.Instruction, At: e.Time}
 			}
+		case KindAttachment:
+			if in := st.Instructions[e.Attachment.Message]; in != nil && !hasAttachment(in.Attachments, e.Attachment.ID) {
+				in.Attachments = append(in.Attachments, *e.Attachment)
+			}
 		case KindSeen:
 			for _, id := range e.Seen.IDs {
 				st.setItem(id, func(it *Item) { it.Seen = true })

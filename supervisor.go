@@ -493,7 +493,7 @@ func (s *Supervisor) ownerRecords() {
 			s.st.apply(e)
 			continue
 		}
-		shared := e.Kind == KindSeen || e.Kind == KindInstruction || e.Kind == KindAccount || e.Kind == KindTriage || e.Kind == KindError && e.Error.Triage != nil ||
+		shared := e.Kind == KindSeen || e.Kind == KindInstruction || e.Kind == KindAttachment || e.Kind == KindAccount || e.Kind == KindTriage || e.Kind == KindError && e.Error.Triage != nil ||
 			e.Kind == KindItem && s.st.itemChanged(*e.Item) || e.Kind == KindCase && e.Mode == ModeOwner ||
 			e.Kind == KindLoop && e.Mode == ModeOwner
 		if e.Session == "" && shared {
@@ -865,7 +865,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 				}
 			}
 			if len(iids) > 0 {
-				if err := writeInstructions(sess.Workdir, ins, now); err != nil {
+				if err := writeInstructions(s.cfg, sess.Workdir, ins, now); err != nil {
 					return err
 				}
 			}

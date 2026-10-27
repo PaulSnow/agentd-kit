@@ -71,6 +71,7 @@ type Event struct {
 	Thread      *ThreadPayload      `json:"thread,omitempty"`
 	Query       *QueryPayload       `json:"query,omitempty"`
 	Fact        *FactPayload        `json:"fact,omitempty"`
+	Attachment  *AttachmentPayload  `json:"attachment,omitempty"`
 }
 
 // Event kinds.
@@ -113,6 +114,7 @@ const (
 	KindLoop        = "loop"        // a step agentd took in a request's loop, or the owner's retry of a failed one
 	KindRoute       = "route"       // where agentd sends an owner instruction, or why it waits or failed
 	KindStatus      = "status"      // a status check of an active session: the model's record, or the failure that leaves a gap
+	KindAttachment  = "attachment"  // a file the owner attached to a console message (#61)
 )
 
 // Modes, in the mode every event carries. A run reads only the events of
@@ -377,7 +379,7 @@ func (e Event) check() error {
 		KindSkip: e.Skip != nil, KindCrash: e.Crash != nil, KindClear: e.Clear != nil, KindError: e.Error != nil, KindWarning: e.Warning != nil,
 		KindItem: e.Item != nil, KindSeen: e.Seen != nil, KindCursor: e.Cursor != nil, KindUsage: e.Usage != nil,
 		KindCheckpoint: e.Checkpoint != nil, KindPoll: e.Poll != nil, KindTriage: e.Triage != nil, KindDecision: e.Decision != nil,
-		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, KindApproval: e.Approval != nil, KindAccount: e.Account != nil, KindMessage: e.Message != nil, KindInbox: e.Inbox != nil, KindJob: e.Job != nil, KindLoop: e.Loop != nil, KindNode: e.Node != nil, KindRoute: e.Route != nil, KindStatus: e.Status != nil, KindCard: e.Card != nil, KindThread: e.Thread != nil, KindQuery: e.Query != nil, KindFact: e.Fact != nil, "act": e.Act != nil,
+		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, KindApproval: e.Approval != nil, KindAccount: e.Account != nil, KindMessage: e.Message != nil, KindInbox: e.Inbox != nil, KindJob: e.Job != nil, KindLoop: e.Loop != nil, KindNode: e.Node != nil, KindRoute: e.Route != nil, KindStatus: e.Status != nil, KindCard: e.Card != nil, KindThread: e.Thread != nil, KindQuery: e.Query != nil, KindAttachment: e.Attachment != nil, KindFact: e.Fact != nil, "act": e.Act != nil,
 	}
 	want := e.Kind
 	switch e.Kind {
@@ -442,6 +444,8 @@ func (e Event) check() error {
 		return errors.New("a feed event is a run's, for no one session; an imported line is the owner's")
 	case e.Kind == KindInstruction && (e.Session != "" || e.Mode != ModeOwner || e.Instruction.ID == "" || (len(e.Instruction.Repositories) == 0) == (e.Instruction.Console == "")):
 		return errors.New("an instruction event is the owner's, for no one session, and names its id and either its repositories or its console")
+	case e.Kind == KindAttachment && (e.Session != "" || e.Mode != ModeOwner || e.Attachment.check() != nil):
+		return fmt.Errorf("an attachment event is the owner's, for no one session: %v", e.Attachment.check())
 	case e.Kind == KindStatus && (e.Session == "" || e.Mode != ModeLive && e.Mode != ModeShadow || (e.Status.Record == nil) == (e.Status.Error == "")):
 		return errors.New("a status event is a run's, for one session, and carries a record or an error")
 	case e.Kind == KindRoute && (e.Session != "" || e.Mode != ModeLive && e.Mode != ModeShadow || e.Route.Instruction == "" || !validRouteStep(e.Route.Step) || e.Route.Step == RouteTo && e.Route.Session == "" || (e.Route.Step == RouteAnswered) != (e.Route.Agent != nil)):
@@ -518,13 +522,21 @@ func (l *Log) lock() (func(), error) {
 // Append writes one event as one line and syncs it. It first repairs a
 // torn final line, so the event never lands glued to a fragment that the
 // next run would cut off with it.
-func (l *Log) Append(e Event) error {
-	if err := e.check(); err != nil {
-		return fmt.Errorf("refusing to log an event agentd could not read back: %w", err)
-	}
-	b, err := json.Marshal(e)
-	if err != nil {
-		return err
+func (l *Log) Append(e Event) error { return l.AppendAll(e) }
+
+// AppendAll appends events in one write, so a reader sees all of them or
+// none: a message and its attachments (#61) are never read apart.
+func (l *Log) AppendAll(es ...Event) error {
+	var b []byte
+	for _, e := range es {
+		if err := e.check(); err != nil {
+			return fmt.Errorf("refusing to log an event agentd could not read back: %w", err)
+		}
+		line, err := json.Marshal(e)
+		if err != nil {
+			return err
+		}
+		b = append(append(b, line...), '\n')
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -538,7 +550,7 @@ func (l *Log) Append(e Event) error {
 			return err
 		}
 	}
-	return l.write(append(b, '\n'))
+	return l.write(b)
 }
 
 // write writes and syncs, with the lock held. When the write or the sync
