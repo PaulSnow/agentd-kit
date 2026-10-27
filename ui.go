@@ -210,7 +210,9 @@ func (src *uiSource) catchUp() error {
 			}
 			src.events[e.Session] = es
 		}
-		if e.Kind == KindTurn && e.Turn != nil && e.Session != "" && (e.Turn.Role == TurnPrompt || e.Turn.Role == TurnCompact) {
+		// A prompt logged before #56 B that its rule rejects is shown as
+		// none: its turn is no ref, and its message is dropped below.
+		if e.Kind == KindTurn && e.Turn != nil && e.Session != "" && (e.Turn.Role == TurnPrompt && !loggedNoPrompt(e.Turn.Text) || e.Turn.Role == TurnCompact) {
 			if len(src.turnRefs) >= uiTurnRefs {
 				clear(src.turnRefs)
 			}
@@ -249,6 +251,7 @@ func (src *uiSource) catchUp() error {
 				add(r, m)
 			}
 			add(e.Instruction.Console, m)
+		case e.Kind == KindMessage && e.Message != nil && e.Message.Kind == MessagePrompt && loggedNoPrompt(e.Message.Text):
 		case e.Kind == KindMessage && e.Message != nil:
 			m := uiMessage{At: e.Time, Kind: e.Message.Kind, From: e.Message.From, Text: e.Message.Text}
 			if m.turn() {

@@ -1031,7 +1031,13 @@ func (u *UI) sessionView(src *uiSource, name string, now time.Time) (*uiSessionP
 	if !secret(t.Reason) {
 		v.Reason = t.Reason
 	}
-	turns := t.Turns
+	var turns []TurnRecord
+	for _, tr := range t.Turns {
+		// A prompt logged before #56 B, whose rule it fails, is none.
+		if tr.Role != TurnPrompt || !loggedNoPrompt(tr.Text) {
+			turns = append(turns, tr)
+		}
+	}
 	if len(turns) > uiTurns {
 		turns = turns[len(turns)-uiTurns:]
 	}

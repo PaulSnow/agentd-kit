@@ -211,6 +211,31 @@ func injected(text string) bool {
 	return m != nil && strings.Contains(text, "</"+m[1]+">")
 }
 
+// harnessTags are the tags Claude Code opens an entry it writes itself
+// with, which a prompt logged cut, its closing tag lost, is known by.
+var harnessTags = map[string]bool{
+	"task-notification": true, "system-reminder": true, "user-prompt-submit-hook": true,
+	"bash-input": true, "bash-stdout": true, "bash-stderr": true,
+	"command-name": true, "command-message": true, "command-args": true,
+	"local-command-stdout": true, "local-command-stderr": true, "local-command-caveat": true,
+}
+
+// harnessOpen is the tag a text opens with.
+var harnessOpen = regexp.MustCompile(`^<([a-z][a-z0-9_-]*)>`)
+
+// loggedNoPrompt says whether a prompt as the log holds it, whole or cut,
+// is one #56 B's rule no longer reads as a prompt: an entry the harness
+// wrote, logged as a prompt before the rule was. A compaction is named
+// by labelPrompt, not dropped.
+func loggedNoPrompt(text string) bool {
+	text = strings.TrimSpace(text)
+	if injected(text) {
+		return true
+	}
+	m := harnessOpen.FindStringSubmatch(text)
+	return m != nil && harnessTags[m[1]] && strings.HasSuffix(text, "…")
+}
+
 // turnOf reads a transcript line as a turn, its text cut at turnRead.
 func turnOf(line []byte, n int) (TurnPayload, bool) {
 	tn, ok := wholeTurn(line, n)

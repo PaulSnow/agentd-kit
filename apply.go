@@ -252,7 +252,7 @@ func (st *LogState) apply(e Event) {
 	case KindUsage:
 		u := *e.Usage
 		t.Usage[u.Transcript] = u
-		if t.Transcript == "" || u.Transcript == t.Transcript || u.Guessed {
+		if t.Transcript == "" || u.Transcript == t.Transcript || u.Guessed || u.Cleared {
 			t.Measured = u.Transcript
 		}
 	case KindCheckpoint:
