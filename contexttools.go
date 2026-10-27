@@ -24,7 +24,7 @@ const (
 const historyIDs = 50
 
 // contextTools are offered on every server, after a session's own.
-var contextTools = []string{ToolState, ToolFind, ToolHistory, ToolAskExpert}
+var contextTools = []string{ToolState, ToolFind, ToolHistory, ToolAskExpert, ToolIssueBody}
 
 // RoleQuery is a server that serves the context tools alone, for an
 // agent that works no case: a console thread's agent (#59).
@@ -53,6 +53,7 @@ func contextToolList() []MCPTool {
 		{Name: ToolState, Description: "What is true now about a topic: its card, with each claim's src record ids. Read this first; leave topic out for the repository's card.", InputSchema: json.RawMessage(state)},
 		{Name: ToolFind, Description: "The topics whose cards match words or a reference, best first; topics with history but no card yet say card false.", InputSchema: json.RawMessage(find)},
 		{Name: ToolHistory, Description: "History records, only when state is not enough: by ids, or by topic newest first, cut to budget_tokens. Say why; missing-from-state asks the card's curator to add what was missing.", InputSchema: json.RawMessage(history)},
+		{Name: ToolIssueBody, Description: "Write the body of an issue you are filing: Go quotes the owner's words from the records you name, lists your facts and the records, and gives the decisions so far from the topics' cards. File it with the body as returned.", InputSchema: issueBodySchema()},
 		{Name: ToolAskExpert, Description: "Ask a stronger model, with the records and cards you name. It answers as JSON: answer, confidence and the record ids it used. Say in your answer when you relied on it.", InputSchema: json.RawMessage(expert)},
 	}
 }
@@ -113,6 +114,15 @@ func (srv *MCPServer) contextCall(tool string, args json.RawMessage) (string, bo
 		reply, problems = srv.history(cs, args, q)
 	case ToolAskExpert:
 		reply, problems = srv.askExpert(cs, args, q)
+	case ToolIssueBody:
+		var a issueBodyArgs
+		if problems = srv.decodeArgs(args, &a); problems == nil {
+			var body string
+			if body, problems = issueBody(cs, repo, a, srv.withheld); problems == nil {
+				q.IDs, q.Records = append(append([]string{}, a.Owner...), a.IDs...), len(a.Owner)+len(a.IDs)
+				reply = map[string]any{"title": oneLine(srv.withheld(a.Title), 300), "body": body}
+			}
+		}
 	}
 	if len(problems) > 0 {
 		var said []string

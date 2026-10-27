@@ -175,8 +175,8 @@ func (c *Config) checkPolicy(name string, repo *Repository, errs *[]error) {
 	bad := func(format string, a ...any) { *errs = append(*errs, fmt.Errorf(field+"."+format, a...)) }
 	def := func(key string) { repo.defaulted = append(repo.defaulted, key) }
 	for _, a := range p.Delivery.Allow {
-		if a != "push" && a != "open" {
-			bad("delivery.allow: %q is not push or open", a)
+		if a != "push" && a != "open" && a != ActComment {
+			bad("delivery.allow: %q is not push, open or comment", a)
 		}
 		if a == "push" && len(p.Gate.Argv) == 0 {
 			bad("delivery.allow has push but gate.argv is empty: nothing is delivered without a gate")
