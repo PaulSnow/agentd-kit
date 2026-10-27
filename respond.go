@@ -181,7 +181,7 @@ func (src *uiSource) entryOf(cfg *Config, rep Report, repo, id string, now time.
 		}
 		re.Options = []string{"yes", "no"}
 		// Only a change that waits on the owner takes the yes or the no.
-		if !r.open() || r.Auto {
+		if !r.open() || r.noYes(cfg) {
 			return re, "", nil, nil
 		}
 		return re, "", &Decision{ID: r.ID, Type: DecisionYesNo, Question: r.Summary}, nil

@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -79,6 +80,12 @@ type Supervisor struct {
 	dueRetype map[string]bool
 	// designTried is when each item's designer last started (#68).
 	designTried map[string]time.Time
+	// watchedAt is when the ops watch last looked at the branch to
+	// install from (#68).
+	watchedAt time.Time
+	// watchErr is the watch's last failure, shared with its workers, so
+	// a failure is logged once until it changes.
+	watchErr *atomic.Value
 
 	checkpointRe *regexp.Regexp
 
@@ -131,6 +138,7 @@ func NewSupervisor(cfg *Config, log *Log, clock Clock, tmux Tmux, git Git, forge
 		checkedAt:   map[string]time.Time{},
 		dueRetype:   map[string]bool{},
 		designTried: map[string]time.Time{},
+		watchErr:    emptyValue(),
 
 		checkpointRe: regexp.MustCompile(cfg.Policies.Context.Checkpoint),
 		runCtx:       context.Background(),
@@ -477,6 +485,7 @@ func (s *Supervisor) Pass() error {
 	s.routeInstructions(s.clock.Now())
 	s.driveItems(s.clock.Now())
 	s.runOps(s.clock.Now())
+	s.watchInstall(s.clock.Now())
 	for _, name := range s.cfg.SessionNames() {
 		if s.halt != nil {
 			break

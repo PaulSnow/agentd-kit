@@ -197,8 +197,8 @@ func (o *opsEnv) onMain(sha string) (string, error) {
 	if err != nil || full == "" {
 		return "", fmt.Errorf("the clone has no commit %s", sha)
 	}
-	if _, err := o.git(o.cfg.Ops.Repo, "merge-base", "--is-ancestor", full, "origin/main"); err != nil {
-		return "", fmt.Errorf("commit %s is not on the clone's main (origin/main)", short(full))
+	if _, err := o.git(o.cfg.Ops.Repo, "merge-base", "--is-ancestor", full, "origin/"+o.cfg.Ops.branch()); err != nil {
+		return "", fmt.Errorf("commit %s is not on the clone's %s (origin/%s)", short(full), o.cfg.Ops.branch(), o.cfg.Ops.branch())
 	}
 	return full, nil
 }
@@ -210,7 +210,7 @@ func (o *opsEnv) proposeInstall(c OpsChange, a opsArgs) (OpsChange, error) {
 	if o.binary == "" {
 		return c, errors.New("agentd does not know the binary to replace; set ops.binary")
 	}
-	if _, err := o.git(o.cfg.Ops.Repo, "fetch", "--quiet", "origin", "main"); err != nil {
+	if _, err := o.fetchBranch(); err != nil {
 		return c, err
 	}
 	full, err := o.onMain(a.Commit)
@@ -235,8 +235,8 @@ func (o *opsEnv) proposeInstall(c OpsChange, a opsArgs) (OpsChange, error) {
 		installed = short(cur)
 	}
 	c.Diff = redactLines("installed: "+installed+"\nto install: "+short(full)+"\n\n"+log, confidentialMatcher(o.cfg))
-	c.Summary = fmt.Sprintf("Install commit %s (%s) from main: build it, keep the running binary as %s.%s, swap it in, check every supervisor's config with it and restart them all, this process last.",
-		short(full), oneLine(subject, 100), filepath.Base(o.binary), keptSuffix(cur))
+	c.Summary = fmt.Sprintf("Install commit %s (%s) from %s: build it, keep the running binary as %s.%s, swap it in, check every supervisor's config with it and restart them all, this process last.",
+		short(full), oneLine(subject, 100), o.cfg.Ops.branch(), filepath.Base(o.binary), keptSuffix(cur))
 	return c, nil
 }
 
@@ -264,12 +264,15 @@ func (o *opsEnv) execute(ctx context.Context, r OpsRecord) (outcome string, self
 		}
 		return r.Supervisor + " is up again", false, nil
 	case OpsInstall:
-		if _, err := o.git(o.cfg.Ops.Repo, "fetch", "--quiet", "origin", "main"); err != nil {
+		if _, err := o.fetchBranch(); err != nil {
 			return "", false, err
 		}
 		full, err := o.onMain(r.Commit)
 		if err != nil || full != r.Commit {
 			return "", false, fmt.Errorf("nothing was installed: %v", err)
+		}
+		if strings.TrimSuffix(binaryCommit(o.binary), "+modified") == full {
+			return "", false, fmt.Errorf("commit %s is installed already, so nothing was done", short(full))
 		}
 		dir, err := os.MkdirTemp("", "agentd-install-")
 		if err != nil {
@@ -497,6 +500,11 @@ func (o *opsEnv) opsResolved(r *OpsRecord) (string, string) {
 		if commit == "" {
 			commit = "an unknown commit"
 		}
+		// An install this process does not run was put back by the
+		// restart's helper (#68).
+		if r.Op == OpsInstall && r.Commit != "" && buildCommit() != "" && buildCommit() != r.Commit {
+			return OpsFailed, fmt.Sprintf("%s; %s is up again, but on %s, not %s: the kept binary was put back when the new one did not come up", r.Restarting, o.self, commit, short(r.Commit))
+		}
 		return OpsDone, fmt.Sprintf("%s; %s is up again, on %s", r.Restarting, o.self, commit)
 	}
 	why := fmt.Sprintf("agentd stopped while it was carrying this out (started %s)", r.Started.UTC().Format(time.RFC3339))
@@ -509,4 +517,11 @@ func (o *opsEnv) opsResolved(r *OpsRecord) (string, string) {
 		}
 	}
 	return OpsFailed, why + "; ops_status and ops_tail show where it stands"
+}
+
+// fetchBranch fetches the install branch into origin/BRANCH, also in a
+// clone made with --single-branch.
+func (o *opsEnv) fetchBranch() (string, error) {
+	b := o.cfg.Ops.branch()
+	return o.git(o.cfg.Ops.Repo, "fetch", "--quiet", "origin", "+refs/heads/"+b+":refs/remotes/origin/"+b)
 }
