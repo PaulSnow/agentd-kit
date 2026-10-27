@@ -40,7 +40,8 @@
     "timeout": "2m",
     "max_input": 16384,
     "batch": 20,
-    "status": {"enabled": false, "every": "5m", "max_input": 20480}
+    "status": {"enabled": false, "every": "5m", "max_input": 20480},
+    "designer": {"off": false, "model": "", "max_input": 65536, "timeout": "15m"}
   },
   "policies": {
     "restart": {

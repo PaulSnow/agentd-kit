@@ -387,7 +387,8 @@ func (s *Supervisor) routeInstructions(now time.Time) {
 			}
 			continue
 		}
-		if !in.Route || !in.Delivered.IsZero() || in.Failed != "" || in.Session != "" && s.takesInstructions(in.Session) && !s.stranded(in) {
+		// One answered, by Go on an entry's answer too, is settled.
+		if !in.Route || !in.Delivered.IsZero() || !in.Replied.IsZero() || in.Failed != "" || in.Session != "" && s.takesInstructions(in.Session) && !s.stranded(in) {
 			continue
 		}
 		// A response on a work item's entry is the item's (#66), and one
