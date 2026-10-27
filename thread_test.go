@@ -252,3 +252,66 @@ func TestThreadAgentScreensAndBounds(t *testing.T) {
 		t.Fatalf("outcomes = %q", outcomes)
 	}
 }
+
+// A message an older agentd routed to a chat session that never started
+// is routed again, once, to a thread agent, and answered under itself;
+// so is one routed to a session that is gone (#59).
+func TestStrandedMessageRoutedAgain(t *testing.T) {
+	dir := fakeClaude(t)
+	h := sessionsHarness(t)
+	h.ticks(1, time.Minute)
+	chat := runtimeName("widgets", chatBranch, KindChat)
+	if why := h.sup.startRuntime("widgets", chat, RuntimePayload{Kind: KindChat, Branch: chatBranch}); why != "" {
+		t.Fatal(why)
+	}
+	h.sup.refreshRuntime()
+	if err := reply(h, "widgets", "status?"); err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	for _, e := range h.events() {
+		if e.Kind == KindInstruction {
+			id = e.Instruction.ID
+		}
+	}
+	// As the build before the thread agents logged it: routed to the chat.
+	if err := h.sup.log.Append(Event{V: EventVersion, Time: h.clock.Now(), Kind: KindRoute, Mode: ModeLive,
+		Route: &RoutePayload{Instruction: id, Step: RouteTo, Session: chat, Started: true}}); err != nil {
+		t.Fatal(err)
+	}
+	h.restart(false)
+	claudeAnswers(t, dir, 0, agentOut("Two sessions work; nothing waits on you.", ""))
+	h.ticks(3, time.Minute)
+	in := h.instruction(t)
+	if !in.Agent || in.Session != "" || in.Reply != "Two sessions work; nothing waits on you." || in.AgentRuns != 1 || claudeCalls(t, dir) != 1 {
+		t.Fatalf("instruction = %+v, %d calls", in, claudeCalls(t, dir))
+	}
+	if _, ok := h.sup.st.Runtime[chat]; ok {
+		t.Fatal("the chat session was not ended")
+	}
+
+	// A message routed to a work session that is then gone goes to an
+	// agent too.
+	h2 := sessionsHarness(t)
+	w1 := h2.startSession("issue-1", KindWork, 1)
+	h2.ticks(1, time.Minute)
+	if err := reply(h2, "widgets", "And the docs?"); err != nil {
+		t.Fatal(err)
+	}
+	var id2 string
+	for _, e := range h2.events() {
+		if e.Kind == KindInstruction {
+			id2 = e.Instruction.ID
+		}
+	}
+	if err := h2.sup.log.Append(Event{V: EventVersion, Time: h2.clock.Now(), Kind: KindRoute, Mode: ModeLive,
+		Route: &RoutePayload{Instruction: id2, Step: RouteTo, Session: w1 + "-gone"}}); err != nil {
+		t.Fatal(err)
+	}
+	h2.restart(false)
+	before := claudeCalls(t, dir)
+	h2.ticks(2, time.Minute)
+	if in := h2.instruction(t); !in.Agent || in.Reply == "" || claudeCalls(t, dir) != before+1 {
+		t.Fatalf("instruction = %+v", in)
+	}
+}
