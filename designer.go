@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -453,6 +454,10 @@ func (s *Supervisor) checkDesign(raw json.RawMessage, d *WorkDesign) error {
 		return out
 	}
 	b.Exists, b.Missing, b.Design, b.OutOfScope, b.Acceptance = clean(b.Exists), clean(b.Missing), clean(b.Design), clean(b.OutOfScope), clean(b.Acceptance)
+	// Go numbers the design: a step's own number goes.
+	for i, l := range b.Design {
+		b.Design[i] = strings.TrimSpace(stepNumber.ReplaceAllString(l, ""))
+	}
 	b.Where = cutUTF8(strings.TrimSpace(b.Where), designLine)
 	a.Questions = clean(a.Questions)
 	if len(a.Questions) > designQuestions {
@@ -479,6 +484,9 @@ func (s *Supervisor) checkDesign(raw json.RawMessage, d *WorkDesign) error {
 	d.Brief, d.Questions, d.DoneWhen, d.Rating = b, a.Questions, &a.DoneWhen, &a.Rating
 	return nil
 }
+
+// stepNumber is a number a designer put before a design step.
+var stepNumber = regexp.MustCompile(`^(?:[0-9]+[.)]\s*)+`)
 
 // designerSystem is the designer's instructions.
 const designerSystem = `You are agentd's designer. The owner of a software project asked, on agentd's console, for work no running session covers; before any session starts, you write the brief the session will work from, and the owner reads it and says go, change or decline. ` +

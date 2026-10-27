@@ -25,6 +25,18 @@ func (s *Supervisor) finishedFor(name string) string {
 	if !ok || p.Kind != KindWork || t == nil || len(s.st.itemsOf(name)) > 0 {
 		return ""
 	}
+	// A message routed to it and not yet delivered waits on it: the
+	// owner may have sent it there to reopen it.
+	if len(s.st.freshInstructions(name, false, s.clock.Now())) > 0 {
+		return ""
+	}
+	// Each delivery it makes after DONE has its outcome, and none runs.
+	for _, d := range s.cfg.Sessions[name].Deliver {
+		key := name + ":" + d.Worktree
+		if t.Delivered[key] == "" || s.work.busy("deliver:"+key) {
+			return ""
+		}
+	}
 	var how string
 	switch {
 	case t.State == Done:
@@ -45,6 +57,11 @@ func (s *Supervisor) finishedFor(name string) string {
 		refs = append(refs, d.Ref)
 	}
 	if len(refs) == 0 {
+		// Only one that wrote DONE is finished with nothing delivered:
+		// one stopped or parked waits on the owner's clear.
+		if t.State != Done {
+			return ""
+		}
 		return how + ", with no request delivered"
 	}
 	sort.Strings(refs)

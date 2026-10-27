@@ -34,7 +34,7 @@ func designOut(step string, deploys bool, spend float64) string {
 		"brief": map[string]any{
 			"exists":       []string{"paint.go: Paint(color) paints one wall"},
 			"missing":      []string{"a way to paint every wall"},
-			"design":       []string{step, "agentd-style test in paint_test.go"},
+			"design":       []string{step, "2. agentd-style test in paint_test.go"},
 			"where":        "widgets, a branch cut from main",
 			"out_of_scope": []string{"the fence"},
 			"acceptance":   []string{"every wall of the shed is red", "./bin/check passes"},
@@ -126,7 +126,7 @@ func TestDesignerBriefPostsAsDecisionAndStartsOnGo(t *testing.T) {
 	if entry == nil || !entry.Open || entry.Decision == nil {
 		t.Fatalf("no open design entry: %+v", v.Entries)
 	}
-	for _, want := range []string{"> Paint the shed red, all of it.", "## Design", "1. Add PaintAll", "## Acceptance", "Which red?", "SHED.md contains", "$0.25"} {
+	for _, want := range []string{"> Paint the shed red, all of it.", "## Design", "1. Add PaintAll", "\n2. agentd-style test", "## Acceptance", "Which red?", "SHED.md contains", "$0.25"} {
 		if !strings.Contains(entry.Decision.Context, want) {
 			t.Fatalf("the design lacks %q:\n%s", want, entry.Decision.Context)
 		}

@@ -26,6 +26,18 @@ func TestCappedStartEndsFinishedSession(t *testing.T) {
 		t.Fatalf("states: %s %s", h.sup.st.Tracks[w1].State, h.sup.st.Tracks[w2].State)
 	}
 
+	// Neither is finished while its delivery has no outcome: what it
+	// wrote is not delivered yet.
+	if why := h.sup.finishedFor(w2); why != "" {
+		t.Fatalf("a session whose delivery is pending is finished: %s", why)
+	}
+	for _, w := range []string{w1, w2} {
+		tr := h.sup.st.Tracks[w]
+		if tr.Delivered == nil {
+			tr.Delivered = map[string]string{}
+		}
+		tr.Delivered[w+":"+h.sup.cfg.Sessions[w].Cwd] = "no MR.md: nothing to deliver"
+	}
 	// w1, the older, delivered a request still open: it may get a fix
 	// round, so w2 is the one ended.
 	h.sup.st.Tracks[w1].Deliveries = []DeliveryRecord{{Ref: "!3", Repository: "widgets"}}
@@ -61,6 +73,11 @@ func TestCappedStartEndsFinishedSession(t *testing.T) {
 	h.sup.st.CI[ciKey("widgets", "!3")] = CIRecord{CIPayload: CIPayload{State: CIMerged}}
 	if why := h.sup.finishedFor(w1); !strings.Contains(why, "merged or closed (!3)") {
 		t.Fatalf("why = %q", why)
+	}
+	// One stopped with nothing delivered waits on the owner's clear.
+	h.sup.st.Tracks[w1].State, h.sup.st.Tracks[w1].Deliveries = Stopped, nil
+	if why := h.sup.finishedFor(w1); why != "" {
+		t.Fatalf("a stopped session with nothing delivered is finished: %s", why)
 	}
 	// One at work is never ended: the new session is working.
 	h.alive(in.Session, "painting")
