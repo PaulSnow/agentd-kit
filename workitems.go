@@ -1207,7 +1207,7 @@ func WorkViews(cfg *Config, st *LogState, console string, all bool, now time.Tim
 		}
 		out = append(out, v)
 	}
-	return out
+	return append(out, releaseViews(cfg, st, console, all, now, secret)...)
 }
 
 // PrintWork writes the work items table.

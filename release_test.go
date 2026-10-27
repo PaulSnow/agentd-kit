@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -136,6 +137,13 @@ func TestReleaseClosesOnlyWhenServiceAndFleetHold(t *testing.T) {
 	if g := h.releaseSteps(ReleaseGate); len(g) != 1 || g[0].Gate.Output != "gate output" {
 		t.Fatalf("the gate's output is attached to the item: %+v", g)
 	}
+	// The item is among the open work items, with its fleet-shaped done_when.
+	none := func(...string) bool { return false }
+	if vs := WorkViews(h.cfg, h.sup.st, "widgets", false, h.clock.Now(), none); len(vs) != 1 || vs[0].ID != "release:v1.1.0" || vs[0].State != ReleaseDeploying ||
+		!strings.Contains(vs[0].DoneWhen, "signers: at least 2 members' heartbeats on v1.1.0") || !strings.Contains(vs[0].DoneWhen, `version is "v1.1.0"`) ||
+		!strings.Contains(vs[0].Progress, "compat: browser and signers together") || vs[0].Entry != "" {
+		t.Fatalf("views = %+v", vs)
+	}
 	// The hub asks host-a's node for the first step.
 	cmds := deployCommands(h.cfg, h.sup.st, newNodeRecord("host-a"))
 	if len(cmds) != 1 || cmds[0].Deploy.SSH != "host-b" || strings.Join(cmds[0].Deploy.Run, " ") != "deploy v1.1.0" {
@@ -172,6 +180,9 @@ func TestReleaseClosesOnlyWhenServiceAndFleetHold(t *testing.T) {
 	h.ticks(3, every)
 	if r.State != ReleaseDone || len(h.releaseSteps(ReleaseRunning)) != 1 || len(h.messages("is running where it must")) != 1 {
 		t.Fatalf("both checks hold: the item is done once: %s", r.State)
+	}
+	if vs := WorkViews(h.cfg, h.sup.st, "widgets", false, h.clock.Now(), none); len(vs) != 0 {
+		t.Fatalf("a done release is still open: %+v", vs)
 	}
 	if len(h.messages("For the operators")) != 1 {
 		t.Fatal("the operators were asked more than once")
@@ -399,5 +410,38 @@ func TestHubDrivesReleaseStepsOnTheNode(t *testing.T) {
 	st := NewLogState(h.cfg, ModeLive).Fold(events)
 	if r := st.Releases[releaseKey("widgets", "v2.0.0")]; r == nil || r.Targets["browser"].StepsDone != 2 {
 		t.Fatalf("release = %+v", r)
+	}
+}
+
+// The owner opens an item for a tag there before Go read the clone, and
+// retries a blocked one, through the log as agentd releases does.
+func TestOwnerOpensAndRetriesARelease(t *testing.T) {
+	h, _ := releaseHarness(t)
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	log, err := OpenLog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	h.git.tagNotes = map[string]string{"v1.0.0": "\x00# Changes\n\n## v1.0.0\n\n- compat: signers first\n\n## v0.9.0\n- compat: none\n"}
+	if err := OpenRelease(h.cfg, log, nil, h.git, h.clock.Now(), "widgets", "v1.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := OpenRelease(h.cfg, log, nil, h.git, h.clock.Now(), "widgets", "nightly"); err == nil {
+		t.Fatal("a tag deploy.tags does not match was opened")
+	}
+	events, _, err := log.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := OpenRelease(h.cfg, log, events, h.git, h.clock.Now(), "widgets", "v1.0.0"); err == nil {
+		t.Fatal("an open release was opened again")
+	}
+	st := NewLogState(h.cfg, ModeLive).Fold(events)
+	if r := st.Releases[releaseKey("widgets", "v1.0.0")]; r == nil || r.Compat != "signers first" {
+		t.Fatalf("release = %+v", r)
+	}
+	if err := RetryRelease(h.cfg, log, events, h.clock.Now(), "widgets", "v1.0.0"); err == nil {
+		t.Fatal("a release with no failed step was retried")
 	}
 }

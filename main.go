@@ -117,7 +117,7 @@ func usage() {
   agentd clear [--config PATH] [--log PATH] SESSION
   agentd sessions [--config PATH] [--log PATH] end NAME
   agentd loop [--config PATH] [--log PATH] retry REPOSITORY REQUEST
-  agentd releases [--config PATH] [--log PATH] [retry REPOSITORY TAG]
+  agentd releases [--config PATH] [--log PATH] [open|retry REPOSITORY TAG]
   agentd policy [--config PATH] [--log PATH] show REPO
   agentd console [--config PATH] [--log PATH] [--shadow] reply CONSOLE TEXT...
   agentd console [--config PATH] [--log PATH] [--repository REPO] import FILE

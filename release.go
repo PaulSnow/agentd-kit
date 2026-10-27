@@ -556,8 +556,30 @@ func releasesCmd(args []string, w io.Writer) error {
 		return nil
 	case len(rest) == 3 && rest[0] == "retry":
 		return RetryRelease(cfg, log, events, time.Now(), rest[1], rest[2])
+	case len(rest) == 3 && rest[0] == "open":
+		return OpenRelease(cfg, log, events, ExecGit{Timeout: cfg.Timeouts.Forge.Duration}, time.Now(), rest[1], rest[2])
 	}
-	return errors.New("usage: agentd releases [retry REPOSITORY TAG]")
+	return errors.New("usage: agentd releases [open|retry REPOSITORY TAG]")
+}
+
+// OpenRelease records the owner's opening of a release item for a tag Go
+// did not see made: one there when Go first read the clone.
+func OpenRelease(cfg *Config, log *Log, events []Event, g Git, now time.Time, repo, tag string) error {
+	d := cfg.Repositories[repo].Deploy
+	if d == nil {
+		return fmt.Errorf("repository %q has no deploy", repo)
+	}
+	if !d.tags.MatchString(tag) || !releaseTagPattern.MatchString(tag) || strings.Contains(tag, "..") {
+		return fmt.Errorf("%q is not a release tag of %s (deploy.tags is %s)", tag, repo, d.Tags)
+	}
+	if NewLogState(cfg, ModeLive).Fold(events).Releases[releaseKey(repo, tag)] != nil {
+		return fmt.Errorf("release %s of %s is open already", tag, repo)
+	}
+	notes, err := g.TagNotes(d.Clone, tag)
+	if err != nil {
+		return fmt.Errorf("tag %s in %s: %w", tag, d.Clone, err)
+	}
+	return log.Append(Event{V: EventVersion, Time: now, Kind: KindRelease, Mode: ModeOwner, Release: &ReleasePayload{Repository: repo, Tag: tag, Step: ReleaseOpened, Compat: compatRule(notes, tag)}})
 }
 
 // RetryRelease records the owner's retry of a blocked release: its steps
@@ -600,4 +622,59 @@ func PrintReleases(w io.Writer, cfg *Config, st *LogState) {
 			}
 		}
 	}
+}
+
+// releaseDoneWhen is a release item's done_when, as the owner reads it:
+// every target's check, the fleets' by their thresholds.
+func releaseDoneWhen(d *DeployConfig, tag string) string {
+	var parts []string
+	for _, tn := range sortedKeys(d.Targets) {
+		t := d.Targets[tn]
+		switch {
+		case t.Kind == TargetFleet:
+			parts = append(parts, fmt.Sprintf("%s: at least %d members' heartbeats on %s", tn, t.Threshold, tag))
+		case t.Check.JSONPath != "":
+			parts = append(parts, fmt.Sprintf("%s: %s %s is %q", tn, strings.ReplaceAll(t.Check.URL, "{tag}", tag), t.Check.JSONPath, strings.ReplaceAll(t.Check.Value, "{tag}", tag)))
+		default:
+			parts = append(parts, fmt.Sprintf("%s: %s contains %q", tn, strings.ReplaceAll(t.Check.URL, "{tag}", tag), strings.ReplaceAll(t.Check.Contains, "{tag}", tag)))
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
+// releaseViews are st's release items on console as work items (#66):
+// the item "release TAG running", its state, its done_when and each
+// target's last check, the gate and the compat rule as its progress.
+func releaseViews(cfg *Config, st *LogState, console string, all bool, now time.Time, secret func(...string) bool) []WorkView {
+	var out []WorkView
+	rels := st.sortedReleases()
+	for i := len(rels) - 1; i >= 0; i-- { // oldest first, as work items are
+		r := rels[i]
+		d := cfg.Repositories[r.Repository].Deploy
+		if d == nil || console != "" && r.Repository != console && cfg.RepositoryConsole(r.Repository) != console || !all && r.terminal() {
+			continue
+		}
+		v := WorkView{ID: "release:" + r.Tag, Repository: r.Repository, Title: "release " + r.Tag + " running", State: r.State, Opened: r.Opened,
+			Age: ago(now, r.Opened), DoneWhen: releaseDoneWhen(d, r.Tag), LastCheck: strings.Join(releaseTargetLines(d, r), "; ")}
+		var progress []string
+		switch g := r.Gate; {
+		case g == nil:
+			progress = append(progress, "the gate has not run")
+		case g.None:
+			progress = append(progress, "no gate configured")
+		case g.Passed:
+			progress = append(progress, "the gate passed")
+		default:
+			progress = append(progress, fmt.Sprintf("the gate failed, exit %d: withdrawn", g.Exit))
+		}
+		if r.Compat != "" {
+			progress = append(progress, "compat: "+r.Compat)
+		}
+		v.Progress = strings.Join(progress, "; ")
+		if secret(v.DoneWhen, v.LastCheck, v.Progress) {
+			v.DoneWhen, v.LastCheck, v.Progress = withheldSecret, "", ""
+		}
+		out = append(out, v)
+	}
+	return out
 }

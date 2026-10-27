@@ -424,8 +424,9 @@ func (e Event) check() error {
 		return errors.New("a fact is a run's, for no one session, and names its repository, a change, and a session or a reference")
 	case e.Kind == KindOps && (e.Session != "" || e.Mode != ModeShared || e.Ops.check() != nil):
 		return errors.New("an ops event is a shared fact, for no one session, and names its change and a step")
-	case e.Kind == KindRelease && (e.Session != "" || e.Release.check() != nil || (e.Mode == ModeOwner) != (e.Release.Step == ReleaseRetry) || e.Mode != ModeOwner && e.Mode != ModeLive && e.Mode != ModeShadow):
-		return errors.New("a release event is a run's step, or the owner's retry, for no one session, and names its repository, step and tag")
+	case e.Kind == KindRelease && (e.Session != "" || e.Release.check() != nil || e.Mode == ModeOwner && e.Release.Step != ReleaseRetry && e.Release.Step != ReleaseOpened ||
+		e.Mode != ModeOwner && e.Release.Step == ReleaseRetry || e.Mode != ModeOwner && e.Mode != ModeLive && e.Mode != ModeShadow):
+		return errors.New("a release event is a run's step, or the owner's opening or retry, for no one session, and names its repository, step and tag")
 	case e.Kind == KindFleet && (e.Session != "" || e.Mode != ModeLive && e.Mode != ModeShadow || e.Fleet.Repository == "" || e.Fleet.Target == ""):
 		return errors.New("a fleet reading is a run's, for no one session, and names its repository and target")
 	case e.Kind == KindWorkItem && (e.Session != "" || e.Mode != ModeLive && e.Mode != ModeShadow || e.Work.check() != nil):
