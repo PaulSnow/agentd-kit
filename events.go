@@ -65,6 +65,7 @@ type Event struct {
 	Job         *JobPayload         `json:"job,omitempty"`
 	Loop        *LoopPayload        `json:"loop,omitempty"`
 	Node        *NodePayload        `json:"node,omitempty"`
+	Route       *RoutePayload       `json:"route,omitempty"`
 }
 
 // Event kinds.
@@ -105,6 +106,7 @@ const (
 	KindInbox       = "inbox"       // a reader read the owner's instructions for a console (agentd console inbox)
 	KindJob         = "job"         // a scheduled job's run started, ended or was skipped
 	KindLoop        = "loop"        // a step agentd took in a request's loop, or the owner's retry of a failed one
+	KindRoute       = "route"       // where agentd sends an owner instruction, or why it waits or failed
 )
 
 // Modes, in the mode every event carries. A run reads only the events of
@@ -140,6 +142,7 @@ const (
 	ActEnd       = "end"       // an ended session's tmux session stopped
 	ActMerge     = "merge"     // a request's target fast-forwarded to its gated, green head
 	ActRetest    = "retest"    // a request's pipeline run again on its merge result, its target having moved
+	ActInstruct  = "instruct"  // the owner's instructions written to instructions.json and the pointer typed
 )
 
 // StartPayload is a run's start: the sessions it supervises.
@@ -221,6 +224,9 @@ type ActPayload struct {
 	// AnswersAt is when each of Answers was given, so a later answer to
 	// the same decision is not taken as delivered.
 	AnswersAt []time.Time `json:"answers_at,omitempty"`
+	// An instruct, or a restart that hands instructions over: the owner's
+	// instructions instructions.json holds, newly delivered (#56).
+	Instructions []string `json:"instructions,omitempty"`
 
 	// Typing: a nudge, a resume, the trust keys.
 	Message string `json:"message,omitempty"`
@@ -365,7 +371,7 @@ func (e Event) check() error {
 		KindSkip: e.Skip != nil, KindCrash: e.Crash != nil, KindClear: e.Clear != nil, KindError: e.Error != nil, KindWarning: e.Warning != nil,
 		KindItem: e.Item != nil, KindSeen: e.Seen != nil, KindCursor: e.Cursor != nil, KindUsage: e.Usage != nil,
 		KindCheckpoint: e.Checkpoint != nil, KindPoll: e.Poll != nil, KindTriage: e.Triage != nil, KindDecision: e.Decision != nil,
-		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, KindApproval: e.Approval != nil, KindAccount: e.Account != nil, KindMessage: e.Message != nil, KindInbox: e.Inbox != nil, KindJob: e.Job != nil, KindLoop: e.Loop != nil, KindNode: e.Node != nil, "act": e.Act != nil,
+		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, KindApproval: e.Approval != nil, KindAccount: e.Account != nil, KindMessage: e.Message != nil, KindInbox: e.Inbox != nil, KindJob: e.Job != nil, KindLoop: e.Loop != nil, KindNode: e.Node != nil, KindRoute: e.Route != nil, "act": e.Act != nil,
 	}
 	want := e.Kind
 	switch e.Kind {
@@ -412,8 +418,8 @@ func (e Event) check() error {
 		return errors.New("a deadline event is the owner's, for one session")
 	case e.Kind == KindDecision && (e.Mode == ModeOwner || e.Session == ""):
 		return errors.New("a decision event is a run's, for one session")
-	case e.Kind == KindTurn && (e.Mode == ModeOwner || e.Mode == ModeShared || e.Session == "" || e.Turn.Role != TurnPrompt && e.Turn.Role != TurnSummary):
-		return errors.New("a turn event is a run's, for one session, and a prompt or a summary")
+	case e.Kind == KindTurn && (e.Mode == ModeOwner || e.Mode == ModeShared || e.Session == "" || e.Turn.Role != TurnPrompt && e.Turn.Role != TurnSummary && e.Turn.Role != TurnTool):
+		return errors.New("a turn event is a run's, for one session, and a prompt, a summary or a tool")
 	case e.Kind == KindCoordinator && (e.Coordinator.Repository == "" || !(e.Mode == ModeShared && e.Session != "" || e.Mode == ModeOwner && e.Session == "")):
 		return errors.New("a coordinator claim is a shared fact of one session; a release is the owner's, for no session")
 	case e.Kind == KindCI && (e.Mode == ModeOwner || e.Mode == ModeShared || e.Session == "" || e.CI.Repository == "" || e.CI.Ref == ""):
@@ -422,6 +428,8 @@ func (e Event) check() error {
 		return errors.New("a feed event is a run's, for no one session; an imported line is the owner's")
 	case e.Kind == KindInstruction && (e.Session != "" || e.Mode != ModeOwner || e.Instruction.ID == "" || (len(e.Instruction.Repositories) == 0) == (e.Instruction.Console == "")):
 		return errors.New("an instruction event is the owner's, for no one session, and names its id and either its repositories or its console")
+	case e.Kind == KindRoute && (e.Session != "" || e.Mode != ModeLive && e.Mode != ModeShadow || e.Route.Instruction == "" || !validRouteStep(e.Route.Step) || e.Route.Step == RouteTo && e.Route.Session == ""):
+		return errors.New("a route event is a run's, for no one session, and names its instruction and step; a route to a session names it")
 	case e.Kind == KindSession && (e.Session == "" || e.Mode != ModeShared && e.Mode != ModeOwner || e.Runtime.ID == "" || e.Runtime.Repository == "" ||
 		e.Runtime.Action != SessionStart && e.Runtime.Action != SessionEnd && e.Runtime.Action != SessionPlace ||
 		e.Runtime.Action == SessionStart && (e.Mode != ModeShared || e.Runtime.Branch == "") ||

@@ -109,6 +109,7 @@ type uiMessage struct {
 	From    string
 	Session string
 	Text    string
+	ID      string // an instruction's, whose steps the view reads from the fold
 }
 
 // turn says whether m is a session's turn (#38).
@@ -228,7 +229,7 @@ func (src *uiSource) catchUp() error {
 				}
 			}
 		case e.Kind == KindInstruction && e.Instruction != nil:
-			m := uiMessage{At: e.Time, Kind: "instruction", From: e.Instruction.From, Text: e.Instruction.Text}
+			m := uiMessage{At: e.Time, Kind: "instruction", From: e.Instruction.From, Text: e.Instruction.Text, ID: e.Instruction.ID}
 			for _, r := range e.Instruction.Repositories {
 				add(r, m)
 			}
@@ -287,14 +288,15 @@ func (src *uiSource) deadline(session, id string, at time.Time) error {
 	return RecordDeadline(src.log, src.st, time.Now(), session, id, at)
 }
 
-// reply records the owner's console reply as an instruction for repo.
-func (src *uiSource) reply(repo, text string) error {
+// reply records the owner's console reply as an instruction for repo,
+// addressed to session to when it is set; started sessions count.
+func (src *uiSource) reply(repo, to, text string) error {
 	src.mu.Lock()
 	defer src.mu.Unlock()
 	if err := src.catchUp(); err != nil {
 		return err
 	}
-	return UIInstruction(src.cfg, src.log, time.Now(), repo, text)
+	return UIInstruction(withRuntime(src.cfg, src.st.Runtime), src.log, time.Now(), repo, to, text)
 }
 
 // whoisTTL is how long the UI trusts one whois answer for an address, and
@@ -662,12 +664,12 @@ func (u *UI) serveReply(w http.ResponseWriter, r *http.Request) {
 	if src == nil {
 		return
 	}
-	repo, text := strings.TrimSpace(r.PostForm.Get("repository")), r.PostForm.Get("text")
+	repo, to, text := strings.TrimSpace(r.PostForm.Get("repository")), strings.TrimSpace(r.PostForm.Get("session")), r.PostForm.Get("text")
 	if repo == "" || strings.TrimSpace(text) == "" || len(text) > maxReply {
 		http.Error(w, fmt.Sprintf("name the repository and write a reply of at most %d bytes", maxReply), http.StatusBadRequest)
 		return
 	}
-	if err := src.reply(repo, text); err != nil {
+	if err := src.reply(repo, to, text); err != nil {
 		http.Error(w, "the reply was not recorded: "+err.Error(), http.StatusBadRequest)
 		return
 	}

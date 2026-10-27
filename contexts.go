@@ -134,6 +134,8 @@ type transcriptFile struct {
 	known   bool // a main-chain call has been read, so context is known
 	lines   int  // complete lines read
 	turns   []TurnPayload
+	tools   map[string]string // a tool call's one-line target, by its id, until its result is read
+	ran     []TurnPayload     // the latest tools run, kept apart so they crowd out no prompt
 }
 
 // usageReader reads transcripts in the workers, each file from where the
@@ -292,7 +294,7 @@ func (s *Supervisor) transcriptRoot(sess Session) string {
 // since the last read, and looks for a new merge at the head of its
 // worktree, and logs each when it changed. A transcript or worktree that
 // cannot be read leaves the figures unknown.
-func (s *Supervisor) measure(name string, sess Session, t *Track) {
+func (s *Supervisor) measure(name string, sess Session, t *Track, toolsSince time.Time) {
 	if root := s.transcriptRoot(sess); root != "" {
 		dir := TranscriptDir(root, sess.Cwd)
 		id, guessed := t.Transcript, false
@@ -313,6 +315,11 @@ func (s *Supervisor) measure(name string, sess Session, t *Track) {
 			// Each prompt and summary is logged once, by its line: a
 			// transcript read again from its start logs none twice.
 			for _, tn := range s.usage.turns(dir, id, t.TurnLines[id]) {
+				// A tool is logged only while the owner waits on the
+				// session's answer (#56): it is that answer's activity.
+				if tn.Role == TurnTool && (toolsSince.IsZero() || tn.At.IsZero() || tn.At.Before(toolsSince.Add(-routeSkew))) {
+					continue
+				}
 				tn, raw := tn, tn // a turn of its own for the queued event; raw, as read, for its post
 				if s.emit(name, Event{Kind: KindTurn, Turn: &tn}); s.halt != nil {
 					return
@@ -732,6 +739,10 @@ func (s *Supervisor) promptWith(facts []byte, why string) string {
 	switch why {
 	case "answered":
 		prompt += s.cfg.Policies.Answers.Pointer + " "
+	case "instructed":
+		prompt += s.cfg.Policies.Instructions.Pointer + " "
+	case "answered-instructed":
+		prompt += s.cfg.Policies.Answers.Pointer + " " + s.cfg.Policies.Instructions.Pointer + " "
 	case "ci-fix":
 		prompt += s.cfg.Policies.CI.Pointer + " "
 	case "fix-round":

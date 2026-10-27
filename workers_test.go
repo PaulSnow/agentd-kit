@@ -168,8 +168,8 @@ func TestOwnerRecordWakesTheLoop(t *testing.T) {
 		h.clock.advance(time.Second)
 		return false
 	})
-	if waited := h.clock.Now().Sub(start); waited > 2*WakeCheck {
-		t.Fatalf("the restart came %s after the clear, want within %s", waited, 2*WakeCheck)
+	if waited := h.clock.Now().Sub(start); waited > wakeBound {
+		t.Fatalf("the restart came %s after the clear, want within %s", waited, wakeBound)
 	}
 	cancel()
 	if err := <-done; err != nil {
@@ -256,3 +256,9 @@ func TestCloneCopiesEveryMapAndSlice(t *testing.T) {
 		t.Fatalf("the clone shares the original's maps: %+v", tr)
 	}
 }
+
+// wakeBound is how soon after an owner record a running loop must act on
+// it in the tests that run it: long before their hour's poll. The fake
+// clock moves in steps while the loop waits, so a pass that waits on its
+// workers costs a few of them on top of WakeCheck.
+const wakeBound = 30 * time.Second

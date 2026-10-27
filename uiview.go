@@ -537,6 +537,73 @@ type uiMessageView struct {
 	uiMessage
 	Src  string
 	Body template.HTML
+	// An instruction's steps (#56), the tools the session ran on it, and
+	// the reply threaded under it.
+	Steps    []uiStep
+	Activity []uiStep
+	Reply    template.HTML
+	ReplyBy  string
+	Replied  time.Time
+}
+
+// uiStep is one step of an owner instruction, as the page shows it.
+type uiStep struct {
+	Text   string
+	At     time.Time
+	Failed bool
+	Wait   bool
+	Exit   *int
+}
+
+// takesLine says whether a message routed to a session with track t will
+// be typed into it soon: it is working or idle, or not yet seen.
+func takesLine(t *Track) bool {
+	return t == nil || t.State == "" || t.State == Working || t.State == Idle || t.State == Starting
+}
+
+// instructionSteps is what became of instruction in, as the run's fold
+// holds it: received, routed or started, delivered, taken, or waiting
+// and why, or failed and why.
+func instructionSteps(st *LogState, in *Instruction) []uiStep {
+	steps := []uiStep{{Text: "received", At: in.At}}
+	if !in.Route {
+		return append(steps, uiStep{Text: "recorded before agentd routed instructions; not delivered to any session", Wait: true})
+	}
+	if in.Session != "" {
+		if in.Started {
+			steps = append(steps, uiStep{Text: "agentd started " + in.Session + " for it"})
+		} else {
+			steps = append(steps, uiStep{Text: "routed to " + in.Session})
+		}
+	}
+	switch {
+	case in.Failed != "":
+		return append(steps, uiStep{Text: "failed: " + in.Failed, Failed: true})
+	case in.Waiting != "":
+		steps = append(steps, uiStep{Text: "waiting: " + in.Waiting, Wait: true})
+	case in.Session != "" && in.Delivered.IsZero():
+		why := "waiting for " + in.Session + " to take a line; it is " + string(stateOf(st.Tracks[in.Session]))
+		if t := st.Tracks[in.Session]; t != nil && t.State == BlockedOnOwner {
+			why = "waiting: " + in.Session + " waits on your answer to its questions; answer them, and agentd hands it the message"
+		}
+		steps = append(steps, uiStep{Text: why, Wait: true})
+	}
+	if !in.Delivered.IsZero() {
+		steps = append(steps, uiStep{Text: "delivered to " + in.Session, At: in.Delivered})
+		if in.Taken.IsZero() {
+			steps = append(steps, uiStep{Text: "waiting for " + in.Session + " to start on it", Wait: true})
+		}
+	}
+	if !in.Taken.IsZero() {
+		steps = append(steps, uiStep{Text: in.Session + " started on it", At: in.Taken})
+		if in.Replied.IsZero() {
+			steps = append(steps, uiStep{Text: "waiting for " + in.Session + "'s reply", Wait: true})
+		}
+	}
+	if !in.Replied.IsZero() {
+		steps = append(steps, uiStep{Text: in.Session + " replied", At: in.Replied})
+	}
+	return steps
 }
 
 // uiConsole is a repository's console view, or a console's without a
@@ -549,6 +616,9 @@ type uiConsole struct {
 	Messages   []uiMessageView
 	Needs      []uiNeed
 	ReplySrc   string // the source a reply is recorded in, or "" when none configures the repository
+	// Live: a message waits on its session's answer, so the page
+	// refreshes every few seconds.
+	Live bool
 }
 
 // withheldMessage stands in for a message that matches a confidential
@@ -591,7 +661,25 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 				if m.Text == "" || secret(m.Text) {
 					body = template.HTML(template.HTMLEscapeString(withheldMessage))
 				}
-				v.Messages = append(v.Messages, uiMessageView{uiMessage: m, Src: src.Name, Body: body})
+				mv := uiMessageView{uiMessage: m, Src: src.Name, Body: body}
+				if in := src.st.Instructions[m.ID]; in != nil && m.Kind == "instruction" {
+					mv.Steps = instructionSteps(src.st, in)
+					for _, tn := range in.Activity {
+						text := tn.Text
+						if tn.Withheld > 0 || secret(text) {
+							text = withheldMessage
+						}
+						mv.Activity = append(mv.Activity, uiStep{Text: text, At: tn.At, Failed: tn.Failed, Exit: tn.Exit})
+					}
+					v.Live = v.Live || in.open(src.st, now) || in.Route && in.Failed == "" && in.Waiting == "" && in.Delivered.IsZero() && now.Sub(in.At) < ChatIdle && takesLine(src.st.Tracks[in.Session])
+					if !in.Replied.IsZero() {
+						mv.ReplyBy, mv.Replied, mv.Reply = in.Session, in.Replied, markdown(in.Reply)
+						if in.Reply == "" || in.ReplyWithheld || secret(in.Reply) {
+							mv.Reply = template.HTML(template.HTMLEscapeString(withheldMessage))
+						}
+					}
+				}
+				v.Messages = append(v.Messages, mv)
 			}
 			for _, n := range src.needs(cfg, rep, src.askedAt) {
 				if n.Repository == repo {
@@ -639,6 +727,9 @@ type uiSessionPage struct {
 	StatusNote string
 	Needs      []uiNeed
 	Events     []uiEvent
+	// MessageTo is the repository or console a message to the session is
+	// recorded for, "" when the session takes none here (#56).
+	MessageTo string
 }
 
 // uiTurns is how many of a session's latest turns its view shows.
@@ -664,6 +755,12 @@ func (u *UI) sessionView(src *uiSource, name string, now time.Time) (*uiSessionP
 	}
 	if !found {
 		return nil, nil
+	}
+	if sess, ok := cfg.Sessions[name]; ok && sess.Role == "" && src.st.Mode == ModeLive && !src.echo {
+		v.MessageTo = sess.Repository
+		if v.MessageTo == "" {
+			v.MessageTo = cfg.Console(name)
+		}
 	}
 	secret := confidentialMatcher(cfg)
 	t := src.st.Tracks[name]

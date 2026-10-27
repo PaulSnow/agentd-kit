@@ -170,7 +170,14 @@ func (s *Supervisor) screen(e *Event) {
 		if i := s.confidentialMatch(e.Turn.Text); i > 0 {
 			e.Turn.Text, e.Turn.Withheld = "", i
 		}
-		e.Turn.Text = cutUTF8(e.Turn.Text, turnText)
+		switch e.Turn.Role {
+		case TurnSummary:
+			e.Turn.Text = cutUTF8(e.Turn.Text, replyText)
+		case TurnTool:
+			e.Turn.Text = cutUTF8(e.Turn.Text, toolTargetLength)
+		default:
+			e.Turn.Text = cutUTF8(e.Turn.Text, turnText)
+		}
 	}
 	if e.Account != nil {
 		e.Account.Error = s.withheld(e.Account.Error)
@@ -319,9 +326,10 @@ func (s *Supervisor) surfaceCutShort() {
 
 // Run passes until the context ends. A pass stopped by a failed append is
 // reported and the next pass tries again; with once, its error is returned.
-// The next pass comes after the poll interval, or sooner when another
-// process appended an owner record to the log (looked for every WakeCheck),
-// so a clear is acted on within a minute. What a worker finished is applied
+// The next pass comes after the poll interval (ChatPoll while a message
+// waits on its answer), or sooner when another process appended an owner
+// record to the log (looked for every WakeCheck), so a clear or a message
+// is acted on within seconds. What a worker finished is applied
 // at the next pass; it is in the log already. A run waits for its jobs
 // before it stops: a --once run for all of them, one told to stop for up
 // to StopWait.
@@ -353,10 +361,20 @@ func (s *Supervisor) Run(ctx context.Context, once bool) error {
 			s.waitStop()
 			s.emit("", Event{Kind: KindStop, Stop: &StopPayload{Reason: ctx.Err().Error()}})
 			return nil
-		case <-s.clock.After(s.cfg.PollInterval.Duration):
+		case <-s.clock.After(s.passWait()):
 		case <-s.work.wake:
 		}
 	}
+}
+
+// passWait is how long the loop waits for the next pass: ChatPoll while
+// an owner instruction is delivered and not answered, so its activity
+// shows as it goes, else the poll interval.
+func (s *Supervisor) passWait() time.Duration {
+	if d := s.cfg.PollInterval.Duration; s.st.chatInFlight(s.clock.Now()) && ChatPoll < d {
+		return ChatPoll
+	}
+	return s.cfg.PollInterval.Duration
 }
 
 // watchOwner looks at the log every WakeCheck for records the owner
@@ -391,6 +409,9 @@ func (s *Supervisor) Pass() error {
 	s.halt = nil
 	s.ownerRecords()
 	s.endSessions(s.clock.Now())
+	// Instructions are routed before the sessions' steps, so one is
+	// delivered in the pass that read it.
+	s.routeInstructions(s.clock.Now())
 	for _, name := range s.cfg.SessionNames() {
 		if s.halt != nil {
 			break
@@ -634,7 +655,8 @@ func (s *Supervisor) step(name string, sess Session) {
 	// The transcript and the worktree are read in a worker, from what the
 	// transcript gained since the last read; the next pass acts on them.
 	if s.halt == nil {
-		s.spawn(name, "measure:"+name, func(w *Supervisor, wt *Track) { w.measure(name, sess, wt) })
+		since := s.st.openSince(name, now)
+		s.spawn(name, "measure:"+name, func(w *Supervisor, wt *Track) { w.measure(name, sess, wt, since) })
 	}
 }
 
@@ -715,7 +737,8 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 	pol := s.cfg.Policies
 	// A work session is rotated at the end of its round too, DONE once
 	// its branch is delivered (#48).
-	if (state == Working || state == Idle || state == Done && sess.Kind == KindWork && delivered(name, sess, t)) && !t.Limited && s.rotate(name, sess, t, ev, now) {
+	// Nor while the owner waits on its answer to a message (#56).
+	if (state == Working || state == Idle || state == Done && sess.Kind == KindWork && delivered(name, sess, t)) && !t.Limited && s.st.openSince(name, now).IsZero() && s.rotate(name, sess, t, ev, now) {
 		return Starting
 	}
 	// The limit has cleared. Only a session that can take a line is told to
@@ -731,6 +754,9 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 	}
 	if !typed {
 		typed = s.deliverAnswers(name, sess, t, ev, state)
+	}
+	if !typed {
+		typed = s.deliverInstructions(name, sess, t, ev, state)
 	}
 	if !typed && s.fixCI(name, sess, t, ev, state, now) {
 		return Starting
@@ -772,8 +798,14 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 		// file is written first, and the prompt names it.
 		why := "restart"
 		ids, at := t.freshAnswers()
-		if len(ids) > 0 {
+		iids := s.st.freshInstructions(name, true, now)
+		switch {
+		case len(ids) > 0 && len(iids) > 0:
+			why = "answered-instructed"
+		case len(ids) > 0:
 			why = "answered"
+		case len(iids) > 0:
+			why = "instructed"
 		}
 		id := newSessionID()
 		cmd, facts := s.launchCommandWith(name, sess, t, id, why, nil)
@@ -785,13 +817,18 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			s.escalate(name, "account:"+name, fmt.Sprintf("%s is gone and cannot be restarted under its account: %v. Fix the account; agentd will not use another.", name, err), t, now)
 			return state
 		}
-		answers := t.answersFor(false)
-		err = s.act(name, ActRestart, &ActPayload{Attempt: n + 1, Cwd: sess.Cwd, Respawn: ev.PaneDead, Account: sess.Account, Command: line, Transcript: id, Answers: ids, AnswersAt: at, Brief: brief.parts()}, func() error {
+		answers, ins := t.answersFor(false), s.st.instructionsFor(name, false)
+		err = s.act(name, ActRestart, &ActPayload{Attempt: n + 1, Cwd: sess.Cwd, Respawn: ev.PaneDead, Account: sess.Account, Command: line, Transcript: id, Answers: ids, AnswersAt: at, Instructions: iids, Brief: brief.parts()}, func() error {
 			if err := brief.write(sess.Workdir); err != nil {
 				return err
 			}
 			if len(ids) > 0 {
 				if err := writeAnswers(sess.Workdir, answers); err != nil {
+					return err
+				}
+			}
+			if len(iids) > 0 {
+				if err := writeInstructions(sess.Workdir, ins, now); err != nil {
 					return err
 				}
 			}
@@ -855,7 +892,8 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 				fmt.Sprintf("%s has shown the same screen since %s with a tool call as its last turn; it is probably waiting at a permission prompt. Attach and answer it.", name, t.HashSince.Format(time.RFC3339)), t, now)
 		}
 	case Idle:
-		if !pol.Nudge.Enabled || typed {
+		// A chat session waits for the owner's next message.
+		if !pol.Nudge.Enabled || typed || sess.Kind == KindChat {
 			return state
 		}
 		if t.turnEnded(ev) && t.lastTurn().At.After(t.LastNudge) && s.continueTurn(name, sess, t, ev, now) {

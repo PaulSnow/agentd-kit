@@ -149,6 +149,10 @@ func (st *LogState) apply(e Event) {
 		st.applyLoop(e)
 		return
 	}
+	if e.Kind == KindRoute {
+		st.applyRoute(e)
+		return
+	}
 	if e.Session == "" {
 		switch e.Kind {
 		case KindAccount:
@@ -254,6 +258,7 @@ func (st *LogState) apply(e Event) {
 		t.Checkpoint = Checkpoint{CheckpointPayload: *e.Checkpoint, At: e.Time}
 	case KindTurn:
 		t.applyTurn(e.Turn)
+		st.instructionTurn(e.Session, e.Turn)
 	case KindTransition:
 		t.State, t.Since = State(e.Transition.To), e.Time
 		t.Reason = e.Transition.Reason
@@ -340,6 +345,7 @@ func (st *LogState) apply(e Event) {
 			t.Would++
 		}
 		t.applyAction(e.Act, e.Kind == KindAction, true, e.Time)
+		st.instructionsDelivered(e.Session, e.Act, e.Time)
 		st.ciSeen(t)
 		if e.Act.Action == ActEnd {
 			delete(st.Ended, e.Session)
