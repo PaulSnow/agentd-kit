@@ -276,6 +276,96 @@ func newestTranscript(dir string) string {
 	return newest
 }
 
+// clearHead bounds what is read of a transcript's head to tell whether
+// /clear began it.
+const clearHead = 64 << 10
+
+// clearedFrom are the transcripts in dir, other than own, that /clear
+// typed into the session's pane began at or after since, its launch: a
+// /clear goes on in a new transcript, which agentd did not launch. They
+// are in the order they were begun.
+func clearedFrom(dir, own string, since time.Time) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil || since.IsZero() {
+		return nil
+	}
+	type begun struct {
+		id string
+		at time.Time
+	}
+	var out []begun
+	for _, e := range entries {
+		id, ok := strings.CutSuffix(e.Name(), ".jsonl")
+		if e.IsDir() || !ok || id == own {
+			continue
+		}
+		// One not written since the launch was not begun since.
+		if info, err := e.Info(); err != nil || info.ModTime().Before(since) {
+			continue
+		}
+		if at, ok := clearBegun(filepath.Join(dir, e.Name())); ok && !at.Before(since) {
+			out = append(out, begun{id, at})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].at.Before(out[j].at) })
+	ids := make([]string, len(out))
+	for i, b := range out {
+		ids[i] = b.id
+	}
+	return ids
+}
+
+// clearBegun says whether /clear began the transcript at path, before
+// any prompt, and when its first entry was written.
+func clearBegun(path string) (time.Time, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return time.Time{}, false
+	}
+	defer f.Close()
+	b, _ := io.ReadAll(io.LimitReader(f, clearHead))
+	var first time.Time
+	for _, line := range bytes.Split(b, []byte("\n")) {
+		var l struct {
+			Type        string `json:"type"`
+			IsSidechain bool   `json:"isSidechain"`
+			Timestamp   string `json:"timestamp"`
+			Message     struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal(line, &l) != nil {
+			continue
+		}
+		if at, err := time.Parse(time.RFC3339Nano, l.Timestamp); err == nil && first.IsZero() {
+			first = at
+		}
+		if l.Type != "user" || l.IsSidechain {
+			continue
+		}
+		if text, _ := lineText(l.Message.Content); strings.Contains(text, "<command-name>/clear</command-name>") {
+			return first, !first.IsZero()
+		}
+		if _, ok := wholeTurn(line, 0); ok {
+			return time.Time{}, false
+		}
+	}
+	return time.Time{}, false
+}
+
+// sharesTranscripts says whether another session keeps its transcripts
+// where session name does, so a transcript there is no sure sign of it.
+func (c *Config) sharesTranscripts(name string) bool {
+	sess := c.Sessions[name]
+	dir := TranscriptDir(transcriptRootOf(c, sess), sess.Cwd)
+	for other, o := range c.Sessions {
+		if other != name && o.Cwd != "" && TranscriptDir(transcriptRootOf(c, o), o.Cwd) == dir {
+			return true
+		}
+	}
+	return false
+}
+
 // transcriptRoot is where the session's account keeps its transcripts, or
 // "" when transcripts are not read.
 func (s *Supervisor) transcriptRoot(sess Session) string { return transcriptRootOf(s.cfg, sess) }
@@ -306,12 +396,21 @@ func (s *Supervisor) measure(name string, sess Session, t *Track, toolsSince tim
 			// the session id on: the newest transcript is a guess.
 			id, guessed = newestTranscript(dir), true
 		}
-		if id != "" {
+		ids := []string{id}
+		// A /clear typed into the pane goes on in a transcript agentd did
+		// not launch; its prompts are the session's too.
+		if id != "" && !guessed && !s.cfg.sharesTranscripts(name) {
+			ids = append(ids, clearedFrom(dir, id, t.Launched)...)
+		}
+		for i, id := range ids {
+			if id == "" {
+				continue
+			}
 			if u, ok, err := s.usage.measure(dir, id); err == nil && ok {
 				// A guess that lands on a transcript agentd launched is
 				// that transcript, measured exactly.
-				u.Guessed = guessed && (t.Usage[id].Transcript == "" || t.Usage[id].Guessed)
-				if prev, seen := t.Usage[id]; !seen || prev != u || t.Measured != id {
+				u.Guessed = i == 0 && guessed && (t.Usage[id].Transcript == "" || t.Usage[id].Guessed)
+				if prev, seen := t.Usage[id]; !seen || prev != u || i == 0 && t.Measured != id {
 					s.emit(name, Event{Kind: KindUsage, Usage: &u})
 				}
 			}
@@ -460,7 +559,9 @@ func (s *Supervisor) lastInstruction(t *Track) string {
 	own := []string{DefaultRestartPrompt, pol.Nudge.Message, pol.Nudge.ContinueMessage, pol.Nudge.ResumeMessage, pol.Answers.Pointer, pol.CI.Pointer}
 	for i := len(t.Turns) - 1; i >= 0; i-- {
 		tn := t.Turns[i]
-		if tn.Role != TurnPrompt || tn.Withheld || strings.TrimSpace(tn.Text) == "" {
+		// A harness entry or a compaction logged as a prompt before #56 B
+		// is no instruction either.
+		if tn.Role != TurnPrompt || tn.Withheld || strings.TrimSpace(tn.Text) == "" || loggedNoPrompt(tn.Text) || strings.HasPrefix(tn.Text, compactOpening) {
 			continue
 		}
 		mine := false

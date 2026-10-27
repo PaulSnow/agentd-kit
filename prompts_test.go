@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -95,11 +96,6 @@ func TestPromptPageShowsTheWholePromptAndItsFiles(t *testing.T) {
 	writeFile(t, filepath.Join(h.cfg.Sessions["a"].Workdir, "STATUS.md"), "# Progress\n\n- [x] second coat\n")
 	if page := owner(t, u, "/session/night/a/prompt/t1.1"); !strings.Contains(page, "<li>[x] second coat</li>") {
 		t.Errorf("progress not read now:\n%s", page)
-	}
-	for _, target := range []string{"/session/night/a/prompt/t1.2", "/session/night/a/prompt/t1.99"} {
-		if page := owner(t, u, target); !strings.Contains(page, "no prompt") && !strings.Contains(page, "no such line") {
-			t.Errorf("%s:\n%s", target, page)
-		}
 	}
 	for _, target := range []string{"/session/night/a/prompt/t1", "/session/night/a/prompt/..%2Ft1.1", "/session/night/a/prompt/t1.01",
 		"/session/night/a/prompt/t1.0", "/session/night/nobody/prompt/t1.1", "/session/elsewhere/a/prompt/t1.1", "/session/night/a/other/t1.1"} {
@@ -196,5 +192,100 @@ func TestCompactionIsNoTurnToJudge(t *testing.T) {
 	tr.Turns = append(tr.Turns, TurnRecord{Role: TurnCompact, Transcript: "t1", Line: 10, At: h.clock.Now()})
 	if last := tr.lastTurn(); last.Role != TurnSummary || last.Line != 9 {
 		t.Fatalf("last turn = %+v", last)
+	}
+}
+
+// A prompt link never dead-ends (#58 follow-up): a line that is no prompt
+// is named in plain words and shown, screened whole; only a missing
+// transcript or line is an error, which names the one missing.
+func TestPromptPageSaysWhatALineIs(t *testing.T) {
+	h, u := promptsFixture(t)
+	for _, c := range []struct{ id, what, text string }{
+		{"t1.2", "The session&#39;s reply, not a prompt.", "<pre>Read the brief; painting goes on.</pre>"},
+		{"t1.10", "A background-task notice from Claude Code, not a prompt.", "&lt;result&gt;The primer branch is ready: two findings, both fixed.&lt;/result&gt;"},
+		{"t1.11", "A step of the session&#39;s own work, not a prompt.", "Bash: {&#34;command&#34;:&#34;./bin/check&#34;}"},
+		{"t1.12", "A tool&#39;s result, which Claude Code hands back to the session, not a prompt.", "CHECK PASS"},
+		{"t1.13", "Claude Code&#39;s note before a slash command&#39;s output, not a prompt.", "DO NOT respond to these messages."},
+		{"t1.14", "A file-history-snapshot line Claude Code keeps for its own bookkeeping, not a prompt.", "&#34;isSnapshotUpdate&#34;: false"},
+		{"t1.99", "", "Line 99 of transcript t1 is missing."},
+		{"t9.1", "", "Transcript t9 is missing."},
+	} {
+		page := owner(t, u, "/session/night/a/prompt/"+c.id)
+		if !strings.Contains(page, c.what) || !strings.Contains(page, c.text) {
+			t.Errorf("%s lacks %q or %q:\n%s", c.id, c.what, c.text, page)
+		}
+		if c.what != "" && !strings.Contains(page, "<h2 id=\"prompt-h\">Not a prompt") {
+			t.Errorf("%s is not headed as no prompt:\n%s", c.id, page)
+		}
+	}
+	// Screened whole: a match anywhere in the line withholds all of it.
+	h.cfg.ConfidentialPatterns = []string{"(?i)two findings"}
+	u2, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
+	u2.now = h.clock.Now
+	page := owner(t, u2, "/session/night/a/prompt/t1.10")
+	if strings.Contains(page, "primer branch") || !strings.Contains(page, "background-task notice") || !strings.Contains(page, "withheld because it matched") {
+		t.Errorf("a confidential line is shown:\n%s", page)
+	}
+}
+
+// Turns a build before #56 B logged as prompts, recorded in that shape,
+// are judged by its rule when the views are built: a harness entry is no
+// prompt, a compaction is named as one, and the rest still link their
+// pages. The supervisor takes neither as the session's last instruction.
+func TestPre56PromptsJudgedByTodaysRule(t *testing.T) {
+	h, _ := promptsFixture(t)
+	b, err := os.ReadFile("testdata/prompts/pre56-log.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pairs := []string{"{at}", h.clock.Now().Format(time.RFC3339Nano)}
+	for _, n := range []int{5, 12, 14, 15} {
+		pairs = append(pairs, fmt.Sprintf("{id:t0.%d}", n), turnMessageID("a", "t0", n))
+	}
+	h.buf.WriteString(strings.NewReplacer(pairs...).Replace(string(b)))
+	u, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
+	u.now = h.clock.Now
+	for _, target := range []string{"/console/widgets", "/session/night/a"} {
+		page := owner(t, u, target)
+		for _, want := range []string{
+			`<a href="/session/night/a/prompt/t0.5">Restarted (rotation): brief, progress →</a>`,
+			`<a href="/session/night/a/prompt/t0.12">Context compacted →</a>`,
+			`Continue with the second coat as the brief says. <a href="/session/night/a/prompt/t0.14">full prompt →</a>`,
+		} {
+			if !strings.Contains(page, want) {
+				t.Errorf("%s lacks %q", target, want)
+			}
+		}
+		for _, not := range []string{"task-notification", "a0ld5e55", "prompt/t0.15"} {
+			if strings.Contains(page, not) {
+				t.Errorf("%s shows the harness entry: %q", target, not)
+			}
+		}
+	}
+	tr := NewLogState(h.cfg, ModeLive).Fold(h.events()).Tracks["a"]
+	if got := h.sup.lastInstruction(tr); got != "Continue with the second coat as the brief says." {
+		t.Errorf("last instruction %q", got)
+	}
+}
+
+// loggedNoPrompt reads the log's text, whole or cut: an entry the harness
+// wrote is none; a typed prompt that opens with a tag, or is cut, is one.
+func TestLoggedNoPrompt(t *testing.T) {
+	for _, c := range []struct {
+		text string
+		want bool
+	}{
+		{"<task-notification>\n<task-id>a1</task-id>\n</task-notification>", true},
+		{cutUTF8("<task-notification>\n<task-id>a1</task-id>\n<result>"+strings.Repeat("ok ", 200), turnText), true},
+		{cutUTF8("<system-reminder>"+strings.Repeat("x", 400), turnText), true},
+		{"<command-name>/clear</command-name>", true},
+		{"<widget> is the tag to paint, not <gadget>.", false},
+		{cutUTF8("<widget> "+strings.Repeat("paint ", 100), turnText), false},
+		{"<task-notification> is what I mean; explain it", false},
+		{cutUTF8("Paint the widgets "+strings.Repeat("blue ", 100), turnText), false},
+	} {
+		if got := loggedNoPrompt(c.text); got != c.want {
+			t.Errorf("%q: %v", cutUTF8(c.text, 40), got)
+		}
 	}
 }

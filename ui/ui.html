@@ -156,6 +156,7 @@
 <p class="crumbs"><a href="/">All repositories</a> · <a href="/session/{{.Src}}/{{.Session}}">{{.Session}}</a></p>
 <section id="prompt" aria-labelledby="prompt-h">
 <h2 id="prompt-h">{{.Label}}{{if not .At.IsZero}} <time class="muted">{{.When .At}}</time>{{end}}</h2>
+{{with .What}}<p>{{.}}</p>{{end}}
 {{with .Note}}<p class="muted">{{.}}</p>{{else}}<div class="card md">{{.Body}}</div>
 {{with .Facts}}<h3>What the supervisor recorded</h3><div class="card">{{.}}</div>{{end}}{{end}}
 </section>

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -279,5 +280,47 @@ func TestLastInstructionOwnLineEndingInEllipsis(t *testing.T) {
 	tr.Turns = append(tr.Turns, TurnRecord{Role: TurnPrompt, Text: "Carry on with the spin fix."}, TurnRecord{Role: TurnPrompt, Text: "Carry on…"})
 	if got := h.sup.lastInstruction(tr); got != "Carry on with the spin fix." {
 		t.Fatalf("instruction = %q", got)
+	}
+}
+
+// A prompt typed into the pane after /clear is read (#58 follow-up):
+// Claude Code goes on in a transcript agentd did not launch, recorded
+// in testdata/prompts/cleared.jsonl. A transcript /clear began before the
+// launch, one that /clear did not begin, and any where another session
+// keeps its transcripts are not the session's.
+func TestPromptsAfterClearAreRead(t *testing.T) {
+	h, name, id := workHarness(t)
+	h.alive(name, runningScreen)
+	launched := h.clock.Now()
+	h.workTranscript(name, id, promptLine("u1", "Fix the spin test.", launched))
+	h.ticks(1, time.Minute)
+	b, err := os.ReadFile("testdata/prompts/cleared.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleared := func(tid string, at time.Time) string {
+		return strings.NewReplacer("{id}", tid, "{cwd}", filepath.Join(h.dir, name, "work"), "{at}", at.Format(time.RFC3339Nano)).Replace(string(b))
+	}
+	h.workTranscript(name, "c-early", cleared("c-early", launched.Add(-time.Hour)))
+	h.workTranscript(name, "c-cleared", cleared("c-cleared", h.clock.Now()))
+	h.workTranscript(name, "c-other", promptLine("o1", "Another session's prompt.", h.clock.Now()))
+	h.ticks(2, time.Minute)
+	got := map[string][]string{}
+	for _, e := range h.events() {
+		if e.Kind == KindTurn && e.Session == name {
+			got[e.Turn.Transcript] = append(got[e.Turn.Transcript], e.Turn.Role+": "+e.Turn.Text)
+		}
+	}
+	want := []string{"prompt: Read BRIEF.md (its last section is new) and STATUS.md, then paint the third coat as the brief says.", "summary: Third coat started."}
+	if fmt.Sprint(got["c-cleared"]) != fmt.Sprint(want) || len(got["c-early"]) != 0 || len(got["c-other"]) != 0 || len(got[id]) != 1 {
+		t.Fatalf("turns by transcript: %q", got)
+	}
+	if h.sup.cfg.sharesTranscripts(name) {
+		t.Fatal("a session alone in its worktree shares its transcripts")
+	}
+	cfg := *h.sup.cfg
+	cfg.Sessions = map[string]Session{name: h.sup.cfg.Sessions[name], "twin": h.sup.cfg.Sessions[name]}
+	if !cfg.sharesTranscripts(name) {
+		t.Fatal("a twin in the same worktree shares no transcripts")
 	}
 }

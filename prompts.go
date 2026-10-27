@@ -171,6 +171,7 @@ type uiPromptPage struct {
 	Session string
 	Label   string
 	At      time.Time
+	What    string        // what the line is, when it is no prompt
 	Note    string        // why the prompt is not shown, when it is not
 	Body    template.HTML // the prompt, rendered
 	Facts   template.HTML // a restart's facts, pretty
@@ -220,18 +221,31 @@ func (u *UI) promptView(src *uiSource, name, id string, now time.Time) (*uiPromp
 	line, err := transcriptLine(filepath.Join(TranscriptDir(root, sess.Cwd), ref.Transcript+".jsonl"), ref.Line)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		v.Note = "The transcript is gone."
+		v.Note = "Transcript " + ref.Transcript + " is missing."
+		return v, nil
+	case errors.Is(err, errNoLine):
+		v.Note = fmt.Sprintf("Line %d of transcript %s is missing.", ref.Line, ref.Transcript)
 		return v, nil
 	case err != nil:
 		v.Note = "The transcript could not be read: " + readError(err)
 		return v, nil
 	}
+	secret := confidentialMatcher(cfg)
 	tn, ok := wholeTurn(line, ref.Line)
 	if !ok || tn.Role != TurnPrompt && tn.Role != TurnCompact {
-		v.Note = "That line of the transcript is no prompt."
+		// No dead end (#58): the page says what the line is instead, a
+		// turn logged as a prompt before #56 B among them, and shows it,
+		// screened whole.
+		var text string
+		v.Label, v.Title = "Not a prompt", name+": not a prompt"
+		v.What, text, v.At = notPrompt(line)
+		if secret(string(line)) {
+			v.Note = "It was withheld because it matched a confidential pattern."
+		} else {
+			v.Body = template.HTML("<pre>" + template.HTMLEscapeString(text) + "</pre>")
+		}
 		return v, nil
 	}
-	secret := confidentialMatcher(cfg)
 	v.At = tn.At
 	if secret(tn.Text) {
 		v.Note = "The prompt was withheld because it matched a confidential pattern."
@@ -272,6 +286,121 @@ func (u *UI) promptView(src *uiSource, name, id string, now time.Time) (*uiPromp
 		v.Files = append(v.Files, promptFile(sess.Workdir, f, secret))
 	}
 	return v, nil
+}
+
+// notPrompt says, in plain words, what a transcript line that is no
+// prompt is, with its text and when it was written.
+func notPrompt(line []byte) (string, string, time.Time) {
+	var l struct {
+		Type        string `json:"type"`
+		IsSidechain bool   `json:"isSidechain"`
+		IsMeta      bool   `json:"isMeta"`
+		Timestamp   string `json:"timestamp"`
+		Message     struct {
+			StopReason string          `json:"stop_reason"`
+			Content    json.RawMessage `json:"content"`
+		} `json:"message"`
+	}
+	if json.Unmarshal(line, &l) != nil {
+		return "A line that is no JSON entry, so no prompt.", string(line), time.Time{}
+	}
+	at, _ := time.Parse(time.RFC3339Nano, l.Timestamp)
+	text, results := lineText(l.Message.Content)
+	m := harnessOpen.FindStringSubmatch(strings.TrimSpace(text))
+	switch {
+	case l.Type != "user" && l.Type != "assistant":
+		kind := l.Type
+		if kind == "" {
+			kind = "untyped"
+		}
+		return "A " + kind + " line Claude Code keeps for its own bookkeeping, not a prompt.", string(prettyJSONText(line)), at
+	case l.IsSidechain:
+		return "A line of a subagent's conversation, not a prompt to this session.", text, at
+	case l.Type == "assistant" && l.Message.StopReason == "end_turn":
+		return "The session's reply, not a prompt.", text, at
+	case l.Type == "assistant":
+		return "A step of the session's own work, not a prompt.", text, at
+	case results:
+		return "A tool's result, which Claude Code hands back to the session, not a prompt.", text, at
+	case m != nil:
+		return harnessWhat(m[1]), text, at
+	case l.IsMeta:
+		return "A meta line Claude Code wrote into the conversation, not a prompt.", text, at
+	}
+	return "A user line with nothing typed in it, not a prompt.", text, at
+}
+
+// harnessWhat is what an entry Claude Code wrote, opening with tag, is.
+func harnessWhat(tag string) string {
+	switch tag {
+	case "task-notification":
+		return "A background-task notice from Claude Code, not a prompt."
+	case "system-reminder":
+		return "A reminder Claude Code added to the conversation, not a prompt."
+	case "user-prompt-submit-hook":
+		return "A hook's output Claude Code added to the conversation, not a prompt."
+	case "command-name", "command-message", "command-args":
+		return "A slash command run in Claude Code, not a prompt."
+	case "local-command-caveat":
+		return "Claude Code's note before a slash command's output, not a prompt."
+	case "local-command-stdout", "local-command-stderr":
+		return "The output of a slash command, not a prompt."
+	case "bash-input":
+		return "A shell command typed into Claude Code with !, not a prompt."
+	case "bash-stdout", "bash-stderr":
+		return "The output of a shell command typed into Claude Code, not a prompt."
+	}
+	return "An entry Claude Code wrote itself, <" + tag + ">, not a prompt."
+}
+
+// lineText is a line's content as text: a string, or its blocks' text,
+// tool results and tool calls; results says whether it holds a result.
+func lineText(raw json.RawMessage) (text string, results bool) {
+	if json.Unmarshal(raw, &text) == nil {
+		return text, false
+	}
+	var blocks []struct {
+		Type    string          `json:"type"`
+		Text    string          `json:"text"`
+		Name    string          `json:"name"`
+		Input   json.RawMessage `json:"input"`
+		Content json.RawMessage `json:"content"`
+	}
+	json.Unmarshal(raw, &blocks)
+	var parts []string
+	for _, b := range blocks {
+		switch b.Type {
+		case "text":
+			parts = append(parts, b.Text)
+		case "tool_use":
+			parts = append(parts, b.Name+": "+string(b.Input))
+		case "tool_result":
+			results = true
+			var s string
+			if json.Unmarshal(b.Content, &s) != nil {
+				var inner []struct {
+					Text string `json:"text"`
+				}
+				json.Unmarshal(b.Content, &inner)
+				var ts []string
+				for _, i := range inner {
+					ts = append(ts, i.Text)
+				}
+				s = strings.Join(ts, "\n")
+			}
+			parts = append(parts, s)
+		}
+	}
+	return strings.Join(parts, "\n\n"), results
+}
+
+// prettyJSONText is b indented, or as it is when it is no JSON document.
+func prettyJSONText(b []byte) []byte {
+	var out bytes.Buffer
+	if json.Indent(&out, bytes.TrimSpace(b), "", "  ") != nil {
+		return b
+	}
+	return out.Bytes()
 }
 
 // promptFile reads f, as it is now, for a prompt's page: only a regular
@@ -343,13 +472,11 @@ func underWorkdir(workdir, path string) (string, error) {
 // prettyJSON renders a JSON document indented, or as it is when it is
 // not one.
 func prettyJSON(b []byte) template.HTML {
-	var out bytes.Buffer
-	if err := json.Indent(&out, bytes.TrimSpace(b), "", "  "); err != nil {
-		out.Reset()
-		out.Write(b)
-	}
-	return template.HTML(`<pre class="json">` + template.HTMLEscapeString(out.String()) + "</pre>")
+	return template.HTML(`<pre class="json">` + template.HTMLEscapeString(string(prettyJSONText(b))) + "</pre>")
 }
+
+// errNoLine is a transcript's lack of the line asked for.
+var errNoLine = errors.New("the transcript has no such line")
 
 // transcriptLine reads line n of the transcript at path, counted as the
 // transcript reader counts them: each line a newline ends, from 1.
@@ -377,7 +504,7 @@ func transcriptLine(path string, n int) ([]byte, error) {
 				continue
 			}
 			if err == io.EOF {
-				return nil, errors.New("the transcript has no such line")
+				return nil, errNoLine
 			}
 			return nil, err
 		}
