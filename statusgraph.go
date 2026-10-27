@@ -37,23 +37,25 @@ import (
 // Status defaults, when the config leaves them unset.
 const (
 	DefaultStatusEvery    = 5 * time.Minute
-	DefaultStatusMaxInput = 48 << 10 // bytes, about 12k tokens
+	DefaultStatusMaxInput = 24 << 10 // bytes: about 12k tokens, at the 2 bytes a token measured on sessions' transcripts
 )
 
 // Bounds on what one window sends.
 const (
-	statusRead       = 4 << 20 // bytes of transcript read at most per window, the latest
-	statusTextMax    = 4000    // bytes of one prompt or of the session's own text
-	statusInputMax   = 600     // bytes of one string in a tool call's input
-	statusCommandMax = 2000    // bytes of a command a tool call runs
-	statusOutLines   = 3       // lines kept from each end of a tool's output
-	statusLineMax    = 200     // bytes of one line of a tool's output
-	statusFailedMax  = 4000    // bytes of a failed tool's output, kept whole up to it
-	statusMDMax      = 3000    // bytes of STATUS.md sent whole, when no earlier copy is known
-	statusCommits    = 20      // new commits listed at most
-	statusPointsKept = 300     // records a Track keeps: more than a day at five minutes
-	statusCIKept     = 10      // CI changes a Track keeps for the next window
-	statusSentence   = 200     // characters of the answer's sentences
+	statusRead        = 4 << 20 // bytes of transcript read at most per window, the latest
+	statusTextMax     = 3000    // bytes of one prompt or of the session's own text
+	statusInputMax    = 300     // bytes of one string in a tool call's input
+	statusCommandMax  = 600     // bytes of a command a tool call runs
+	statusInputTight  = 150     // bytes of each string of a call's input, when the input is over its limit
+	statusOutLines    = 3       // lines kept from each end of a tool's output
+	statusLineMax     = 160     // bytes of one line of a tool's output
+	statusFailedMax   = 2000    // bytes of a failed tool's output, kept whole up to it
+	statusFailedTight = 500     // bytes of a failed tool's output, when the input is over its limit
+	statusMDMax       = 3000    // bytes of STATUS.md sent whole, when no earlier copy is known
+	statusCommits     = 20      // new commits listed at most
+	statusPointsKept  = 300     // records a Track keeps: more than a day at five minutes
+	statusCIKept      = 10      // CI changes a Track keeps for the next window
+	statusSentence    = 200     // characters of the answer's sentences
 )
 
 // Status answers, as the schema lists them.
@@ -320,15 +322,21 @@ func resultFull(raw json.RawMessage) string {
 // its middle: a command up to statusCommandMax, anything else, a file's
 // content or an edit's text, up to statusInputMax.
 func statusToolInput(raw json.RawMessage) json.RawMessage {
+	return cutToolInput(raw, statusCommandMax, statusInputMax)
+}
+
+// cutToolInput is a tool call's input with its command cut to command
+// bytes and every other string to other.
+func cutToolInput(raw json.RawMessage, command, other int) json.RawMessage {
 	var in map[string]any
 	if json.Unmarshal(raw, &in) != nil {
 		return nil
 	}
 	for k, v := range in {
 		if s, ok := v.(string); ok {
-			max := statusInputMax
+			max := other
 			if k == "command" {
-				max = statusCommandMax
+				max = command
 			}
 			in[k] = cutMiddle(s, max)
 		}
@@ -396,8 +404,10 @@ func (in statusInput) empty() bool {
 }
 
 // fit marshals the input within limit bytes: the outputs of the tools
-// that did not fail trimmed to their first and last line first, then the
-// earliest entries dropped. A failure is kept whole.
+// that did not fail trimmed to their first and last line first, then each
+// tool call's input cut to statusInputTight a string, so every call is
+// still there, then each failed output cut to statusFailedTight; only
+// then are the earliest entries dropped.
 func (in *statusInput) fit(limit int) ([]byte, error) {
 	b, err := json.Marshal(in)
 	if err != nil || len(b) <= limit {
@@ -406,6 +416,22 @@ func (in *statusInput) fit(limit int) ([]byte, error) {
 	for i := range in.Entries {
 		if e := &in.Entries[i]; e.Out != "" && !e.Failed {
 			e.Out = trimOutput(e.full, false, 1)
+		}
+	}
+	if b, err = json.Marshal(in); err != nil || len(b) <= limit {
+		return b, err
+	}
+	for i := range in.Entries {
+		if e := &in.Entries[i]; len(e.Input) > 0 {
+			e.Input = cutToolInput(e.Input, statusInputTight, statusInputTight)
+		}
+	}
+	if b, err = json.Marshal(in); err != nil || len(b) <= limit {
+		return b, err
+	}
+	for i := range in.Entries {
+		if e := &in.Entries[i]; e.Failed {
+			e.Out = cutMiddle(e.Out, statusFailedTight)
 		}
 	}
 	for {

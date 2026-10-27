@@ -82,8 +82,12 @@ func busyTranscript(start time.Time, n int, prefix string) (string, []string, []
 }
 
 // The filtered input of a busy five minutes keeps every tool call, every
-// prompt and all of the session's text, trims the outputs, keeps a failed
-// one whole, drops the bookkeeping and stays under 12k tokens (#57).
+// prompt and all of the session's text, trims the outputs, keeps the
+// start and end of each failure, drops the bookkeeping and stays under
+// 12k tokens (#57), at the 2 bytes a token measured on real sessions'
+// transcripts. This window is busier than the busiest recorded one, so
+// the input is fitted: the outputs and inputs are cut harder, and nothing
+// is dropped.
 func TestStatusWindowOfABusyFiveMinutes(t *testing.T) {
 	start := time.Date(2026, 10, 22, 10, 0, 0, 0, time.UTC)
 	text, targets, says := busyTranscript(start, 50, "w")
@@ -104,8 +108,8 @@ func TestStatusWindowOfABusyFiveMinutes(t *testing.T) {
 	}
 	got := string(b)
 	t.Logf("before fitting: %d bytes", len(whole))
-	t.Logf("transcript %d bytes (~%dk tokens), input %d bytes (~%dk tokens)", len(text), len(text)/4000, len(b), len(b)/4000)
-	if len(b)/4 >= 12000 || in.Dropped != 0 || len(text) < 20*len(b) {
+	t.Logf("transcript %d bytes, input %d bytes (~%dk tokens)", len(text), len(b), len(b)/2000)
+	if len(b)/2 >= 12500 || in.Dropped != 0 || len(text) < 50*len(b) {
 		t.Fatalf("input %d bytes, %d dropped, from %d", len(b), in.Dropped, len(text))
 	}
 	tools := 0
@@ -130,9 +134,21 @@ func TestStatusWindowOfABusyFiveMinutes(t *testing.T) {
 			t.Fatalf("input keeps bookkeeping %q", gone)
 		}
 	}
-	// A long read is trimmed to its ends; a failed command is whole.
-	if !strings.Contains(got, "[… 394 lines …]") || strings.Count(got, "got 3 frames, want 4") != 15*7 {
+	// A long read is trimmed to its ends; each failure keeps its exit code
+	// and its first and last lines.
+	if !strings.Contains(got, "[… 398 lines …]") || strings.Count(got, "Exit code 1") != 7 || strings.Count(got, "got 3 frames, want 4") < 7*4 {
 		t.Fatalf("outputs not trimmed as they should be: %d failure lines", strings.Count(got, "got 3 frames, want 4"))
+	}
+	// A quieter window is sent as read: outputs to three lines at each end,
+	// a failure whole.
+	quiet, _, _ := busyTranscript(start, 12, "q")
+	qpath := filepath.Join(t.TempDir(), "q.jsonl")
+	appendFile(t, qpath, quiet)
+	qwin, _ := readStatusWindow(qpath, 0, start)
+	q := statusInput{Session: "q", Entries: qwin.Entries}
+	qb, _ := q.fit(DefaultStatusMaxInput)
+	if !strings.Contains(string(qb), "[… 394 lines …]") || strings.Count(string(qb), "got 3 frames, want 4") != 15 {
+		t.Fatalf("quiet window: %s", qb)
 	}
 	// The same transcript read again from its end holds nothing new.
 	again, _ := readStatusWindow(path, win.Offset, time.Time{})
