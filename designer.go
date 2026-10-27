@@ -60,6 +60,8 @@ const (
 	designList              = 20   // entries of a brief's list
 	designLine              = 1000 // bytes of a brief's entry
 	designQuestions         = 8
+	designTurns             = 40   // model turns a designer may take: it reads the code first
+	designThreadMin         = 4096 // bytes the thread keeps in a round's input
 )
 
 // DesignerConfig sets the designer's call: off turns the design step off
@@ -118,7 +120,7 @@ func designerJob(cfg *Config) Job {
 	if j.Model == "" {
 		j.Model = DefaultDesignerModel
 	}
-	j.MaxInput, j.Timeout = d.MaxInput, d.Timeout.Duration
+	j.MaxInput, j.Timeout, j.Turns = d.MaxInput, d.Timeout.Duration, designTurns
 	if j.MaxInput <= 0 {
 		j.MaxInput = DefaultDesignerMaxInput
 	}
@@ -175,6 +177,11 @@ func (d *WorkDesign) contained(rules DesignRules) (bool, string) {
 		return false, "it deploys"
 	case d.Rating.SpendUSD > rules.SpendLimitUSD:
 		return false, fmt.Sprintf("it would spend $%.2f, over design.spend_limit_usd $%.2f", d.Rating.SpendUSD, rules.SpendLimitUSD)
+	case d.DoneWhen != nil && (d.DoneWhen.Kind == DoneURL || d.DoneWhen.Kind == DoneOwner):
+		// Go's own gate beside the designer's word: work checked on a
+		// page is out in the world, and work only the owner can judge
+		// is the owner's to start.
+		return false, "its done_when is a " + d.DoneWhen.Kind + " check"
 	}
 	return true, ""
 }
@@ -269,10 +276,30 @@ func (s *Supervisor) designWait(in *Instruction, it *WorkItem) {
 		why = fmt.Sprintf("agentd's designer is writing the brief of %s (round %d); you see the design on its entry before any work starts", it.ID, it.Round)
 	case WorkDesigned:
 		why = fmt.Sprintf("the design of %s waits on your go, change or decline on its entry", it.ID)
+		if it.DesignError != "" {
+			why = fmt.Sprintf("the designer failed round %d of %s; answer go, change or decline on its entry", it.Round, it.ID)
+		}
+	case WorkDeclined:
+		s.declinedMessage(it)
+		return
+	case WorkOpen:
+		why = fmt.Sprintf("its design was approved; agentd starts a work session for %s as soon as one can start (the item says why not)", it.ID)
 	default:
+		// Assigned: the message goes to the session started for it, even
+		// when agentd stopped between the two.
+		if it.Session != "" && it.Started && s.st.Runtime[it.Session].Item == it.ID {
+			s.routeStep(in, RouteTo, it.Session, true, "started "+it.Session)
+		}
 		return
 	}
 	s.routeStep(in, RouteWait, "", false, why)
+}
+
+// previousDesign is d as a later round is given it: its brief, questions
+// and done_when, with no usage.
+func previousDesign(d *WorkDesign) *WorkDesign {
+	p := &WorkDesign{Round: d.Round, Brief: d.Brief, Questions: d.Questions, DoneWhen: d.DoneWhen, Rating: d.Rating}
+	return p
 }
 
 // driveDesign takes an item being designed, or designed, a step: a
@@ -343,9 +370,7 @@ func (s *Supervisor) runDesigner(it *WorkItem, in *Instruction, now time.Time) {
 	}
 	d := designInput{Item: it.ID, Round: it.Round, Work: it.ThreadWork, Change: s.keepText(it.Change)}
 	if it.Round > 1 && it.Design != nil {
-		prev := *it.Design
-		prev.Usage = nil
-		d.Previous = &prev
+		d.Previous = previousDesign(it.Design)
 	}
 	s.designTried[it.ID] = now
 	id, round := it.ID, it.Round
@@ -390,6 +415,9 @@ func designerInput(d designInput, x threadInput, max int) ([]byte, error) {
 	rest, err := json.Marshal(d)
 	if err != nil {
 		return nil, err
+	}
+	if max-len(rest) < designThreadMin {
+		return nil, fmt.Errorf("the designer's input leaves %d bytes of jobs.designer.max_input %d for the thread; raise it", max-len(rest), max)
 	}
 	tb, err := x.fit(max - len(rest))
 	if err != nil {
@@ -498,7 +526,19 @@ func designMarkdown(it *WorkItem, words string) string {
 		}
 		b.WriteString("\n")
 	}
+	if it.Change != "" {
+		b.WriteString("## The owner's change\n\n")
+		for _, l := range strings.Split(strings.TrimSpace(it.Change), "\n") {
+			b.WriteString("> " + l + "\n")
+		}
+		b.WriteString("\n")
+	}
 	d := it.Design
+	if d != nil && d.Brief != nil && it.DesignError != "" {
+		// A later round failed: the design is the earlier one, which
+		// does not answer the owner's change.
+		fmt.Fprintf(&b, "## Round %d failed\n\nThe designer failed round %d: %s. The design below is round %d's, from before the change above.\n\n", it.Round, it.Round, it.DesignError, d.Round)
+	}
 	if d == nil || d.Brief == nil {
 		b.WriteString("## Brief\n\nThe designer failed")
 		if it.DesignError != "" {
@@ -561,7 +601,11 @@ func designMarkdown(it *WorkItem, words string) string {
 		if d != nil && d.Model != "" {
 			model = " on " + d.Model
 		}
-		fmt.Fprintf(&b, "\nDesigned in round %d%s; the designer cost $%.4f (%d input, %d output tokens).\n", it.Round, model, it.DesignCost.CostUSD,
+		round := it.Round
+		if d != nil {
+			round = d.Round
+		}
+		fmt.Fprintf(&b, "\nDesigned in round %d%s; the designer cost $%.4f in all (%d input, %d output tokens).\n", round, model, it.DesignCost.CostUSD,
 			it.DesignCost.InputTokens+it.DesignCost.CacheReadTokens+it.DesignCost.CacheCreationTokens, it.DesignCost.OutputTokens)
 	}
 	return b.String()
@@ -613,7 +657,19 @@ func (s *Supervisor) routeDesign(in *Instruction) bool {
 		choice = in.Answer.Choice
 	}
 	word := strings.TrimSpace(in.Text)
-	if choice == "" && in.Withheld == 0 && word != "" {
+	switch {
+	case choice != "":
+	case in.Withheld > 0:
+		answer("Your words matched a confidential pattern, so agentd cannot pass them on; nothing was changed. Answer go, change or decline, or reword them.")
+		return true
+	case it.Session != "" && !it.terminal() && s.takesInstructions(it.Session) && s.reachable(it.Session):
+		// After the go, words on the design are for the session doing it.
+		s.routeStep(in, RouteTo, it.Session, false, "")
+		return true
+	case it.State == WorkDesigned && it.Round >= designRounds:
+		answer(fmt.Sprintf("%s has had its %d rounds of design, so your words were not passed to the designer; answer go or decline.", it.ID, designRounds))
+		return true
+	case word != "":
 		choice = DesignChange
 	}
 	if it.State != WorkDesigned || !contains(it.designOptions(), choice) {
@@ -633,7 +689,7 @@ func (s *Supervisor) routeDesign(in *Instruction) bool {
 		if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepGo, Instruction: in.ID, Note: note, By: "owner"}); s.halt != nil {
 			return true
 		}
-		answer("agentd starts a work session for " + it.ID + ", briefed with its design.")
+		answer("agentd assigns " + it.ID + " to a work session briefed with its design; the item shows where it stands.")
 	case DesignChange:
 		if in.Withheld > 0 || word == "" {
 			answer("A change needs your words on what to change, which agentd can pass to the designer; nothing was changed.")
@@ -692,9 +748,9 @@ func (src *uiSource) designEntries(cfg *Config, repo string, secret func(...stri
 		}
 		d := designDecision(it, words)
 		e := uiDesignEntry{uiDecisionEntry: uiDecisionEntry{UIDecision: UIDecision{Repository: repo, Decision: d}, At: at}, ID: it.ID, open: it.State == WorkDesigned}
-		if secret(d.Context) {
+		if secret(d.Question, d.Context) {
 			e.Withheld = withheldSecret
-			e.Decision.Context = ""
+			e.Decision.Question, e.Decision.Context = "", ""
 		}
 		switch {
 		case !it.Approved.IsZero():

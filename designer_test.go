@@ -299,3 +299,96 @@ func TestDesignerModel(t *testing.T) {
 		t.Fatalf("model = %q", m)
 	}
 }
+
+// A round that fails after the owner's change leaves the earlier design
+// marked as not answering it; a late answer of an earlier round changes
+// nothing; a go with no room says so on the message; and a message whose
+// item was assigned before agentd stopped is routed to its session.
+func TestDesignRoundsAndRecovery(t *testing.T) {
+	dir := fakeClaude(t)
+	h := designerHarness(t, false)
+	h.ticks(1, time.Minute)
+	claudeAnswers(t, dir, 2, designOut("Add PaintAll", false, 0))
+	it := h.askDesigned(dir, "Paint the shed red.")
+	h.ticks(2, time.Minute)
+	bad := claudeResult(`{"brief":{"exists":[],"missing":[],"design":["x"],"where":"","out_of_scope":[],"acceptance":[]},"questions":[],"done_when":{"kind":"owner"},"rating":{"production":false,"deployment":false,"spend_usd":0,"why":""}}`) + "\n"
+	claudeAnswers(t, dir, 0, bad)
+	if err := h.respondDesign(it.ID, DesignChange, "Use blue."); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(6, time.Minute)
+	it = h.item(it.ID)
+	if it.State != WorkDesigned || it.Round != 2 || it.Design == nil || it.Design.Round != 1 || it.DesignError == "" {
+		t.Fatalf("after a failed round 2: %+v", it)
+	}
+	md := designMarkdown(it, "Paint the shed red.")
+	for _, want := range []string{"## The owner's change\n\n> Use blue.", "## Round 2 failed", "round 1's, from before the change", "Designed in round 1"} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("the design lacks %q:\n%s", want, md)
+		}
+	}
+	if in := h.sup.st.Instructions[it.Instruction]; !strings.Contains(in.Waiting, "failed round 2") {
+		t.Fatalf("waiting = %q", in.Waiting)
+	}
+	// A late round-1 answer is not this round's.
+	h.sup.workEmit(WorkPayload{ID: it.ID, Step: WorkStepChange, Note: "Use green.", By: "owner"})
+	h.sup.workEmit(WorkPayload{ID: it.ID, Step: WorkStepDesign, Design: &WorkDesign{Round: 2, Brief: &DesignBrief{Design: []string{"late"}, Acceptance: []string{"a"}}}})
+	if it = h.item(it.ID); it.State != WorkDesigning || it.Round != 3 || it.Design.Round != 1 {
+		t.Fatalf("a late round changed the item: %+v", it)
+	}
+
+	// Go with every place held by sessions at work: the message says the
+	// session starts once one can.
+	w1 := h.startSession("issue-1", KindWork, 1)
+	w2 := h.startSession("issue-2", KindWork, 2)
+	h.alive(w1, "working")
+	h.alive(w2, "working")
+	h.sup.workEmit(WorkPayload{ID: it.ID, Step: WorkStepDesign, Design: &WorkDesign{Round: 3, Brief: &DesignBrief{Design: []string{"Add PaintAll"}, Acceptance: []string{"red"}}}})
+	if err := h.respondDesign(it.ID, DesignGo, ""); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(2, time.Minute)
+	it = h.item(it.ID)
+	in := h.sup.st.Instructions[it.Instruction]
+	if it.State != WorkOpen || in.Session != "" || !strings.Contains(in.Waiting, "as soon as one can start") {
+		t.Fatalf("a go with no room: item %+v, waiting %q", it, in.Waiting)
+	}
+
+	// Room again, and agentd stops between the assignment and the
+	// message's route: the next pass routes it.
+	if err := h.endSession(w1); err != nil {
+		t.Fatal(err)
+	}
+	h.restart(false)
+	name := runtimeName("widgets", "owner/paint-"+strings.ToLower(it.ID), KindWork)
+	if why := h.sup.startRuntime("widgets", name, RuntimePayload{Kind: KindWork, Branch: "owner/paint", Owner: in.ID, Item: it.ID}); why != "" {
+		t.Fatal(why)
+	}
+	h.sup.refreshRuntime()
+	h.sup.workEmit(WorkPayload{ID: it.ID, Step: WorkStepAssign, Session: name, Started: true})
+	h.restart(false)
+	h.ticks(1, time.Minute)
+	if in = h.sup.st.Instructions[it.Instruction]; in.Session != name || !in.Started {
+		t.Fatalf("the message was not routed after the stop: %+v", in)
+	}
+}
+
+// A repository's own file may turn design.auto off and lower its limit,
+// never turn it on or raise it; a withheld file turns it off.
+func TestDesignPolicyNarrowed(t *testing.T) {
+	owner := RepoPolicy{Design: DesignRules{Auto: true, SpendLimitUSD: 5}}
+	eff, applied, refused := narrowPolicy(owner, []byte(`{"design":{"auto":false,"spend_limit_usd":1}}`))
+	if eff.Design.Auto || eff.Design.SpendLimitUSD != 1 || len(applied) != 2 || len(refused) != 0 {
+		t.Fatalf("narrowed = %+v, applied %v, refused %v", eff.Design, applied, refused)
+	}
+	_, _, refused = narrowPolicy(RepoPolicy{}, []byte(`{"design":{"auto":true,"spend_limit_usd":1}}`))
+	if len(refused) != 2 {
+		t.Fatalf("widened: refused %v", refused)
+	}
+	if p := narrowBy(owner, PolicyPayload{Withheld: 1}); p.Design.Auto {
+		t.Fatal("a withheld file left design.auto on")
+	}
+	if ok, why := (&WorkDesign{Brief: &DesignBrief{}, Rating: &DesignRating{}, DoneWhen: &EndCheck{Kind: DoneURL}}).contained(owner.Design); ok || !strings.Contains(why, "url") {
+		t.Fatalf("a url check is contained: %v %q", ok, why)
+	}
+}

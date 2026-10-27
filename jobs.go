@@ -131,6 +131,16 @@ type Job struct {
 	Tools []string
 	Deny  []string
 	Dir   string
+	// Turns bounds an agent's model turns, by default agentTurns.
+	Turns int
+}
+
+// turns is the model turns an agent run of j may take.
+func (j Job) turns() int {
+	if j.Turns > 0 {
+		return j.Turns
+	}
+	return agentTurns
 }
 
 // jobFromConfig is the job the config describes, with its defaults.

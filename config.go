@@ -492,11 +492,6 @@ func (c *Config) finish(base string) error {
 	if d := c.Jobs.Designer; d.MaxInput < 0 || d.Timeout.Duration < 0 {
 		errs = append(errs, errors.New("jobs.designer.max_input and jobs.designer.timeout must not be negative"))
 	}
-	for _, n := range sortedKeys(c.Repositories) {
-		if c.Repositories[n].Policy.Design.SpendLimitUSD < 0 {
-			errs = append(errs, fmt.Errorf("repositories.%s.policy.design.spend_limit_usd must not be negative", n))
-		}
-	}
 	if c.Poll.Every.Duration <= 0 || c.Poll.CIEvery.Duration <= 0 {
 		errs = append(errs, errors.New("poll.every and poll.ci_every must be positive"))
 	}

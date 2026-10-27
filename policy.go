@@ -184,6 +184,9 @@ func (c *Config) checkPolicy(name string, repo *Repository, errs *[]error) {
 			bad("delivery.allow has push but gate.argv is empty: nothing is delivered without a gate")
 		}
 	}
+	if p.Design.SpendLimitUSD < 0 {
+		bad("design.spend_limit_usd must not be negative")
+	}
 	if p.Gate.Timeout.Duration < 0 {
 		bad("gate.timeout must not be negative")
 	}
@@ -718,12 +721,12 @@ func effectiveFor(cfg *Config, st *LogState, repo, target string) RepoPolicy {
 }
 
 // narrowBy narrows p by a file's read. A file withheld for matching a
-// confidential pattern cannot be read, so it turns merge off: what it
+// confidential pattern cannot be read, so it turns merge and design.auto off: what it
 // says is unknown, and it may narrow.
 func narrowBy(p RepoPolicy, f PolicyPayload) RepoPolicy {
 	if f.Withheld > 0 {
 		p = clonePolicy(p)
-		p.Merge.Enabled = false
+		p.Merge.Enabled, p.Design.Auto = false, false
 		return p
 	}
 	if len(f.File) == 0 {
