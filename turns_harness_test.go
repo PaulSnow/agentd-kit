@@ -53,3 +53,29 @@ func TestOnlyRealPromptsAndWholeReplies(t *testing.T) {
 		t.Fatal("the session page does not fold the long reply")
 	}
 }
+
+// A session's page lists the tools it ran lately, read from the end of
+// its transcript, with the failed ones and their exit codes marked, and
+// the one it runs now; a confidential one is withheld. Nothing of it is
+// logged.
+func TestSessionPageActivity(t *testing.T) {
+	h := turnsHarness(t)
+	h.cfg.ConfidentialPatterns = []string{`hunter2`}
+	h.restart(false)
+	at := h.clock.Now()
+	running, _ := json.Marshal(map[string]any{"type": "assistant", "uuid": "u9", "timestamp": at.Format(time.RFC3339Nano),
+		"message": map[string]any{"id": "m9", "stop_reason": "tool_use", "content": []map[string]any{{"type": "tool_use", "id": "c9", "name": "Bash", "input": map[string]any{"command": "./bin/check"}}}}})
+	h.transcriptOf("a", "t1", promptLine("u1", "Build the widget.", at)+toolLines("u2", "c1", "go build ./...", 0, at)+
+		toolLines("u3", "c2", "go test ./...", 1, at)+toolLines("u4", "c3", "echo hunter2", 0, at)+string(running)+"\n")
+	h.ticks(2, time.Minute)
+	u, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
+	page := owner(t, u, "/session/night/a")
+	for _, want := range []string{"<code>Bash: go build ./...</code>", "<code>Bash: go test ./...</code> <span class=\"badge\">failed, exit 1</span>", "Running now: <code>Bash: ./bin/check</code>", withheldMessage} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("session page lacks %q:\n%s", want, page)
+		}
+	}
+	if strings.Contains(page, "hunter2") || strings.Contains(h.buf.String(), "go build") {
+		t.Fatal("the activity leaked or was logged")
+	}
+}

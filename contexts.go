@@ -278,13 +278,16 @@ func newestTranscript(dir string) string {
 
 // transcriptRoot is where the session's account keeps its transcripts, or
 // "" when transcripts are not read.
-func (s *Supervisor) transcriptRoot(sess Session) string {
-	root := s.cfg.TranscriptDir
+func (s *Supervisor) transcriptRoot(sess Session) string { return transcriptRootOf(s.cfg, sess) }
+
+// transcriptRootOf is transcriptRoot for any reader of cfg, the UI too.
+func transcriptRootOf(cfg *Config, sess Session) string {
+	root := cfg.TranscriptDir
 	if root == "" {
 		return ""
 	}
 	// An account with its own config directory keeps its transcripts there.
-	if a := s.cfg.Accounts[sess.Account]; sess.Account != "" && a.ConfigDir != "" {
+	if a := cfg.Accounts[sess.Account]; sess.Account != "" && a.ConfigDir != "" {
 		root = filepath.Join(a.ConfigDir, "projects")
 	}
 	return root

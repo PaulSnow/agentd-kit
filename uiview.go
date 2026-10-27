@@ -557,6 +557,16 @@ type uiStep struct {
 	Exit   *int
 }
 
+// activityStep is a tool line as the page shows it: screened whole, then
+// cut, as the log would hold it.
+func activityStep(tn TurnPayload, secret func(...string) bool) uiStep {
+	text := cutUTF8(tn.Text, toolTargetLength)
+	if secret(tn.Text) {
+		text = withheldMessage
+	}
+	return uiStep{Text: text, At: tn.At, Failed: tn.Failed, Exit: tn.Exit}
+}
+
 // foldAt is how much of a message the page shows before the fold.
 const foldAt = 1200
 
@@ -750,6 +760,11 @@ type uiSessionPage struct {
 	// MessageTo is the repository or console a message to the session is
 	// recorded for, "" when the session takes none here (#56).
 	MessageTo string
+	// Activity is the tools it ran lately and Doing the one it runs now,
+	// read from its transcript (#56 C); HasActivity when one was read.
+	Activity    []uiStep
+	Doing       *uiStep
+	HasActivity bool
 }
 
 // uiTurns is how many of a session's latest turns its view shows.
@@ -784,6 +799,18 @@ func (u *UI) sessionView(src *uiSource, name string, now time.Time) (*uiSessionP
 	}
 	secret := confidentialMatcher(cfg)
 	t := src.st.Tracks[name]
+	if sess, ok := cfg.Sessions[name]; ok {
+		if a, ok := sessionActivity(cfg, sess, t); ok {
+			v.HasActivity = true
+			for _, tn := range a.Ran {
+				v.Activity = append(v.Activity, activityStep(tn, secret))
+			}
+			if a.Now != nil {
+				now := activityStep(*a.Now, secret)
+				v.Doing = &now
+			}
+		}
+	}
 	if !secret(t.Reason) {
 		v.Reason = t.Reason
 	}

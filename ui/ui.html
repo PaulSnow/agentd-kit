@@ -146,6 +146,12 @@
 <p class="muted">agentd types a pointer to it into {{.Row.Name}} at once, even mid-turn; its activity and reply show under your message on the {{.MessageTo}} console.</p>
 <div class="choices"><button type="submit">Send</button></div></form>
 </section>{{end}}
+<section id="activity" data-refresh aria-labelledby="activity-h">
+<h2 id="activity-h">Activity</h2>
+{{if .HasActivity}}{{with .Doing}}<p class="doing">Running now: <code>{{.Text}}</code>{{if not .At.IsZero}} <span class="muted">since {{$.When .At}}</span>{{end}}</p>{{end}}
+<ol class="activity">{{range .Activity}}<li class="tool{{if .Failed}} tool-failed{{end}}">{{if not .At.IsZero}}<time class="muted">{{$.When .At}}</time> {{end}}<code>{{.Text}}</code>{{if .Failed}} <span class="badge">failed{{with .Exit}}, exit {{.}}{{end}}</span>{{end}}</li>{{else}}<li class="empty">No tools run lately.</li>{{end}}</ol>
+{{else}}<p class="muted">No transcript of this session is readable here.</p>{{end}}
+</section>
 <section id="turns" data-refresh aria-labelledby="turns-h">
 <h2 id="turns-h">Latest turns</h2>
 <ol class="messages">{{range .Turns}}<li class="msg msg-{{.Role}}"><div class="msg-head"><span class="from">{{.Role}}</span> <time class="muted">{{$.When .At}}</time></div>{{if .More}}<details class="more"><summary><div class="md">{{.Body}}</div><span class="more-label">Show all</span></summary><div class="md">{{.More}}</div></details>{{else}}<div class="md">{{.Body}}</div>{{end}}</li>{{else}}<li class="empty">No turns read yet.</li>{{end}}</ol>
