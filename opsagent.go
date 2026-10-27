@@ -107,7 +107,7 @@ func (o *opsEnv) readFacts() opsFacts {
 	case strings.TrimSuffix(installed, "+modified") == main:
 		f.Behind = "the installed agentd is main's tip"
 	default:
-		if n, err := o.git(o.cfg.Ops.Repo, "rev-list", "--count", strings.TrimSuffix(installed, "+modified")+"..origin/main"); err == nil {
+		if n, err := o.git(o.cfg.Ops.Repo, "rev-list", "--count", strings.TrimSuffix(installed, "+modified")+"..origin/"+o.cfg.Ops.branch()); err == nil {
 			f.Behind = "main is " + n + " commits ahead of the installed agentd"
 		}
 	}
@@ -311,7 +311,7 @@ func (s *Supervisor) runOps(now time.Time) {
 			}
 		case r.Answer == "no":
 			s.opsEnd(r, OpsDeclined, "not done: the owner answered no")
-		case r.Answer == "yes" || r.Auto && r.Op == OpsRestart && r.Answer == "":
+		case r.Answer == "yes" || r.Auto && (r.Op == OpsRestart || r.Op == OpsInstall) && r.Answer == "":
 			s.opsCarryOut(r)
 			return
 		}
@@ -327,6 +327,10 @@ func (s *Supervisor) opsEnd(r *OpsRecord, step, outcome string) {
 	outcome = s.withheld(cutUTF8(outcome, 2000))
 	if s.emit("", Event{Kind: KindOps, Mode: ModeShared, Ops: &OpsPayload{ID: r.ID, Step: step, Instruction: r.AnsweredBy, Outcome: outcome}}); s.halt != nil {
 		return
+	}
+	// An install made without a yes is told on the ops console (#68).
+	if r.Auto && r.Op == OpsInstall && r.AnsweredBy == "" {
+		s.installTold(r, step, outcome)
 	}
 	if r.AnsweredBy != "" {
 		text := "Done: " + outcome
@@ -350,7 +354,7 @@ func (s *Supervisor) opsCarryOut(r *OpsRecord) {
 	}
 	rec, base := *r, s.ops
 	s.spawnShared("ops", func(w *Supervisor) {
-		if rec.Auto && rec.Answer == "" {
+		if rec.Auto && rec.Op == OpsRestart && rec.Answer == "" {
 			if rec.Supervisor == base.self || !base.down(base.cfg.Ops.Supervisors[rec.Supervisor]) {
 				w.opsEnd(&rec, OpsFailed, rec.Supervisor+" was not down beyond doubt when agentd came to restart it, so nothing was done; propose it again for the owner's yes")
 				return
@@ -402,6 +406,8 @@ func (src *uiSource) opsEntries(cfg *Config, console string, secret func(...stri
 		case r.Answer != "":
 			yes := r.Answer == "yes"
 			e.Answer = &AnswerRecord{AnswerPayload: AnswerPayload{ID: r.ID, Answer: &yes, Note: opsNote(r)}, At: r.AnsweredAt}
+		case r.Auto && !r.Started.IsZero() && r.Op == OpsInstall:
+			e.Answer = &AnswerRecord{AnswerPayload: AnswerPayload{ID: r.ID, Text: "none needed: ops.auto_install", Note: opsNote(r)}, At: r.Started}
 		case r.Auto && !r.Started.IsZero():
 			e.Answer = &AnswerRecord{AnswerPayload: AnswerPayload{ID: r.ID, Text: "none needed: it was down", Note: opsNote(r)}, At: r.Started}
 		}

@@ -197,8 +197,8 @@ func (o *opsEnv) onMain(sha string) (string, error) {
 	if err != nil || full == "" {
 		return "", fmt.Errorf("the clone has no commit %s", sha)
 	}
-	if _, err := o.git(o.cfg.Ops.Repo, "merge-base", "--is-ancestor", full, "origin/main"); err != nil {
-		return "", fmt.Errorf("commit %s is not on the clone's main (origin/main)", short(full))
+	if _, err := o.git(o.cfg.Ops.Repo, "merge-base", "--is-ancestor", full, "origin/"+o.cfg.Ops.branch()); err != nil {
+		return "", fmt.Errorf("commit %s is not on the clone's %s (origin/%s)", short(full), o.cfg.Ops.branch(), o.cfg.Ops.branch())
 	}
 	return full, nil
 }
@@ -210,7 +210,7 @@ func (o *opsEnv) proposeInstall(c OpsChange, a opsArgs) (OpsChange, error) {
 	if o.binary == "" {
 		return c, errors.New("agentd does not know the binary to replace; set ops.binary")
 	}
-	if _, err := o.git(o.cfg.Ops.Repo, "fetch", "--quiet", "origin", "main"); err != nil {
+	if _, err := o.git(o.cfg.Ops.Repo, "fetch", "--quiet", "origin", o.cfg.Ops.branch()); err != nil {
 		return c, err
 	}
 	full, err := o.onMain(a.Commit)
@@ -235,8 +235,8 @@ func (o *opsEnv) proposeInstall(c OpsChange, a opsArgs) (OpsChange, error) {
 		installed = short(cur)
 	}
 	c.Diff = redactLines("installed: "+installed+"\nto install: "+short(full)+"\n\n"+log, confidentialMatcher(o.cfg))
-	c.Summary = fmt.Sprintf("Install commit %s (%s) from main: build it, keep the running binary as %s.%s, swap it in, check every supervisor's config with it and restart them all, this process last.",
-		short(full), oneLine(subject, 100), filepath.Base(o.binary), keptSuffix(cur))
+	c.Summary = fmt.Sprintf("Install commit %s (%s) from %s: build it, keep the running binary as %s.%s, swap it in, check every supervisor's config with it and restart them all, this process last.",
+		short(full), oneLine(subject, 100), o.cfg.Ops.branch(), filepath.Base(o.binary), keptSuffix(cur))
 	return c, nil
 }
 
@@ -264,7 +264,7 @@ func (o *opsEnv) execute(ctx context.Context, r OpsRecord) (outcome string, self
 		}
 		return r.Supervisor + " is up again", false, nil
 	case OpsInstall:
-		if _, err := o.git(o.cfg.Ops.Repo, "fetch", "--quiet", "origin", "main"); err != nil {
+		if _, err := o.git(o.cfg.Ops.Repo, "fetch", "--quiet", "origin", o.cfg.Ops.branch()); err != nil {
 			return "", false, err
 		}
 		full, err := o.onMain(r.Commit)

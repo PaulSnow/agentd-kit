@@ -430,7 +430,7 @@ func (o *opsEnv) installed() (installed, main string) {
 	if o.binary != "" {
 		installed = binaryCommit(o.binary)
 	}
-	main, _ = o.git(o.cfg.Ops.Repo, "rev-parse", "--verify", "--quiet", "origin/main^{commit}")
+	main, _ = o.git(o.cfg.Ops.Repo, "rev-parse", "--verify", "--quiet", "origin/"+o.cfg.Ops.branch()+"^{commit}")
 	return installed, main
 }
 

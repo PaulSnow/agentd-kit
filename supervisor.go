@@ -78,6 +78,9 @@ type Supervisor struct {
 	dueRetype map[string]bool
 	// designTried is when each item's designer last started (#68).
 	designTried map[string]time.Time
+	// watchedAt is when the ops watch last looked at the branch to
+	// install from (#68).
+	watchedAt time.Time
 
 	checkpointRe *regexp.Regexp
 
@@ -462,6 +465,7 @@ func (s *Supervisor) Pass() error {
 	s.routeInstructions(s.clock.Now())
 	s.driveItems(s.clock.Now())
 	s.runOps(s.clock.Now())
+	s.watchInstall(s.clock.Now())
 	for _, name := range s.cfg.SessionNames() {
 		if s.halt != nil {
 			break

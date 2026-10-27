@@ -94,7 +94,9 @@
       "live": {"config": "~/.config/agentd-kit/agentd.json", "tmux": "agentd-live"},
       "page": {"config": "~/.config/agentd-kit/page.json", "tmux": "agentd-page"}
     },
-    "repo": "~/repos/agentd-kit"
+    "repo": "~/repos/agentd-kit",
+    "branch": "main",
+    "auto_install": false
   },
   "items": {"ack_within": "10m", "escalate_after": "2h"},
   "repositories": {

@@ -34,6 +34,21 @@ type OpsConfig struct {
 	Supervisors map[string]OpsSupervisor `json:"supervisors,omitempty"`
 	Repo        string                   `json:"repo,omitempty"`
 	Binary      string                   `json:"binary,omitempty"`
+	// Branch is the branch of Repo's origin installs come from, main by
+	// default; Watch names the configured repository whose forge reports
+	// its CI, and when set Go proposes the install of each tip whose CI
+	// is green, which AutoInstall carries out without a yes (#68).
+	Branch      string `json:"branch,omitempty"`
+	Watch       string `json:"watch,omitempty"`
+	AutoInstall bool   `json:"auto_install,omitempty"`
+}
+
+// branch is the branch installs come from.
+func (o OpsConfig) branch() string {
+	if o.Branch == "" {
+		return "main"
+	}
+	return o.Branch
 }
 
 // OpsSupervisor is one agentd process: the config it runs and the tmux
@@ -101,6 +116,15 @@ func (c *Config) checkOps(path func(field, p string) string, errs *[]error) {
 	}
 	if o.Binary != "" {
 		o.Binary = path("ops.binary", o.Binary)
+	}
+	if !plainBranch(o.branch()) {
+		*errs = append(*errs, fmt.Errorf("ops.branch %q is not a plain branch name", o.Branch))
+	}
+	if r, ok := c.Repositories[o.Watch]; o.Watch != "" && (!ok || r.Project == "") {
+		*errs = append(*errs, fmt.Errorf("ops.watch %q names no configured repository with a forge project", o.Watch))
+	}
+	if o.AutoInstall && o.Watch == "" {
+		*errs = append(*errs, errors.New("ops.auto_install needs ops.watch, the repository whose CI says a build is green"))
 	}
 	for repo := range c.Repositories {
 		if repo == o.Console || c.RepositoryConsole(repo) == o.Console {
