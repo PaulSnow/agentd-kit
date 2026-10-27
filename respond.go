@@ -149,7 +149,7 @@ func (src *uiSource) decisionEntries(cfg *Config, rep Report, repo string) []uiD
 // entryOf finds entry id of repo's console as the page shows it now:
 // what it is about, the session that wrote it ("" for agentd or the
 // owner), and the decision it is, when it is one still open.
-func (src *uiSource) entryOf(cfg *Config, rep Report, repo, id string) (EntryRe, string, *Decision, error) {
+func (src *uiSource) entryOf(cfg *Config, rep Report, repo, id string, now time.Time) (EntryRe, string, *Decision, error) {
 	secret := confidentialMatcher(cfg)
 	switch {
 	case strings.HasPrefix(id, entryDecision):
@@ -185,6 +185,24 @@ func (src *uiSource) entryOf(cfg *Config, rep Report, repo, id string) (EntryRe,
 			return re, "", nil, nil
 		}
 		return re, "", &Decision{ID: r.ID, Type: DecisionYesNo, Question: r.Summary}, nil
+	case strings.HasPrefix(id, entryNext):
+		in := src.st.Instructions[strings.TrimPrefix(id, entryNext)]
+		var d *Decision
+		if in != nil && len(in.Repositories) > 0 && in.Repositories[0] == repo {
+			d = nextDecision(cfg, src.st, in, now)
+		}
+		if d == nil {
+			return EntryRe{}, "", nil, fmt.Errorf("%s's console holds no next step %q now", repo, id)
+		}
+		re := EntryRe{ID: id, Kind: "decision", At: in.FailedAt, Decision: d.ID, Question: d.Question, Options: decisionOptions(*d)}
+		if !secret(in.Failed) {
+			re.Text = d.Context
+		}
+		// Answered after its failure: words about it only.
+		if src.st.nextAnswer(in) != nil {
+			return re, "", nil, nil
+		}
+		return re, "", d, nil
 	case strings.HasPrefix(id, entryNeed):
 		for _, n := range src.needs(cfg, rep, src.askedAt) {
 			if n.Repository != repo || n.Decision != nil || needEntry(n.Session, n.Kind) != id {
@@ -226,12 +244,12 @@ func (src *uiSource) entryOf(cfg *Config, rep Report, repo, id string) (EntryRe,
 func (src *uiSource) respond(repo, id, to, text string, a *AnswerPayload, files []stagedAttachment) error {
 	src.mu.Lock()
 	defer src.mu.Unlock()
-	now := time.Now()
+	now := src.clock()
 	cfg, rep, err := src.view(now)
 	if err != nil {
 		return err
 	}
-	re, writer, dec, err := src.entryOf(cfg, rep, repo, id)
+	re, writer, dec, err := src.entryOf(cfg, rep, repo, id, now)
 	if err != nil {
 		return err
 	}
@@ -265,7 +283,14 @@ func (src *uiSource) respond(repo, id, to, text string, a *AnswerPayload, files 
 		if a.Binding() || a.Other != "" {
 			// A change's yes or no is the instruction's alone (#63): Go
 			// carries the change out from it, and from nothing else.
-			if !strings.HasPrefix(id, entryOps) {
+			switch {
+			case strings.HasPrefix(id, entryNext):
+				// A next step is Go's to carry out from the instruction
+				// (#65), and only one it offers now.
+				if a.Binding() && !contains(decisionOptions(*dec), a.Choice) {
+					return fmt.Errorf("%q is not one of the steps offered", a.Choice)
+				}
+			case !strings.HasPrefix(id, entryOps):
 				if err := RecordAnswer(src.log, src.st, now, writer, *a); err != nil {
 					return err
 				}

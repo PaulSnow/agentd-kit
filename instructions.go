@@ -73,6 +73,9 @@ type Instruction struct {
 	Activity []TurnPayload
 	Waiting  string
 	Failed   string
+	// FailedAt is when it last failed: the owner's next step (#65) is an
+	// answer after it.
+	FailedAt time.Time
 	// Agent marks one a thread agent took (#59), AgentRuns how many were
 	// started, AgentError why the latest failed, and AgentLast what the
 	// latest did, which for one it handed to a session holds its answer.
@@ -351,6 +354,24 @@ func (s *Supervisor) routeInstructions(now time.Time) {
 			}
 			continue
 		}
+		// The owner's next step for a failed one (#65), carried out by Go.
+		if in.Route && in.Re != nil && strings.HasPrefix(in.Re.ID, entryNext) && in.Answer != nil && in.Replied.IsZero() && in.Failed == "" && !in.Agent && in.Session == "" {
+			if !s.shadow {
+				s.routeNext(in)
+			}
+			if s.halt != nil {
+				return
+			}
+			continue
+		}
+		// Work the agent named, which no running session covers: Go
+		// starts a work session for it (#65).
+		if a := in.AgentLast; in.Route && in.Agent && in.Session == "" && in.Replied.IsZero() && in.Failed == "" && in.AgentError == "" && a != nil && a.Work != nil && a.Error == "" && !s.work.busy("thread:"+in.ID) && len(in.Repositories) > 0 {
+			if s.startOwnerWork(in, in.Repositories[0], *a.Work); s.halt != nil {
+				return
+			}
+			continue
+		}
 		if in.Route && in.Agent && in.Session == "" && in.Replied.IsZero() && in.Failed == "" && len(in.Repositories) > 0 {
 			if repo := in.Repositories[0]; !s.shadow {
 				s.retryThread(in, repo, s.threadCwd(repo), now)
@@ -361,6 +382,11 @@ func (s *Supervisor) routeInstructions(now time.Time) {
 			continue
 		}
 		if !in.Route || !in.Delivered.IsZero() || in.Failed != "" || in.Session != "" && s.takesInstructions(in.Session) && !s.stranded(in) {
+			continue
+		}
+		// Handed to a session that finished and whose tmux session runs:
+		// its own step reopens it and types the message (#65).
+		if s.reopens(in) {
 			continue
 		}
 		// One agentd routed to a chat session, which no build starts any
@@ -507,7 +533,7 @@ func stateOf(t *Track) State {
 // routeStep logs a step of in unless it is where in stands already.
 func (s *Supervisor) routeStep(in *Instruction, step, session string, started bool, reason string) {
 	switch {
-	case step == RouteTo && in.Session == session && in.Waiting == "",
+	case step == RouteTo && in.Session == session && in.Waiting == "" && in.Failed == "",
 		step == RouteWait && in.Waiting == reason,
 		step == RouteFail && in.Failed == reason:
 		return
@@ -641,11 +667,16 @@ func (st *LogState) applyRoute(e Event) {
 	}
 	switch p.Step {
 	case RouteTo:
+		// After a failure, the owner's next step (#65): the message goes
+		// to the session as a new one.
+		if in.Failed != "" || in.Agent {
+			in.Failed, in.Delivered, in.Taken, in.Activity = "", time.Time{}, time.Time{}, nil
+		}
 		in.Session, in.Started, in.Waiting = p.Session, p.Started, ""
 	case RouteWait:
 		in.Waiting = p.Reason
 	case RouteFail:
-		in.Failed, in.Waiting = p.Reason, ""
+		in.Failed, in.Waiting, in.FailedAt = p.Reason, "", e.Time
 	case RouteAgent:
 		// The agent takes it at once: delivered and taken as it starts,
 		// from any session it was routed to before.
@@ -665,6 +696,10 @@ func (st *LogState) applyRoute(e Event) {
 			// Handed over: the session receives the owner's record as
 			// any other, and its reply is the answer.
 			in.Session, in.Delivered, in.Taken, in.Activity = a.HandTo, time.Time{}, time.Time{}, nil
+		case a.Work != nil:
+			// Work no running session covers (#65): Go starts a session
+			// for it, which receives the owner's record, and its reply is
+			// the answer.
 		default:
 			in.Reply, in.ReplyWithheld, in.Replied, in.Waiting = a.Answer, a.Withheld > 0, e.Time, ""
 		}

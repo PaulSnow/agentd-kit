@@ -152,6 +152,7 @@ const (
 	ActMerge     = "merge"     // a request's target fast-forwarded to its gated, green head
 	ActRetest    = "retest"    // a request's pipeline run again on its merge result, its target having moved
 	ActInstruct  = "instruct"  // the owner's instructions written to instructions.json and the pointer typed
+	ActReopen    = "reopen"    // a finished session's DONE taken off for the owner's message handed to it (#65)
 )
 
 // StartPayload is a run's start: the sessions it supervises.
