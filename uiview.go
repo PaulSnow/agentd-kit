@@ -541,6 +541,8 @@ type uiMessageView struct {
 	Src  string
 	Body template.HTML
 	More template.HTML // the whole text of a long one, folded (#56)
+	// A prompt's line, linked to its page (#58), in place of its text.
+	Prompt *uiPromptLink
 	// An instruction's steps (#56), the tools the session ran on it, and
 	// the reply threaded under it.
 	Steps     []uiStep
@@ -800,6 +802,9 @@ func (u *UI) consoleView(repo string, page int, now time.Time) (*uiConsole, erro
 					body, more = template.HTML(template.HTMLEscapeString(withheldMessage)), ""
 				}
 				mv := uiMessageView{uiMessage: m, Src: src.Name, Body: body, More: more}
+				if m.Ref != nil && m.Text != "" && !secret(m.Text) {
+					mv.Prompt = promptLinkOf(cfg.Policies, src.Name, m.Session, *m.Ref, m.Text)
+				}
 				if in := src.st.Instructions[m.ID]; in != nil && m.Kind == "instruction" {
 					mv.Steps = instructionSteps(src.st, in)
 					for _, tn := range in.Activity {
@@ -937,10 +942,23 @@ type uiEvent struct {
 
 // uiTurn is one of a session's latest turns.
 type uiTurn struct {
-	Role string
-	At   time.Time
-	Body template.HTML
-	More template.HTML // the whole text of a long one, folded
+	Role   string
+	At     time.Time
+	Body   template.HTML
+	More   template.HTML // the whole text of a long one, folded
+	Prompt *uiPromptLink // a prompt's line, linked to its page (#58)
+}
+
+// uiPromptLink is a prompt as a line links it to its page.
+type uiPromptLink struct {
+	promptLabel
+	Href string
+}
+
+// promptLinkOf is the line of the prompt at ref of session name of
+// source src, with text as logged.
+func promptLinkOf(pol Policies, src, name string, ref promptRef, text string) *uiPromptLink {
+	return &uiPromptLink{promptLabel: labelPrompt(pol, ref.Role, text), Href: "/session/" + src + "/" + name + "/prompt/" + ref.ID()}
 }
 
 // uiSessionPage is a session's view: its row, its latest turns, its
@@ -1022,7 +1040,11 @@ func (u *UI) sessionView(src *uiSource, name string, now time.Time) (*uiSessionP
 		if tr.Withheld || secret(tr.Text) {
 			body, more = template.HTML(template.HTMLEscapeString(withheldMessage)), ""
 		}
-		v.Turns = append(v.Turns, uiTurn{Role: tr.Role, At: tr.At, Body: body, More: more})
+		ut := uiTurn{Role: tr.Role, At: tr.At, Body: body, More: more}
+		if (tr.Role == TurnPrompt || tr.Role == TurnCompact) && tr.Transcript != "" && tr.Line > 0 && !tr.Withheld && !secret(tr.Text) {
+			ut.Prompt = promptLinkOf(cfg.Policies, src.Name, name, promptRef{tr.Transcript, tr.Line, tr.Role}, tr.Text)
+		}
+		v.Turns = append(v.Turns, ut)
 	}
 	if sess, ok := cfg.Sessions[name]; ok && sess.Workdir != "" {
 		b, err := readRegular(filepath.Join(sess.Workdir, "STATUS.md"), statusLimit)

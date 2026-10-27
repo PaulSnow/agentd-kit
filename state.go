@@ -308,10 +308,13 @@ func (t *Track) noteHash(hash string, now time.Time, p NudgePolicy, tr Transcrip
 
 // lastTurn is the session's latest folded turn, or none.
 func (t *Track) lastTurn() TurnRecord {
-	if len(t.Turns) == 0 {
-		return TurnRecord{}
+	// A compaction is kept to show (#58), not to judge the turn by.
+	for i := len(t.Turns) - 1; i >= 0; i-- {
+		if t.Turns[i].Role != TurnCompact {
+			return t.Turns[i]
+		}
 	}
-	return t.Turns[len(t.Turns)-1]
+	return TurnRecord{}
 }
 
 // turnEnded says whether the session ended its turn and waits at the

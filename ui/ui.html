@@ -141,13 +141,29 @@
 <p class="muted">Newest first.</p>
 <ol class="messages">{{range .Messages}}<li class="msg msg-{{.Kind}}">
 <div class="msg-head"><span class="from">{{if .From}}{{.From}}{{else}}unknown{{end}}</span>{{if .Session}} <a href="/session/{{.Src}}/{{.Session}}">{{.Session}}</a>{{end}} <span class="badge">{{.Kind}}</span> <time class="muted">{{$.When .At}}</time></div>
-{{if .More}}<div class="fold"><div class="md preview">{{.Body}}</div><details class="more" data-key="m-{{.Src}}-{{.Session}}-{{.At.UnixNano}}"><summary><span class="more-label show-all">Show all</span><span class="more-label show-less">Show less</span></summary><div class="md">{{.More}}</div></details></div>{{else}}<div class="md">{{.Body}}</div>{{end}}
+{{with .Prompt}}{{template "prompt-line" .}}{{else}}{{if .More}}<div class="fold"><div class="md preview">{{.Body}}</div><details class="more" data-key="m-{{.Src}}-{{.Session}}-{{.At.UnixNano}}"><summary><span class="more-label show-all">Show all</span><span class="more-label show-less">Show less</span></summary><div class="md">{{.More}}</div></details></div>{{else}}<div class="md">{{.Body}}</div>{{end}}{{end}}
 {{with .Steps}}<ol class="steps">{{range .}}<li class="step{{if .Failed}} step-failed{{else if .Wait}} step-wait{{end}}">{{.Text}}{{if not .At.IsZero}} <time class="muted">{{$.When .At}}</time>{{end}}</li>{{end}}</ol>{{end}}
 {{with .Activity}}<ol class="activity">{{range .}}<li class="tool{{if .Failed}} tool-failed{{end}}"><code>{{.Text}}</code>{{if .Failed}} <span class="badge">failed{{with .Exit}}, exit {{.}}{{end}}</span>{{end}}</li>{{end}}</ol>{{end}}
 {{if .ReplyBy}}<div class="msg msg-reply thread"><div class="msg-head"><a href="/session/{{.Src}}/{{.ReplyBy}}">{{.ReplyBy}}</a> <span class="badge">reply</span> <time class="muted">{{$.When .Replied}}</time></div>{{if .ReplyMore}}<div class="fold"><div class="md preview">{{.Reply}}</div><details class="more" data-key="r-{{.Src}}-{{.ReplyBy}}-{{.Replied.UnixNano}}"><summary><span class="more-label show-all">Show all</span><span class="more-label show-less">Show less</span></summary><div class="md">{{.ReplyMore}}</div></details></div>{{else}}<div class="md">{{.Reply}}</div>{{end}}</div>{{end}}
 </li>{{else}}<li class="empty">No messages yet.</li>{{end}}</ol>
 {{if gt .Pages 1}}<nav class="pager" aria-label="History pages">{{if ge .Newer 1}}<a href="/console/{{.Repository}}?page={{.Newer}}">Newer</a>{{end}} {{if ge .Older 1}}<a href="/console/{{.Repository}}?page={{.Older}}">Older</a>{{end}}</nav>{{end}}
 </section>
+{{template "foot" .}}{{end}}
+
+{{define "prompt-line"}}<p class="prompt-line">{{with .Lead}}{{.}} {{end}}<a href="{{.Href}}">{{.Link}} →</a></p>{{end}}
+
+{{define "prompt"}}{{template "head" .}}
+<p class="crumbs"><a href="/">All repositories</a> · <a href="/session/{{.Src}}/{{.Session}}">{{.Session}}</a></p>
+<section id="prompt" aria-labelledby="prompt-h">
+<h2 id="prompt-h">{{.Label}}{{if not .At.IsZero}} <time class="muted">{{.When .At}}</time>{{end}}</h2>
+{{with .Note}}<p class="muted">{{.}}</p>{{else}}<div class="card md">{{.Body}}</div>
+{{with .Facts}}<h3>What the supervisor recorded</h3><div class="card">{{.}}</div>{{end}}{{end}}
+</section>
+{{with .Files}}<section id="files" aria-labelledby="files-h">
+<h2 id="files-h">The files it points at, as they are now</h2>
+{{range .}}<article class="card"><header class="card-head"><h3>{{.Name}}</h3> <code class="muted">{{.Path}}</code></header>
+{{with .Note}}<p class="muted">{{.}}</p>{{else}}<div class="md">{{.Body}}</div>{{end}}</article>{{end}}
+</section>{{end}}
 {{template "foot" .}}{{end}}
 
 {{define "session"}}{{template "head" .}}
@@ -172,7 +188,7 @@
 </section>
 <section id="turns" data-refresh aria-labelledby="turns-h">
 <h2 id="turns-h">Latest turns</h2>
-<ol class="messages">{{range .Turns}}<li class="msg msg-{{.Role}}"><div class="msg-head"><span class="from">{{.Role}}</span> <time class="muted">{{$.When .At}}</time></div>{{if .More}}<div class="fold"><div class="md preview">{{.Body}}</div><details class="more" data-key="t-{{.Role}}-{{.At.UnixNano}}"><summary><span class="more-label show-all">Show all</span><span class="more-label show-less">Show less</span></summary><div class="md">{{.More}}</div></details></div>{{else}}<div class="md">{{.Body}}</div>{{end}}</li>{{else}}<li class="empty">No turns read yet.</li>{{end}}</ol>
+<ol class="messages">{{range .Turns}}<li class="msg msg-{{.Role}}"><div class="msg-head"><span class="from">{{.Role}}</span> <time class="muted">{{$.When .At}}</time></div>{{with .Prompt}}{{template "prompt-line" .}}{{else}}{{if .More}}<div class="fold"><div class="md preview">{{.Body}}</div><details class="more" data-key="t-{{.Role}}-{{.At.UnixNano}}"><summary><span class="more-label show-all">Show all</span><span class="more-label show-less">Show less</span></summary><div class="md">{{.More}}</div></details></div>{{else}}<div class="md">{{.Body}}</div>{{end}}{{end}}</li>{{else}}<li class="empty">No turns read yet.</li>{{end}}</ol>
 </section>
 <section id="status" data-refresh aria-labelledby="status-h">
 <h2 id="status-h">STATUS.md</h2>
