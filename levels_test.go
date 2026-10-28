@@ -278,10 +278,21 @@ func TestHomeLevel(t *testing.T) {
 	for _, want := range []string{
 		"Across 1 repository: 4 issues and 2 requests open, 2 being worked. 1 issue waits on you, in widgets.",
 		`<a href="/repo/widgets">widgets</a></th><td>4</td><td>2</td><td>2</td><td><strong>1</strong></td><td>3h</td>`,
-		`name="scope" value="home"`, `class="meter"`,
+		`class="meter"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing %q", want)
+		}
+	}
+	for rows, want := range map[string][]HomeRow{
+		"Across 2 repositories: 3 issues and 0 requests open, 0 being worked. 2 issues wait on you, in a, b.": {
+			{Repository: "a", Listed: true, Counts: IndexCounts{Open: 1, Waiting: 1}}, {Repository: "b", Listed: true, Counts: IndexCounts{Open: 2, Waiting: 1}}},
+		"1 repository configured; agentd does not list its issues yet.": {{Repository: "a"}},
+		"Across 1 repository: 1 issue and 1 request open, 1 being worked. Nothing waits on you. 1 repository not listed yet.": {
+			{Repository: "a", Listed: true, Counts: IndexCounts{Open: 1, Working: 1, Requests: 1}}, {Repository: "b"}},
+	} {
+		if got := homeSentence(want); got != rows {
+			t.Errorf("sentence %q, want %q", got, rows)
 		}
 	}
 	day := func(h int) time.Time { return time.Date(2026, 10, 23, h, 0, 0, 0, time.UTC) }
@@ -291,9 +302,15 @@ func TestHomeLevel(t *testing.T) {
 		{At: day(3), Account: "b", Kind: "thread", Tokens: 50},
 		{At: day(0).Add(-time.Hour), Account: "a", Repository: "widgets", Session: "w4", Kind: SpendSession, Tokens: 9000},
 	}}
+	// A day starts at midnight where the owner is: at 01:00 in UTC+3
+	// it is 22:00 the day before in UTC.
+	east := time.FixedZone("UTC+3", 3*3600)
+	if e := todayTokens([]*AccountLedger{l}, time.Date(2026, 10, 23, 1, 0, 0, 0, time.UTC), east); e.Since != time.Date(2026, 10, 23, 0, 0, 0, 0, east) || e.Total != 300+9000 {
+		t.Fatalf("today in UTC+3: %+v", e)
+	}
 	tt := todayTokens([]*AccountLedger{l}, pageAt, time.UTC)
 	if tt.Total != 370 || tt.ByKind[0] != (NamedSpend{Name: SpendSession, Tokens: 300}) || len(tt.ByKind) != 3 ||
-		tt.ByRepository[0] != (NamedSpend{Name: "widgets", Tokens: 320}) || tt.ByRepository[1].Name != "agentd" || tt.BySession[0].Tokens != 300 {
+		tt.ByRepository[0] != (NamedSpend{Name: "widgets", Tokens: 320}) || tt.ByRepository[1].Name != "(agentd)" || tt.BySession[0].Tokens != 300 {
 		t.Fatalf("today %+v", tt)
 	}
 }

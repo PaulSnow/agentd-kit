@@ -77,7 +77,6 @@
 <div><h4>By session</h4><ul>{{range .Today.BySession}}<li>{{.Name}} {{$.Tokens .Tokens}}</li>{{else}}<li class="muted">none</li>{{end}}</ul></div></div></details>
 </div>
 </section>
-{{if .Src}}{{template "console-box" .}}{{end}}
 <details class="home-detail" data-key="home-detail"><summary>Runs, sessions and requests in detail</summary>
 <section id="runs" class="runs" data-refresh aria-label="Runs">
 <ul class="chips">{{range .Runs}}<li class="chip">

@@ -362,9 +362,8 @@ func TestUIAnswersByButtonAndBox(t *testing.T) {
 			t.Errorf("index lacks %q", want)
 		}
 	}
-	// The text question's box, and the home level's console box (#69).
-	if n := strings.Count(body, `<textarea name="text"`); n != 2 {
-		t.Fatalf("%d text boxes, want the text question's and the console box", n)
+	if n := strings.Count(body, `<textarea name="text"`); n != 1 {
+		t.Fatalf("%d text boxes, want the text question's only", n)
 	}
 	if w := ownerPost(u, "/answer", url.Values{"src": {"night"}, "session": {"s-blocked"}, "id": {"Q1"}, "choice": {"b"}, "back": {"/"}}); w.Code != http.StatusSeeOther {
 		t.Fatalf("choice: %d %s", w.Code, w.Body.String())

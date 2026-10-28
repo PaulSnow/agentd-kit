@@ -689,7 +689,7 @@ func todayTokens(ledgers []*AccountLedger, now time.Time, loc *time.Location) To
 			kinds[s.Kind] += s.Tokens
 			repo := s.Repository
 			if repo == "" {
-				repo = "agentd"
+				repo = "(agentd)" // its own jobs, no repository's
 			}
 			repos[repo] += s.Tokens
 			if s.Session != "" {

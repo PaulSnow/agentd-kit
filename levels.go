@@ -713,14 +713,22 @@ func homeSentence(rows []HomeRow) string {
 		}
 	}
 	if listed == 0 {
+		if len(rows) == 1 {
+			return "1 repository configured; agentd does not list its issues yet."
+		}
 		return fmt.Sprintf("%s configured; agentd lists the issues of none of them yet.", listedRepos(len(rows)))
 	}
 	s := fmt.Sprintf("Across %s: %s and %s open, %d being worked.", listedRepos(listed), plural(open, "issue"), plural(requests, "request"), working)
-	if waiting > 0 {
-		s += fmt.Sprintf(" %s on you, in %s.", plural(waiting, "issue waits"), strings.Join(need, ", "))
-		s = strings.Replace(s, "issues waits", "issues wait", 1)
-	} else {
+	switch {
+	case waiting == 1:
+		s += " 1 issue waits on you, in " + strings.Join(need, ", ") + "."
+	case waiting > 1:
+		s += fmt.Sprintf(" %d issues wait on you, in %s.", waiting, strings.Join(need, ", "))
+	default:
 		s += " Nothing waits on you."
+	}
+	if n := len(rows) - listed; n > 0 {
+		s += fmt.Sprintf(" %s not listed yet.", listedRepos(n))
 	}
 	return s
 }

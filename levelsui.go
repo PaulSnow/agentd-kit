@@ -136,7 +136,7 @@ func (u *UI) homeLevel(v *uiIndex, now time.Time) error {
 		for r := range src.cfg.Repositories {
 			names[r] = true
 		}
-		if src.st.Ledger != nil && !src.echo {
+		if src.st.Ledger != nil && src.st.Mode == ModeLive && !src.echo { // as the account reports count
 			spends.Spends = append(spends.Spends, src.st.Ledger.Spends...)
 		}
 		if v.Src == "" && src.st.Mode == ModeLive {
@@ -145,7 +145,7 @@ func (u *UI) homeLevel(v *uiIndex, now time.Time) error {
 		src.mu.Unlock()
 	}
 	for _, repo := range sortedKeys(names) {
-		var row HomeRow
+		row := HomeRow{Repository: repo, Sentence: "No live run serves " + repo + "."}
 		if _, err := u.levelSource(repo, now, func(_ *uiSource, cfg *Config, st *LogState, ds []UIDecision) {
 			row = BuildHomeRow(cfg, st, repo, ds, now)
 		}); err != nil {
