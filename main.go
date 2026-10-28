@@ -78,6 +78,8 @@ func main() {
 		err = contextCmd(os.Args[2:], os.Stdout)
 	case "cases":
 		err = casesCmd(os.Args[2:], os.Stdout)
+	case "issue":
+		err = issueCmd(os.Args[2:], os.Stdout)
 	case "mcp":
 		err = mcpCmd(os.Args[2:], os.Stdin, os.Stdout)
 	case "hub":
@@ -123,6 +125,11 @@ func usage() {
   agentd console [--config PATH] [--log PATH] [--repository REPO] import FILE
   agentd console post [--config PATH] [--log PATH] [--kind KIND] [--from NAME] [--to SESSION] CONSOLE TEXT...|-
   agentd console inbox [--config PATH] [--log PATH] [--from NAME] CONSOLE
+  agentd console [--config PATH] [--log PATH] REPO [--issues [--sort SORT] [--filter WORDS]] [--history]
+  agentd console [--config PATH] [--log PATH] ask [--now] home|REPO|REPO#N TEXT...
+  agentd console [--config PATH] [--log PATH] message --to SESSION [--now] TEXT...
+  agentd console [--config PATH] [--log PATH] reply --entry ID [--choice KEY|--yes|--no] [--repository REPO] TEXT...
+  agentd issue [--config PATH] [--log PATH] [--all] REPO N
   agentd inventory [--config PATH]
   agentd report [--config PATH] [--log PATH] [--shadow] [--host NAME] --out PATH
   agentd ui [--config PATH] [--log PATH]
@@ -412,6 +419,10 @@ func loopCmd(args []string) error {
 // PostMessage and ConsoleInbox. The decisions are read as the live run
 // holds them, or with --shadow the shadow run, as the page reads them.
 func consoleCmd(args []string) error {
+	// The levels' forms (#69): REPO, ask, message and reply --entry.
+	if ok, err := levelConsoleCmd(args, os.Stdout); ok {
+		return err
+	}
 	if len(args) > 0 && (args[0] == "post" || args[0] == "inbox") {
 		return consolePostCmd(args[0], args[1:], os.Stdin, os.Stdout)
 	}
@@ -435,7 +446,7 @@ func consoleCmd(args []string) error {
 	}
 	importing := len(rest) == 2 && rest[0] == "import"
 	if !importing && (len(rest) < 3 || rest[0] != "reply") {
-		return fmt.Errorf("usage: agentd console reply CONSOLE TEXT... | agentd console --repository REPO import FILE | agentd console post CONSOLE TEXT|- | agentd console inbox CONSOLE")
+		return fmt.Errorf("usage: agentd console REPO [--issues [--sort S] [--filter WORDS]] [--history] | agentd console ask [--now] home|REPO|REPO#N TEXT... | agentd console message --to SESSION [--now] TEXT... | agentd console reply --entry ID [--choice KEY|--yes|--no] TEXT... | agentd console reply CONSOLE TEXT... | agentd console --repository REPO import FILE | agentd console post CONSOLE TEXT|- | agentd console inbox CONSOLE")
 	}
 	log, events, err := openLoaded(cfg.EventLog)
 	if err != nil {

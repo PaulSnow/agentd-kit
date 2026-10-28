@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -312,5 +313,106 @@ func TestHomeLevel(t *testing.T) {
 	if tt.Total != 370 || tt.ByKind[0] != (NamedSpend{Name: SpendSession, Tokens: 300}) || len(tt.ByKind) != 3 ||
 		tt.ByRepository[0] != (NamedSpend{Name: "widgets", Tokens: 320}) || tt.ByRepository[1].Name != "(agentd)" || tt.BySession[0].Tokens != 300 {
 		t.Fatalf("today %+v", tt)
+	}
+}
+
+// levelsCLI writes the levels fixture's log and a config for it to files,
+// as the CLI reads them, and returns the config's path.
+func levelsCLI(t *testing.T, f *levelsFixture) string {
+	t.Helper()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "events.jsonl")
+	if err := os.WriteFile(logPath, f.buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wd := f.cfg.Sessions["w4"].Workdir
+	cfgPath := filepath.Join(dir, "agentd.json")
+	writeFile(t, cfgPath, `{"event_log": "`+logPath+`", "transcript_dir": "", "poll": {"index": true},
+		"repositories": {"widgets": {"forge": "github", "project": "example-org/widgets"}},
+		"sessions": {"w4": {"workdir": "`+wd+`", "cwd": "`+wd+`", "repository": "widgets", "issue": 4}}}`)
+	return cfgPath
+}
+
+// The CLI prints the repository's page, its issue box sorted and
+// filtered, its history and the issue's page in the pages' sentences,
+// and records the console box's forms as the pages do; the old forms
+// still work, and a repository named like a subcommand is refused.
+func TestLevelsCLI(t *testing.T) {
+	f := newLevelsFixture(t)
+	cfgPath := levelsCLI(t, f)
+	run := func(args ...string) string {
+		t.Helper()
+		var out bytes.Buffer
+		ok, err := levelConsoleCmd(append([]string{"--config", cfgPath}, args...), &out)
+		if !ok || err != nil {
+			t.Fatalf("%v: %v %v", args, ok, err)
+		}
+		return out.String()
+	}
+	page := run("widgets")
+	for _, want := range []string{
+		"widgets has 4 issues and 2 requests open: 1 needs you, 2 being worked.",
+		"4 issues, 1 need you, 2 being worked, 4 shown", "Profiling the settings page; the cache is next. (status)",
+		"Asks you (w:wa1): w4 asks: Which cache size, 64 or 256 MB? [done, reassign, decline]",
+		"2 open requests", "!9 is reviewing: round 1",
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("console widgets lacks %q:\n%s", want, page)
+		}
+	}
+	if box := run("widgets", "--issues", "--sort", "oldest", "--filter", "docs"); !strings.Contains(box, "4 issues, 1 need you, 2 being worked, 1 shown") || !strings.Contains(box, "#6") || strings.Contains(box, "#4 ") {
+		t.Errorf("issue box:\n%s", box)
+	}
+	if h := run("widgets", "--history"); !strings.Contains(h, "#5  Work item wa1 opened: Pick the cache.") || !strings.Contains(h, "!9  !9: review round 1 started.") {
+		t.Errorf("history:\n%s", h)
+	}
+	var out bytes.Buffer
+	if err := issueCmd([]string{"--config", cfgPath, "widgets", "5"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"#5 Choose a cache (needs you)", "Asks you (w:wa1): w4 asks: Which cache size", "decline: the item closes and nothing more is done on it",
+		"Work item wa1 opened: Pick the cache.", "wa1 is done when the owner says so. Go waits on your answer."} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("issue widgets 5 lacks %q:\n%s", want, out.String())
+		}
+	}
+	if err := issueCmd([]string{"--config", cfgPath, "widgets", "99"}, io.Discard); err == nil {
+		t.Error("an unknown issue printed")
+	}
+	// The console box's forms.
+	run("ask", "widgets#4", "Use", "the", "small", "cache.")
+	run("ask", "home", "What needs me?")
+	run("message", "--to", "w4", "--now", "Push it.")
+	run("reply", "--entry", "w:wa1", "--choice", "decline")
+	log, err := OpenLog(filepath.Join(filepath.Dir(cfgPath), "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, _, _ := log.Tail(0)
+	log.Close()
+	var got []*InstructionPayload
+	for _, e := range events {
+		if e.Kind == KindInstruction {
+			got = append(got, e.Instruction)
+		}
+	}
+	if len(got) != 4 || got[0].Scope != "widgets#4" || got[0].To != "w4" || got[0].Now || got[1].Scope != "home" ||
+		got[2].Scope != "widgets#4" || !got[2].Now || got[3].Re == nil || got[3].Re.ID != "w:wa1" || got[3].Answer == nil || got[3].Answer.Choice != "decline" {
+		for _, g := range got {
+			t.Logf("%+v", g)
+		}
+		t.Fatal("the CLI's forms recorded otherwise than the pages'")
+	}
+	// The old forms are not taken for a repository.
+	if ok, _ := levelConsoleCmd([]string{"--config", cfgPath, "reply", "widgets", "hello"}, io.Discard); ok {
+		t.Error("console reply CONSOLE TEXT was taken as a level form")
+	}
+	if ok, _ := levelConsoleCmd([]string{"--config", cfgPath, "post", "widgets", "hello"}, io.Discard); ok {
+		t.Error("console post was taken as a level form")
+	}
+	bad := filepath.Join(t.TempDir(), "agentd.json")
+	writeFile(t, bad, `{"event_log": "`+filepath.Join(t.TempDir(), "e.jsonl")+`", "transcript_dir": "", "repositories": {"ask": {"forge": "github", "project": "example-org/ask"}}}`)
+	if ok, err := levelConsoleCmd([]string{"--config", bad, "ask", "home", "hi"}, io.Discard); !ok || err == nil || !strings.Contains(err.Error(), "named like") {
+		t.Errorf("a repository named ask: %v %v", ok, err)
 	}
 }
