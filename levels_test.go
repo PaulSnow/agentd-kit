@@ -644,3 +644,26 @@ func TestStepsAreSentences(t *testing.T) {
 		t.Errorf("%d steps, the opening kept: %v", len(texts), contains(texts, "The item to pick the cache was opened."))
 	}
 }
+
+// Two things that read alike are two steps when their chips differ; a
+// ring of steps that all matter keeps them over a new one that does not;
+// a reason's ids are put as words.
+func TestAddStep(t *testing.T) {
+	st := NewLogState(&Config{}, ModeLive)
+	st.addStep("r", IssueStep{Ref: "#1", Text: "A reviewer started on it at 21:56.", Chips: []StepRef{{Kind: "session", ID: "a"}}, Key: true})
+	st.addStep("r", IssueStep{Ref: "#1", Text: "A reviewer started on it at 21:56.", Chips: []StepRef{{Kind: "session", ID: "b"}}, Key: true})
+	st.addStep("r", IssueStep{Ref: "#1", Text: "A reviewer started on it at 21:56.", Chips: []StepRef{{Kind: "session", ID: "b"}}, Key: true})
+	if n := len(st.Steps[sentenceKey("r", "#1")]); n != 2 {
+		t.Fatalf("%d steps", n)
+	}
+	for k := 0; k < stepsKept; k++ {
+		st.addStep("r", IssueStep{Ref: "#2", Text: fmt.Sprintf("Key %d.", k), Key: true})
+	}
+	st.addStep("r", IssueStep{Ref: "#2", Text: "Routine."})
+	if s := st.Steps[sentenceKey("r", "#2")]; len(s) != stepsKept || s[0].Text != "Key 0." || s[len(s)-1].Text != "Key 99." {
+		t.Fatalf("the ring: %d, %q … %q", len(s), s[0].Text, s[len(s)-1].Text)
+	}
+	if got := scrubIDs("the reviewer 1bdb6beef6abadb2 of !12 for W0a1b2c3d on #7 failed"); got != "the reviewer a session of a request for an item on an issue failed" {
+		t.Fatalf("scrubbed: %q", got)
+	}
+}

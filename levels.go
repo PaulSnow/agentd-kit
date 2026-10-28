@@ -55,22 +55,56 @@ func (st *LogState) addStep(repo string, s IssueStep) {
 	}
 	k := sentenceKey(repo, s.Ref)
 	steps := st.Steps[k]
-	if n := len(steps); n > 0 && steps[n-1].Text == s.Text {
+	if n := len(steps); n > 0 && steps[n-1].Text == s.Text && sameChips(steps[n-1].Chips, s.Chips) {
 		return
 	}
 	s.Text = cutUTF8(s.Text, 400)
 	steps = append(steps[:len(steps):len(steps)], s)
 	if len(steps) > stepsKept {
+		// The oldest step that does not matter goes; when every older
+		// one matters, the new one goes unless it matters too.
 		drop := 0
 		for drop < len(steps)-1 && steps[drop].Key {
 			drop++
 		}
-		if drop == len(steps)-1 {
+		if drop == len(steps)-1 && s.Key {
 			drop = 0
 		}
 		steps = append(append([]IssueStep(nil), steps[:drop]...), steps[drop+1:]...)
 	}
 	st.Steps[k] = steps
+}
+
+// sameChips says whether two steps' chips are the same.
+func sameChips(a, b []StepRef) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if a[k] != b[k] {
+			return false
+		}
+	}
+	return true
+}
+
+// stepIDs are the ids a reason Go or a tool wrote may hold: an item's, a
+// session's hex id, a request's or an issue's number.
+var stepIDs = regexp.MustCompile(`\bW[0-9a-f]{8}\b|\b[0-9a-f]{12,}\b|[#!][0-9]+\b`)
+
+// scrubIDs is a reason with its ids put as words, for a step's sentence.
+func scrubIDs(s string) string {
+	return stepIDs.ReplaceAllStringFunc(s, func(id string) string {
+		switch {
+		case id[0] == '!':
+			return "a request"
+		case id[0] == '#':
+			return "an issue"
+		case id[0] == 'W':
+			return "an item"
+		}
+		return "a session"
+	})
 }
 
 // itemName is a work item by its title, as a sentence names it: "the
@@ -173,10 +207,13 @@ func (st *LogState) noteSteps(e Event) {
 		}
 		st.addStep(it.Repository, s)
 	case e.Kind == KindSession && e.Runtime != nil && e.Runtime.Issue > 0 && e.Runtime.Action == SessionStart:
+		// The clock time is the zone agentd runs in, as its pages show.
 		s := IssueStep{At: e.Time, Ref: "#" + strconv.Itoa(e.Runtime.Issue), Key: true,
 			Text: fmt.Sprintf("%s started on it at %s.", roleName(e.Runtime.Kind), e.Time.In(time.Local).Format("15:04"))}
-		if e.Session != "" {
-			s.Chips = []StepRef{{Kind: "session", ID: e.Session}}
+		if name := e.Session; name != "" {
+			s.Chips = []StepRef{{Kind: "session", ID: name}}
+		} else if e.Runtime.ID != "" {
+			s.Chips = []StepRef{{Kind: "session", ID: e.Runtime.ID}}
 		}
 		st.addStep(e.Runtime.Repository, s)
 	case e.Kind == KindLoop && e.Loop != nil && e.Mode != ModeOwner:
@@ -197,7 +234,7 @@ func (st *LogState) noteSteps(e Event) {
 			if p.Failed == LoopJudge {
 				what = "judging"
 			}
-			s.Text = fmt.Sprintf("The %s of %s failed: %s.", what, name, strings.TrimSuffix(oneLine(p.Reason, 200), "."))
+			s.Text = fmt.Sprintf("The %s of %s failed: %s.", what, name, strings.TrimSuffix(scrubIDs(oneLine(p.Reason, 200)), "."))
 		}
 		st.addStep(p.Repository, s)
 		if issue := caseIssue(p.Case); issue != "" {
@@ -209,11 +246,20 @@ func (st *LogState) noteSteps(e Event) {
 		name := st.requestName(a.Repository, a.Ref)
 		s := IssueStep{At: e.Time, Ref: a.Ref, Key: true, Text: capital(name) + " was merged.", Chips: []StepRef{{Kind: "request", ID: a.Ref}}}
 		st.addStep(a.Repository, s)
-		if i := st.Index[a.Repository][a.Ref]; i != nil {
+		// Its issue as the loop's steps have it: the case of the session
+		// that delivered it, else the issue its title names.
+		issue := ""
+		if st.cfg != nil {
+			issue = caseIssue(st.cfg.caseOf(withRuntime(st.cfg, st.Runtime).Sessions[e.Session]))
+		}
+		if i := st.Index[a.Repository][a.Ref]; issue == "" && i != nil {
 			if m := issueInTitle.FindStringSubmatch(i.Title); m != nil {
-				s.Ref = "#" + m[1]
-				st.addStep(a.Repository, s)
+				issue = "#" + m[1]
 			}
+		}
+		if issue != "" {
+			s.Ref = issue
+			st.addStep(a.Repository, s)
 		}
 	}
 }
@@ -950,6 +996,11 @@ func BuildIssueLevel(cfg *Config, st *LogState, repo string, n int, decisions []
 			for k, c := range s.Chips {
 				if c.Kind == "request" && contains(j.Requests, c.ID) {
 					c.Link = "#mr-" + c.ID[1:]
+				}
+				// A step written before the request was listed names it
+				// now that its title is known.
+				if name := st.requestName(repo, c.ID); c.Kind == "request" && name != "its request" && !secret(name) {
+					s.Text = strings.Replace(s.Text, "its request", name, 1)
 				}
 				chips[k] = c
 			}
