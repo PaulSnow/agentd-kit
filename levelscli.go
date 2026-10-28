@@ -143,7 +143,11 @@ func printDecisions(w io.Writer, ds []LevelDecision) {
 			continue
 		}
 		if d.Prompt != "" {
-			fmt.Fprintf(w, "  Answer: agentd console reply --entry %s YOUR ANSWER, or --choice KEY\n", d.Entry)
+			var keys []string
+			for _, o := range d.Options {
+				keys = append(keys, "--choice "+o.Key)
+			}
+			fmt.Fprintf(w, "  Answer: agentd console reply --entry %s YOUR ANSWER, or %s\n", d.Entry, strings.Join(keys, " or "))
 			continue
 		}
 		fmt.Fprintf(w, "  Answer: agentd console reply --entry %s --choice KEY [WORDS]\n", d.Entry)

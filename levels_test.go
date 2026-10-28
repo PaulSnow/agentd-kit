@@ -431,7 +431,7 @@ func TestLevelsCLI(t *testing.T) {
 	if err := issueCmd([]string{"--config", cfgPath, "widgets", "5"}, &out); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"#5 Choose a cache (needs you)", "Asks you (w:wa1): w4 asks: Which cache size", "decline: the item closes and nothing more is done on it",
+	for _, want := range []string{"#5 Choose a cache (needs you)", "Asks you (w:wa1): w4 asks: Which cache size", "decline: the item closes and nothing more is done on it", "Answer: agentd console reply --entry w:wa1 YOUR ANSWER, or --choice decline",
 		"The item to pick the cache was opened. [item wa1]", "wa1 is done when the owner says so. Go waits on your answer."} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("issue widgets 5 lacks %q:\n%s", want, out.String())
