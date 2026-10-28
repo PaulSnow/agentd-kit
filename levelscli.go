@@ -330,11 +330,11 @@ func printIssueLevel(w io.Writer, p uiPage, v IssueLevel) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "What has been done")
 	for _, s := range v.Steps {
-		ref := ""
-		if s.Ref != v.Ref {
-			ref = s.Ref + " "
+		chips := ""
+		for _, c := range s.Chips {
+			chips += fmt.Sprintf(" [%s %s]", c.Kind, c.ID)
 		}
-		fmt.Fprintf(w, "  %s  %s%s\n", p.When(s.At), ref, s.Text)
+		fmt.Fprintf(w, "  %s  %s%s\n", p.When(s.At), s.Text, chips)
 	}
 	if len(v.Steps) == 0 {
 		fmt.Fprintln(w, "  Nothing yet.")

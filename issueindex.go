@@ -207,10 +207,10 @@ func (st *LogState) applyIndex(e Event) {
 	case prev != nil:
 		i.Seen, i.Quiet = prev.Seen, prev.Quiet
 		if prev.Title != p.Title && p.Title != "" {
-			st.noteStep(p.Repository, p.Ref, e.Time, "Retitled on the forge: "+p.Title)
+			st.noteStep(p.Repository, p.Ref, e.Time, "Retitled on the forge to “"+p.Title+"”.")
 		}
 	case !p.First && !p.Opened.IsZero():
-		st.noteStep(p.Repository, p.Ref, p.Opened, fmt.Sprintf("Opened on the forge by %s.", p.Author))
+		st.addStep(p.Repository, IssueStep{At: p.Opened, Ref: p.Ref, Key: true, Text: fmt.Sprintf("Opened on the forge by %s.", p.Author)})
 	}
 	if p.First {
 		i.Quiet = p.Changed
@@ -251,9 +251,6 @@ func (st *LogState) applySentence(e Event) {
 		}
 	}
 	if p.Text != "" {
-		if prev == nil || prev.Text != p.Text {
-			st.noteStep(p.Repository, p.Ref, e.Time, p.Text)
-		}
 		s.SentencePayload, s.At = p, e.Time
 	}
 	st.Sentences[k] = s

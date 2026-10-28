@@ -306,7 +306,7 @@
 <section id="decisions" data-refresh aria-labelledby="decisions-h"><h2 id="decisions-h">Decision</h2>
 {{range .Decisions}}{{template "level-decision" (ctx $ .)}}{{else}}<p class="empty">Nothing on this issue waits on you.</p>{{end}}</section>
 <section id="steps" data-refresh aria-labelledby="steps-h"><h2 id="steps-h">What has been done</h2>
-<ol class="steps">{{range .Steps}}<li><time class="muted">{{$.When .At}}</time> {{if ne .Ref $.Ref}}<span class="badge">{{.Ref}}</span> {{end}}{{.Text}}</li>{{else}}<li class="empty">Nothing yet.</li>{{end}}</ol>
+<ol class="steps">{{range .Steps}}<li><time class="muted">{{$.When .At}}</time> {{.Text}}{{with .Chips}} <span class="step-chips">{{range .}}{{if eq .Kind "session"}}<a class="badge chip" href="/session/{{$.Src}}/{{.ID}}">session {{.ID}}</a>{{else if .Link}}<a class="badge chip" href="{{.Link}}">{{.Kind}} {{.ID}}</a>{{else}}<span class="badge chip">{{.Kind}} {{.ID}}</span>{{end}} {{end}}</span>{{end}}</li>{{else}}<li class="empty">Nothing yet.</li>{{end}}</ol>
 {{if .More}}<p><a href="?steps=all">every entry ({{.More}} more)</a></p>{{else if .All}}<p><a href="?">the latest only</a></p>{{end}}
 </section>
 <section id="next" data-refresh aria-labelledby="next-h"><h2 id="next-h">Next</h2>
