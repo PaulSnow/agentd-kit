@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -691,6 +692,146 @@ func TestStatusJudgesAgeAtTheReadersClock(t *testing.T) {
 func containsView(views []LoopView, ref, why string) bool {
 	for _, v := range views {
 		if v.Ref == ref && v.Phase == PlaceOutside && v.Reason == why {
+			return true
+		}
+	}
+	return false
+}
+
+// loopAtOwner is a loop whose request !1 waits on the owner: its
+// reviewer was stopped by its spend cap, so its review step failed.
+func loopAtOwner(t *testing.T) *harness {
+	t.Helper()
+	h, api := loopHarness(t)
+	outsideOpen(api)
+	h.ticks(3, 5*time.Minute)
+	tr := h.sup.track(judgmentName("!1", KindReviewer))
+	tr.State, tr.Stopped = Stopped, "its spend cap"
+	h.ticks(1, 5*time.Minute)
+	if p := h.place("!1"); p.Phase != PlaceOwner {
+		t.Fatalf("place = %+v", p)
+	}
+	return h
+}
+
+// lastLoop is the last loop event of h's log.
+func (h *harness) lastLoop() Event {
+	h.t.Helper()
+	es := h.events()
+	for i := len(es) - 1; i >= 0; i-- {
+		if es[i].Kind == KindLoop {
+			return es[i]
+		}
+	}
+	h.t.Fatal("no loop event")
+	return Event{}
+}
+
+// A request the loop waits on the owner for is a decision card with
+// retry the step, skip to judging and stop; each option, posted from the
+// page, writes the event `agentd loop retry|skip|stop` writes.
+func TestLoopOwnerCard(t *testing.T) {
+	for _, step := range []string{LoopRetry, LoopSkip, LoopStop} {
+		h := loopAtOwner(t)
+		v := BuildRepoLevel(h.cfg, h.sup.st, "widgets", nil, h.clock.Now())
+		var card *LevelDecision
+		for k := range v.Needs {
+			if v.Needs[k].Entry == entryLoop+"!1" {
+				card = &v.Needs[k]
+			}
+		}
+		if card == nil || len(card.Options) != 3 || card.Options[0].Key != LoopRetry || card.Options[1].Key != LoopSkip || card.Options[2].Key != LoopStop {
+			t.Fatalf("the card: %+v in %+v", card, v.Needs)
+		}
+		src := newUISource("live", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+		u, _ := testUI(t, UIConfig{}, src)
+		if body := owner(t, u, "/repo/widgets"); !strings.Contains(body, `value="l:!1"`) || !strings.Contains(body, `value="skip"`) {
+			t.Fatalf("the page has no card:\n%s", body)
+		}
+		if w := multipartTo(u, "/respond", u.token, map[string]string{"src": "live", "repository": "widgets", "entry": "l:!1", "choice": step, "back": "/repo/widgets"}); w.Code != http.StatusSeeOther {
+			t.Fatalf("%s: %d %s", step, w.Code, w.Body.String())
+		}
+		page := h.lastLoop()
+		c := loopAtOwner(t)
+		if err := LoopStep(c.cfg, NewLogWriter(c.buf), c.events(), c.clock.Now(), "widgets", "!1", step); err != nil {
+			t.Fatal(err)
+		}
+		cli := c.lastLoop()
+		if page.Kind != cli.Kind || page.Mode != ModeOwner || cli.Mode != ModeOwner || *page.Loop != *cli.Loop || page.Loop.Step != step {
+			t.Fatalf("%s: the page wrote %+v %+v, the CLI %+v %+v", step, page, page.Loop, cli, cli.Loop)
+		}
+	}
+}
+
+// Stop leaves the request alone until a retry; skip takes the failed
+// review as clean, so the request goes on as converged; neither is
+// taken twice.
+func TestLoopStopAndSkip(t *testing.T) {
+	h := loopAtOwner(t)
+	step := func(s string) error {
+		return LoopStep(h.cfg, NewLogWriter(h.buf), h.events(), h.clock.Now(), "widgets", "!1", s)
+	}
+	if err := step(LoopStop); err != nil {
+		t.Fatal(err)
+	}
+	h.restart(false)
+	h.ticks(3, 5*time.Minute)
+	if p := h.place("!1"); p.Phase != PlaceOwner || !strings.Contains(p.Reason, "stopped") {
+		t.Fatalf("stopped: %+v", p)
+	}
+	if _, ok := h.sup.st.Runtime[judgmentName("!1", KindReviewer)]; ok {
+		t.Fatal("a reviewer runs on a stopped request")
+	}
+	if step(LoopStop) == nil || step(LoopSkip) == nil {
+		t.Fatal("a stopped request was stopped or skipped again")
+	}
+	if err := step(LoopRetry); err != nil {
+		t.Fatal(err)
+	}
+	h.restart(false)
+	h.ticks(2, 5*time.Minute)
+	if _, ok := h.sup.st.Runtime[judgmentName("!1", KindReviewer)]; !ok {
+		t.Fatalf("no review after the retry: %+v", h.place("!1"))
+	}
+
+	s := loopAtOwner(t)
+	if err := LoopStep(s.cfg, NewLogWriter(s.buf), s.events(), s.clock.Now(), "widgets", "!1", LoopSkip); err != nil {
+		t.Fatal(err)
+	}
+	sapi := s.sup.api
+	s.restart(false)
+	s.sup.api = sapi
+	if p := s.place("!1"); p.Phase == PlaceOwner || p.Phase == PlaceReviewing || !strings.Contains(p.Reason, "skipped") {
+		t.Fatalf("skipped: %+v", p)
+	}
+	if LoopStep(s.cfg, NewLogWriter(s.buf), s.events(), s.clock.Now(), "widgets", "!1", LoopSkip) == nil {
+		t.Fatal("a skip with no failed review was recorded")
+	}
+	s.ticks(3, 5*time.Minute)
+	if !mergedRef(s, "!1") {
+		t.Fatalf("the skipped request did not merge: %+v, merges %+v", s.place("!1"), s.forge.merges)
+	}
+
+	// A skipped request the owner then stops does not merge.
+	x := loopAtOwner(t)
+	for _, step := range []string{LoopSkip, LoopStop} {
+		if err := LoopStep(x.cfg, NewLogWriter(x.buf), x.events(), x.clock.Now(), "widgets", "!1", step); err != nil {
+			t.Fatal(err)
+		}
+	}
+	api := x.sup.api
+	x.restart(false)
+	x.sup.api = api
+	x.ticks(3, 5*time.Minute)
+	if mergedRef(x, "!1") {
+		t.Fatal("a stopped request merged")
+	}
+}
+
+// mergedRef says whether h's forge merged ref.
+func mergedRef(h *harness, ref string) bool {
+	for _, m := range h.forge.merges {
+		if m.ref == ref {
 			return true
 		}
 	}

@@ -147,7 +147,7 @@ func (i LevelIssue) WordClass() string { return strings.ReplaceAll(i.Word, " ", 
 
 // Anchor is the decision card's id on its issue's page.
 func (d LevelDecision) Anchor() string {
-	return "decision-" + strings.NewReplacer(":", "-", "/", "-").Replace(d.Entry)
+	return "decision-" + strings.NewReplacer(":", "-", "/", "-", "#", "n").Replace(d.Entry)
 }
 
 // Issue state words.
@@ -189,6 +189,9 @@ type LevelDecision struct {
 	CameBack string        `json:"came_back,omitempty"`
 	Checked  string        `json:"checked,omitempty"`
 	Options  []LevelOption `json:"options,omitempty"`
+	// Command answers it on the command line, KEY one of the options';
+	// "" for agentd console reply --entry.
+	Command string `json:"command,omitempty"`
 }
 
 // LevelOption is one answer a decision takes, with what it does.
@@ -347,7 +350,8 @@ func sessionDecision(d UIDecision) LevelDecision {
 // once.
 type repoNeed struct {
 	LevelDecision
-	Issue string
+	Issue   string
+	Request bool // a request the loop waits on the owner for
 }
 
 // repoNeeds is everything in repo that waits on the owner, as the old
@@ -377,16 +381,31 @@ func repoNeeds(cfg *Config, st *LogState, repo string, decisions []UIDecision, n
 			out = append(out, repoNeed{LevelDecision: sessionDecision(d), Issue: number(c.Sessions[d.Session].Issue)})
 		}
 	}
+	return append(out, requestNeeds(cfg, st, repo, now)...)
+}
+
+// requestNeeds are the cards of repo's requests the loop waits on the
+// owner for, each with the words `agentd loop` takes now, and the issue
+// each is of.
+func requestNeeds(cfg *Config, st *LogState, repo string, now time.Time) []repoNeed {
+	var out []repoNeed
+	c := withRuntime(cfg, st.Runtime)
+	secret := confidentialMatcher(cfg)
 	for _, q := range loopRequests(cfg, st, now) {
 		if q.Repository != repo {
 			continue
 		}
-		if p := placeOf(cfg, st, q); p.Phase != PlaceOwner || p.Do != "" {
+		p := placeOf(cfg, st, q)
+		if p.Phase != PlaceOwner || p.Do != "" {
 			continue // moving, or a step of the loop's own is due
 		}
-		n := repoNeed{LevelDecision: LevelDecision{Asked: fmt.Sprintf("%s is %s: %s.", q.Ref, PlaceOwner, placeOf(cfg, st, q).Reason)}}
+		n := repoNeed{Request: true, LevelDecision: LevelDecision{Entry: entryLoop + q.Ref, Asked: fmt.Sprintf("%s is %s: %s.", q.Ref, PlaceOwner, p.Reason),
+			Options: loopOptions(st.Loops[ciKey(repo, q.Ref)]), Command: fmt.Sprintf("agentd loop KEY %s %s", repo, q.Ref)}}
+		if secret(n.Asked) {
+			n.Asked = fmt.Sprintf("%s is %s; the reason was withheld, as it matched a confidential pattern.", q.Ref, PlaceOwner)
+		}
 		if k := c.Sessions[q.Session].Issue; k > 0 && !q.Outside {
-			n.Issue = number(k)
+			n.Issue = "#" + strconv.Itoa(k)
 		} else if i := st.Index[repo][q.Ref]; i != nil {
 			if m := issueInTitle.FindStringSubmatch(i.Title); m != nil {
 				n.Issue = "#" + m[1]
@@ -523,7 +542,6 @@ func BuildRepoLevel(cfg *Config, st *LogState, repo string, decisions []UIDecisi
 			}
 		}
 	}
-	sortIssues(v.Issues, "needs-me")
 	sort.SliceStable(v.Requests, func(a, b int) bool {
 		if v.Requests[a].Rank != v.Requests[b].Rank {
 			return v.Requests[a].Rank < v.Requests[b].Rank
@@ -534,11 +552,16 @@ func BuildRepoLevel(cfg *Config, st *LogState, repo string, decisions []UIDecisi
 	// the loop waits on the owner for counts its listed issue; the rest
 	// are the repository's own needs, counted once an issue they name.
 	loose := map[string]bool{}
+	cards := map[string]*LevelDecision{} // a listed issue's request card
 	for _, n := range repoNeeds(cfg, st, repo, decisions, now) {
 		switch {
 		case n.Entry != "" && shown[n.Entry]:
-		case n.Entry == "" && st.Index[repo][n.Issue] != nil:
+		case n.Request && st.Index[repo][n.Issue] != nil:
 			needs[n.Issue] = true
+			if cards[n.Issue] == nil {
+				d := n.LevelDecision
+				cards[n.Issue] = &d
+			}
 		default:
 			if secret(n.Asked, n.CameBack, n.Checked) {
 				n.Asked, n.CameBack, n.Checked = withheldSecret, "", ""
@@ -550,6 +573,12 @@ func BuildRepoLevel(cfg *Config, st *LogState, repo string, decisions []UIDecisi
 			loose[n.Issue] = n.Issue != ""
 		}
 	}
+	for k := range v.Issues {
+		if i := &v.Issues[k]; i.Decision == nil && cards[i.Ref] != nil {
+			i.Word, i.Decision = WordNeedsYou, cards[i.Ref]
+		}
+	}
+	sortIssues(v.Issues, "needs-me")
 	loosely := v.Counts.Loose
 	v.Counts = indexCounts(cfg, st, repo, func(ref string) bool { return needs[ref] })
 	v.Counts.Loose = loosely
@@ -766,6 +795,15 @@ func BuildIssueLevel(cfg *Config, st *LogState, repo string, n int, decisions []
 		return v
 	}
 	v.Known = true
+	for _, n := range requestNeeds(cfg, st, repo, now) {
+		if n.Issue == ref {
+			v.Decisions = append(v.Decisions, n.LevelDecision)
+			v.Word = WordNeedsYou
+			if v.Decision == nil {
+				v.Decision = &v.Decisions[len(v.Decisions)-1]
+			}
+		}
+	}
 	// The issue's steps and its requests', each once: a loop step is
 	// noted on the request and on its issue both.
 	var steps []IssueStep

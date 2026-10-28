@@ -118,7 +118,7 @@ func usage() {
   agentd mark-delivered [--config PATH] [--log PATH] SESSION WORKTREE REF
   agentd clear [--config PATH] [--log PATH] SESSION
   agentd sessions [--config PATH] [--log PATH] end NAME
-  agentd loop [--config PATH] [--log PATH] retry REPOSITORY REQUEST
+  agentd loop [--config PATH] [--log PATH] retry|skip|stop REPOSITORY REQUEST
   agentd releases [--config PATH] [--log PATH] [open|retry REPOSITORY TAG]
   agentd policy [--config PATH] [--log PATH] show REPO
   agentd console [--config PATH] [--log PATH] [--shadow] reply CONSOLE TEXT...
@@ -155,7 +155,7 @@ config prints the resolved configuration. mark-delivered records that a
 worktree was already delivered as REF by other means, so run never delivers
 it again. clear lifts a crash-looping session's park, so it may be
 restarted again. sessions end stops a session agentd started and takes it
-off the supervised sessions, keeping its files. loop retry takes a request's failed review or judge step again.
+off the supervised sessions, keeping its files. loop retry takes a request's failed review or judge step again, a skipped review again, or a stopped request up again; loop skip takes a failed review as clean, so the request goes on as converged; loop stop leaves a request alone until a retry.
 policy show prints a repository's effective policy, each key with
 where it came from: the owner's configuration, a default, or the
 repository's own .agentd/policy.json as last read. console reply applies the owner's
@@ -396,7 +396,7 @@ func sessionsCmd(args []string) error {
 	return EndSession(cfg, log, events, time.Now(), rest[1])
 }
 
-// loopCmd is agentd loop retry REPOSITORY REQUEST.
+// loopCmd is agentd loop retry|skip|stop REPOSITORY REQUEST.
 func loopCmd(args []string) error {
 	fs := flag.NewFlagSet("loop", flag.ContinueOnError)
 	cfg, _, err := loadConfigFlag(fs, args)
@@ -404,15 +404,15 @@ func loopCmd(args []string) error {
 		return err
 	}
 	rest := fs.Args()
-	if len(rest) != 3 || rest[0] != "retry" {
-		return fmt.Errorf("usage: agentd loop retry REPOSITORY REQUEST")
+	if len(rest) != 3 || !ownerLoopStep(rest[0]) {
+		return fmt.Errorf("usage: agentd loop retry|skip|stop REPOSITORY REQUEST")
 	}
 	log, events, err := openLoaded(cfg.EventLog)
 	if err != nil {
 		return err
 	}
 	defer log.Close()
-	return RetryLoop(cfg, log, events, time.Now(), rest[1], rest[2])
+	return LoopStep(cfg, log, events, time.Now(), rest[1], rest[2], rest[0])
 }
 
 // consoleCmd is the command-line face of ConsoleReply, ImportConsole,

@@ -412,8 +412,8 @@ func (e Event) check() error {
 		return errors.New("an inbox event is a shared fact, for no one session, and names its console, reader and the ids read")
 	case e.Kind == KindJob && (e.Session != "" || e.Mode != ModeLive && e.Mode != ModeShadow || e.Job.Name == "" || !validJobPhase(e.Job.Phase)):
 		return errors.New("a job event is a run's, for no one session, and names its job and a phase")
-	case e.Kind == KindLoop && (e.Session != "" || e.Loop.Repository == "" || e.Loop.Ref == "" || !validLoopStep(e.Loop.Step) || (e.Mode == ModeOwner) != (e.Loop.Step == LoopRetry) || e.Mode != ModeOwner && e.Mode != ModeLive && e.Mode != ModeShadow):
-		return errors.New("a loop event is a run's step, or the owner's retry, for no one session, and names its repository, request and step")
+	case e.Kind == KindLoop && (e.Session != "" || e.Loop.Repository == "" || e.Loop.Ref == "" || !validLoopStep(e.Loop.Step) || (e.Mode == ModeOwner) != ownerLoopStep(e.Loop.Step) || e.Mode != ModeOwner && e.Mode != ModeLive && e.Mode != ModeShadow):
+		return errors.New("a loop event is a run's step, or the owner's retry, skip or stop, for no one session, and names its repository, request and step")
 	case e.Kind == KindNode && (e.Session != "" || e.Mode != ModeShared):
 		return errors.New("a node event is a shared fact, for no one session")
 	case e.Kind == KindNode && e.Node.check() != nil:
