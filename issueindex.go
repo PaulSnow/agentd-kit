@@ -668,7 +668,7 @@ func (s *Supervisor) readIndexes(now time.Time) {
 		// The listing counts once it is done, so one slower than
 		// poll.every is followed at the next pass, and the worker's key
 		// keeps two of one repository from running at once.
-		if s.idx.due(repo, now, s.cfg.Poll.Every.Duration) {
+		if !s.work.inFlight["index:"+repo] && s.idx.due(repo, now, s.cfg.Poll.Every.Duration) {
 			known := map[string]IndexPayload{}
 			for ref, i := range s.st.Index[repo] {
 				known[ref] = i.IndexPayload
