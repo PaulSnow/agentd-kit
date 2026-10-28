@@ -132,23 +132,55 @@
   function store(key, v) {
     try { localStorage.setItem(key, JSON.stringify(v)); } catch (e) {}
   }
+  // box sorts: begin. The sorts are levels.go's sortIssues and
+  // sortRequests, and a test runs this part against them on the same
+  // rows: text compares with A-Z as a-z, character by character by code
+  // point, as Go compares UTF-8 bytes, the same in every locale; none is
+  // last; ties go to the latest change, then the highest number.
   var wordRank = { "needs you": 0, "working": 1, "stopped": 2 };
   function num(row, k) { return Number(row.dataset[k] || 0); }
-  function text(row, k) { return row.dataset[k] || "\uffff"; }
+  function text(row, k) {
+    return (row.dataset[k] || "\udbff\udfff").replace(/[A-Z]/g, function (c) { return c.toLowerCase(); });
+  }
+  function cmp(x, y) {
+    var i = 0, j = 0;
+    while (i < x.length && j < y.length) {
+      var a = x.codePointAt(i), b = y.codePointAt(j);
+      if (a !== b) { return a < b ? -1 : 1; }
+      i += a > 0xffff ? 2 : 1;
+      j += b > 0xffff ? 2 : 1;
+    }
+    return i < x.length ? 1 : j < y.length ? -1 : 0;
+  }
+  function rank(row) { return wordRank[row.dataset.word] !== undefined ? wordRank[row.dataset.word] : 3; }
+  // run is how long ago a worked row's session started, the longest first.
+  function run(row) { return num(row, "run") || Infinity; }
   var sorts = {
-    "needs-me": function (a, b) { return (wordRank[a.dataset.word] !== undefined ? wordRank[a.dataset.word] : 3) - (wordRank[b.dataset.word] !== undefined ? wordRank[b.dataset.word] : 3); },
+    "needs-me": function (a, b) { return rank(a) - rank(b); },
     "last-change": function () { return 0; },
-    "working": function (a, b) { return (b.dataset.working ? 1 : 0) - (a.dataset.working ? 1 : 0); },
-    "has-mr": function (a, b) { return (num(b, "mr") > 0 ? 1 : 0) - (num(a, "mr") > 0 ? 1 : 0); },
-    "newest": function (a, b) { return num(b, "opened") - num(a, "opened"); },
-    "oldest": function (a, b) { return num(a, "opened") - num(b, "opened"); },
+    "working": function (a, b) {
+      return (b.dataset.working ? 1 : 0) - (a.dataset.working ? 1 : 0) || (a.dataset.working ? cmp(run(a), run(b)) : 0);
+    },
+    "has-mr": function (a, b) {
+      var x = num(a, "mr") > 0, y = num(b, "mr") > 0;
+      return (y ? 1 : 0) - (x ? 1 : 0) || (x ? num(a, "mrrank") - num(b, "mrrank") : 0);
+    },
+    "newest": function (a, b) { return num(b, "number") - num(a, "number"); },
+    "oldest": function (a, b) { return num(a, "number") - num(b, "number"); },
     "stale": function (a, b) { return num(a, "changed") - num(b, "changed"); },
-    "label": function (a, b) { return text(a, "label").localeCompare(text(b, "label")); },
-    "milestone": function (a, b) { return text(a, "milestone").localeCompare(text(b, "milestone")); },
-    "author": function (a, b) { return text(a, "author").localeCompare(text(b, "author")); },
+    "label": function (a, b) { return cmp(text(a, "label"), text(b, "label")); },
+    "milestone": function (a, b) { return cmp(text(a, "milestone"), text(b, "milestone")); },
+    "author": function (a, b) { return cmp(text(a, "author"), text(b, "author")); },
     "loop": function (a, b) { return num(a, "rank") - num(b, "rank"); },
     "ci-failing": function (a, b) { return (b.dataset.failing ? 1 : 0) - (a.dataset.failing ? 1 : 0); }
   };
+  function compareRows(by, a, b) {
+    var c = sorts[by] ? sorts[by](a, b) : 0;
+    if (c === 0) { c = num(b, "changed") - num(a, "changed"); }
+    if (c === 0) { c = num(b, "number") - num(a, "number"); }
+    return c;
+  }
+  // box sorts: end
   function matches(row, words) {
     var hay = row.dataset.text || row.textContent.toLowerCase();
     var refs = (row.dataset.refs || row.dataset.ref || "").split(" ");
@@ -178,12 +210,7 @@
     var words = filter ? filter.value.toLowerCase().split(/\s+/).filter(Boolean) : [];
     var list = section.querySelector(".box-rows");
     var rows = Array.prototype.slice.call(list.querySelectorAll(".box-row"));
-    rows.sort(function (a, b) {
-      var c = sorts[by] ? sorts[by](a, b) : 0;
-      if (c === 0) { c = num(b, "changed") - num(a, "changed"); }
-      if (c === 0) { c = num(b, "number") - num(a, "number"); }
-      return c;
-    });
+    rows.sort(function (a, b) { return compareRows(by, a, b); });
     var shown = 0;
     rows.forEach(function (r) {
       r.hidden = !matches(r, words);
@@ -213,6 +240,21 @@
   }
   document.addEventListener("change", boxInput);
   document.addEventListener("input", boxInput);
+  // A link may name the issue box's sort, as home's waits-on-you number
+  // does (?sort=needs-me): it is taken as the owner's choice.
+  (function () {
+    var m = /[?&]sort=([a-z-]+)/.exec(location.search);
+    var issues = document.querySelector('[data-box="issues"]');
+    var select = issues ? issues.querySelector(".box-sort") : null;
+    if (!m || !select || !select.querySelector('option[value="' + m[1] + '"]')) { return; }
+    // Once: a reload keeps what the owner chooses after.
+    try { history.replaceState(null, "", location.pathname + location.hash); } catch (e) {}
+    var key = "agentd-box:" + issues.dataset.key + ":issues";
+    var state = stored(key);
+    state.sort = m[1];
+    store(key, state);
+    select.value = m[1];
+  })();
   levelBoxes();
   talkBottom(document);
 

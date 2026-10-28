@@ -37,7 +37,8 @@ func levelCmd(cfg *Config, repo string, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("console "+repo, flag.ContinueOnError)
 	issues := fs.Bool("issues", false, "print the issue box")
 	sortBy := fs.String("sort", IssueSorts[0], "the issue box's sort: "+strings.Join(IssueSorts, ", "))
-	filter := fs.String("filter", "", "keep the issues holding these words, a label, #N or !N")
+	filter := fs.String("filter", "", "keep the issues holding these words, a label, an item's or a session's id, #N or !N")
+	mrSort := fs.String("mr-sort", RequestSorts[0], "the MR box's sort: "+strings.Join(RequestSorts, ", "))
 	history := fs.Bool("history", false, "print every step of the repository's issues and requests, oldest first")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -47,6 +48,9 @@ func levelCmd(cfg *Config, repo string, args []string, out io.Writer) error {
 	}
 	if !contains(IssueSorts, *sortBy) {
 		return fmt.Errorf("--sort is one of %s", strings.Join(IssueSorts, ", "))
+	}
+	if !contains(RequestSorts, *mrSort) {
+		return fmt.Errorf("--mr-sort is one of %s", strings.Join(RequestSorts, ", "))
 	}
 	if _, ok := cfg.Repositories[repo]; !ok {
 		return fmt.Errorf("no repository %q", repo)
@@ -82,7 +86,7 @@ func levelCmd(cfg *Config, repo string, args []string, out io.Writer) error {
 		}
 		printIssueBox(out, p, v, *sortBy, *filter)
 		fmt.Fprintln(out)
-		printRequestBox(out, p, v.Requests)
+		printRequestBox(out, p, v.Requests, *mrSort)
 		if talk := screenTalk(c, src.st.scopeConversation(repo, scopeShown)); len(talk) > 0 {
 			fmt.Fprintln(out)
 			printTalk(out, p, talk)
@@ -97,14 +101,22 @@ func printIssueBox(w io.Writer, p uiPage, v RepoLevel, by, filter string) {
 	is := append([]LevelIssue(nil), v.Issues...)
 	sortIssues(is, by)
 	shown := filterIssues(is, filter)
-	fmt.Fprintf(w, "%d issues, %d need you, %d being worked, %d shown\n", v.Counts.Open, v.IssuesWaiting(), v.Counts.Working, len(shown))
+	need := "need"
+	if v.IssuesWaiting() == 1 {
+		need = "needs"
+	}
+	fmt.Fprintf(w, "%s, %d %s you, %d being worked, %d shown\n", plural(v.Counts.Open, "issue"), v.IssuesWaiting(), need, v.Counts.Working, len(shown))
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	for _, i := range shown {
 		mr := strings.Join(i.Requests, " ")
 		if mr == "" {
 			mr = "-"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\tchanged %s\n", i.Ref, i.Word, oneLine(i.Title, 60), mr, p.Ago(i.Changed))
+		labels := ""
+		if len(i.Labels) > 0 {
+			labels = " [" + strings.Join(i.Labels, "] [") + "]"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s%s\t%s\tchanged %s\n", i.Ref, i.Word, oneLine(i.Title, 60), labels, mr, p.Ago(i.Changed))
 		if i.Sentence != "" {
 			fmt.Fprintf(tw, "\t%s (%s)\n", i.Sentence, i.Writer)
 		} else {
@@ -155,8 +167,10 @@ func printDecisions(w io.Writer, ds []LevelDecision) {
 }
 
 // printRequestBox prints the MR box, in the loop's order.
-func printRequestBox(w io.Writer, p uiPage, rs []LevelRequest) {
-	fmt.Fprintf(w, "%d open requests\n", len(rs))
+func printRequestBox(w io.Writer, p uiPage, rs []LevelRequest, by string) {
+	rs = append([]LevelRequest(nil), rs...)
+	sortRequests(rs, by)
+	fmt.Fprintf(w, "%d open %s\n", len(rs), map[bool]string{true: "request", false: "requests"}[len(rs) == 1])
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	for _, r := range rs {
 		ci, issue := r.CI, r.Issue
@@ -166,7 +180,11 @@ func printRequestBox(w io.Writer, p uiPage, rs []LevelRequest) {
 		if issue == "" {
 			issue = "-"
 		}
-		fmt.Fprintf(tw, "%s\t%s\tfor %s\tCI %s\tchanged %s\n", r.Ref, oneLine(r.Title, 60), issue, ci, p.Ago(r.Changed))
+		by := ""
+		if r.Author != "" {
+			by = " by " + r.Author
+		}
+		fmt.Fprintf(tw, "%s\t%s%s\tfor %s\tCI %s\tchanged %s\n", r.Ref, oneLine(r.Title, 60), by, issue, ci, p.Ago(r.Changed))
 		if r.Place != "" {
 			fmt.Fprintf(tw, "\t%s\n", r.Place)
 		}
@@ -329,6 +347,19 @@ func printIssueLevel(w io.Writer, p uiPage, v IssueLevel) {
 	}
 	if len(refs) > 0 {
 		fmt.Fprintln(w, "Refs: "+strings.Join(refs, ", "))
+	}
+	var about []string
+	if len(v.Labels) > 0 {
+		about = append(about, "labels: "+strings.Join(v.Labels, ", "))
+	}
+	if v.Milestone != "" {
+		about = append(about, "milestone: "+v.Milestone)
+	}
+	if v.Author != "" {
+		about = append(about, fmt.Sprintf("opened by %s %s ago", v.Author, p.Ago(v.Opened)))
+	}
+	if len(about) > 0 {
+		fmt.Fprintln(w, strings.Join(about, "; "))
 	}
 	fmt.Fprintln(w)
 	if len(v.Decisions) == 0 {

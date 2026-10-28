@@ -287,6 +287,14 @@ type LevelIssue struct {
 	// Decision is the first open decision, whose options the row offers.
 	Decision *LevelDecision `json:"decision,omitempty"`
 	Working  bool           `json:"working,omitempty"`
+	// RunSince is when the longest-running session that works it started,
+	// zero when none does: the working sort puts the longest run first.
+	RunSince time.Time `json:"run_since,omitempty"`
+	// MRRank is where its foremost request stands in the loop, as
+	// loopRanks orders the places; len(loopRanks)+1 with none.
+	MRRank int `json:"mr_rank"`
+	// IDs are its items' and sessions' ids, which the filter finds it by.
+	IDs []string `json:"ids,omitempty"`
 	// URL is the issue's page on its forge, "" when none is configured.
 	URL string `json:"url,omitempty"`
 }
@@ -294,7 +302,15 @@ type LevelIssue struct {
 // FilterText is what the filter's words are matched in: title,
 // sentence, labels, milestone and author, in lower case.
 func (i LevelIssue) FilterText() string {
-	return strings.ToLower(i.Title + " " + i.Sentence + " " + strings.Join(i.Labels, " ") + " " + i.Milestone + " " + i.Author)
+	return strings.ToLower(i.Title + " " + i.Sentence + " " + strings.Join(i.Labels, " ") + " " + i.Milestone + " " + i.Author + " " + strings.Join(i.IDs, " "))
+}
+
+// RunUnix is RunSince for the page's script, 0 for none.
+func (i LevelIssue) RunUnix() int64 {
+	if i.RunSince.IsZero() {
+		return 0
+	}
+	return i.RunSince.Unix()
 }
 
 // WordClass is the state word as a class name.
@@ -613,7 +629,17 @@ func levelIssue(cfg *Config, st *LogState, repo string, i *IndexIssue, decisions
 	n := i.Number()
 	j := joinIssue(cfg, st, repo, n)
 	li := LevelIssue{Repository: repo, Ref: i.Ref, Number: n, Title: i.Title, Labels: i.Labels, Milestone: i.Milestone, Author: i.Author,
-		Opened: i.Opened, Changed: i.Changed, Requests: j.Requests, Working: busy[i.Ref], Word: WordOpen, URL: webURL(cfg.Repositories[repo], '#', n)}
+		Opened: i.Opened, Changed: i.Changed, Requests: j.Requests, Working: busy[i.Ref], Word: WordOpen, URL: webURL(cfg.Repositories[repo], '#', n),
+		MRRank: len(loopRanks) + 1}
+	for _, it := range j.Work {
+		li.IDs = append(li.IDs, it.ID)
+	}
+	for _, name := range j.Sessions {
+		li.IDs = append(li.IDs, name)
+		if at := st.StartedAt[name]; li.Working && st.sessionLive(name) && !at.IsZero() && (li.RunSince.IsZero() || at.Before(li.RunSince)) {
+			li.RunSince = at
+		}
+	}
 	if i.Withheld > 0 {
 		li.Title = "(withheld: it matched a confidential pattern)"
 	}
@@ -747,9 +773,19 @@ func BuildRepoLevel(cfg *Config, st *LogState, repo string, decisions []UIDecisi
 			loose[n.Issue] = n.Issue != ""
 		}
 	}
+	ranks := map[string]int{}
+	for _, r := range v.Requests {
+		ranks[r.Ref] = r.Rank
+	}
 	for k := range v.Issues {
-		if i := &v.Issues[k]; i.Decision == nil && cards[i.Ref] != nil {
+		i := &v.Issues[k]
+		if i.Decision == nil && cards[i.Ref] != nil {
 			i.Word, i.Decision = WordNeedsYou, cards[i.Ref]
+		}
+		for _, q := range i.Requests {
+			if r, ok := ranks[q]; ok && r < i.MRRank {
+				i.MRRank = r
+			}
 		}
 	}
 	sortIssues(v.Issues, "needs-me")
@@ -831,9 +867,16 @@ func sortIssues(is []LevelIssue, by string) {
 			v = i.Author
 		}
 		if v == "" {
-			return "\uffff" // none last, as on the page
+			return "\U0010FFFF" // none last, as on the page
 		}
-		return v
+		// A-Z as a-z, compared byte by byte, which is by code point, in no
+		// locale, as the page does.
+		return strings.Map(func(r rune) rune {
+			if 'A' <= r && r <= 'Z' {
+				return r + 'a' - 'A'
+			}
+			return r
+		}, v)
 	}
 	sort.SliceStable(is, func(a, b int) bool {
 		x, y := is[a], is[b]
@@ -846,17 +889,23 @@ func sortIssues(is []LevelIssue, by string) {
 			if x.Working != y.Working {
 				return x.Working
 			}
+			if rx, ry := x.RunUnix(), y.RunUnix(); x.Working && rx != ry {
+				return rx != 0 && (ry == 0 || rx < ry) // the longest run first
+			}
 		case "has-mr":
 			if (len(x.Requests) > 0) != (len(y.Requests) > 0) {
 				return len(x.Requests) > 0
 			}
+			if len(x.Requests) > 0 && x.MRRank != y.MRRank {
+				return x.MRRank < y.MRRank
+			}
 		case "newest":
-			if !x.Opened.Equal(y.Opened) {
-				return x.Opened.After(y.Opened)
+			if x.Number != y.Number {
+				return x.Number > y.Number
 			}
 		case "oldest":
-			if !x.Opened.Equal(y.Opened) {
-				return x.Opened.Before(y.Opened)
+			if x.Number != y.Number {
+				return x.Number < y.Number
 			}
 		case "stale":
 			if !x.Changed.Equal(y.Changed) {
@@ -888,12 +937,12 @@ func sortRequests(rs []LevelRequest, by string) {
 				return x.Failing
 			}
 		case "newest":
-			if !x.Opened.Equal(y.Opened) {
-				return x.Opened.After(y.Opened)
+			if x.Number != y.Number {
+				return x.Number > y.Number
 			}
 		case "oldest":
-			if !x.Opened.Equal(y.Opened) {
-				return x.Opened.Before(y.Opened)
+			if x.Number != y.Number {
+				return x.Number < y.Number
 			}
 		}
 		if !x.Changed.Equal(y.Changed) {
