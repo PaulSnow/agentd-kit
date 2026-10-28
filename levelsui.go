@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"sort"
@@ -233,11 +234,14 @@ func (src *uiSource) scopeReply(c Scope, text string, now bool, files []stagedAt
 	// At home a typed answer binds nothing: the decisions are every
 	// repository's, and the owner answers one on its page.
 	src.mu.Unlock()
-	if now && to == "" {
-		return "", fmt.Errorf("no session that takes messages works %s, so nothing can be typed into one now; send it without now and it goes to the repository's thread", c)
-	}
 	if entry, a := typedDecision(open, text); entry != "" {
 		return "the answer to " + entry, src.respond(repoOf[entry], entry, "", "", a, files)
+	}
+	switch {
+	case now && c.Issue == 0:
+		return "", errors.New("now applies only at an issue a session works; at home or a repository nothing interrupts a session")
+	case now && to == "":
+		return "", fmt.Errorf("no session that takes messages works %s, so nothing can be typed into one now; send it without now and it goes to the repository's thread", c)
 	}
 	src.mu.Lock()
 	defer src.mu.Unlock()

@@ -693,6 +693,9 @@ func TestNowOnlyWithASession(t *testing.T) {
 	if _, err := f.src.scopeReply(Scope{Repository: "widgets", Issue: 6}, "Look at the typo.", true, nil); err == nil || f.buf.Len() != before {
 		t.Fatal("the command line's ask --now with no session was recorded")
 	}
+	if _, err := f.src.scopeReply(Scope{Repository: "widgets"}, "Look at the typo.", true, nil); err == nil || !strings.Contains(err.Error(), "only at an issue") || f.buf.Len() != before {
+		t.Fatalf("now at a repository: %v", err)
+	}
 	if w := ownerPost(u, "/reply", url.Values{"src": {"live"}, "repository": {"widgets"}, "scope": {"widgets#6"}, "text": {"Look at the typo."}, "back": {"/repo/widgets/issue/6"}}); w.Code != http.StatusSeeOther {
 		t.Fatalf("without now: %d %s", w.Code, w.Body.String())
 	}
