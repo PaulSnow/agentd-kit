@@ -813,7 +813,16 @@ func repoSentence(v RepoLevel, now time.Time) string {
 	s := fmt.Sprintf("%s has %s and %s open", v.Repository, plural(c.Open, "issue"), plural(c.Requests, "request"))
 	var parts []string
 	if c.Waiting > 0 {
-		parts = append(parts, fmt.Sprintf("%d %s you", c.Waiting, map[bool]string{true: "needs", false: "need"}[c.Waiting == 1]))
+		// The box counts issues; the sentence counts all that waits, and
+		// says how many of those are on no listed issue.
+		p := fmt.Sprintf("%d %s you", c.Waiting, map[bool]string{true: "needs", false: "need"}[c.Waiting == 1])
+		switch {
+		case c.Loose >= c.Waiting:
+			p += ", on no listed issue"
+		case c.Loose > 0:
+			p += fmt.Sprintf(", %d on no listed issue", c.Loose)
+		}
+		parts = append(parts, p)
 	}
 	if c.Working > 0 {
 		parts = append(parts, fmt.Sprintf("%d being worked", c.Working))
@@ -1118,7 +1127,7 @@ func homeSentence(rows []HomeRow) string {
 		return "No repository is configured."
 	}
 	var need []string
-	open, working, requests, waiting, listed := 0, 0, 0, 0, 0
+	open, working, requests, waiting, loose, listed := 0, 0, 0, 0, 0, 0
 	for _, r := range rows {
 		if !r.Listed {
 			continue
@@ -1128,6 +1137,7 @@ func homeSentence(rows []HomeRow) string {
 		working += r.Counts.Working
 		requests += r.Counts.Requests
 		waiting += r.Counts.Waiting
+		loose += r.Counts.Loose
 		if r.Counts.Waiting > 0 {
 			need = append(need, r.Repository)
 		}
@@ -1139,11 +1149,17 @@ func homeSentence(rows []HomeRow) string {
 		return fmt.Sprintf("%s configured; agentd lists the issues of none of them yet.", listedRepos(len(rows)))
 	}
 	s := fmt.Sprintf("Across %s: %s and %s open, %d being worked.", listedRepos(listed), plural(open, "issue"), plural(requests, "request"), working)
+	// Issues only when every wait is on a listed issue; a decision or a
+	// question on none is a thing.
+	what := "issue"
+	if loose > 0 {
+		what = "thing"
+	}
 	switch {
 	case waiting == 1:
-		s += " 1 issue waits on you, in " + strings.Join(need, ", ") + "."
+		s += " 1 " + what + " waits on you, in " + strings.Join(need, ", ") + "."
 	case waiting > 1:
-		s += fmt.Sprintf(" %d issues wait on you, in %s.", waiting, strings.Join(need, ", "))
+		s += fmt.Sprintf(" %d %ss wait on you, in %s.", waiting, what, strings.Join(need, ", "))
 	default:
 		s += " Nothing waits on you."
 	}
