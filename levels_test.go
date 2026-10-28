@@ -298,9 +298,10 @@ func TestLevelForgeLinks(t *testing.T) {
 	u, _ := testUI(t, UIConfig{}, f.src)
 	for path, want := range map[string]string{
 		"/repo/widgets/issue/5": `<h2><a class="forge-ref" href="https://github.com/example-org/widgets/issues/5" target="_blank" rel="noopener"`,
+		"/repo/widgets?issue":   `<a class="forge-ref" href="https://github.com/example-org/widgets/issues/5" target="_blank" rel="noopener" title="Open #5 on its forge">#5</a> <strong class="row-title"><a href="/repo/widgets/issue/5">Choose a cache</a></strong>`,
 		"/repo/widgets":         `<a class="forge-ref" href="https://github.com/example-org/widgets/pull/9" target="_blank" rel="noopener" title="Open !9 on its forge">!9</a> <strong class="row-title"><a href="/repo/widgets/issue/4#mr-9">Speed up #4</a></strong>`,
 	} {
-		if body := owner(t, u, path); !strings.Contains(body, want) {
+		if body := owner(t, u, strings.TrimSuffix(path, "?issue")); !strings.Contains(body, want) {
 			t.Errorf("%s: missing %q", path, want)
 		}
 	}
