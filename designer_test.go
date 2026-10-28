@@ -30,6 +30,11 @@ func designerHarness(t *testing.T, auto bool) *harness {
 // designOut is what a fake designer prints: a brief with design and
 // acceptance, a question, done_when and a rating.
 func designOut(step string, deploys bool, spend float64) string {
+	return designOutQ(step, deploys, spend, "Which red?")
+}
+
+// designOutQ is designOut asking questions.
+func designOutQ(step string, deploys bool, spend float64, questions ...string) string {
 	out, _ := json.Marshal(map[string]any{
 		"brief": map[string]any{
 			"exists":       []string{"paint.go: Paint(color) paints one wall"},
@@ -39,7 +44,7 @@ func designOut(step string, deploys bool, spend float64) string {
 			"out_of_scope": []string{"the fence"},
 			"acceptance":   []string{"every wall of the shed is red", "./bin/check passes"},
 		},
-		"questions": []string{"Which red?"},
+		"questions": questions,
 		"done_when": map[string]any{"kind": "file", "path": "SHED.md", "contains": "red"},
 		"rating":    map[string]any{"production": false, "deployment": deploys, "spend_usd": spend, "why": "a change to the repository alone"},
 	})
@@ -174,7 +179,7 @@ func TestDesignerBriefPostsAsDecisionAndStartsOnGo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"# " + it.ID + ": Paint the shed", "in signal red", "## Questions\n\n- Which red?", "## How agentd tracks it", `"ID done: EVIDENCE"`} {
+	for _, want := range []string{"# " + it.ID + ": Paint the shed", "in signal red", "## Questions\n\nQ1. Which red?\n> Not answered at go", "## How agentd tracks it", `"ID done: EVIDENCE"`} {
 		if !strings.Contains(string(brief), want) {
 			t.Fatalf("BRIEF.md lacks %q:\n%s", want, brief)
 		}
@@ -193,6 +198,100 @@ func TestDesignerBriefPostsAsDecisionAndStartsOnGo(t *testing.T) {
 	rb, err := os.ReadFile(filepath.Join(h.dir, rev, "BRIEF.md"))
 	if err != nil || !strings.Contains(string(rb), `"standard":"# `+it.ID) {
 		t.Fatalf("the reviewer's brief: %s, %v", rb, err)
+	}
+}
+
+// The owner's answers at go reach the session: BRIEF.md and the item's
+// brief in items.json hold each answer, whole, under its numbered
+// question (#68).
+func TestGoAnswersReachBriefUnderQuestions(t *testing.T) {
+	dir := fakeClaude(t)
+	h := designerHarness(t, false)
+	h.ticks(1, time.Minute)
+	claudeAnswers(t, dir, 2, designOutQ("Add PaintAll to paint.go", false, 0, "Gate it on the policy?", "Is the count enough?"))
+	it := h.askDesigned(dir, "Paint the shed red, all of it.")
+	h.ticks(2, time.Minute)
+	if it = h.item(it.ID); it.State != WorkDesigned {
+		t.Fatalf("item = %+v", it)
+	}
+	long := "the count is enough " + strings.Repeat("and nothing more ", 60) + "END"
+	if err := h.respondDesign(it.ID, DesignGo, "Q1: yes, gate it\nQ2: "+long); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(3, time.Minute)
+	it = h.item(it.ID)
+	if it.Session == "" || !it.Started {
+		t.Fatalf("after go: item = %+v", it)
+	}
+	want := "## Questions\n\nQ1. Gate it on the policy?\n> Answer: yes, gate it\n\nQ2. Is the count enough?\n> Answer: " + long + "\n"
+	brief, err := os.ReadFile(filepath.Join(h.dir, it.Session, "BRIEF.md"))
+	if err != nil || !strings.Contains(string(brief), want) {
+		t.Fatalf("BRIEF.md lacks the answers under their questions (%v):\n%s", err, brief)
+	}
+	if !strings.Contains(string(brief), `("> Answer: …") is settled: follow the answer`) || strings.Contains(string(brief), "Not answered at go") {
+		t.Fatalf("BRIEF.md does not say the answered questions are settled:\n%s", brief)
+	}
+	h.alive(it.Session, "launched\n"+idleScreen)
+	h.ticks(2, time.Minute)
+	b, err := os.ReadFile(filepath.Join(h.dir, it.Session, ItemsFile))
+	var doc struct{ Items []itemDoc }
+	if err != nil || json.Unmarshal(b, &doc) != nil || len(doc.Items) != 1 || !strings.Contains(doc.Items[0].Brief, want) {
+		t.Fatalf("items.json lacks the answers under their questions: %s, %v", b, err)
+	}
+}
+
+// splitAnswers matches answers to questions by their line markers; free
+// text answers a single question, and is otherwise left whole.
+func TestSplitAnswers(t *testing.T) {
+	for _, c := range []struct {
+		words string
+		n     int
+		want  []string
+	}{
+		{"Q1: yes\nQ2: no", 2, []string{"yes", "no"}},
+		{"1. yes\nmore on it\n2) no", 2, []string{"yes\nmore on it", "no"}},
+		{"q2. only the second", 2, []string{"", "only the second"}},
+		{"go ahead, signal red", 1, []string{"go ahead, signal red"}},
+		{"go ahead, all of it", 2, nil},
+		{"Q3: none such", 2, nil},
+		{"", 2, nil},
+		// A list inside a Qn answer, and a marker again, add to it.
+		{"Q1: Use both:\n1. Postgres\n2. Redis\nQ2: no", 2, []string{"Use both:\n1. Postgres\n2. Redis", "no"}},
+		{"Q1: a\nQ1: b", 2, []string{"a\nb", ""}},
+		// A number is no marker.
+		{"2.5 seconds is the timeout we want", 2, nil},
+		{"1.21 is the minimum Go", 1, []string{"1.21 is the minimum Go"}},
+		// A list in prose, or longer than the questions, answers none.
+		{"Fine by me.\nMy plan:\n1. ship\n2. test", 2, nil},
+		{"1. ship\n2. test\n3. tag", 2, nil},
+		{"Q1: yes\r\nmore\r\nand more\r\nQ2: no", 2, []string{"yes\nmore\nand more", "no"}},
+	} {
+		if got := splitAnswers(c.words, c.n); strings.Join(got, "|") != strings.Join(c.want, "|") || (got == nil) != (c.want == nil) {
+			t.Errorf("splitAnswers(%q, %d) = %q, want %q", c.words, c.n, got, c.want)
+		}
+	}
+}
+
+// An answer left out, and words with no markers for two questions, are
+// shown as such: the question stays open, or points to the words.
+func TestDesignMarkdownAnswers(t *testing.T) {
+	it := &WorkItem{ID: "W12345678", ThreadWork: ThreadWork{Title: "Paint"}, Designer: true, Approved: time.Now(),
+		Design: &WorkDesign{Brief: &DesignBrief{}, Questions: []string{"Which red?", "Which wall?"}}}
+	it.ApprovedWords = "Go.\nQ2: the north one"
+	md := designMarkdown(it, "Paint it.")
+	for _, want := range []string{"Q1. Which red?\n> Not answered at go", "Q2. Which wall?\n> Answer: the north one\n", "## Owner's answers at go\n\n> Go.\n"} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("lacks %q:\n%s", want, md)
+		}
+	}
+	it.ApprovedWords = "Looks good, thanks"
+	md = designMarkdown(it, "Paint it.")
+	if strings.Count(md, "may answer it") != 2 || !strings.Contains(md, "## Owner's answers at go\n\n> Looks good, thanks\n") || strings.Contains(md, "> Answer:") {
+		t.Fatalf("free text:\n%s", md)
+	}
+	it.ApprovedWords = ""
+	if md = designMarkdown(it, ""); strings.Count(md, "Not answered at go") != 2 || strings.Contains(md, "Owner's answers") {
+		t.Fatalf("no words:\n%s", md)
 	}
 }
 
