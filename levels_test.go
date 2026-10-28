@@ -510,3 +510,33 @@ func TestLevelsCLIFlags(t *testing.T) {
 		t.Fatal("a view created a log")
 	}
 }
+
+// What waits on the owner is counted on the home row and the repository
+// page whether or not an indexed issue shows it: a request the loop waits
+// on the owner for, a work item that asks with no issue, and a session's
+// decision in a repository whose issues are not listed. Each is listed
+// among the repository's needs.
+func TestWaitsOnYouCountsWhatWaits(t *testing.T) {
+	h, api := loopHarness(t)
+	outsideOpen(api)
+	h.ticks(3, 5*time.Minute)
+	tr := h.sup.track(judgmentName("!1", KindReviewer))
+	tr.State, tr.Stopped = Stopped, "its spend cap"
+	h.ticks(1, 5*time.Minute)
+	if p := h.place("!1"); p.Phase != PlaceOwner {
+		t.Fatalf("place = %+v", p)
+	}
+	now := h.clock.Now()
+	if row := BuildHomeRow(h.cfg, h.sup.st, "widgets", nil, now); row.Counts.Waiting != 1 {
+		t.Fatalf("a request waiting on the owner: home counts %d", row.Counts.Waiting)
+	}
+	h.sup.st.Work["w9"] = &WorkItem{ID: "w9", Repository: "widgets", State: WorkBlocked, Question: "Which cache size?", ThreadWork: ThreadWork{Title: "Pick the cache"}}
+	ds := []UIDecision{{Session: "d", Repository: "widgets", Decision: Decision{ID: "q1", Question: "Ship it on Friday?"}}}
+	v := BuildRepoLevel(h.cfg, h.sup.st, "widgets", ds, now)
+	if v.Counts.Waiting != 3 {
+		t.Fatalf("waiting %d", v.Counts.Waiting)
+	}
+	if row := BuildHomeRow(h.cfg, h.sup.st, "widgets", ds, now); row.Counts.Waiting != 3 {
+		t.Fatalf("home counts %d", row.Counts.Waiting)
+	}
+}
