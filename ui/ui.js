@@ -85,9 +85,103 @@
           reopen(old, next);
           old.replaceWith(document.importNode(next, true));
         }
+        levelBoxes();
       })
       .catch(function () {});
   }
+
+  // The level boxes (#69): the issue box and the MR box sort and filter
+  // their rows here, over the rows' data, so sorting never fetches; the
+  // choice is kept per repository and box, and applied again after a
+  // refresh swaps a box in.
+  function stored(key) {
+    try { return JSON.parse(localStorage.getItem(key) || "{}"); } catch (e) { return {}; }
+  }
+  function store(key, v) {
+    try { localStorage.setItem(key, JSON.stringify(v)); } catch (e) {}
+  }
+  var wordRank = { "needs you": 0, "working": 1, "stopped": 2 };
+  function num(row, k) { return Number(row.dataset[k] || 0); }
+  function text(row, k) { return row.dataset[k] || "\uffff"; }
+  var sorts = {
+    "needs-me": function (a, b) { return (wordRank[a.dataset.word] !== undefined ? wordRank[a.dataset.word] : 3) - (wordRank[b.dataset.word] !== undefined ? wordRank[b.dataset.word] : 3); },
+    "last-change": function () { return 0; },
+    "working": function (a, b) { return (b.dataset.working ? 1 : 0) - (a.dataset.working ? 1 : 0); },
+    "has-mr": function (a, b) { return (num(b, "mr") > 0 ? 1 : 0) - (num(a, "mr") > 0 ? 1 : 0); },
+    "newest": function (a, b) { return num(b, "opened") - num(a, "opened"); },
+    "oldest": function (a, b) { return num(a, "opened") - num(b, "opened"); },
+    "stale": function (a, b) { return num(a, "changed") - num(b, "changed"); },
+    "label": function (a, b) { return text(a, "label").localeCompare(text(b, "label")); },
+    "milestone": function (a, b) { return text(a, "milestone").localeCompare(text(b, "milestone")); },
+    "author": function (a, b) { return text(a, "author").localeCompare(text(b, "author")); },
+    "loop": function (a, b) { return num(a, "rank") - num(b, "rank"); },
+    "ci-failing": function (a, b) { return (b.dataset.failing ? 1 : 0) - (a.dataset.failing ? 1 : 0); }
+  };
+  function matches(row, words) {
+    var hay = row.dataset.text || row.textContent.toLowerCase();
+    var refs = (row.dataset.refs || row.dataset.ref || "").split(" ");
+    for (var i = 0; i < words.length; i++) {
+      var w = words[i];
+      if (w.charAt(0) === "#" || w.charAt(0) === "!") {
+        if (refs.indexOf(w) < 0) { return false; }
+      } else if (hay.indexOf(w) < 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+  function applyBox(section) {
+    var key = "agentd-box:" + section.dataset.key + ":" + section.dataset.box;
+    var state = stored(key);
+    var select = section.querySelector(".box-sort");
+    var filter = section.querySelector(".box-filter");
+    if (select && state.sort && sorts[state.sort]) { select.value = state.sort; }
+    if (filter && typeof state.filter === "string" && document.activeElement !== filter) {
+      // As the page's own value, so a refresh does not take the box for
+      // one the owner is typing in.
+      filter.value = state.filter;
+      filter.defaultValue = state.filter;
+    }
+    var by = select ? select.value : "";
+    var words = filter ? filter.value.toLowerCase().split(/\s+/).filter(Boolean) : [];
+    var list = section.querySelector(".box-rows");
+    var rows = Array.prototype.slice.call(list.querySelectorAll(".box-row"));
+    rows.sort(function (a, b) {
+      var c = sorts[by] ? sorts[by](a, b) : 0;
+      if (c === 0) { c = num(b, "changed") - num(a, "changed"); }
+      if (c === 0) { c = num(b, "number") - num(a, "number"); }
+      return c;
+    });
+    var shown = 0;
+    rows.forEach(function (r) {
+      r.hidden = !matches(r, words);
+      if (!r.hidden) { shown++; }
+      list.appendChild(r);
+    });
+    var out = section.querySelector(".box-shown");
+    if (out) { out.textContent = String(shown); }
+  }
+  function levelBoxes() {
+    var sections = document.querySelectorAll("[data-box]");
+    for (var i = 0; i < sections.length; i++) {
+      applyBox(sections[i]);
+    }
+  }
+  function boxInput(e) {
+    var section = e.target.closest ? e.target.closest("[data-box]") : null;
+    if (!section || !e.target.matches(".box-sort, .box-filter")) {
+      return;
+    }
+    var key = "agentd-box:" + section.dataset.key + ":" + section.dataset.box;
+    var select = section.querySelector(".box-sort");
+    var filter = section.querySelector(".box-filter");
+    store(key, { sort: select ? select.value : "", filter: filter ? filter.value : "" });
+    if (filter) { filter.defaultValue = filter.value; }
+    applyBox(section);
+  }
+  document.addEventListener("change", boxInput);
+  document.addEventListener("input", boxInput);
+  levelBoxes();
 
   var box = document.getElementById("box");
   if (!box) {

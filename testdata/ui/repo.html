@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>widgets</title>
+<link rel="stylesheet" href="/ui.css">
+<script src="/ui.js" defer></script>
+</head>
+<body>
+<header class="topbar"><a class="brand" href="/">agentd</a><span class="topbar-title">widgets</span></header>
+<main>
+
+<nav class="crumbs"><a href="/">Home</a> › widgets · <a href="/console/widgets">history</a></nav>
+<section id="state" data-refresh><p class="state-sentence">widgets has 4 issues and 2 requests open: 1 needs you, 2 being worked. Last change 3h ago.</p></section>
+<section id="issues" class="level-box issue-box" data-refresh data-box="issues" data-key="widgets" aria-label="Issues">
+<header class="box-head"><span class="box-count" data-total="4" data-need="1" data-working="2">4 issues, 1 need you, 2 being worked, <span class="box-shown">4</span> shown</span>
+<label>Sort <select class="box-sort" aria-label="Sort the issues"><option value="needs-me">needs-me</option><option value="last-change">last-change</option><option value="working">working</option><option value="has-mr">has-mr</option><option value="newest">newest</option><option value="oldest">oldest</option><option value="stale">stale</option><option value="label">label</option><option value="milestone">milestone</option><option value="author">author</option></select></label>
+<input type="search" class="box-filter" placeholder="Filter: words, a label, #N or !N" aria-label="Filter the issues"></header>
+<ol class="box-rows"><li class="box-row word-needs-you" data-ref="#5" data-number="5" data-word="needs you" data-working="1" data-mr="0" data-opened="1790931600" data-changed="1792573200" data-label="design" data-milestone="" data-author="bo" data-text="choose a cache  design  bo" data-refs="#5">
+<div class="row-head"><a href="/repo/widgets/issue/5">#5</a> <strong class="row-title">Choose a cache</strong> <span class="badge word">needs you</span> <span class="badge label">design</span> <span class="muted">changed 2d</span></div>
+<p class="row-sentence"><span class="muted">No sentence yet; the forge's title stands.</span></p>
+<p class="row-options"><a href="/repo/widgets/issue/5#decision-w-wa1">w4 asks: Which cache size, 64 or 256 MB?</a> <span class="badge">done</span> <span class="badge">reassign</span> <span class="badge">decline</span></p>
+</li><li class="box-row word-working" data-ref="#4" data-number="4" data-word="working" data-working="1" data-mr="1" data-opened="1790845200" data-changed="1792486800" data-label="perf" data-milestone="v2" data-author="ann" data-text="slow settings page profiling the settings page; the cache is next. perf v2 ann" data-refs="#4 !9">
+<div class="row-head"><a href="/repo/widgets/issue/4">#4</a> <strong class="row-title">Slow settings page</strong> <span class="badge word">working</span> <span class="badge label">perf</span> <span class="badge mr">!9</span> <span class="muted">changed 3d</span></div>
+<p class="row-sentence">Profiling the settings page; the cache is next. <span class="muted">(status)</span></p>
+
+</li><li class="box-row word-open" data-ref="#6" data-number="6" data-word="open" data-working="" data-mr="0" data-opened="1791018000" data-changed="1792746000" data-label="docs" data-milestone="" data-author="cy" data-text="typo in the help page asks to fix a typo; nobody has answered. docs  cy" data-refs="#6">
+<div class="row-head"><a href="/repo/widgets/issue/6">#6</a> <strong class="row-title">Typo in the help page</strong> <span class="badge word">open</span> <span class="badge label">docs</span> <span class="muted">changed 3h</span></div>
+<p class="row-sentence">Asks to fix a typo; nobody has answered. <span class="muted">(idle)</span></p>
+
+</li><li class="box-row word-open" data-ref="#7" data-number="7" data-word="open" data-working="" data-mr="0" data-opened="1791104400" data-changed="1791709200" data-label="" data-milestone="" data-author="" data-text="(withheld: it matched a confidential pattern)    " data-refs="#7">
+<div class="row-head"><a href="/repo/widgets/issue/7">#7</a> <strong class="row-title">(withheld: it matched a confidential pattern)</strong> <span class="badge word">open</span> <span class="muted">changed 12d</span></div>
+<p class="row-sentence"><span class="muted">No sentence yet; the forge's title stands.</span></p>
+
+</li></ol>
+</section>
+<section id="requests" class="level-box mr-box" data-refresh data-box="requests" data-key="widgets" aria-label="Open requests">
+<header class="box-head"><span class="box-count">2 open requests, <span class="box-shown">2</span> shown</span>
+<label>Sort <select class="box-sort" aria-label="Sort the requests"><option value="loop">loop</option><option value="last-change">last-change</option><option value="ci-failing">ci-failing</option><option value="newest">newest</option><option value="oldest">oldest</option></select></label></header>
+<ol class="box-rows"><li class="box-row" data-ref="!9" data-number="9" data-rank="3" data-failing="" data-opened="1792054800" data-changed="1792659600">
+<div class="row-head"><a href="/repo/widgets/issue/4#mr-9">!9</a> <strong class="row-title">Speed up #4</strong> <span class="muted">for #4</span> <span class="badge ci-unwatched">CI not watched</span> <span class="muted">changed 27h</span></div>
+<p class="row-sentence">!9 is reviewing: round 1</p>
+</li><li class="box-row" data-ref="!10" data-number="10" data-rank="7" data-failing="" data-opened="1792141200" data-changed="1792314000">
+<div class="row-head"><span class="ref">!10</span> <strong class="row-title">Docs</strong> <span class="badge ci-unwatched">CI not watched</span> <span class="muted">changed 5d</span></div>
+<p class="row-sentence"><span class="muted">Outside the loop, or not yet placed.</span></p>
+</li></ol>
+</section>
+<section class="console-box" aria-labelledby="console-h"><h2 id="console-h">Console</h2>
+<p class="muted">About widgets: a question is answered from its issues, requests and sessions; an instruction becomes work under the issue it names, or a new one. Nothing here interrupts a session.</p>
+<form method="post" action="/reply" enctype="multipart/form-data"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/repo/widgets"><input type="hidden" name="src" value="live"><input type="hidden" name="repository" value="widgets"><input type="hidden" name="scope" value="widgets">
+<div class="composer-row"><textarea name="text" rows="2" maxlength="4000" aria-label="Your message" required placeholder="Ask, or tell agentd what to do here"></textarea><button type="submit">Send</button></div></form>
+</section>
+</main>
+<footer class="foot muted">Shown 2026-10-23 12:00. The page refreshes every 30 seconds.</footer>
+</body>
+</html>

@@ -82,6 +82,8 @@ type LogState struct {
 	Index     map[string]map[string]*IndexIssue
 	IndexRead map[string]time.Time
 	Sentences map[string]*IndexSentence
+	// Steps are each issue's and request's dated steps, by sentenceKey.
+	Steps map[string][]IssueStep
 
 	cfg *Config // its policies, read as each event is applied
 }
@@ -154,6 +156,7 @@ func (st *LogState) apply(e Event) {
 	}
 	// After the fold, so a placement is the ledger's only once it holds.
 	defer st.applyLedger(e)
+	defer st.noteSteps(e)
 	if e.Kind == KindCase {
 		st.applyCase(e)
 		return
