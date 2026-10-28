@@ -282,7 +282,8 @@ func TestIssueForWork(t *testing.T) {
 func TestJoinIssue(t *testing.T) {
 	h, _ := indexHarness(t)
 	h.ticks(1, time.Minute)
-	h.sup.st.Work = map[string]*WorkItem{"w1": {ID: "w1", Repository: "widgets", ThreadWork: ThreadWork{Issue: 4}, State: WorkWorking},
+	h.sup.track("s").State = Working
+	h.sup.st.Work = map[string]*WorkItem{"w1": {ID: "w1", Repository: "widgets", ThreadWork: ThreadWork{Issue: 4}, State: WorkWorking, Session: "s"},
 		"w2": {ID: "w2", Repository: "widgets", ThreadWork: ThreadWork{DoneWhen: EndCheck{Kind: "forge", Ref: "#5", State: "closed"}}}}
 	j := joinIssue(h.cfg, h.sup.st, "widgets", 4)
 	if len(j.Work) != 1 || j.Work[0].ID != "w1" || len(j.Requests) != 1 || j.Requests[0] != "!9" {
@@ -681,5 +682,43 @@ func TestClosedIssueKeepsItsHistory(t *testing.T) {
 	h.ticks(1, time.Minute)
 	if page := h.issuePage(5); strings.Contains(page, "closed") || len(h.sup.st.Steps[sentenceKey("widgets", "#5")]) != 0 {
 		t.Fatalf("kept past its time:\n%s", page)
+	}
+}
+
+// An issue is being worked only when a session works it now: a live
+// session whose issue it is, or one holding an item on it that is
+// assigned or under way. An item being designed, or one whose session is
+// gone, does not count, nor does a session that is done.
+func TestBeingWorkedMeansASession(t *testing.T) {
+	h, _ := indexHarness(t)
+	h.ticks(1, time.Minute)
+	h.sup.st.Work = map[string]*WorkItem{
+		"w1": {ID: "w1", Repository: "widgets", ThreadWork: ThreadWork{Issue: 4}, State: WorkDesigned},
+		"w2": {ID: "w2", Repository: "widgets", ThreadWork: ThreadWork{Issue: 5}, State: WorkWorking, Session: "gone"},
+	}
+	if w := workingOn(h.cfg, h.sup.st, "widgets"); len(w) != 0 {
+		t.Fatalf("worked with no session: %v", w)
+	}
+	h.cfg.Sessions["s"] = Session{Repository: "widgets", Issue: 4, Workdir: h.dir, Cwd: h.dir}
+	if w := workingOn(h.cfg, h.sup.st, "widgets"); len(w) != 0 {
+		t.Fatalf("worked by a session never seen: %v", w)
+	}
+	h.sup.track("s").State = Working
+	h.sup.st.Work["w2"].Session = "s"
+	if w := workingOn(h.cfg, h.sup.st, "widgets"); !w["#4"] || !w["#5"] {
+		t.Fatalf("a live session's issue and item: %v", w)
+	}
+	h.sup.track("s").State = Failed // restarted after its backoff
+	if w := workingOn(h.cfg, h.sup.st, "widgets"); !w["#4"] {
+		t.Fatalf("a session between a crash and its restart: %v", w)
+	}
+	h.sup.track("s").Parked = true
+	if w := workingOn(h.cfg, h.sup.st, "widgets"); len(w) != 0 {
+		t.Fatalf("worked by a parked session: %v", w)
+	}
+	h.sup.track("s").Parked = false
+	h.sup.track("s").State = Done
+	if w := workingOn(h.cfg, h.sup.st, "widgets"); len(w) != 0 {
+		t.Fatalf("worked by a session that is done: %v", w)
 	}
 }

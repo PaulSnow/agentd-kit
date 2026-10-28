@@ -617,22 +617,47 @@ func (s *Supervisor) screenIndex(p *IndexPayload) {
 	}
 }
 
-// workingOn are repo's issues being worked: one a session agentd knows
-// works, or an open work item names.
+// workingOn are repo's issues being worked: those a session works now,
+// a live session whose own issue it is, or one holding an item on it
+// that is assigned or under way. An item being designed or waiting, or
+// one whose session is gone, done or stopped, does not count.
 func workingOn(cfg *Config, st *LogState, repo string) map[string]bool {
 	out := map[string]bool{}
 	c := withRuntime(cfg, st.Runtime)
 	for _, name := range sortedKeys(c.Sessions) {
-		if s := c.Sessions[name]; s.Repository == repo && s.Issue > 0 {
+		if s := c.Sessions[name]; s.Repository == repo && s.Issue > 0 && st.sessionLive(name) {
 			out["#"+strconv.Itoa(s.Issue)] = true
 		}
 	}
 	for _, w := range st.Work {
-		if w.Repository == repo && w.Issue > 0 && !workTerminal(w.State) {
+		if w.Repository == repo && w.Issue > 0 && (w.State == WorkAssigned || w.State == WorkWorking) && st.sessionLive(w.Session) {
 			out["#"+strconv.Itoa(w.Issue)] = true
 		}
 	}
 	return out
+}
+
+// sessionLive says whether session name is at work now, as agentd last
+// saw it: starting, working, idle between turns, waiting on the owner or
+// on its usage limit, or failed and to be restarted; one agentd started
+// and has not yet seen. Not done, crash-looping, parked or stopped.
+func (st *LogState) sessionLive(name string) bool {
+	if name == "" {
+		return false
+	}
+	t := st.Tracks[name]
+	if t == nil || t.State == "" {
+		_, started := st.Runtime[name]
+		return started
+	}
+	if t.Stopped != "" || t.Parked {
+		return false
+	}
+	switch t.State {
+	case Starting, Working, Idle, BlockedOnOwner, UsageLimited, Failed:
+		return true
+	}
+	return false
 }
 
 // workTerminal says whether a work item's state is an end.
