@@ -83,6 +83,34 @@ func scopeOf(scope string) Scope {
 // running session: one with no scope, as before, or one at an issue.
 func scopeHandsOver(scope string) bool { return scope == "" || scopeOf(scope).Issue > 0 }
 
+// handOverNote is what the owner is told of a hand-over not followed.
+const handOverNote = "\n\n(Written at this level, it goes to no running session: write at the issue's page, or to the session, to reach one.)"
+
+// dropHandOver takes the hand-over out of a thread agent's answer, and
+// says so in the answer when there was one; an answer that does not read
+// is left for the check to refuse.
+func dropHandOver(raw json.RawMessage) json.RawMessage {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(raw, &m) != nil {
+		return raw
+	}
+	var to, answer string
+	json.Unmarshal(m["hand_to"], &to)
+	if strings.TrimSpace(to) == "" {
+		return raw
+	}
+	json.Unmarshal(m["answer"], &answer)
+	m["hand_to"], _ = json.Marshal("")
+	if len([]rune(answer+handOverNote)) <= agentAnswer {
+		m["answer"], _ = json.Marshal(answer + handOverNote)
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
 // issueWords finds #N in an instruction's words.
 var issueWords = regexp.MustCompile(`(?:^|[^\w&!])#([0-9]+)\b`)
 
@@ -140,6 +168,9 @@ func ScopeInstruction(cfg *Config, log *Log, at time.Time, c Scope, to, text str
 	if c.Repository == "" {
 		repo = namedRepository(cfg, text)
 		to, now = "", false
+		if repo == "" && len(files) > 0 {
+			return errors.New("a question at home takes no files: send them at a repository or an issue")
+		}
 	} else if c.Issue == 0 {
 		to, now = "", false
 	}
@@ -209,7 +240,7 @@ func (s *Supervisor) homeThreadInput(in *Instruction, now time.Time) homeInput {
 	keep := func(t string) string { return s.keepText(t) }
 	for _, repo := range sortedKeys(s.cfg.Repositories) {
 		v := BuildRepoLevel(s.cfg, s.st, repo, ds, now)
-		r := homeRepo{Name: repo, Sentence: v.Sentence}
+		r := homeRepo{Name: repo, Sentence: keep(v.Sentence)}
 		for _, i := range v.Issues {
 			hi := homeIssue{Ref: repo + i.Ref, Title: keep(i.Title), Sentence: keep(i.Sentence)}
 			switch {
@@ -229,7 +260,7 @@ func (s *Supervisor) homeThreadInput(in *Instruction, now time.Time) homeInput {
 	}
 	for _, e := range s.st.scopeConversation(ScopeHome, 6) {
 		if e.ID != in.ID {
-			x.Earlier = append(x.Earlier, homeRecord{At: e.At, Owner: e.Text, Answer: e.Answer})
+			x.Earlier = append(x.Earlier, homeRecord{At: e.At, Owner: keep(e.Text), Answer: keep(e.Answer)})
 		}
 	}
 	return x
@@ -255,12 +286,26 @@ func (s *Supervisor) startHomeThread(in *Instruction, now time.Time) {
 	s.spawnShared(key, func(w *Supervisor) {
 		p := &AgentPayload{Model: job.Model}
 		input, err := json.Marshal(x)
-		if err == nil && len(input) > job.MaxInput {
-			// The largest repositories' lists go first, until it fits.
-			for k := range x.Repositories {
-				x.Repositories[k].Working, x.Repositories[k].Requests = nil, nil
+		// Over the bound, the lists go, the least pressing first.
+		for step := 0; err == nil && len(input) > job.MaxInput && step < 3; step++ {
+			switch step {
+			case 0:
+				for k := range x.Repositories {
+					x.Repositories[k].Working, x.Repositories[k].Requests = nil, nil
+				}
+			case 1:
+				x.Earlier = nil
+			case 2:
+				for k := range x.Repositories {
+					if len(x.Repositories[k].NeedsYou) > 3 {
+						x.Repositories[k].NeedsYou = x.Repositories[k].NeedsYou[:3]
+					}
+				}
 			}
 			input, err = json.Marshal(x)
+		}
+		if err == nil && len(input) > job.MaxInput {
+			err = fmt.Errorf("the home input is %d bytes, over the %d allowed", len(input), job.MaxInput)
 		}
 		if err == nil {
 			p.InputBytes = len(input)

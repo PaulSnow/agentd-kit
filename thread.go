@@ -297,7 +297,14 @@ func (s *Supervisor) scopeFacts(x *threadInput, in *Instruction, repo string, ke
 		return
 	}
 	l := BuildIssueLevel(s.cfg, s.st, repo, c.Issue, ds, false, now)
-	ti := &threadIssue{Ref: l.Ref, Title: keep(l.Title), Sentence: keep(l.Sentence), Next: l.Next, Requests: l.Request}
+	ti := &threadIssue{Ref: l.Ref, Title: keep(l.Title), Sentence: keep(l.Sentence)}
+	for _, n := range l.Next {
+		ti.Next = append(ti.Next, keep(n))
+	}
+	for _, r := range l.Request {
+		r.Title, r.Place = keep(r.Title), keep(r.Place)
+		ti.Requests = append(ti.Requests, r)
+	}
 	for _, d := range l.Decisions {
 		ti.Decisions = append(ti.Decisions, keep(d.Entry+": "+d.Asked))
 	}
@@ -541,13 +548,14 @@ func (s *Supervisor) startThread(in *Instruction, repo, cwd string) {
 			var ran []TurnPayload
 			raw, usage, ran, err = job.RunAgent(w.runCtx, threadSystem, threadSchema(), input, cwd, mcp, agentAllowed(cwd, dirs...), dirs...)
 			p.Usage, p.Activity = &usage, ran
+			// Nothing written at home or at a repository is handed to a
+			// running session (#69): a hand-over is dropped, the owner is
+			// told so, and work starts a session of its own.
+			if err == nil && !scopeHandsOver(in.Scope) {
+				raw = dropHandOver(raw)
+			}
 			if err == nil {
 				a, err = w.checkThreadAnswer(raw, running, finished, p)
-			}
-			// Nothing written at home or at a repository is handed to a
-			// running session (#69): its work starts a session of its own.
-			if err == nil && !scopeHandsOver(in.Scope) {
-				p.HandTo = ""
 			}
 		}
 		// The facts the session started for the work is briefed with are

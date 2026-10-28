@@ -360,8 +360,10 @@ func (s *Supervisor) routeInstructions(now time.Time) {
 		in := s.st.Instructions[id]
 		// A question at home that names no repository: the home thread
 		// answers it from every repository's state (#69).
-		if in.Scope == ScopeHome && len(in.Repositories) == 0 && in.Route && !in.Agent && in.Replied.IsZero() && in.Failed == "" {
-			if !s.shadow {
+		// It is started again after a stop cut it short, and after a
+		// failure up to agentRuns times; nothing else routes it.
+		if in.homeQuestion() {
+			if in.Route && in.Replied.IsZero() && in.Failed == "" && (in.AgentLast == nil || in.AgentError != "" && in.AgentRuns < agentRuns) && !s.work.busy("thread:"+in.ID) && !s.shadow {
 				s.startHomeThread(in, now)
 			}
 			if s.halt != nil {
@@ -680,12 +682,15 @@ func (st *LogState) freshInstructions(name string, unanswered bool, now time.Tim
 func (s *Supervisor) deliverInstructions(name string, sess Session, t *Track, ev Evidence, state State) bool {
 	ids := s.st.freshInstructions(name, false, s.clock.Now())
 	// A scoped message waits for the session's turn to end, unless the
-	// owner said now (#69).
-	if state == Working && !t.turnEnded(ev) {
+	// owner said now (#69); one held is not in the file it reads either.
+	held := map[string]bool{}
+	if state == Working && !t.turnEnded(ev) && !atPrompt(ev) {
 		var due []string
 		for _, id := range ids {
 			if in := s.st.Instructions[id]; in == nil || in.Scope == "" || in.Now {
 				due = append(due, id)
+			} else {
+				held[id] = true
 			}
 		}
 		ids = due
@@ -699,7 +704,12 @@ func (s *Supervisor) deliverInstructions(name string, sess Session, t *Track, ev
 	if !s.retryDue(t, key, s.clock.Now()) {
 		return false
 	}
-	ins := s.st.instructionsFor(name, false)
+	var ins []*Instruction
+	for _, in := range s.st.instructionsFor(name, false) {
+		if !held[in.ID] {
+			ins = append(ins, in)
+		}
+	}
 	pointer := s.cfg.Policies.Instructions.Pointer
 	s.typeInto(name, ActInstruct, &ActPayload{Key: key, Instructions: ids, Message: pointer}, t, ev.PaneHash, func() error {
 		if err := writeInstructions(s.cfg, sess.Workdir, ins, s.clock.Now()); err != nil {
@@ -800,4 +810,11 @@ func (st *LogState) instructionTurn(session string, tn *TurnPayload) {
 			}
 		}
 	}
+}
+
+// atPrompt says whether the screen shows the input prompt after a turn
+// the transcript ended: the session's turn is over, whether or not
+// nudging is on (#69).
+func atPrompt(ev Evidence) bool {
+	return ev.Prompt && ev.Transcript.Found && ev.Transcript.Role == "assistant" && ev.Transcript.StopReason == "end_turn"
 }

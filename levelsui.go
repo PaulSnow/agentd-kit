@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -210,25 +211,22 @@ func (src *uiSource) scopeReply(c Scope, text string, now bool, files []stagedAt
 			repoOf[d.Entry] = c.Repository
 		}
 		for _, r := range l.Refs {
-			if s, ok := cfg.Sessions[r.Name]; r.Kind == "session" && ok && s.Role == "" && stateOf(src.st.Tracks[r.Name]) != Done {
+			if r.Kind == "session" && takesMessages(cfg, src.st, r.Name) {
 				to = r.Name
 				break
 			}
 		}
-	default:
-		repos := []string{c.Repository}
-		if c.Repository == "" {
-			repos = sortedKeys(cfg.Repositories)
-		}
-		for _, repo := range repos {
-			for _, i := range BuildRepoLevel(cfg, src.st, repo, ds, at).Issues {
-				if i.Decision != nil {
-					open = append(open, *i.Decision)
-					repoOf[i.Decision.Entry] = repo
-				}
-			}
+	case c.Repository != "":
+		// Every decision open at the repository: on its issues, and its
+		// sessions' and items' that are on none; a typed answer binds
+		// only when there is one.
+		open = repoDecisions(cfg, src.st, c.Repository, ds)
+		for _, d := range open {
+			repoOf[d.Entry] = c.Repository
 		}
 	}
+	// At home a typed answer binds nothing: the decisions are every
+	// repository's, and the owner answers one on its page.
 	src.mu.Unlock()
 	if entry, a := typedDecision(open, text); entry != "" {
 		return src.respond(repoOf[entry], entry, "", "", a, files)
@@ -238,7 +236,65 @@ func (src *uiSource) scopeReply(c Scope, text string, now bool, files []stagedAt
 	if err := src.catchUp(); err != nil {
 		return err
 	}
-	return ScopeInstruction(withRuntime(src.cfg, src.st.Runtime), src.log, time.Now(), c, to, text, now, files)
+	return ScopeInstruction(withRuntime(src.cfg, src.st.Runtime), src.log, src.clock(), c, to, text, now, files)
+}
+
+// takesMessages says whether session name can be handed a message from
+// the issue's box: one of the repository's that is not a reviewer or a
+// judge, and not done, stopped, failed, crash-looping or parked; else the
+// repository's thread takes the message.
+func takesMessages(cfg *Config, st *LogState, name string) bool {
+	s, ok := cfg.Sessions[name]
+	if !ok || s.Role != "" {
+		return false
+	}
+	t := st.Tracks[name]
+	switch stateOf(t) {
+	case Done, Stopped, Failed, CrashLooping:
+		return false
+	}
+	return t == nil || !t.Parked
+}
+
+// repoDecisions are every decision open at repo, each once: those on its
+// issues, and those of its sessions and its items on none.
+func repoDecisions(cfg *Config, st *LogState, repo string, ds []UIDecision) []LevelDecision {
+	var out []LevelDecision
+	seen := map[string]bool{}
+	add := func(d LevelDecision) {
+		if !seen[d.Entry] {
+			seen[d.Entry] = true
+			out = append(out, d)
+		}
+	}
+	secret := confidentialMatcher(cfg)
+	c := withRuntime(cfg, st.Runtime)
+	for ref, i := range st.Index[repo] {
+		if ref[0] == '#' {
+			for _, d := range levelDecisions(cfg, st, i.Number(), joinIssue(cfg, st, repo, i.Number()), ds, secret) {
+				add(d)
+			}
+		}
+	}
+	// Those on no issue the index holds count too, so one cannot be
+	// taken for the only one.
+	var items []*WorkItem
+	for _, id := range st.sortedWork() {
+		if it := st.Work[id]; it.Repository == repo {
+			items = append(items, it)
+		}
+	}
+	var sessions []string
+	for _, name := range sortedKeys(c.Sessions) {
+		if c.Sessions[name].Repository == repo {
+			sessions = append(sessions, name)
+		}
+	}
+	for _, d := range levelDecisionsOf(cfg, st, 0, IssueJoin{Work: items, Sessions: sessions}, ds) {
+		add(d)
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a].Entry < out[b].Entry })
+	return out
 }
 
 // Conversation is the page's console box's exchanges, newest last.

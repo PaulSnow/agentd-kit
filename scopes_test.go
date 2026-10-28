@@ -39,9 +39,21 @@ func TestIssueScopeWaitsForTheNextTurn(t *testing.T) {
 	if in := h.instruction(t); in.Session != w1 || !in.Delivered.IsZero() || in.Scope != "widgets#1" {
 		t.Fatalf("typed while it works: %+v", in)
 	}
+	// An unscoped message typed meanwhile does not carry the held one in
+	// the file the session reads.
+	if err := UIInstruction(h.sup.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", w1, "Unscoped words.", nil); err != nil {
+		t.Fatal(err)
+	}
+	h.alive(w1, "w1 works on and on")
+	h.ticks(1, time.Minute)
+	for _, d := range readInstructions(t, h.sup.cfg.Sessions[w1].Workdir) {
+		if d.Text == "Use the small cache." {
+			t.Fatal("the held message is in instructions.json while the session works")
+		}
+	}
 	h.alive(w1, "w1 waits at its prompt")
 	h.ticks(int(h.cfg.Policies.Nudge.Stall.Duration/time.Minute)+3, time.Minute)
-	if in := h.instruction(t); in.Delivered.IsZero() {
+	if in := h.instructionText(t, "Use the small cache."); in.Delivered.IsZero() {
 		t.Fatalf("not typed at its next turn: %+v", in)
 	}
 
@@ -86,6 +98,9 @@ func TestRepoScopeNeverTypesIntoASession(t *testing.T) {
 	if in.Session == w1 || in.AgentLast == nil || in.AgentLast.HandTo != "" || h.count(KindAction, ActInstruct, w1) != 0 {
 		t.Fatalf("a repository's message reached %s: %+v", w1, in)
 	}
+	if !strings.Contains(in.AgentLast.Answer, "goes to no running session") {
+		t.Fatalf("the owner is not told the hand-over was not followed: %q", in.AgentLast.Answer)
+	}
 
 	h2 := sessionsHarness(t)
 	h2.cfg.Jobs.Designer.Off = true
@@ -109,17 +124,21 @@ func TestRepoScopeNeverTypesIntoASession(t *testing.T) {
 // answer is the home conversation's.
 func TestHomeScopeAnswered(t *testing.T) {
 	dir := fakeClaude(t)
+	claudeAnswers(t, dir, 1, "not json") // a failure is tried again
 	claudeAnswers(t, dir, 0, claudeResult(`{"answer":"widgets has nothing open that needs you."}`))
 	h := sessionsHarness(t)
 	if err := scoped(h, "home", "", "Anything need me today?", false); err != nil {
 		t.Fatal(err)
 	}
-	h.ticks(2, time.Minute)
+	h.ticks(3, time.Minute)
 	in := h.instruction(t)
+	if n := claudeCalls(t, dir); n != 2 {
+		t.Fatalf("%d calls", n)
+	}
 	if in.Scope != ScopeHome || len(in.Repositories) != 0 || in.AgentLast == nil || !strings.Contains(in.AgentLast.Answer, "nothing open") {
 		t.Fatalf("home question: %+v %+v", in, in.AgentLast)
 	}
-	if x := readFake(t, dir, "in.1"); !strings.Contains(x, `"name":"widgets"`) || !strings.Contains(x, `"today_tokens"`) || !strings.Contains(x, "Anything need me today?") {
+	if x := readFake(t, dir, "in.2"); !strings.Contains(x, `"name":"widgets"`) || !strings.Contains(x, `"today_tokens"`) || !strings.Contains(x, "Anything need me today?") {
 		t.Fatalf("home input %s", x)
 	}
 	if c := h.logState().scopeConversation(ScopeHome, 5); len(c) != 1 || c[0].State != "answered" {
@@ -195,6 +214,8 @@ func TestConsoleBoxPosts(t *testing.T) {
 	post("widgets#4", "Use the small cache.", false)
 	post("widgets#4", "Push now.", true)
 	post("widgets#5", "Decline", false)
+	post("home", "decline", false)    // at home a typed answer binds nothing
+	post("widgets", "decline", false) // the repository's one open decision
 	events, _, _ := f.log.Tail(0)
 	var got []*InstructionPayload
 	for _, e := range events {
@@ -202,8 +223,14 @@ func TestConsoleBoxPosts(t *testing.T) {
 			got = append(got, e.Instruction)
 		}
 	}
-	if len(got) != 5 {
+	if len(got) != 7 {
 		t.Fatalf("%d instructions", len(got))
+	}
+	if g := got[5]; g.Re != nil || g.Scope != "home" {
+		t.Errorf("typed at home: %+v", g)
+	}
+	if g := got[6]; g.Re == nil || g.Re.ID != "w:wa1" {
+		t.Errorf("typed at the repository: %+v", g)
 	}
 	if g := got[0]; g.Scope != "home" || len(g.Repositories) != 0 || g.To != "" {
 		t.Errorf("home: %+v", g)
@@ -229,4 +256,16 @@ func TestConsoleBoxPosts(t *testing.T) {
 	if w := ownerPost(u, "/reply", url.Values{"src": {"live"}, "scope": {"nowhere"}, "text": {"x"}}); w.Code != 400 {
 		t.Errorf("an unknown scope: %d", w.Code)
 	}
+}
+
+// instructionText is the instruction whose text is text.
+func (h *harness) instructionText(t *testing.T, text string) *Instruction {
+	t.Helper()
+	for _, in := range h.logState().Instructions {
+		if in.Text == text {
+			return in
+		}
+	}
+	t.Fatalf("no instruction %q", text)
+	return nil
 }
