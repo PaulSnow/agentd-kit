@@ -277,6 +277,41 @@ func TestIssueForWork(t *testing.T) {
 	}
 }
 
+// A request joins issue N when its title holds #N as a word, wherever it
+// stands and however many it names, or when a segment of its branch is N
+// or starts with N- or N_; a number inside a version or another word joins
+// nothing.
+func TestJoinIssueByWord(t *testing.T) {
+	st := &LogState{Index: map[string]map[string]*IndexIssue{"widgets": {}}}
+	for ref, p := range map[string]IndexPayload{
+		"!1": {Title: "Release", Branch: "release-1.2"},
+		"!2": {Title: "Fix #3 and #7", Branch: "both"},
+		"!3": {Title: "Fix gadgets#7", Branch: "fix/12-crash"},
+		"!4": {Title: "Tidy", Branch: "7_tidy"},
+		"!5": {Title: "Tidy", Branch: "fix/7"},
+		"!6": {Title: "Bump", Branch: "deps/v7.1"},
+		"!7": {Title: "Item#7", Branch: "issue-12"},
+	} {
+		p.Ref, p.Repository, p.State = ref, "widgets", "open"
+		st.Index["widgets"][ref] = &IndexIssue{IndexPayload: p}
+	}
+	cfg := &Config{}
+	for n, want := range map[int]string{1: "", 2: "", 3: "!2", 7: "!2 !4 !5", 12: "!3"} {
+		if got := strings.Join(joinIssue(cfg, st, "widgets", n).Requests, " "); got != want {
+			t.Errorf("#%d joins %q, want %q", n, got, want)
+		}
+	}
+	for title, want := range map[string]string{"Speed up #4": "#4", "Fix #3 and #7": "#3", "Bump to v#2.0 (#8)": "#8", "Fix gadgets#7": "", "#45": "#45"} {
+		got := ""
+		if i := requestIssue(title); i > 0 {
+			got = "#" + strconv.Itoa(i)
+		}
+		if got != want {
+			t.Errorf("requestIssue(%q) = %q, want %q", title, got, want)
+		}
+	}
+}
+
 // What belongs to an issue is joined by its number: items, sessions, and
 // the requests whose title or branch name it.
 func TestJoinIssue(t *testing.T) {
@@ -291,9 +326,6 @@ func TestJoinIssue(t *testing.T) {
 	}
 	if j := joinIssue(h.cfg, h.sup.st, "widgets", 5); len(j.Work) != 1 || len(j.Requests) != 0 {
 		t.Fatalf("#5: %+v", j)
-	}
-	if !branchNumber(12).MatchString("fix/12-crash") || branchNumber(12).MatchString("fix/120") || !titleNumber(4).MatchString("Speed up #4") || titleNumber(4).MatchString("#45") {
-		t.Fatal("number matching")
 	}
 	if c := indexCounts(h.cfg, h.sup.st, "widgets", func(ref string) bool { return ref == "#5" }); c.Working != 1 || c.Waiting != 1 || c.Open != 2 {
 		t.Fatalf("counts %+v", c)
