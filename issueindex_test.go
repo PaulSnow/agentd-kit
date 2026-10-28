@@ -722,3 +722,36 @@ func TestBeingWorkedMeansASession(t *testing.T) {
 		t.Fatalf("worked by a session that is done: %v", w)
 	}
 }
+
+// With the index off, the sentences and steps the loop and the status
+// check write are bounded: a request or issue nothing has touched for
+// closedKept, which no open item, watched request or working session
+// holds, is dropped, so replaying many closed requests leaves a bounded
+// fold. One an open item holds is kept.
+func TestIndexOffSentencesAreBounded(t *testing.T) {
+	h := newHarness(t, false)
+	start := h.clock.Now()
+	var events []Event
+	for n := 1; n <= 200; n++ {
+		ref := "!" + strconv.Itoa(n)
+		at := start.Add(time.Duration(n) * time.Minute)
+		events = append(events,
+			Event{V: EventVersion, Time: at, Kind: KindLoop, Mode: ModeLive, Loop: &LoopPayload{Repository: "widgets", Ref: ref, Case: "widgets#" + strconv.Itoa(n), Step: LoopReview, Round: 1, Head: "c0ffee"}},
+			Event{V: EventVersion, Time: at, Kind: KindSentence, Mode: ModeLive, Sentence: &SentencePayload{Repository: "widgets", Ref: ref, Text: ref + " is reviewing: round 1", Writer: WriterLoop}})
+	}
+	events = append(events,
+		Event{V: EventVersion, Time: start, Kind: KindWorkItem, Mode: ModeLive, Work: &WorkPayload{ID: "wk", Step: WorkStepOpen, Repository: "widgets", Instruction: "in1", Work: &ThreadWork{Title: "Keep it", Issue: 3}}},
+		Event{V: EventVersion, Time: start, Kind: KindSentence, Mode: ModeLive, Sentence: &SentencePayload{Repository: "widgets", Ref: "#3", Text: "Being kept.", Writer: WriterStatus}},
+		Event{V: EventVersion, Time: start, Kind: KindCI, Mode: ModeLive, CI: &CIPayload{Repository: "widgets", Ref: "!7", State: CIPending, Head: "c0ffee"}},
+		Event{V: EventVersion, Time: start.Add(40 * 24 * time.Hour), Kind: KindStart, Mode: ModeLive, Start: &StartPayload{}})
+	st := NewLogState(h.cfg, ModeLive).Fold(events)
+	if len(st.Steps) > 3 || len(st.Sentences) > 2 {
+		t.Fatalf("after 40 days, %d steps and %d sentences kept", len(st.Steps), len(st.Sentences))
+	}
+	if st.sentenceOf("widgets", "!7") == nil {
+		t.Fatal("the sentence of a request CI last saw open was dropped")
+	}
+	if st.sentenceOf("widgets", "#3") == nil {
+		t.Fatal("the sentence of an issue an open item holds was dropped")
+	}
+}

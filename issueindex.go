@@ -256,6 +256,84 @@ func (st *LogState) applySentence(e Event) {
 	st.Sentences[k] = s
 }
 
+// sweepEvery is how often, by the events' time, the fold sweeps steps
+// and sentences.
+const sweepEvery = time.Hour
+
+// sweepSteps drops, at most once a sweepEvery, the steps and sentences of
+// every issue and request nothing holds and nothing touched for
+// closedKept: one not on the open list, which no open work item names, no
+// live session works, that is no request CI last saw open nor the issue of
+// one, and whose CI was not seen since. With the
+// index off, which is the default, the loop's and the status check's
+// sentences would otherwise grow for ever; with it on, the closed ones a
+// repository no longer listed keeps go too.
+func (st *LogState) sweepSteps(now time.Time) {
+	if now.Sub(st.Swept) < sweepEvery {
+		return
+	}
+	st.Swept = now
+	for repo := range st.Closed {
+		st.pruneClosed(repo, now)
+	}
+	held := map[string]bool{}
+	for _, w := range st.Work {
+		if w.Issue > 0 && !workTerminal(w.State) {
+			held[sentenceKey(w.Repository, "#"+strconv.Itoa(w.Issue))] = true
+		}
+	}
+	if st.cfg != nil {
+		c := withRuntime(st.cfg, st.Runtime)
+		for name, sess := range c.Sessions {
+			if sess.Issue > 0 && st.sessionLive(name) {
+				held[sentenceKey(sess.Repository, "#"+strconv.Itoa(sess.Issue))] = true
+			}
+		}
+		// A request still open, as CI last saw it, and its case's issue,
+		// however long it has been quiet.
+		for _, r := range st.CI {
+			if r.State == CIMerged || r.State == CIClosed || !requestRef.MatchString(r.Ref) {
+				continue
+			}
+			held[sentenceKey(r.Repository, r.Ref)] = true
+			if issue := caseIssue(st.cfg.caseOf(c.Sessions[r.Session])); issue != "" {
+				held[sentenceKey(r.Repository, issue)] = true
+			}
+		}
+	}
+	keys := map[string]bool{}
+	for k := range st.Steps {
+		keys[k] = true
+	}
+	for k := range st.Sentences {
+		keys[k] = true
+	}
+	for k := range keys {
+		i := strings.LastIndex(k, " ")
+		if i < 0 || held[k] {
+			continue
+		}
+		repo, ref := k[:i], k[i+1:]
+		if st.Index[repo][ref] != nil || st.Closed[repo][ref] != nil {
+			continue // the index keeps it, or its closing does
+		}
+		last := time.Time{}
+		if steps := st.Steps[k]; len(steps) > 0 {
+			last = steps[len(steps)-1].At
+		}
+		if s := st.Sentences[k]; s != nil && s.At.After(last) {
+			last = s.At
+		}
+		if r, ok := st.CI[ciKey(repo, ref)]; ok && r.At.After(last) {
+			last = r.At
+		}
+		if now.Sub(last) > closedKept {
+			delete(st.Steps, k)
+			delete(st.Sentences, k)
+		}
+	}
+}
+
 // closed is repo's map of closed issues and requests, made when missing.
 func (st *LogState) closed(repo string) map[string]*IndexIssue {
 	if st.Closed == nil {
