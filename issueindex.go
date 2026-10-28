@@ -158,13 +158,23 @@ func (st *LogState) applyIndex(e Event) {
 		st.IndexRead = map[string]time.Time{}
 	}
 	st.IndexRead[p.Repository] = e.Time
+	prev := m[p.Ref]
 	if p.Gone {
+		if prev != nil {
+			st.noteStep(p.Repository, p.Ref, e.Time, "No longer open on the forge.")
+		}
 		delete(m, p.Ref)
 		return
 	}
 	i := &IndexIssue{IndexPayload: p, Seen: e.Time, At: e.Time}
-	if prev := m[p.Ref]; prev != nil {
+	switch {
+	case prev != nil:
 		i.Seen, i.Quiet = prev.Seen, prev.Quiet
+		if prev.Title != p.Title && p.Title != "" {
+			st.noteStep(p.Repository, p.Ref, e.Time, "Retitled on the forge: "+p.Title)
+		}
+	case !p.First && !p.Opened.IsZero():
+		st.noteStep(p.Repository, p.Ref, p.Opened, fmt.Sprintf("Opened on the forge by %s.", p.Author))
 	}
 	if p.First {
 		i.Quiet = p.Changed
@@ -198,6 +208,9 @@ func (st *LogState) applySentence(e Event) {
 		}
 	}
 	if p.Text != "" {
+		if prev == nil || prev.Text != p.Text {
+			st.noteStep(p.Repository, p.Ref, e.Time, p.Text)
+		}
 		s.SentencePayload, s.At = p, e.Time
 	}
 	st.Sentences[k] = s
@@ -764,6 +777,11 @@ func joinIssue(cfg *Config, st *LogState, repo string, n int) IssueJoin {
 		rt, started := st.Runtime[name]
 		if sess.Issue == n || started && rt.Item != "" && items[rt.Item] {
 			j.Sessions = append(j.Sessions, name)
+		}
+	}
+	for _, w := range j.Work {
+		if w.Session != "" && !contains(j.Sessions, w.Session) {
+			j.Sessions = append(j.Sessions, w.Session)
 		}
 	}
 	title, branch := titleNumber(n), branchNumber(n)

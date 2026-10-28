@@ -563,7 +563,7 @@ func (u *UI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		u.serveAttachment(w, r)
-	case path == "/" || strings.HasPrefix(path, "/console/") || strings.HasPrefix(path, "/session/"):
+	case path == "/" || strings.HasPrefix(path, "/console/") || strings.HasPrefix(path, "/session/") || strings.HasPrefix(path, "/repo/"):
 		if !get {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -584,6 +584,29 @@ func (u *UI) serveView(w http.ResponseWriter, r *http.Request) {
 	case path == "/":
 		name = "index"
 		view, err = u.indexView(now)
+	case strings.HasPrefix(path, "/repo/"):
+		repo, n, ok := levelPath(path)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		if n == 0 {
+			name = "repo"
+			var v *uiRepoPage
+			if v, err = u.repoView(repo, now); err == nil && v == nil {
+				http.NotFound(w, r)
+				return
+			}
+			view = v
+			break
+		}
+		name = "issue"
+		var v *uiIssuePage
+		if v, err = u.issueView(repo, n, r.URL.Query().Get("steps") == "all", now); err == nil && v == nil {
+			http.NotFound(w, r)
+			return
+		}
+		view = v
 	case strings.HasPrefix(path, "/console/"):
 		name = "console"
 		repo, entries := strings.CutSuffix(strings.TrimPrefix(path, "/console/"), "/entries")

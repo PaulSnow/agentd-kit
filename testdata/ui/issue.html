@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>widgets #5</title>
+<link rel="stylesheet" href="/ui.css">
+<script src="/ui.js" defer></script>
+</head>
+<body>
+<header class="topbar"><a class="brand" href="/">agentd</a><span class="topbar-title">widgets #5</span></header>
+<main>
+
+<nav class="crumbs"><a href="/">Home</a> › <a href="/repo/widgets">widgets</a> › #5 · <a href="/console/widgets">history</a></nav>
+<section id="issue-head" data-refresh>
+<h2>#5 widgets #5 <span class="badge word">needs you</span></h2>
+<p class="state-sentence"><span class="muted">No sentence yet; the forge's title stands.</span></p>
+<p class="refs"><span class="badge ref-item">item wa1 · blocked</span> <span class="badge ref-session">session w4</span> <span class="badge label">design</span> <span class="muted">opened by bo 21d ago</span></p>
+</section>
+<section id="decisions" data-refresh aria-labelledby="decisions-h"><h2 id="decisions-h">Decision</h2>
+<article class="card decision-card" id="decision-w-wa1">
+<p class="asked"><strong>Asks you:</strong> w4 asks: Which cache size, 64 or 256 MB?</p>
+
+
+<form method="post" action="/respond" enctype="multipart/form-data"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/repo/widgets/issue/5"><input type="hidden" name="src" value="live"><input type="hidden" name="repository" value="widgets"><input type="hidden" name="entry" value="w:wa1">
+<ul class="options"><li><button type="submit" name="choice" value="done">done</button> <span class="muted">the item closes as done</span></li><li><button type="submit" name="choice" value="reassign">reassign</button> <span class="muted">the item is taken off its session and given to another</span></li><li><button type="submit" name="choice" value="decline">decline</button> <span class="muted">the item closes and nothing more is done on it</span></li></ul>
+<div class="inline"><input type="text" name="text" maxlength="4000" placeholder="Or answer in your words" aria-label="Your answer"><button type="submit">Send</button></div></form>
+</article></section>
+<section id="steps" data-refresh aria-labelledby="steps-h"><h2 id="steps-h">What has been done</h2>
+<ol class="steps"><li><time class="muted">2026-10-23 09:00</time> Work item wa1 opened: Pick the cache.</li><li><time class="muted">2026-10-23 10:00</time> wa1 given to w4.</li><li><time class="muted">2026-10-23 11:00</time> wa1 asks you: Which cache size, 64 or 256 MB?</li></ol>
+
+</section>
+<section id="next" data-refresh aria-labelledby="next-h"><h2 id="next-h">Next</h2>
+<ul><li>wa1 is done when the owner says so. Go waits on your answer.</li></ul>
+
+</section>
+<section class="console-box" aria-labelledby="console-h"><h2 id="console-h">Console</h2>
+<p class="muted">About #5: a question is answered from its steps, its session and its requests; a message goes to its session at its next turn.</p>
+<form method="post" action="/reply" enctype="multipart/form-data"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/repo/widgets/issue/5"><input type="hidden" name="src" value="live"><input type="hidden" name="repository" value="widgets"><input type="hidden" name="scope" value="widgets#5">
+<div class="composer-row"><textarea name="text" rows="2" maxlength="4000" aria-label="Your message" required placeholder="Ask, or tell agentd what to do here"></textarea><button type="submit">Send</button></div></form>
+</section>
+</main>
+<footer class="foot muted">Shown 2026-10-23 12:00. The page refreshes every 30 seconds.</footer>
+</body>
+</html>
