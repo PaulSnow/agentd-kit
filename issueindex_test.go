@@ -282,7 +282,8 @@ func TestIssueForWork(t *testing.T) {
 func TestJoinIssue(t *testing.T) {
 	h, _ := indexHarness(t)
 	h.ticks(1, time.Minute)
-	h.sup.st.Work = map[string]*WorkItem{"w1": {ID: "w1", Repository: "widgets", ThreadWork: ThreadWork{Issue: 4}, State: WorkWorking},
+	h.sup.track("s").State = Working
+	h.sup.st.Work = map[string]*WorkItem{"w1": {ID: "w1", Repository: "widgets", ThreadWork: ThreadWork{Issue: 4}, State: WorkWorking, Session: "s"},
 		"w2": {ID: "w2", Repository: "widgets", ThreadWork: ThreadWork{DoneWhen: EndCheck{Kind: "forge", Ref: "#5", State: "closed"}}}}
 	j := joinIssue(h.cfg, h.sup.st, "widgets", 4)
 	if len(j.Work) != 1 || j.Work[0].ID != "w1" || len(j.Requests) != 1 || j.Requests[0] != "!9" {

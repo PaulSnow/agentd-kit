@@ -66,6 +66,9 @@ func newLevelsFixture(t *testing.T) *levelsFixture {
 		e.Loop = &LoopPayload{Repository: "widgets", Ref: "!9", Case: "widgets#4", Step: LoopReview, Round: 1, Session: "widgets-perf-4-reviewer"}
 	})
 	sentence(at(4*time.Hour), SentencePayload{Ref: "!9", Text: "!9 is reviewing: round 1", Writer: WriterLoop})
+	add(at(4*time.Hour), KindTransition, func(e *Event) {
+		e.Session, e.Transition = "w4", &TransitionPayload{From: "starting", To: "working", Reason: "working"}
+	})
 	sentence(at(3*time.Hour), SentencePayload{Ref: "#4", Text: "Profiling the settings page; the cache is next.", Writer: WriterStatus, Session: "w4"})
 	add(at(3*time.Hour), KindWorkItem, func(e *Event) {
 		e.Work = &WorkPayload{ID: "wa1", Step: WorkStepOpen, Repository: "widgets", Instruction: "in1", Work: &ThreadWork{Title: "Pick the cache", Issue: 5, DoneWhen: EndCheck{Kind: DoneOwner}}}
@@ -115,8 +118,8 @@ func TestRepoLevel(t *testing.T) {
 	u, _ := testUI(t, UIConfig{}, f.src)
 	body := owner(t, u, "/repo/widgets")
 	for _, want := range []string{
-		"widgets has 4 issues and 2 requests open: 1 needs you, 2 being worked.",
-		"4 issues, 1 need you, 2 being worked, <span class=\"box-shown\">4</span> shown",
+		"widgets has 4 issues and 2 requests open: 1 needs you, 1 being worked.",
+		"4 issues, 1 need you, 1 being worked, <span class=\"box-shown\">4</span> shown",
 		`class="box-filter"`, "Profiling the settings page; the cache is next.", "(status)", "(idle)",
 		"No sentence yet; the forge&#39;s title stands.", "(withheld: it matched a confidential pattern)",
 		`href="/repo/widgets/issue/4#mr-9"`, "!9 is reviewing: round 1", `href="/console/widgets">history</a>`,
@@ -334,8 +337,8 @@ func TestHomeLevel(t *testing.T) {
 	u, _ := testUI(t, UIConfig{}, f.src)
 	body := owner(t, u, "/")
 	for _, want := range []string{
-		"Across 1 repository: 4 issues and 2 requests open, 2 being worked. 1 issue waits on you, in widgets.",
-		`<a href="/repo/widgets">widgets</a> <a class="forge-link" href="https://github.com/example-org/widgets" target="_blank" rel="noopener" title="Open on its forge">github.com/example-org/widgets ↗</a></th><td>4</td><td>2</td><td>2</td><td><strong>1</strong></td><td>3h</td>`,
+		"Across 1 repository: 4 issues and 2 requests open, 1 being worked. 1 issue waits on you, in widgets.",
+		`<a href="/repo/widgets">widgets</a> <a class="forge-link" href="https://github.com/example-org/widgets" target="_blank" rel="noopener" title="Open on its forge">github.com/example-org/widgets ↗</a></th><td>4</td><td>1</td><td>2</td><td><strong>1</strong></td><td>3h</td>`,
 		`class="meter"`,
 	} {
 		if !strings.Contains(body, want) {
@@ -408,8 +411,8 @@ func TestLevelsCLI(t *testing.T) {
 	}
 	page := run("widgets")
 	for _, want := range []string{
-		"widgets has 4 issues and 2 requests open: 1 needs you, 2 being worked.",
-		"4 issues, 1 need you, 2 being worked, 4 shown", "Profiling the settings page; the cache is next. (status)",
+		"widgets has 4 issues and 2 requests open: 1 needs you, 1 being worked.",
+		"4 issues, 1 need you, 1 being worked, 4 shown", "Profiling the settings page; the cache is next. (status)",
 		"Asks you (w:wa1): w4 asks: Which cache size, 64 or 256 MB? [done, reassign, decline]",
 		"2 open requests", "!9 is reviewing: round 1",
 	} {
@@ -417,7 +420,7 @@ func TestLevelsCLI(t *testing.T) {
 			t.Errorf("console widgets lacks %q:\n%s", want, page)
 		}
 	}
-	if box := run("widgets", "--issues", "--sort", "oldest", "--filter", "docs"); !strings.Contains(box, "4 issues, 1 need you, 2 being worked, 1 shown") || !strings.Contains(box, "#6") || strings.Contains(box, "#4 ") {
+	if box := run("widgets", "--issues", "--sort", "oldest", "--filter", "docs"); !strings.Contains(box, "4 issues, 1 need you, 1 being worked, 1 shown") || !strings.Contains(box, "#6") || strings.Contains(box, "#4 ") {
 		t.Errorf("issue box:\n%s", box)
 	}
 	if h := run("widgets", "--history"); !strings.Contains(h, "#5  The item to pick the cache was opened.") || !strings.Contains(h, "!9  Review round 1 started on the request “Speed up #4”.") {
