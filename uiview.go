@@ -54,6 +54,14 @@ func (p uiPage) When(t time.Time) string {
 	return t.In(p.loc).Format("2006-01-02 15:04")
 }
 
+// Day is t's day as the owner reads it: "Mon 2 Nov".
+func (p uiPage) Day(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	return t.In(p.loc).Format("Mon 2 Jan")
+}
+
 // Ago is how long before the view t was, shortly: "5m", "3h", "2d".
 func (p uiPage) Ago(t time.Time) string {
 	if t.IsZero() {
@@ -375,6 +383,12 @@ type uiOtherConsole struct {
 // uiIndex is the index view.
 type uiIndex struct {
 	uiPage
+	// The home level (#69): a sentence across the repositories, a row
+	// each, today's tokens, and the source a home message is recorded in.
+	Sentence string
+	Home     []HomeRow
+	Today    TodayTokens
+	Src      string
 	Runs     []uiRun
 	Accounts []uiAccount
 	Jobs     []uiJob
@@ -449,6 +463,9 @@ func (u *UI) indexView(now time.Time) (*uiIndex, error) {
 	}
 	sort.Slice(v.Accounts, func(i, j int) bool { return v.Accounts[i].Name < v.Accounts[j].Name })
 	sortNeeds(v.Needs)
+	if err := u.homeLevel(v, now); err != nil {
+		return nil, err
+	}
 	for _, r := range repos {
 		for _, rows := range [][]uiRow{r.Working, r.Finished} {
 			sort.SliceStable(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })

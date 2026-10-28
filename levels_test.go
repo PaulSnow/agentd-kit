@@ -267,3 +267,33 @@ func TestIssueLevelScreensAndDedupes(t *testing.T) {
 		}
 	}
 }
+
+// Level 1: a sentence across the repositories, a row each with its
+// counts, linked to its page, and the token meter; today's tokens split
+// by kind, repository and session.
+func TestHomeLevel(t *testing.T) {
+	f := newLevelsFixture(t)
+	u, _ := testUI(t, UIConfig{}, f.src)
+	body := owner(t, u, "/")
+	for _, want := range []string{
+		"Across 1 repository: 4 issues and 2 requests open, 2 being worked. 1 issue waits on you, in widgets.",
+		`<a href="/repo/widgets">widgets</a></th><td>4</td><td>2</td><td>2</td><td><strong>1</strong></td><td>3h</td>`,
+		`name="scope" value="home"`, `class="meter"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	day := func(h int) time.Time { return time.Date(2026, 10, 23, h, 0, 0, 0, time.UTC) }
+	l := &AccountLedger{Spends: []LedgerSpend{
+		{At: day(1), Account: "a", Repository: "widgets", Session: "w4", Kind: SpendSession, Tokens: 300},
+		{At: day(2), Account: "a", Repository: "widgets", Kind: "status", Tokens: 20},
+		{At: day(3), Account: "b", Kind: "thread", Tokens: 50},
+		{At: day(0).Add(-time.Hour), Account: "a", Repository: "widgets", Session: "w4", Kind: SpendSession, Tokens: 9000},
+	}}
+	tt := todayTokens([]*AccountLedger{l}, pageAt, time.UTC)
+	if tt.Total != 370 || tt.ByKind[0] != (NamedSpend{Name: SpendSession, Tokens: 300}) || len(tt.ByKind) != 3 ||
+		tt.ByRepository[0] != (NamedSpend{Name: "widgets", Tokens: 320}) || tt.ByRepository[1].Name != "agentd" || tt.BySession[0].Tokens != 300 {
+		t.Fatalf("today %+v", tt)
+	}
+}

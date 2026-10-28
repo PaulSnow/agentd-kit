@@ -124,3 +124,47 @@ func levelPath(path string) (repo string, n int, ok bool) {
 	}
 	return rest, 0, true
 }
+
+// homeLevel fills the index's home level: a row per configured
+// repository from the run that serves it, the sentence across them, and
+// today's tokens from every source's ledger.
+func (u *UI) homeLevel(v *uiIndex, now time.Time) error {
+	names := map[string]bool{}
+	spends := &AccountLedger{} // copies, read under each source's lock
+	for _, src := range u.sources {
+		src.mu.Lock()
+		for r := range src.cfg.Repositories {
+			names[r] = true
+		}
+		if src.st.Ledger != nil && !src.echo {
+			spends.Spends = append(spends.Spends, src.st.Ledger.Spends...)
+		}
+		if v.Src == "" && src.st.Mode == ModeLive {
+			v.Src = src.Name
+		}
+		src.mu.Unlock()
+	}
+	for _, repo := range sortedKeys(names) {
+		var row HomeRow
+		if _, err := u.levelSource(repo, now, func(_ *uiSource, cfg *Config, st *LogState, ds []UIDecision) {
+			row = BuildHomeRow(cfg, st, repo, ds, now)
+		}); err != nil {
+			return err
+		}
+		v.Home = append(v.Home, row)
+	}
+	v.Sentence = homeSentence(v.Home)
+	v.Today = todayTokens([]*AccountLedger{spends}, now, u.loc)
+	return nil
+}
+
+// Scope is the home page's scope.
+func (v *uiIndex) Scope() string { return "home" }
+
+// Repository is the home page's: none.
+func (v *uiIndex) Repository() string { return "" }
+
+// ScopeNote says where the home console box's words go.
+func (v *uiIndex) ScopeNote() string {
+	return "About every repository: a question is answered from their issues, requests and the usage ledger; an instruction goes to the repository it names, or to agentd itself. Nothing here interrupts a session."
+}
