@@ -67,6 +67,19 @@
     }
   }
 
+  // The conversation of a level's console box (#69) keeps its newest
+  // entry last, so it is brought to its bottom: on load, and after a
+  // refresh unless the owner had scrolled up in it.
+  function atBottom(el) {
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 8;
+  }
+  function talkBottom(root) {
+    var talks = root.querySelectorAll(".talk");
+    for (var i = 0; i < talks.length; i++) {
+      talks[i].scrollTop = talks[i].scrollHeight;
+    }
+  }
+
   function refresh() {
     if (document.hidden) {
       return;
@@ -87,7 +100,7 @@
           }
           reopen(old, next);
           var inner = old.querySelector(".talk");
-          scrolled[old.id] = { top: old.scrollTop, inner: inner ? inner.scrollTop : 0 };
+          scrolled[old.id] = { top: old.scrollTop, inner: inner ? inner.scrollTop : 0, atBottom: !inner || atBottom(inner) };
           old.replaceWith(document.importNode(next, true));
         }
         levelBoxes();
@@ -96,8 +109,14 @@
           var el = document.getElementById(id);
           if (!el) { return; }
           if (scrolled[id].top > 0) { el.scrollTop = scrolled[id].top; }
-          var inner = el.querySelector(".talk");
-          if (inner && scrolled[id].inner > 0) { inner.scrollTop = scrolled[id].inner; }
+          // The conversation stays at its newest entry, unless the owner
+          // scrolled up in it to read.
+          if (scrolled[id].atBottom) {
+            talkBottom(el);
+          } else {
+            var inner = el.querySelector(".talk");
+            if (inner) { inner.scrollTop = scrolled[id].inner; }
+          }
         });
       })
       .catch(function () {});
@@ -195,6 +214,7 @@
   document.addEventListener("change", boxInput);
   document.addEventListener("input", boxInput);
   levelBoxes();
+  talkBottom(document);
 
   var box = document.getElementById("box");
   if (!box) {
