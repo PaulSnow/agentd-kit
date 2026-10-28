@@ -263,7 +263,8 @@ const sweepEvery = time.Hour
 // sweepSteps drops, at most once a sweepEvery, the steps and sentences of
 // every issue and request nothing holds and nothing touched for
 // closedKept: one not on the open list, which no open work item names, no
-// live session works and whose request CI was not seen since. With the
+// live session works, that is no request CI last saw open nor the issue of
+// one, and whose CI was not seen since. With the
 // index off, which is the default, the loop's and the status check's
 // sentences would otherwise grow for ever; with it on, the closed ones a
 // repository no longer listed keeps go too.
@@ -286,6 +287,17 @@ func (st *LogState) sweepSteps(now time.Time) {
 		for name, sess := range c.Sessions {
 			if sess.Issue > 0 && st.sessionLive(name) {
 				held[sentenceKey(sess.Repository, "#"+strconv.Itoa(sess.Issue))] = true
+			}
+		}
+		// A request still open, as CI last saw it, and its case's issue,
+		// however long it has been quiet.
+		for _, r := range st.CI {
+			if r.State == CIMerged || r.State == CIClosed || !requestRef.MatchString(r.Ref) {
+				continue
+			}
+			held[sentenceKey(r.Repository, r.Ref)] = true
+			if issue := caseIssue(st.cfg.caseOf(c.Sessions[r.Session])); issue != "" {
+				held[sentenceKey(r.Repository, issue)] = true
 			}
 		}
 	}
