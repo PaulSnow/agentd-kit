@@ -108,7 +108,17 @@ var noQuestions = regexp.MustCompile(`(?i)^[-*\s]*\(?\s*(none(\s+(yet|open|so\s+
 // something (noneAsks), makes it a question whatever it begins with.
 var noneSaid = regexp.MustCompile(`(?i)^[-*\s]*\(\s*(none(\s+(yet|open|so\s+far))?|no(\s+open)?\s+questions?(\s+(yet|open))?)\s*([;:,.\x{2013}\x{2014}]|\s-\s)[^?]*\)\s*\.?$`)
 var listOrFence = regexp.MustCompile("^\\s*([-*+]\\s|\\d+[.)]\\s|```|~~~)")
+var listStart = regexp.MustCompile(`^\s*([-*+]\s|\d+[.)]\s)`)
 var noneAsks = regexp.MustCompile(`(?i)\b(but|need|needs|please|must|until|block|blocked|blocking|waiting|approve)\b`)
+
+// noneFirst matches a line whose first word is none, said as an answer:
+// "none. Owner asked ...", "None so far: ...", "- (none, ...". "None of
+// the tests pass" and "none-blocking" say something else.
+var noneFirst = regexp.MustCompile(`(?i)^[-*\s]*\(?\s*none(\s+(yet|open|so\s+far))?\s*([.,;:!)\x{2013}\x{2014}]|\s-\s|$)`)
+
+// noneParagraphAsks is what makes a none paragraph ask the owner something
+// after all: a question mark, or a request (#69).
+var noneParagraphAsks = regexp.MustCompile(`(?i)\?|\b(please|must|blocked|choose|say\s+if|tell\s+me)\b|\bowner\s*:`)
 
 // ParseStatus interprets STATUS.md text.
 func ParseStatus(text string) StatusEvidence {
@@ -151,7 +161,13 @@ func parseQuestions(text string, fences bool) (questions string, closed bool) {
 		// leaves the question asked. A parenthesised reason wrapped onto
 		// the lines after it is judged as the one line it is.
 		var kept []string
+		if len(section) > 0 && noneFirst.MatchString(section[0]) {
+			section = noneSection(section)
+		}
 		for i := 0; i < len(section); i++ {
+			if section[i] == "" {
+				continue
+			}
 			t, j := strings.TrimSpace(section[i]), i
 			if strings.HasPrefix(strings.TrimLeft(t, "-* "), "(") && !strings.Contains(t, ")") {
 				// Only up to a closing parenthesis, over plain lines: one
@@ -163,8 +179,9 @@ func parseQuestions(text string, fences bool) (questions string, closed bool) {
 					}
 					if strings.Contains(section[k], ")") {
 						for j < k {
-							j++
-							t += " " + strings.TrimSpace(section[j])
+							if j++; section[j] != "" {
+								t += " " + strings.TrimSpace(section[j])
+							}
 						}
 						break
 					}
@@ -202,13 +219,56 @@ func parseQuestions(text string, fences bool) (questions string, closed bool) {
 			}
 		}
 		l := strings.TrimSpace(line)
-		if level == 0 || l == "" || thematicBreak.MatchString(strings.ReplaceAll(l, " ", "")) {
+		if level == 0 {
+			continue
+		}
+		// A blank line or a break ends a paragraph, outside a code block:
+		// "" marks it.
+		if l == "" || thematicBreak.MatchString(strings.ReplaceAll(l, " ", "")) {
+			if fence == "" && len(section) > 0 && section[len(section)-1] != "" {
+				section = append(section, "")
+			}
 			continue
 		}
 		section = append(section, l)
 	}
 	flush()
 	return strings.Join(found, "\n"), fence == ""
+}
+
+// noneSection is what is left to judge of a Questions section whose first
+// word is none (#69). It is read in paragraphs, which a blank line or a
+// list item starts. The first, the none paragraph, asks nothing unless it
+// asks the owner something (noneParagraphAsks); after it, a list item
+// counts, and a plain paragraph or a code block only when it asks. The
+// none paragraph is kept as the lead-in of what counts after it.
+func noneSection(section []string) []string {
+	var paras [][]string
+	open, code := false, false // in a paragraph; in a code block, which is one
+	for _, l := range section {
+		if l == "" {
+			open = false
+			continue
+		}
+		f, _ := fenceOf(l)
+		if !open || !code && listOrFence.MatchString(l) {
+			paras, open = append(paras, nil), true
+		}
+		if f != "" {
+			code = !code
+		}
+		paras[len(paras)-1] = append(paras[len(paras)-1], l)
+	}
+	var out []string
+	for k, p := range paras {
+		if k > 0 && listStart.MatchString(p[0]) || noneParagraphAsks.MatchString(strings.Join(p, " ")) {
+			if k > 0 && len(out) == 0 {
+				out = append(out, paras[0]...)
+			}
+			out = append(out, p...)
+		}
+	}
+	return out
 }
 
 // fenceOf returns the code fence a line starts with, a run of three or more

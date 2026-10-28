@@ -423,6 +423,41 @@ func TestNoQuestionsForms(t *testing.T) {
 	}
 }
 
+// A Questions section whose first word is none asks nothing when that
+// paragraph is narrative: no question mark, and nothing asked of the
+// owner (please, must, blocked, choose, say if, tell me, "Owner:"). A
+// question on its own line after it still counts, with the paragraph as
+// its lead-in; a none paragraph that asks keeps counting (#54).
+func TestNoneParagraphAsksNothing(t *testing.T) {
+	for _, body := range []string{
+		"none. Owner asked for the lantern fix: nothing is blocking. Waiting on review of !7.",
+		"none. Owner asked for the lantern fix: nothing is blocking.\nWaiting on review of !7.",
+		"None: the kite repaint was approved on the console; nothing is needed from you.",
+		"- none, the gate hinges were oiled as asked\nDONE",
+		"none.\nOwner asked for the lantern fix: nothing is blocking.\nWaiting on review of !5.",
+		"None\nNothing is blocking; waiting on review.",
+		"none yet\n\nThe kite repaint needs your approval on the console, which it has.",
+		"none.\n\n```\nlantern build ok\n\n- 3 wicks trimmed\n```",
+	} {
+		if ev := ParseStatus("# T\n\n## Questions\n\n" + body + "\n\n## Next\nwork\n"); ev.Questions != "" {
+			t.Errorf("%q: questions %q", body, ev.Questions)
+		}
+	}
+	for body, want := range map[string]string{
+		"none. Owner asked for the lantern fix.\n- Which wick should I use?":    "none. Owner asked for the lantern fix.\n- Which wick should I use?",
+		"none. Owner asked for the lantern fix.\nWhich wick should I use?":      "none. Owner asked for the lantern fix.\nWhich wick should I use?",
+		"None. Nothing is blocking.\nTell me if the blue kite should ship too.": "None. Nothing is blocking.\nTell me if the blue kite should ship too.",
+		"None so far. Owner: choose the wick before Friday.":                    "None so far. Owner: choose the wick before Friday.",
+		"none. Say if the kite should be blue.":                                 "none. Say if the kite should be blue.",
+		"none.\nI am waiting on CI.\n- Which wick should I use?":                "I am waiting on CI.\n- Which wick should I use?",
+		"none. The lantern fix is merged.\n\nPlease merge !7 too.":              "none. The lantern fix is merged.\nPlease merge !7 too.",
+	} {
+		if ev := ParseStatus("# T\n\n## Questions\n" + body + "\n"); ev.Questions != want {
+			t.Errorf("%q: questions %q, want %q", body, ev.Questions, want)
+		}
+	}
+}
+
 // A line that says nothing is open is not a question, however it is put:
 // "none", "(none)", "none open", or a parenthesised line that begins with
 // none and says why (#54). A real question after such a line still counts,
