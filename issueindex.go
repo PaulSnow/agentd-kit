@@ -639,14 +639,22 @@ func workingOn(cfg *Config, st *LogState, repo string) map[string]bool {
 
 // sessionLive says whether session name is at work now, as agentd last
 // saw it: starting, working, idle between turns, waiting on the owner or
-// on its usage limit; not done, failed, crash-looping or stopped.
+// on its usage limit, or failed and to be restarted; one agentd started
+// and has not yet seen. Not done, crash-looping, parked or stopped.
 func (st *LogState) sessionLive(name string) bool {
+	if name == "" {
+		return false
+	}
 	t := st.Tracks[name]
-	if name == "" || t == nil || t.Stopped != "" {
+	if t == nil || t.State == "" {
+		_, started := st.Runtime[name]
+		return started
+	}
+	if t.Stopped != "" || t.Parked {
 		return false
 	}
 	switch t.State {
-	case Starting, Working, Idle, BlockedOnOwner, UsageLimited:
+	case Starting, Working, Idle, BlockedOnOwner, UsageLimited, Failed:
 		return true
 	}
 	return false

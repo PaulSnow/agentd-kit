@@ -708,6 +708,15 @@ func TestBeingWorkedMeansASession(t *testing.T) {
 	if w := workingOn(h.cfg, h.sup.st, "widgets"); !w["#4"] || !w["#5"] {
 		t.Fatalf("a live session's issue and item: %v", w)
 	}
+	h.sup.track("s").State = Failed // restarted after its backoff
+	if w := workingOn(h.cfg, h.sup.st, "widgets"); !w["#4"] {
+		t.Fatalf("a session between a crash and its restart: %v", w)
+	}
+	h.sup.track("s").Parked = true
+	if w := workingOn(h.cfg, h.sup.st, "widgets"); len(w) != 0 {
+		t.Fatalf("worked by a parked session: %v", w)
+	}
+	h.sup.track("s").Parked = false
 	h.sup.track("s").State = Done
 	if w := workingOn(h.cfg, h.sup.st, "widgets"); len(w) != 0 {
 		t.Fatalf("worked by a session that is done: %v", w)
