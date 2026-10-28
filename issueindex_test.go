@@ -362,9 +362,11 @@ func gitlabIssues(from, to int, changed string) string {
 }
 
 // A forge with 400 idle issues gets 300 sentences on the first back-fill
-// run, spread over the poll interval, and the other 100 on the second;
-// then an issue that changes gets exactly one new sentence. A page
-// rendered while the back-fill runs calls no model and says how far it is.
+// run, spread over the poll interval at most backfillAtOnce at a time,
+// with the loop coming back sooner for them, and the other 100 on the
+// second; then an issue that changes gets exactly one new sentence. A
+// page rendered while the back-fill runs calls no model and says how far
+// it is.
 func TestBackfillIdleSentences(t *testing.T) {
 	dir := fakeClaude(t)
 	claudeAnswers(t, dir, 0, claudeResult(`{"sentence":"Asks for a fix; nobody has answered."}`))
@@ -378,13 +380,30 @@ func TestBackfillIdleSentences(t *testing.T) {
 		}
 		api.gitlab["widgets/issues?state=opened|&page=5"] = `[]`
 	})
-	h.ticks(1, time.Minute) // the listing
+	tick := 20 * time.Second
+	h.ticks(1, tick) // the listing
 	if n := len(h.sup.st.Index["widgets"]); n != 401 {
 		t.Fatalf("%d listed", n)
 	}
-	h.ticks(6, time.Minute) // a run starts, 5 of its 10 minutes go by
+	if p := backfillProgress(h.cfg, h.sup.st, "widgets"); p == nil || p.Done != 0 || p.Of != 400 {
+		t.Fatalf("progress %v before the back-fill", p)
+	}
+	// A run starts; each pass starts at most backfillAtOnce, and the loop
+	// waits less than poll_interval for the next.
+	last := 0
+	for k := 0; k < 15; k++ {
+		h.ticks(1, tick)
+		n := h.idleCalls("")
+		if n-last > backfillAtOnce {
+			t.Fatalf("pass %d started %d", k, n-last)
+		}
+		last = n
+		if w := h.sup.passWait(); w != BackfillPoll {
+			t.Fatalf("pass %d: next pass in %s", k, w)
+		}
+	}
 	mid := h.idleCalls("")
-	if mid == 0 || mid >= 300 {
+	if mid < 100 || mid >= 300 {
 		t.Fatalf("%d sentences half-way through the first run", mid)
 	}
 
@@ -401,18 +420,21 @@ func TestBackfillIdleSentences(t *testing.T) {
 		t.Fatalf("%d model calls from page loads", n-before)
 	}
 
-	h.ticks(5, time.Minute) // the first run's interval is over
+	h.ticks(16, tick) // the first run's interval is over
 	if n := h.idleCalls(""); n != 300 {
 		t.Fatalf("%d sentences after the first run", n)
 	}
-	h.ticks(11, time.Minute) // the second run
+	h.ticks(31, tick) // the second run
 	if n := h.idleCalls(""); n != 400 {
 		t.Fatalf("%d sentences after the second run", n)
 	}
 	if p := backfillProgress(h.cfg, h.sup.st, "widgets"); p != nil {
 		t.Fatalf("progress %v after the back-fill", p)
 	}
-	h.ticks(10, time.Minute)
+	if w := h.sup.passWait(); w != h.cfg.PollInterval.Duration {
+		t.Fatalf("next pass in %s after the back-fill", w)
+	}
+	h.ticks(30, tick)
 	if n := h.idleCalls(""); n != 400 {
 		t.Fatalf("%d sentences with nothing changed", n)
 	}
@@ -422,11 +444,33 @@ func TestBackfillIdleSentences(t *testing.T) {
 		api.gitlab[k] = strings.Replace(api.gitlab[k], `"iid":150,"title":"Issue 150","labels":["bug"],"author":{"username":"author0"},"created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-02T00:00:00Z"`,
 			`"iid":150,"title":"Issue 150","labels":["bug"],"author":{"username":"author0"},"created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-06T00:00:00Z"`, 1)
 	})
-	h.ticks(20, time.Minute)
+	h.ticks(60, tick)
 	if n, one := h.idleCalls(""), h.idleCalls("#150"); n != 401 || one != 2 {
 		t.Fatalf("%d sentences, %d for #150, after #150 changed", n, one)
 	}
 	if s := h.sup.st.sentenceOf("widgets", "#150"); s == nil || s.Writer != WriterIdle || !s.For.Equal(time.Date(2026, 10, 6, 0, 0, 0, 0, time.UTC)) {
 		t.Fatalf("#150's sentence %+v", s)
+	}
+}
+
+// A back-filled sentence that is withheld is not written again, and the
+// issue counts out of the progress, so it does not stand for ever.
+func TestBackfillWithheldSettles(t *testing.T) {
+	dir := fakeClaude(t)
+	claudeAnswers(t, dir, 0, claudeResult(`{"sentence":"Asks about the secret plan."}`))
+	h, api := indexHarness(t)
+	h.cfg.Jobs.Sentences.Enabled = true
+	h.cfg.ConfidentialPatterns = []string{"(?i)secret plan"}
+	if err := h.cfg.finish(h.dir); err != nil {
+		t.Fatal(err)
+	}
+	h.restart(false)
+	h.sup.api = api
+	h.ticks(130, time.Minute)
+	if n := h.idleCalls(""); n != 2 {
+		t.Fatalf("%d calls for two withheld sentences", n)
+	}
+	if p := backfillProgress(h.cfg, h.sup.st, "widgets"); p != nil {
+		t.Fatalf("progress %v with every sentence withheld", p)
 	}
 }

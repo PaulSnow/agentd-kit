@@ -451,12 +451,17 @@ func (s *Supervisor) Run(ctx context.Context, once bool) error {
 
 // passWait is how long the loop waits for the next pass: ChatPoll while
 // an owner instruction is delivered and not answered, so its activity
-// shows as it goes, else the poll interval.
+// shows as it goes, else the poll interval, or sooner when a back-fill
+// has a call to start (backfillWait).
 func (s *Supervisor) passWait() time.Duration {
-	if d := s.cfg.PollInterval.Duration; s.st.chatInFlight(s.clock.Now()) && ChatPoll < d {
+	d := s.cfg.PollInterval.Duration
+	if s.st.chatInFlight(s.clock.Now()) && ChatPoll < d {
 		return ChatPoll
 	}
-	return s.cfg.PollInterval.Duration
+	if w, ok := s.backfillWait(s.clock.Now()); ok && w < d {
+		return w
+	}
+	return d
 }
 
 // watchOwner looks at the log every WakeCheck for records the owner
