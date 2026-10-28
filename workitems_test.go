@@ -499,3 +499,112 @@ func TestThreadAgentWorkOpensItem(t *testing.T) {
 		t.Fatalf("instruction = %+v", in)
 	}
 }
+
+// A new item never goes to a session that wrote DONE or is stopped, even
+// handed to it: it goes to a running session on the same issue, or to a
+// session started for it (#68).
+func TestNewItemNeverGoesToFinishedSession(t *testing.T) {
+	for _, c := range []string{"done", "stopped", "status DONE"} {
+		t.Run(c, func(t *testing.T) {
+			h := sessionsHarness(t)
+			w1 := h.startSession("issue-1", KindWork, 1)
+			h.ticks(2, time.Minute)
+			h.alive(w1, "w1 works")
+			h.ticks(1, time.Minute)
+			switch c {
+			case "done":
+				h.finish(w1)
+				h.alive(w1, "w1 is done")
+				h.ticks(1, time.Minute)
+				if st := h.state(w1); st != Done {
+					t.Fatalf("state = %v", st)
+				}
+			case "stopped":
+				tr := h.sup.track(w1)
+				tr.State, tr.Stopped = Stopped, "its spend cap"
+			case "status DONE":
+				// DONE written, the track not yet seen it.
+				h.finish(w1)
+			}
+			it := h.askWork("Ship the follow-up.", ThreadWork{Title: "Ship the follow-up", Brief: "Ship it.", DoneWhen: EndCheck{Kind: DoneOwner}}, w1)
+			h.ticks(1, time.Minute)
+			it = h.item(it.ID)
+			for _, step := range h.workItemAssigns(it.ID) {
+				if step == w1 {
+					t.Fatalf("the item went to %s, which is %s: item = %+v", w1, c, it)
+				}
+			}
+			if it.Session == "" || !it.Started {
+				t.Fatalf("no session started for it: item = %+v", it)
+			}
+		})
+	}
+	// A running session on the item's issue takes it.
+	h := sessionsHarness(t)
+	w1 := h.startSession("issue-1", KindWork, 1)
+	w2 := h.startSession("issue-1-b", KindWork, 1)
+	h.ticks(2, time.Minute)
+	h.alive(w1, "w1 works")
+	h.alive(w2, "w2 works")
+	h.ticks(1, time.Minute)
+	h.finish(w1)
+	h.alive(w1, "w1 is done")
+	h.ticks(1, time.Minute)
+	it := h.askWork("Ship the follow-up.", ThreadWork{Title: "Ship the follow-up", Brief: "Ship it.", Issue: 1, DoneWhen: EndCheck{Kind: DoneOwner}}, w1)
+	if it = h.item(it.ID); it.Session != w2 || it.Started {
+		t.Fatalf("not given to %s, on the same issue: item = %+v", w2, it)
+	}
+}
+
+// workItemAssigns are the sessions item id was assigned to, in order.
+func (h *harness) workItemAssigns(id string) []string {
+	var out []string
+	for _, e := range h.events() {
+		if e.Kind == KindWorkItem && e.Work.ID == id && e.Work.Step == WorkStepAssign {
+			out = append(out, e.Work.Session)
+		}
+	}
+	return out
+}
+
+// A DONE that is not this assignment's claims nothing: one written
+// before the item was assigned, or one whose only done line names another
+// item; the item is given back (#68).
+func TestClaimRefusedWhenDoneOlderOrForOtherItem(t *testing.T) {
+	for _, c := range []string{"older", "other"} {
+		t.Run(c, func(t *testing.T) {
+			h := sessionsHarness(t)
+			h.alive("a", "a works")
+			it := h.askWork("Bump the version to 3.38.2.", ThreadWork{Title: "Bump the version", Brief: "Bump it.", DoneWhen: EndCheck{Kind: DoneOwner}}, "a")
+			if it.Session != "a" {
+				t.Fatalf("item = %+v", it)
+			}
+			path := filepath.Join(h.dir, "a", "STATUS.md")
+			switch c {
+			case "older":
+				h.status("a", "# Status\n\nall of it shipped\n\nDONE\n")
+				at := it.Assigned.Add(-time.Hour)
+				if err := os.Chtimes(path, at, at); err != nil {
+					t.Fatal(err)
+				}
+			case "other":
+				h.status("a", "# Status\n\nWdeadbeef done: the other one shipped\n\nDONE\n")
+			}
+			h.alive("a", "a is done")
+			h.ticks(3, time.Minute)
+			for _, step := range h.workSteps(it.ID) {
+				if step == WorkStepClaim {
+					t.Fatalf("claimed: steps %v", h.workSteps(it.ID))
+				}
+			}
+			it = h.item(it.ID)
+			want := "DONE predates the assignment"
+			if c == "other" {
+				want = "DONE names Wdeadbeef, not this item"
+			}
+			if len(it.Tried) == 0 || it.Tried[0] != "a" || len(it.Notes) == 0 || !strings.Contains(it.Notes[0].Text, want) {
+				t.Fatalf("not reopened with %q: item = %+v", want, it)
+			}
+		})
+	}
+}
