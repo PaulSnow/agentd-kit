@@ -168,7 +168,8 @@ func TestLevelsCLIParity(t *testing.T) {
 			t.Errorf("console widgets lacks %q:\n%s", want, page)
 		}
 	}
-	if i, j := strings.Index(page, "!10 "), strings.Index(page, "!9 "); i < 0 || j < 0 || i > j {
+	box := page[strings.Index(page, "2 open requests"):]
+	if i, j := strings.Index(box, "!10 "), strings.Index(box, "!9 "); i < 0 || j < 0 || i > j {
 		t.Errorf("the MR box sorted newest has !9 before !10:\n%s", page)
 	}
 	if box := run("widgets", "--issues", "--filter", "wa1"); !strings.Contains(box, "#5") || strings.Contains(box, "#6") {
