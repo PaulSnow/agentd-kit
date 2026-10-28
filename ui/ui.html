@@ -65,6 +65,19 @@
 </li>{{end}}{{end}}
 
 {{define "index"}}{{template "head" .}}
+<section id="home" data-refresh aria-labelledby="home-h"><h2 id="home-h" class="visually-hidden">Where things stand</h2>
+<p class="state-sentence">{{.Sentence}}</p>
+<table class="home-table"><thead><tr><th scope="col">Repository</th><th scope="col">Open</th><th scope="col">Being worked</th><th scope="col">Requests</th><th scope="col">Waits on you</th><th scope="col">Last change</th></tr></thead>
+<tbody>{{range .Home}}<tr{{if .Counts.Waiting}} class="row-alert"{{end}}><th scope="row"><a href="/repo/{{path .Repository}}">{{.Repository}}</a></th>{{if .Listed}}<td>{{.Counts.Open}}</td><td>{{.Counts.Working}}</td><td>{{.Counts.Requests}}</td><td>{{if .Counts.Waiting}}<strong>{{.Counts.Waiting}}</strong>{{else}}0{{end}}</td><td>{{$.Ago .Counts.Last}}</td>{{else}}<td colspan="5" class="muted">{{.Sentence}}</td>{{end}}</tr>{{end}}</tbody></table>
+<div class="meter" aria-label="Token meter"><h3>Tokens</h3>
+<ul class="meter-accounts">{{range .Accounts}}{{with .Report}}<li><strong>{{.Account}}</strong> {{if .Weekly}}week {{pct .Weekly}}{{with .WeeklyReset}}, resets {{$.Day .}}{{end}}{{else}}<span class="muted">no reading</span>{{end}}</li>{{end}}{{end}}</ul>
+<details class="meter-today" data-key="home-today"><summary>Today {{.Tokens .Today.Total}} tokens{{range $i, $k := .Today.ByKind}}{{if lt $i 4}} · {{$k.Name}} {{$.Tokens $k.Tokens}}{{end}}{{end}}</summary>
+<div class="meter-split"><div><h4>By kind</h4><ul>{{range .Today.ByKind}}<li>{{.Name}} {{$.Tokens .Tokens}}</li>{{else}}<li class="muted">none</li>{{end}}</ul></div>
+<div><h4>By repository</h4><ul>{{range .Today.ByRepository}}<li>{{.Name}} {{$.Tokens .Tokens}}</li>{{else}}<li class="muted">none</li>{{end}}</ul></div>
+<div><h4>By session</h4><ul>{{range .Today.BySession}}<li>{{.Name}} {{$.Tokens .Tokens}}</li>{{else}}<li class="muted">none</li>{{end}}</ul></div></div></details>
+</div>
+</section>
+<details class="home-detail" data-key="home-detail"><summary>Runs, sessions and requests in detail</summary>
 <section id="runs" class="runs" data-refresh aria-label="Runs">
 <ul class="chips">{{range .Runs}}<li class="chip">
 <strong>{{.Src}}</strong> <span class="badge mode-{{.Mode}}">{{.Mode}}</span>
@@ -107,6 +120,7 @@
 <p class="meta">{{.Name}}{{if not .Last.IsZero}} · last message {{$.Ago .Last}}{{else}} · no messages yet{{end}}</p>
 </article>{{end}}
 </section>{{end}}
+</details>
 {{template "foot" .}}{{end}}
 
 {{define "console"}}{{template "head" .}}

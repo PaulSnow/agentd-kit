@@ -681,3 +681,68 @@ func BuildIssueLevel(cfg *Config, st *LogState, repo string, n int, decisions []
 	}
 	return v
 }
+
+// HomeRow is one repository on the home page: its counts and last change,
+// or that agentd does not list its issues.
+type HomeRow struct {
+	Repository string      `json:"repository"`
+	Tracked    bool        `json:"tracked"`
+	Listed     bool        `json:"listed"`
+	Counts     IndexCounts `json:"counts"`
+	Sentence   string      `json:"sentence"`
+}
+
+// homeSentence says where the repositories stand together.
+func homeSentence(rows []HomeRow) string {
+	if len(rows) == 0 {
+		return "No repository is configured."
+	}
+	var need []string
+	open, working, requests, waiting, listed := 0, 0, 0, 0, 0
+	for _, r := range rows {
+		if !r.Listed {
+			continue
+		}
+		listed++
+		open += r.Counts.Open
+		working += r.Counts.Working
+		requests += r.Counts.Requests
+		waiting += r.Counts.Waiting
+		if r.Counts.Waiting > 0 {
+			need = append(need, r.Repository)
+		}
+	}
+	if listed == 0 {
+		if len(rows) == 1 {
+			return "1 repository configured; agentd does not list its issues yet."
+		}
+		return fmt.Sprintf("%s configured; agentd lists the issues of none of them yet.", listedRepos(len(rows)))
+	}
+	s := fmt.Sprintf("Across %s: %s and %s open, %d being worked.", listedRepos(listed), plural(open, "issue"), plural(requests, "request"), working)
+	switch {
+	case waiting == 1:
+		s += " 1 issue waits on you, in " + strings.Join(need, ", ") + "."
+	case waiting > 1:
+		s += fmt.Sprintf(" %d issues wait on you, in %s.", waiting, strings.Join(need, ", "))
+	default:
+		s += " Nothing waits on you."
+	}
+	if n := len(rows) - listed; n > 0 {
+		s += fmt.Sprintf(" %s not listed yet.", listedRepos(n))
+	}
+	return s
+}
+
+// BuildHomeRow is repo's row on the home page, from the fold.
+func BuildHomeRow(cfg *Config, st *LogState, repo string, decisions []UIDecision, now time.Time) HomeRow {
+	v := BuildRepoLevel(cfg, st, repo, decisions, now)
+	return HomeRow{Repository: repo, Tracked: v.Tracked, Listed: v.Tracked && !v.Read.IsZero(), Counts: v.Counts, Sentence: v.Sentence}
+}
+
+// listedRepos is n repositories, in words.
+func listedRepos(n int) string {
+	if n == 1 {
+		return "1 repository"
+	}
+	return fmt.Sprintf("%d repositories", n)
+}

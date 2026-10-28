@@ -658,3 +658,58 @@ func accountsFlags(args []string) (*Config, bool, bool, error) {
 	cfg, _, err := loadConfigFlag(fs, args)
 	return cfg, *report, *asJSON, err
 }
+
+// TodayTokens are the tokens charged since the start of today, in all and
+// by what spent them: by kind (a session, or a job's kind), by repository
+// and by session, each largest first (#69).
+type TodayTokens struct {
+	Since        time.Time    `json:"since"`
+	Total        int64        `json:"total"`
+	ByKind       []NamedSpend `json:"by_kind"`
+	ByRepository []NamedSpend `json:"by_repository"`
+	BySession    []NamedSpend `json:"by_session"`
+}
+
+// todayTokens sums the ledgers' spends since the start of now's day in
+// loc.
+func todayTokens(ledgers []*AccountLedger, now time.Time, loc *time.Location) TodayTokens {
+	n := now.In(loc)
+	since := time.Date(n.Year(), n.Month(), n.Day(), 0, 0, 0, 0, loc)
+	t := TodayTokens{Since: since}
+	kinds, repos, sessions := map[string]int64{}, map[string]int64{}, map[string]int64{}
+	for _, l := range ledgers {
+		if l == nil {
+			continue
+		}
+		for _, s := range l.Spends {
+			if s.At.Before(since) || s.At.After(now) {
+				continue
+			}
+			t.Total += s.Tokens
+			kinds[s.Kind] += s.Tokens
+			repo := s.Repository
+			if repo == "" {
+				repo = "(agentd)" // its own jobs, no repository's
+			}
+			repos[repo] += s.Tokens
+			if s.Session != "" {
+				sessions[s.Session] += s.Tokens
+			}
+		}
+	}
+	byTokens := func(m map[string]int64) []NamedSpend {
+		out := []NamedSpend{}
+		for k, v := range m {
+			out = append(out, NamedSpend{Name: k, Tokens: v})
+		}
+		sort.Slice(out, func(i, j int) bool {
+			if out[i].Tokens != out[j].Tokens {
+				return out[i].Tokens > out[j].Tokens
+			}
+			return out[i].Name < out[j].Name
+		})
+		return out
+	}
+	t.ByKind, t.ByRepository, t.BySession = byTokens(kinds), byTokens(repos), byTokens(sessions)
+	return t
+}
