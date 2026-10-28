@@ -115,7 +115,7 @@ func TestRepoLevel(t *testing.T) {
 		"widgets has 4 issues and 2 requests open: 1 needs you, 2 being worked.",
 		"4 issues, 1 need you, 2 being worked, <span class=\"box-shown\">4</span> shown",
 		`class="box-filter"`, "Profiling the settings page; the cache is next.", "(status)", "(idle)",
-		"No sentence yet; the forge's title stands.", "(withheld: it matched a confidential pattern)",
+		"No sentence yet; the forge&#39;s title stands.", "(withheld: it matched a confidential pattern)",
 		`href="/repo/widgets/issue/4#mr-9"`, "!9 is reviewing: round 1", `href="/console/widgets">history</a>`,
 		`name="scope" value="widgets"`,
 	} {

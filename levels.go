@@ -125,7 +125,10 @@ type LevelIssue struct {
 	Sentence   string    `json:"sentence,omitempty"`
 	Writer     string    `json:"writer,omitempty"`
 	SentenceAt time.Time `json:"sentence_at,omitempty"`
-	Requests   []string  `json:"requests,omitempty"`
+	// Missing says why it has no sentence: SentenceWithheld or
+	// SentenceFailed, "" when none was tried or it has one.
+	Missing  string   `json:"missing,omitempty"`
+	Requests []string `json:"requests,omitempty"`
 	// Decision is the first open decision, whose options the row offers.
 	Decision *LevelDecision `json:"decision,omitempty"`
 	Working  bool           `json:"working,omitempty"`
@@ -322,6 +325,23 @@ func levelDecisionsOf(cfg *Config, st *LogState, n int, j IssueJoin, decisions [
 	return out
 }
 
+// Why an issue has no sentence.
+const (
+	SentenceWithheld = "withheld"
+	SentenceFailed   = "failed"
+)
+
+// NoSentence says, in a sentence, that the issue has none and why.
+func (i LevelIssue) NoSentence() string {
+	switch i.Missing {
+	case SentenceWithheld:
+		return "No sentence: the last one written was withheld, as it matched a confidential pattern; the forge's title stands."
+	case SentenceFailed:
+		return "No sentence: the last one could not be written; the forge's title stands."
+	}
+	return "No sentence yet; the forge's title stands."
+}
+
 // levelIssue is issue i of repo as a row: its sentence, its word, its
 // requests and its first open decision.
 func levelIssue(cfg *Config, st *LogState, repo string, i *IndexIssue, decisions []UIDecision, busy map[string]bool, secret func(...string) bool) (LevelIssue, IssueJoin, []LevelDecision) {
@@ -334,6 +354,11 @@ func levelIssue(cfg *Config, st *LogState, repo string, i *IndexIssue, decisions
 	}
 	if s := st.sentenceOf(repo, i.Ref); s != nil {
 		li.Sentence, li.Writer, li.SentenceAt = s.Text, s.Writer, s.At
+	} else if s := st.Sentences[sentenceKey(repo, i.Ref)]; s != nil && !s.IdleFailed.IsZero() {
+		li.Missing = SentenceFailed
+		if s.IdleWithheld {
+			li.Missing = SentenceWithheld
+		}
 	}
 	ds := levelDecisions(cfg, st, n, j, decisions, secret)
 	switch {

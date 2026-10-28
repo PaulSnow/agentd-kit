@@ -279,7 +279,7 @@
 <input type="search" class="box-filter" placeholder="Filter: words, a label, #N or !N" aria-label="Filter the issues"></header>
 <ol class="box-rows">{{range $i := .Issues}}<li class="box-row word-{{.WordClass}}" data-ref="{{.Ref}}" data-number="{{.Number}}" data-word="{{.Word}}" data-working="{{if .Working}}1{{end}}" data-mr="{{len .Requests}}" data-opened="{{.Opened.Unix}}" data-changed="{{.Changed.Unix}}" data-label="{{range $i, $l := .Labels}}{{if $i}} {{end}}{{$l}}{{end}}" data-milestone="{{.Milestone}}" data-author="{{.Author}}" data-text="{{.FilterText}}" data-refs="{{.Ref}}{{range .Requests}} {{.}}{{end}}">
 <div class="row-head">{{if .URL}}<a class="forge-ref" href="{{.URL}}" target="_blank" rel="noopener" title="Open {{.Ref}} on its forge">{{.Ref}}</a>{{else}}<a href="/repo/{{path .Repository}}/issue/{{.Number}}">{{.Ref}}</a>{{end}} <strong class="row-title"><a href="/repo/{{path .Repository}}/issue/{{.Number}}">{{.Title}}</a></strong> <span class="badge word">{{.Word}}</span>{{range .Labels}} <span class="badge label">{{.}}</span>{{end}}{{range .Requests}} <span class="badge mr">{{.}}</span>{{end}} <span class="muted">changed {{$.Ago .Changed}}</span></div>
-<p class="row-sentence">{{if .Sentence}}{{.Sentence}} <span class="muted">({{.Writer}})</span>{{else}}<span class="muted">No sentence yet; the forge's title stands.</span>{{end}}</p>
+<p class="row-sentence">{{if .Sentence}}{{.Sentence}} <span class="muted">({{.Writer}})</span>{{else}}<span class="muted">{{.NoSentence}}</span>{{end}}</p>
 {{with .Decision}}<p class="row-options"><a href="/repo/{{path $i.Repository}}/issue/{{$i.Number}}#{{.Anchor}}">{{.Asked}}</a>{{range .Options}} <span class="badge">{{.Label}}</span>{{end}}</p>{{end}}
 </li>{{else}}<li class="empty">No open issues listed.</li>{{end}}</ol>
 </section>
@@ -298,7 +298,7 @@
 <nav class="crumbs"><a href="/">Home</a> › <a href="/repo/{{path .Repository}}">{{.Repository}}</a> › {{.Ref}} · <a href="/console/{{.Repository}}">history</a></nav>
 <section id="issue-head" data-refresh>
 <h2>{{if .URL}}<a class="forge-ref" href="{{.URL}}" target="_blank" rel="noopener" title="Open {{.Ref}} on its forge">{{.Ref}}</a>{{else}}{{.Ref}}{{end}} {{.LevelIssue.Title}} <span class="badge word">{{.Word}}</span></h2>
-<p class="state-sentence">{{if .Sentence}}{{.Sentence}} <span class="muted">— {{.Writer}}, {{.Ago .SentenceAt}} ago</span>{{else}}<span class="muted">No sentence yet; the forge's title stands.</span>{{end}}</p>
+<p class="state-sentence">{{if .Sentence}}{{.Sentence}} <span class="muted">— {{.Writer}}, {{.Ago .SentenceAt}} ago</span>{{else}}<span class="muted">{{.NoSentence}}</span>{{end}}</p>
 <p class="refs">{{range .Refs}}<span class="badge ref-{{.Kind}}">{{.Kind}} {{.Name}}{{with .Note}} · {{.}}{{end}}</span> {{end}}{{range .Labels}}<span class="badge label">{{.}}</span> {{end}}{{with .Milestone}}<span class="badge">milestone {{.}}</span> {{end}}{{with .Author}}<span class="muted">opened by {{.}} {{$.Ago $.Opened}} ago</span>{{end}}</p>
 </section>
 <section id="decisions" data-refresh aria-labelledby="decisions-h"><h2 id="decisions-h">Decision</h2>
