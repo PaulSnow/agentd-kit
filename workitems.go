@@ -227,6 +227,9 @@ type WorkPayload struct {
 	// starts, and Design is a round's design (#68).
 	Designer bool        `json:"designer,omitempty"`
 	Design   *WorkDesign `json:"design,omitempty"`
+	// Words are the owner's words at a go, whole: the answers to the
+	// design's questions.
+	Words string `json:"words,omitempty"`
 }
 
 // check says what a work item step lacks.
@@ -293,18 +296,20 @@ type WorkItem struct {
 	// Round is the round designed now or last, Design its brief,
 	// DesignError and DesignFails the round's failures, DesignCost what
 	// every round cost, Change the owner's words on the last, and
-	// Approved when it went on, by whom.
-	Designer     bool
-	Round        int
-	Design       *WorkDesign
-	DesignError  string
-	DesignFails  int
-	DesignCost   *JobUsage
-	Designed     time.Time
-	Change       string
-	Approved     time.Time
-	ApprovedBy   string
-	ApprovedNote string
+	// Approved when it went on, by whom, and ApprovedWords the owner's
+	// words then, whole.
+	Designer      bool
+	Round         int
+	Design        *WorkDesign
+	DesignError   string
+	DesignFails   int
+	DesignCost    *JobUsage
+	Designed      time.Time
+	Change        string
+	Approved      time.Time
+	ApprovedBy    string
+	ApprovedNote  string
+	ApprovedWords string
 }
 
 // terminal says whether the item is closed.
