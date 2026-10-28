@@ -210,8 +210,8 @@ func TestHandToDoneAliveReopens(t *testing.T) {
 // A hand-over to a finished session whose tmux session is gone drops no
 // message: Go opens its item from it, starts a session for it and tells
 // the owner on the console (#68). A message that failed otherwise still
-// offers the next step: start a session for it, or send it to a session
-// that takes messages.
+// offers the next step: end a session to start one for it, or send it to
+// a session that takes messages.
 func TestHandToDoneGoneOpensItem(t *testing.T) {
 	dir := fakeClaude(t)
 	h := sessionsHarness(t)
@@ -249,8 +249,9 @@ func TestHandToDoneGoneOpensItem(t *testing.T) {
 		}
 	}
 	h.sup.emit("", Event{Kind: KindRoute, Route: &RoutePayload{Instruction: other.ID, Step: RouteFail, Reason: "agentd could not start a session for it"}})
+	// The repository is at its max: a session is ended to start one.
 	d := nextDecision(h.sup.cfg, h.sup.st, other, h.clock.Now())
-	if d == nil || !contains(decisionOptions(*d), nextStart) || !contains(decisionOptions(*d), nextSend+"a") || contains(decisionOptions(*d), nextSend+w1) {
+	if d == nil || !contains(decisionOptions(*d), nextEnd+w1) || !contains(decisionOptions(*d), nextSend+"a") || contains(decisionOptions(*d), nextSend+w1) {
 		t.Fatalf("next step = %+v", d)
 	}
 	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")

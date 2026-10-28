@@ -265,6 +265,9 @@ func (s *Supervisor) openDesign(in *Instruction, repo string, w ThreadWork) {
 		if s.workEmit(WorkPayload{ID: id, Step: WorkStepOpen, Repository: repo, Instruction: in.ID, Work: &w, Designer: true}); s.halt != nil {
 			return
 		}
+		if s.toldHandTo(in, s.st.Work[id]); s.halt != nil {
+			return
+		}
 	}
 	if it := s.st.Work[id]; it != nil {
 		s.designWait(in, it)

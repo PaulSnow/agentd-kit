@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -584,18 +583,6 @@ func (s *Supervisor) routeNext(in *Instruction) {
 			say("agentd ended " + end + " but could not start a session: " + orig.Failed)
 		}
 	}
-}
-
-// errHandToFinished prefixes a hand-over to a session that finished and
-// whose tmux session is gone: no second agent changes that.
-const errHandToFinished = "the agent handed it to "
-
-// handToError is why hand_to names a session that cannot be handed work.
-func handToError(name string, finished map[string]bool) error {
-	if finished[name] {
-		return errors.New(errHandToFinished + name + ", which finished and whose tmux session is gone")
-	}
-	return errors.New("the agent handed the work to no running session of the repository")
 }
 
 // uiNextEntry is a failed instruction's next step as an entry of its
