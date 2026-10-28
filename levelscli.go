@@ -425,7 +425,7 @@ func consoleAskCmd(cfg *Config, args []string, out io.Writer) error {
 func consoleEntryCmd(cfg *Config, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("console reply", flag.ContinueOnError)
 	entry := fs.String("entry", "", "the entry's id: b:ITEM, w:ITEM, x:ID, d:SESSION:ID, n:SESSION:KIND or i:ID; any other (m:, f:, e:, p:, o:) with --repository")
-	choice := fs.String("choice", "", "the option chosen")
+	choice := fs.String("choice", "", "the option chosen; on an x: entry start, send:SESSION, end:SESSION or drop (nothing is sent)")
 	yes := fs.Bool("yes", false, "answer a yes/no decision yes")
 	no := fs.Bool("no", false, "answer a yes/no decision no")
 	repo := fs.String("repository", "", "the entry's repository, when Go cannot tell it from the entry")

@@ -470,13 +470,15 @@ const (
 	nextStart = "start" // start a work session for it
 	nextSend  = "send:" // send it to the session named
 	nextEnd   = "end:"  // end the started session named, then start one for it
+	nextDrop  = "drop"  // drop the message: nothing is sent
 )
 
 // nextOptions are what the owner may do with failed instruction in of
 // repo: start a session, unless the repository has no sessions entry or
 // is at its max, when ending each of the sessions that hold the places
 // is offered; and send it to each session that takes messages, or
-// finished with its tmux session running.
+// finished with its tmux session running; and, beside any of those,
+// dropping it.
 func nextOptions(cfg *Config, st *LogState, repo string, work bool) []DecisionOption {
 	var out []DecisionOption
 	if r, ok := cfg.Repositories[repo]; ok && r.Sessions != nil && r.Sessions.Host == "" {
@@ -505,6 +507,9 @@ func nextOptions(cfg *Config, st *LogState, repo string, work bool) []DecisionOp
 			}
 			out = append(out, DecisionOption{Key: nextSend + n, Label: label})
 		}
+	}
+	if len(out) > 0 {
+		out = append(out, DecisionOption{Key: nextDrop, Label: "Drop it", Consequence: "nothing is sent"})
 	}
 	return out
 }
@@ -561,6 +566,8 @@ func (s *Supervisor) routeNext(in *Instruction) {
 		work = *a.Work
 	}
 	switch {
+	case choice == nextDrop:
+		say("dropped; nothing was sent")
 	case choice == nextStart:
 		if s.startOwnerWork(orig, repo, work) {
 			say("agentd started " + orig.Session + " for your message")
