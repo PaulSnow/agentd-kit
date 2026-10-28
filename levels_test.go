@@ -2,10 +2,13 @@ package main
 
 import (
 	"bytes"
+	"fmt"
+	"html"
 	"io"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -572,5 +575,66 @@ func TestRefreshKeepsTheBoxScroll(t *testing.T) {
 	}
 	if read < 0 || swap < 0 || sorted < 0 || restore < 0 || !(read < swap && swap < sorted && sorted < restore) {
 		t.Fatalf("refresh does not keep a box's scroll across the swap and the sort:\n%s", body)
+	}
+}
+
+// stepTexts are the words of the steps on an issue page, chips and times
+// left out, and the chips' markup apart.
+func stepTexts(t *testing.T, body string) (texts []string, chips string) {
+	t.Helper()
+	start := strings.Index(body, `<ol class="steps">`)
+	end := strings.Index(body[start:], "</ol>")
+	if start < 0 || end < 0 {
+		t.Fatalf("no steps:\n%s", body)
+	}
+	for _, li := range strings.Split(body[start:start+end], "<li>")[1:] {
+		if c := strings.Index(li, `<span class="chips">`); c >= 0 {
+			chips += li[c:]
+			li = li[:c]
+		}
+		li = regexp.MustCompile(`<time[^>]*>[^<]*</time>|<[^>]+>`).ReplaceAllString(li, "")
+		texts = append(texts, strings.TrimSpace(html.UnescapeString(li)))
+	}
+	return texts, chips
+}
+
+// The steps say what happened in sentences with names, the item by its
+// title and the request by its title; ids are in chips alone. No step
+// holds an item's id, a session's name or hex id, or a bare #N or !N
+// outside a quoted title. A sentence rewritten is no step, and the steps
+// that matter are kept when the ring is trimmed.
+func TestStepsAreSentences(t *testing.T) {
+	f := newLevelsFixture(t)
+	for k := 0; k < stepsKept+20; k++ {
+		p := IndexPayload{Repository: "widgets", Ref: "#5", Title: fmt.Sprintf("Choose a cache, take %d", k), State: "open", Labels: []string{"design"}, Author: "bo", Opened: pageAt.Add(-48 * time.Hour), Changed: pageAt.Add(time.Duration(k-200) * time.Minute)}
+		if err := f.log.Append(Event{V: EventVersion, Time: pageAt.Add(time.Duration(k-200) * time.Minute), Kind: KindIndex, Mode: ModeLive, Index: &p}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	u, _ := testUI(t, UIConfig{}, f.src)
+	ids := regexp.MustCompile(`\bW[0-9a-f]{8}\b|\b[0-9a-f]{12,}\b|\bwa1\b|\bw4\b`)
+	bare := regexp.MustCompile(`[#!][0-9]+`)
+	quoted := regexp.MustCompile(`“[^”]*”`)
+	var all []string
+	chips := ""
+	for _, target := range []string{"/repo/widgets/issue/4?steps=all", "/repo/widgets/issue/5?steps=all", "/repo/widgets/issue/6?steps=all"} {
+		texts, c := stepTexts(t, owner(t, u, target))
+		all, chips = append(all, texts...), chips+c
+	}
+	for _, s := range all {
+		if ids.MatchString(s) || bare.MatchString(quoted.ReplaceAllString(s, "")) {
+			t.Errorf("a step holds an id: %q", s)
+		}
+		if strings.Contains(s, "Profiling the settings page") {
+			t.Errorf("a sentence is a step: %q", s)
+		}
+	}
+	for _, want := range []string{"The item to pick the cache was opened.", "The item to pick the cache was given to a session.", "The item to pick the cache asks you: Which cache size, 64 or 256 MB?", "Review round 1 started on the request “Speed up #4”."} {
+		if !contains(all, want) {
+			t.Errorf("no step %q among the %d", want, len(all))
+		}
+	}
+	if !strings.Contains(chips, "wa1") || !strings.Contains(chips, "!9") {
+		t.Errorf("the chips hold no ids: %s", chips)
 	}
 }
