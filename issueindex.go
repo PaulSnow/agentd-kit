@@ -18,8 +18,10 @@ import (
 // only through the log. Each issue carries a sentence saying where it
 // stands, logged by what knows: the status check for an issue a session
 // works, the request loop for a request and its issue, and, for an idle
-// issue, a small model call made once per change on the forge. The newest
-// sentence stands, with its writer.
+// issue, a small model call made once per change on the forge. An idle
+// issue the first listing found is back-filled once, at most backfillCap
+// per repository each poll interval, spread over it. The newest sentence
+// stands, with its writer.
 
 // Index and sentence event kinds.
 const (
@@ -31,7 +33,7 @@ const (
 const (
 	WriterStatus = "status" // the status check of the session working the issue
 	WriterLoop   = "loop"   // the request loop, from the request's place
-	WriterIdle   = "idle"   // the idle-issue job, once per change on the forge
+	WriterIdle   = "idle"   // the idle-issue job, once per change on the forge, and the back-fill
 )
 
 // Index limits: the pages one listing reads, the labels kept, a title's
@@ -46,6 +48,7 @@ const (
 	idleBody       = 2000
 	idleComments   = 5
 	idleRetryAfter = time.Hour
+	backfillCap    = 300
 )
 
 // IndexPayload is one open issue or request as the forge lists it, or one
@@ -407,6 +410,15 @@ type indexRun struct {
 	mu     sync.Mutex
 	failed map[string]string
 	listed map[string]bool // listed since agentd started, events or not
+	// fill is each repository's back-fill run under way: when it started
+	// and how many calls it started.
+	fill map[string]*backfillRun
+}
+
+// backfillRun is one poll interval's back-fill of a repository.
+type backfillRun struct {
+	start time.Time
+	taken int
 }
 
 // firstListing says whether repo was never listed, by the log or since
@@ -442,12 +454,19 @@ func (s *Supervisor) readIndexes(now time.Time) {
 		return
 	}
 	if s.idx == nil {
-		s.idx = &indexRun{last: map[string]time.Time{}, failed: map[string]string{}, listed: map[string]bool{}}
+		s.idx = &indexRun{last: map[string]time.Time{}, failed: map[string]string{}, listed: map[string]bool{}, fill: map[string]*backfillRun{}}
 	}
 	for _, repo := range sortedKeys(s.cfg.Repositories) {
 		repo, r := repo, s.cfg.Repositories[repo]
 		if !indexed(r) || s.halt != nil {
 			continue
+		}
+		if s.cfg.Jobs.Sentences.Enabled {
+			for _, ref := range idleDue(s.cfg, s.st, repo, now) {
+				ref, i := ref, *s.st.Index[repo][ref]
+				s.spawnShared("idle:"+repo+ref, func(w *Supervisor) { w.idleSentence(repo, r, i) })
+			}
+			s.backfill(repo, r, now)
 		}
 		if last := s.idx.last[repo]; last.IsZero() || !now.Before(last.Add(s.cfg.Poll.Every.Duration)) {
 			s.idx.last[repo] = now
@@ -457,12 +476,6 @@ func (s *Supervisor) readIndexes(now time.Time) {
 			}
 			_, read := s.st.IndexRead[repo]
 			s.spawnShared("index:"+repo, func(w *Supervisor) { w.readIndex(repo, r, known, read) })
-		}
-		if s.cfg.Jobs.Sentences.Enabled {
-			for _, ref := range idleDue(s.cfg, s.st, repo, now) {
-				ref, i := ref, *s.st.Index[repo][ref]
-				s.spawnShared("idle:"+repo+ref, func(w *Supervisor) { w.idleSentence(repo, r, i) })
-			}
 		}
 	}
 }
@@ -553,6 +566,109 @@ func idleDue(cfg *Config, st *LogState, repo string, now time.Time) []string {
 		refs = append(refs, i.Ref)
 	}
 	return refs
+}
+
+// backfillDue are repo's idle issues the first listing found that have no
+// sentence yet, the latest changed first: an open issue no session or item
+// works, not changed on the forge since that listing (a change is
+// idleDue's), whose last idle call did not fail within idleRetryAfter.
+func backfillDue(cfg *Config, st *LogState, repo string, now time.Time) []string {
+	busy := workingOn(cfg, st, repo)
+	var out []*IndexIssue
+	for ref, i := range st.Index[repo] {
+		if ref[0] != '#' || busy[ref] || i.Changed.After(i.Quiet) {
+			continue
+		}
+		if s := st.Sentences[sentenceKey(repo, ref)]; s != nil && (s.Text != "" || !s.IdleFailed.IsZero() && s.IdleFailed.Add(idleRetryAfter).After(now)) {
+			continue
+		}
+		out = append(out, i)
+	}
+	sort.Slice(out, func(a, b int) bool {
+		if !out[a].Changed.Equal(out[b].Changed) {
+			return out[a].Changed.After(out[b].Changed)
+		}
+		return out[a].Number() < out[b].Number()
+	})
+	refs := make([]string, len(out))
+	for k, i := range out {
+		refs[k] = i.Ref
+	}
+	return refs
+}
+
+// backfill starts the idle sentences of repo's issues that have none, on
+// the sentences job's model: at most backfillCap a poll interval, spread
+// evenly over it, so the k-th call of a run starts k/backfillCap of the
+// way through it. A loop pass that comes once the interval is over starts
+// what the run has left, and the next pass starts a new run. None starts
+// while a listing of the repository from an earlier pass is under way.
+func (s *Supervisor) backfill(repo string, r Repository, now time.Time) {
+	if s.work.inFlight["index:"+repo] {
+		return // what it would write for may be changing
+	}
+	due := backfillDue(s.cfg, s.st, repo, now)
+	run := s.idx.fill[repo]
+	if run == nil {
+		if len(due) == 0 {
+			return
+		}
+		run = &backfillRun{start: now}
+		s.idx.fill[repo] = run
+	}
+	every := s.cfg.Poll.Every.Duration
+	allowed, over := backfillCap, !now.Before(run.start.Add(every))
+	if !over {
+		allowed = min(backfillCap, int(int64(now.Sub(run.start))*backfillCap/int64(every))+1)
+	}
+	for _, ref := range due {
+		if run.taken >= allowed {
+			break
+		}
+		i := *s.st.Index[repo][ref]
+		if s.spawnShared("idle:"+repo+ref, func(w *Supervisor) { w.idleSentence(repo, r, i) }) {
+			run.taken++
+		}
+	}
+	if over {
+		delete(s.idx.fill, repo)
+	}
+}
+
+// BackfillProgress is how far the sentences of a repository's idle issues
+// are written: Done of Of.
+type BackfillProgress struct {
+	Done int `json:"done"`
+	Of   int `json:"of"`
+}
+
+// backfillProgress is repo's progress while sentences are being written:
+// its open issues no session or item works, and of those the ones with a
+// sentence; nil when the sentences job is off or every one has one.
+func backfillProgress(cfg *Config, st *LogState, repo string) *BackfillProgress {
+	if !cfg.Jobs.Sentences.Enabled {
+		return nil
+	}
+	busy := workingOn(cfg, st, repo)
+	var p BackfillProgress
+	for ref := range st.Index[repo] {
+		if ref[0] != '#' || busy[ref] {
+			continue
+		}
+		p.Of++
+		if st.sentenceOf(repo, ref) != nil {
+			p.Done++
+		}
+	}
+	if p.Done == p.Of {
+		return nil
+	}
+	return &p
+}
+
+// String is the progress in words.
+func (p *BackfillProgress) String() string {
+	return fmt.Sprintf("sentences being written, %d of %d done", p.Done, p.Of)
 }
 
 const idleSystem = `You write one sentence, at most 200 characters, saying where an open issue stands for its owner: what it asks and what last happened on it. Use only the facts given. No names of people beyond the author's login, no paths, no host names. Answer with the JSON the schema asks for.`
@@ -813,6 +929,9 @@ func refNumber(ref string) int {
 type IndexCounts struct {
 	Open, Working, Requests, Waiting int
 	Last                             time.Time
+	// Backfill is how far the idle issues' sentences are written, while
+	// some are not.
+	Backfill *BackfillProgress `json:"backfill,omitempty"`
 }
 
 // indexCounts counts repo's index; waiting says which issues wait on the
@@ -836,6 +955,7 @@ func indexCounts(cfg *Config, st *LogState, repo string, waiting func(ref string
 			c.Waiting++
 		}
 	}
+	c.Backfill = backfillProgress(cfg, st, repo)
 	return c
 }
 

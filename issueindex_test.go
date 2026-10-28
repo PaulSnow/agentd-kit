@@ -140,41 +140,55 @@ func TestIndexFailureToldOnce(t *testing.T) {
 	}
 }
 
-// An idle issue gets its sentence once per change on the forge: none for
-// the first listing, one call when it changes, none again until it
-// changes again. An issue a session works gets the status check's.
+// An idle issue gets its sentence once per change on the forge: one each
+// back-filled after the first listing, one call when it changes, none
+// again until it changes again.
 func TestIdleSentenceOncePerChange(t *testing.T) {
 	dir := fakeClaude(t)
 	claudeAnswers(t, dir, 0, claudeResult(`{"sentence":"Asks for a faster page; the author added a profile."}`))
 	h, api := indexHarness(t)
 	h.cfg.Jobs.Sentences.Enabled = true
-	h.ticks(2, time.Minute)
-	if n := claudeCalls(t, dir); n != 0 {
-		t.Fatalf("%d calls for the first listing", n)
+	h.ticks(3, time.Minute)
+	if n := claudeCalls(t, dir); n != 2 {
+		t.Fatalf("%d calls back-filling the first listing", n)
 	}
 	api.set(func() {
 		api.gitlab["widgets/issues?state=opened"] = strings.Replace(api.gitlab["widgets/issues?state=opened"], `"updated_at":"2026-10-02T00:00:00Z"}`, `"updated_at":"2026-10-06T00:00:00Z"}`, 1)
 	})
 	h.ticks(3, time.Minute)
-	if n := claudeCalls(t, dir); n != 1 {
+	if n := claudeCalls(t, dir); n != 3 {
 		t.Fatalf("%d calls for one change", n)
 	}
 	s := h.sup.st.sentenceOf("widgets", "#4")
 	if s == nil || s.Writer != WriterIdle || !strings.Contains(s.Text, "faster page") || s.For.IsZero() {
 		t.Fatalf("sentence %+v", s)
 	}
-	if in := readFake(t, dir, "in.1"); !strings.Contains(in, `"ref":"#4"`) || !strings.Contains(in, "Slow page") {
+	if in := readFake(t, dir, "in.3"); !strings.Contains(in, `"ref":"#4"`) || !strings.Contains(in, "Slow page") {
 		t.Fatalf("input %s", in)
 	}
 	h.restart(false)
 	h.sup.api = api
 	h.ticks(3, time.Minute)
-	if n := claudeCalls(t, dir); n != 1 {
+	if n := claudeCalls(t, dir); n != 3 {
 		t.Fatalf("%d calls with no new change", n)
 	}
 }
 
-// A failed idle call is logged, and tried again only after an hour.
+// idleCalls counts the idle sentences logged, written or failed, for ref
+// or for any.
+func (h *harness) idleCalls(ref string) int {
+	n := 0
+	for _, e := range h.events() {
+		if e.Kind == KindSentence && e.Sentence.Writer == WriterIdle && (ref == "" || e.Sentence.Ref == ref) {
+			n++
+		}
+	}
+	return n
+}
+
+// A failed idle call is logged, and tried again only after an hour: #4's
+// for its change and #5's back-fill; #4's back-fill, which failed before
+// it changed, is not, as its change's call stands for it.
 func TestIdleSentenceFailureRetried(t *testing.T) {
 	dir := fakeClaude(t)
 	claudeAnswers(t, dir, 0, "not json")
@@ -185,11 +199,11 @@ func TestIdleSentenceFailureRetried(t *testing.T) {
 		api.gitlab["widgets/issues?state=opened"] = strings.Replace(api.gitlab["widgets/issues?state=opened"], `"updated_at":"2026-10-02T00:00:00Z"}`, `"updated_at":"2026-10-06T00:00:00Z"}`, 1)
 	})
 	h.ticks(5, time.Minute)
-	if n := claudeCalls(t, dir); n != 1 {
+	if n := h.idleCalls(""); n != 3 {
 		t.Fatalf("%d calls", n)
 	}
 	h.ticks(60, time.Minute)
-	if n := claudeCalls(t, dir); n != 2 {
+	if n := h.idleCalls(""); n != 5 {
 		t.Fatalf("%d calls after an hour", n)
 	}
 }
@@ -285,7 +299,8 @@ func TestJoinIssue(t *testing.T) {
 }
 
 // A failed idle call followed by one that works settles: no call again
-// until the issue changes.
+// until the issue changes. The first call, #4's back-fill, fails; the
+// calls for #4's change and #5's back-fill work, and none comes after.
 func TestIdleSentenceSettlesAfterARetry(t *testing.T) {
 	dir := fakeClaude(t)
 	claudeAnswers(t, dir, 1, "not json")
@@ -298,11 +313,13 @@ func TestIdleSentenceSettlesAfterARetry(t *testing.T) {
 	})
 	h.ticks(62, time.Minute)
 	h.ticks(10, time.Minute)
-	if n := claudeCalls(t, dir); n != 2 {
+	if n := h.idleCalls(""); n != 3 {
 		t.Fatalf("%d calls", n)
 	}
-	if s := h.sup.st.sentenceOf("widgets", "#4"); s == nil || s.Text != "Asks for a faster page." {
-		t.Fatalf("sentence %+v", s)
+	for _, ref := range []string{"#4", "#5"} {
+		if s := h.sup.st.sentenceOf("widgets", ref); s == nil || s.Text != "Asks for a faster page." {
+			t.Fatalf("%s sentence %+v", ref, s)
+		}
 	}
 }
 
@@ -331,5 +348,85 @@ func TestIndexWithheld(t *testing.T) {
 	}
 	if n := h.count(KindSentence, "", ""); n != 2 { // the request and its issue, once each
 		t.Fatalf("%d withheld sentences logged", n)
+	}
+}
+
+// gitlabIssues is a GitLab issues page: idle issues from..to, changed at
+// changed.
+func gitlabIssues(from, to int, changed string) string {
+	var parts []string
+	for n := from; n <= to; n++ {
+		parts = append(parts, fmt.Sprintf(`{"iid":%d,"title":"Issue %d","labels":["bug"],"author":{"username":"author%d"},"created_at":"2026-10-01T00:00:00Z","updated_at":"%s"}`, n, n, n%3, changed))
+	}
+	return "[" + strings.Join(parts, ",") + "]"
+}
+
+// A forge with 400 idle issues gets 300 sentences on the first back-fill
+// run, spread over the poll interval, and the other 100 on the second;
+// then an issue that changes gets exactly one new sentence. A page
+// rendered while the back-fill runs calls no model and says how far it is.
+func TestBackfillIdleSentences(t *testing.T) {
+	dir := fakeClaude(t)
+	claudeAnswers(t, dir, 0, claudeResult(`{"sentence":"Asks for a fix; nobody has answered."}`))
+	h, api := indexHarness(t)
+	h.cfg.Jobs.Sentences.Enabled = true
+	h.cfg.Poll.Every = Duration{10 * time.Minute}
+	api.set(func() {
+		delete(api.gitlab, "widgets/issues?state=opened")
+		for p := 0; p < 4; p++ {
+			api.gitlab[fmt.Sprintf("widgets/issues?state=opened|&page=%d", p+1)] = gitlabIssues(p*100+1, p*100+100, "2026-10-02T00:00:00Z")
+		}
+		api.gitlab["widgets/issues?state=opened|&page=5"] = `[]`
+	})
+	h.ticks(1, time.Minute) // the listing
+	if n := len(h.sup.st.Index["widgets"]); n != 401 {
+		t.Fatalf("%d listed", n)
+	}
+	h.ticks(6, time.Minute) // a run starts, 5 of its 10 minutes go by
+	mid := h.idleCalls("")
+	if mid == 0 || mid >= 300 {
+		t.Fatalf("%d sentences half-way through the first run", mid)
+	}
+
+	src := newUISource("live", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	u, _ := testUI(t, UIConfig{}, src)
+	before := claudeCalls(t, dir)
+	want := fmt.Sprintf("sentences being written, %d of 400 done", mid)
+	for _, target := range []string{"/", "/repo/widgets", "/repo/widgets/issue/7"} {
+		if body := owner(t, u, target); target != "/repo/widgets/issue/7" && !strings.Contains(strings.ToLower(body), want) {
+			t.Fatalf("%s does not say %q", target, want)
+		}
+	}
+	if n := claudeCalls(t, dir); n != before {
+		t.Fatalf("%d model calls from page loads", n-before)
+	}
+
+	h.ticks(5, time.Minute) // the first run's interval is over
+	if n := h.idleCalls(""); n != 300 {
+		t.Fatalf("%d sentences after the first run", n)
+	}
+	h.ticks(11, time.Minute) // the second run
+	if n := h.idleCalls(""); n != 400 {
+		t.Fatalf("%d sentences after the second run", n)
+	}
+	if p := backfillProgress(h.cfg, h.sup.st, "widgets"); p != nil {
+		t.Fatalf("progress %v after the back-fill", p)
+	}
+	h.ticks(10, time.Minute)
+	if n := h.idleCalls(""); n != 400 {
+		t.Fatalf("%d sentences with nothing changed", n)
+	}
+
+	api.set(func() {
+		k := "widgets/issues?state=opened|&page=2"
+		api.gitlab[k] = strings.Replace(api.gitlab[k], `"iid":150,"title":"Issue 150","labels":["bug"],"author":{"username":"author0"},"created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-02T00:00:00Z"`,
+			`"iid":150,"title":"Issue 150","labels":["bug"],"author":{"username":"author0"},"created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-06T00:00:00Z"`, 1)
+	})
+	h.ticks(20, time.Minute)
+	if n, one := h.idleCalls(""), h.idleCalls("#150"); n != 401 || one != 2 {
+		t.Fatalf("%d sentences, %d for #150, after #150 changed", n, one)
+	}
+	if s := h.sup.st.sentenceOf("widgets", "#150"); s == nil || s.Writer != WriterIdle || !s.For.Equal(time.Date(2026, 10, 6, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("#150's sentence %+v", s)
 	}
 }
