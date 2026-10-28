@@ -725,3 +725,23 @@ func TestBlockedItemTakesAnAnswer(t *testing.T) {
 		t.Fatalf("the answer: %d %s", w.Code, w.Body.String())
 	}
 }
+
+// The conversation keeps its newest entry last and in view: the page
+// script scrolls each .talk list to its bottom on load and after each
+// refresh, unless the owner scrolled up in it, whose place is kept.
+func TestTalkShowsItsNewest(t *testing.T) {
+	js, err := uiAssets.ReadFile("ui/ui.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(js)
+	start := strings.Index(s, "function refresh()")
+	end := strings.Index(s[start:], "\n  }\n")
+	refresh := s[start : start+end]
+	if !strings.Contains(s, "function talkBottom(") || !strings.Contains(s, "talkBottom(document)") {
+		t.Fatal("the script does not bring the conversation to its newest entry on load")
+	}
+	if !strings.Contains(refresh, "atBottom") || !strings.Contains(refresh, "talkBottom(el)") {
+		t.Fatalf("a refresh does not keep the conversation at its newest entry unless scrolled up:\n%s", refresh)
+	}
+}
