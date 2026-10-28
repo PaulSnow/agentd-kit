@@ -108,6 +108,8 @@ type Forge interface {
 	Retest(repo Repository, ref string) error
 	// Comment posts body on an issue or request (#60).
 	Comment(repo Repository, ref, body string) error
+	// OpenIssue opens an issue and returns its number (#69).
+	OpenIssue(repo Repository, title, body string) (int, error)
 }
 
 // AllowedForge wraps a Forge with the per-repository allow-list. Every write

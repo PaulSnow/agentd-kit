@@ -78,6 +78,15 @@ type JobsConfig struct {
 	// Designer sets the agent that designs the owner's work before a
 	// session starts on it (#68).
 	Designer DesignerConfig `json:"designer"`
+	// Sentences turns on the idle-issue sentences of the issue index,
+	// on Model when set (#69).
+	Sentences SentencesConfig `json:"sentences"`
+}
+
+// SentencesConfig turns on the idle-issue sentence job and sets its model.
+type SentencesConfig struct {
+	Enabled bool   `json:"enabled"`
+	Model   string `json:"model"`
 }
 
 // TriagePayload is one triage call's outcome: the answers Go accepted, the

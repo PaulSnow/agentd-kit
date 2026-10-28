@@ -65,6 +65,7 @@ type Supervisor struct {
 	usage  *usageReader
 	api    ForgeAPI    // the forges' APIs for the poll, or nil for none
 	rel    *releaseRun // the release driver's reads (#67)
+	idx    *indexRun   // the issue index's reads (#69)
 	// live is each repository's issue list as last read, shared by the
 	// loop and its workers (#62).
 	live *liveIssues
@@ -198,6 +199,19 @@ func (s *Supervisor) screen(e *Event) {
 	}
 	if e.Skip != nil {
 		e.Skip.Reason = s.withheld(e.Skip.Reason)
+	}
+	if e.Index != nil {
+		if i := s.confidentialMatch(e.Index.Title + "\n" + e.Index.Branch); i > 0 {
+			e.Index.Title, e.Index.Branch, e.Index.Withheld = "", "", i
+		}
+	}
+	if e.Sentence != nil {
+		if i := s.confidentialMatch(e.Sentence.Text); i > 0 {
+			e.Sentence.Text, e.Sentence.Withheld = "", i
+			if e.Sentence.Failed == "" {
+				e.Sentence.Failed = "withheld"
+			}
+		}
 	}
 	if e.Turn != nil {
 		if i := s.confidentialMatch(e.Turn.Text); i > 0 {
@@ -495,6 +509,7 @@ func (s *Supervisor) Pass() error {
 	if s.halt == nil {
 		s.pollForges(s.clock.Now())
 		s.driveReleases(s.clock.Now())
+		s.readIndexes(s.clock.Now())
 		s.watchCI(s.clock.Now())
 		s.mergeGreen(s.clock.Now())
 		s.runLoops(s.clock.Now())

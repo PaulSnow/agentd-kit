@@ -639,6 +639,12 @@ func (s *Supervisor) checkStatuses(now time.Time) {
 		if !s.statusDue(name, sess, s.track(name), now) {
 			continue
 		}
+		var said string
+		if sess.Issue > 0 {
+			if prev := s.st.sentenceOf(sess.Repository, "#"+strconv.Itoa(sess.Issue)); prev != nil && prev.Writer == WriterStatus {
+				said = prev.Text
+			}
+		}
 		s.spawn(name, "status:"+name, func(w *Supervisor, t *Track) {
 			p, call := w.statusCheck(name, sess, t, now)
 			if p == nil || w.runCtx.Err() != nil {
@@ -655,6 +661,7 @@ func (s *Supervisor) checkStatuses(now time.Time) {
 				}
 			}
 			w.emit(name, Event{Kind: KindStatus, Status: p})
+			w.noteStatusSentence(name, sess, p.Record, said)
 			// The model saw STATUS.md as read only when it was called.
 			if p.statusMD != nil && call != nil {
 				w.status.set(name, *p.statusMD)

@@ -518,6 +518,8 @@ type fakeForge struct {
 	mu             sync.Mutex
 	comments       []string // ref, a space, then the body of each comment posted
 	commentErr     error
+	issues         []string // the title, a newline, then the body of each issue opened
+	issueErr       error
 	pushes         []string
 	pushedSHAs     []string
 	pushURLs       []string
@@ -571,6 +573,16 @@ func (f *fakeForge) Comment(repo Repository, ref, body string) error {
 	defer f.mu.Unlock()
 	f.comments = append(f.comments, ref+" "+body)
 	return f.commentErr
+}
+
+func (f *fakeForge) OpenIssue(repo Repository, title, body string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.issues = append(f.issues, title+"\n"+body)
+	if f.issueErr != nil {
+		return 0, f.issueErr
+	}
+	return 100 + len(f.issues), nil
 }
 
 func (f *fakeForge) Retest(repo Repository, ref string) error {

@@ -257,6 +257,9 @@ func (s *Supervisor) designs(repo string) bool {
 func (s *Supervisor) openDesign(in *Instruction, repo string, w ThreadWork) {
 	id := workID(in.ID)
 	if s.st.Work[id] == nil {
+		if s.issueForWork(id, repo, &w); s.halt != nil {
+			return
+		}
 		if s.workEmit(WorkPayload{ID: id, Step: WorkStepOpen, Repository: repo, Instruction: in.ID, Work: &w, Designer: true}); s.halt != nil {
 			return
 		}

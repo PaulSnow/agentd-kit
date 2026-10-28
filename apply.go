@@ -76,6 +76,12 @@ type LogState struct {
 	// Ledger is the readings and the tokens charged to each account over
 	// the last ledgerKeep (#64); a worker's state has none.
 	Ledger *AccountLedger
+	// Index is each repository's open issues and requests, by ref, and
+	// IndexRead when each was last listed; Sentences each ref's latest
+	// sentence, by sentenceKey (#69).
+	Index     map[string]map[string]*IndexIssue
+	IndexRead map[string]time.Time
+	Sentences map[string]*IndexSentence
 
 	cfg *Config // its policies, read as each event is applied
 }
@@ -191,6 +197,14 @@ func (st *LogState) apply(e Event) {
 	}
 	if e.Kind == KindRelease {
 		st.applyRelease(e)
+		return
+	}
+	if e.Kind == KindIndex {
+		st.applyIndex(e)
+		return
+	}
+	if e.Kind == KindSentence {
+		st.applySentence(e)
 		return
 	}
 	if e.Kind == KindFleet {

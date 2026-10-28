@@ -76,6 +76,8 @@ type Event struct {
 	Release     *ReleasePayload     `json:"release,omitempty"`
 	Fleet       *FleetPayload       `json:"fleet,omitempty"`
 	Work        *WorkPayload        `json:"work,omitempty"`
+	Index       *IndexPayload       `json:"index,omitempty"`
+	Sentence    *SentencePayload    `json:"sentence,omitempty"`
 }
 
 // Event kinds.
@@ -385,7 +387,7 @@ func (e Event) check() error {
 		KindSkip: e.Skip != nil, KindCrash: e.Crash != nil, KindClear: e.Clear != nil, KindError: e.Error != nil, KindWarning: e.Warning != nil,
 		KindItem: e.Item != nil, KindSeen: e.Seen != nil, KindCursor: e.Cursor != nil, KindUsage: e.Usage != nil,
 		KindCheckpoint: e.Checkpoint != nil, KindPoll: e.Poll != nil, KindTriage: e.Triage != nil, KindDecision: e.Decision != nil,
-		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, KindApproval: e.Approval != nil, KindAccount: e.Account != nil, KindMessage: e.Message != nil, KindInbox: e.Inbox != nil, KindJob: e.Job != nil, KindLoop: e.Loop != nil, KindNode: e.Node != nil, KindRoute: e.Route != nil, KindStatus: e.Status != nil, KindCard: e.Card != nil, KindThread: e.Thread != nil, KindQuery: e.Query != nil, KindAttachment: e.Attachment != nil, KindFact: e.Fact != nil, KindOps: e.Ops != nil, KindRelease: e.Release != nil, KindFleet: e.Fleet != nil, KindWorkItem: e.Work != nil, "act": e.Act != nil,
+		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, KindApproval: e.Approval != nil, KindAccount: e.Account != nil, KindMessage: e.Message != nil, KindInbox: e.Inbox != nil, KindJob: e.Job != nil, KindLoop: e.Loop != nil, KindNode: e.Node != nil, KindRoute: e.Route != nil, KindStatus: e.Status != nil, KindCard: e.Card != nil, KindThread: e.Thread != nil, KindQuery: e.Query != nil, KindAttachment: e.Attachment != nil, KindFact: e.Fact != nil, KindOps: e.Ops != nil, KindRelease: e.Release != nil, KindFleet: e.Fleet != nil, KindWorkItem: e.Work != nil, KindIndex: e.Index != nil, KindSentence: e.Sentence != nil, "act": e.Act != nil,
 	}
 	want := e.Kind
 	switch e.Kind {
@@ -431,6 +433,12 @@ func (e Event) check() error {
 		return errors.New("a fleet reading is a run's, for no one session, and names its repository and target")
 	case e.Kind == KindWorkItem && (e.Session != "" || e.Mode != ModeLive && e.Mode != ModeShadow || e.Work.check() != nil):
 		return errors.New("a work item step is a run's, for no one session, and names its item and step")
+	case (e.Kind == KindIndex || e.Kind == KindSentence) && (e.Session != "" || e.Mode != ModeLive && e.Mode != ModeShadow):
+		return fmt.Errorf("a %s event is a run's, for no one session", e.Kind)
+	case e.Kind == KindIndex && e.Index.check() != nil:
+		return e.Index.check()
+	case e.Kind == KindSentence && e.Sentence.check() != nil:
+		return e.Sentence.check()
 	case e.Kind == KindQuery && (e.Mode != ModeShared || e.Query.Repository == "" || e.Query.Tool == ""):
 		return errors.New("a query event is a shared fact and names its repository and tool")
 	case e.Kind == KindAccount && (e.Session != "" || e.Mode != ModeShared || e.Account.Account == ""):
