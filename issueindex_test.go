@@ -566,3 +566,64 @@ func TestFindOpenedIssue(t *testing.T) {
 		t.Fatalf("a listing past its end: %d, %v", n, err)
 	}
 }
+
+// A sentence withheld for an issue's change is not asked for again until
+// the issue changes on the forge: over three hours, one call. A failed one
+// is tried again with a growing wait, three times at most for one change,
+// and the fold says why the issue has none.
+func TestIdleSentenceWithheldAndFailedAreBounded(t *testing.T) {
+	dir := fakeClaude(t)
+	claudeAnswers(t, dir, 0, claudeResult(`{"sentence":"Asks about the secret plan."}`))
+	h, api := indexHarness(t)
+	h.cfg.Jobs.Sentences.Enabled = true
+	h.cfg.ConfidentialPatterns = []string{"(?i)secret plan"}
+	if err := h.cfg.finish(h.dir); err != nil {
+		t.Fatal(err)
+	}
+	h.restart(false)
+	h.sup.api = api
+	h.ticks(1, time.Minute)
+	api.set(func() {
+		api.gitlab["widgets/issues?state=opened"] = strings.Replace(api.gitlab["widgets/issues?state=opened"], `"updated_at":"2026-10-02T00:00:00Z"}`, `"updated_at":"2026-10-06T00:00:00Z"}`, 1)
+	})
+	h.ticks(180, time.Minute)
+	if n := h.idleCallsFor("#4", "2026-10-06T00:00:00Z"); n != 1 {
+		t.Fatalf("%d calls for one withheld change over three hours", n)
+	}
+	if page := h.issuePage(4); !strings.Contains(page, "was withheld") {
+		t.Fatalf("the page does not say the sentence was withheld:\n%s", page)
+	}
+
+	claudeAnswers(t, dir, 0, "not json")
+	api.set(func() {
+		api.gitlab["widgets/issues?state=opened"] = strings.Replace(api.gitlab["widgets/issues?state=opened"], `"updated_at":"2026-10-06T00:00:00Z"}`, `"updated_at":"2026-10-07T00:00:00Z"}`, 1)
+	})
+	h.ticks(24*60, time.Minute)
+	if n := h.idleCallsFor("#4", "2026-10-07T00:00:00Z"); n != 3 {
+		t.Fatalf("%d calls for one failing change over a day", n)
+	}
+	if page := h.issuePage(4); !strings.Contains(page, "could not be written") {
+		t.Fatalf("the page does not say the sentence could not be written:\n%s", page)
+	}
+}
+
+// idleCallsFor counts the idle sentences logged for ref's change at
+// changed.
+func (h *harness) idleCallsFor(ref, changed string) int {
+	at, _ := time.Parse(time.RFC3339, changed)
+	n := 0
+	for _, e := range h.events() {
+		if e.Kind == KindSentence && e.Sentence.Writer == WriterIdle && e.Sentence.Ref == ref && e.Sentence.For.Equal(at) {
+			n++
+		}
+	}
+	return n
+}
+
+// issuePage is widgets' issue n as the command line prints it.
+func (h *harness) issuePage(n int) string {
+	var b strings.Builder
+	now := h.clock.Now()
+	printIssueLevel(&b, uiPage{Now: now, loc: time.UTC}, BuildIssueLevel(h.cfg, h.sup.st, "widgets", n, nil, false, now))
+	return b.String()
+}
