@@ -414,7 +414,7 @@ func TestLevelsCLI(t *testing.T) {
 	for _, want := range []string{
 		"widgets has 4 issues and 2 requests open: 1 needs you, 1 being worked.",
 		"4 issues, 1 need you, 1 being worked, 4 shown", "Profiling the settings page; the cache is next. (status)",
-		"Asks you (w:wa1): w4 asks: Which cache size, 64 or 256 MB? [done, reassign, decline]",
+		"Asks you (w:wa1): w4 asks: Which cache size, 64 or 256 MB? [decline]",
 		"2 open requests", "!9 is reviewing: round 1",
 	} {
 		if !strings.Contains(page, want) {

@@ -142,6 +142,10 @@ func printDecisions(w io.Writer, ds []LevelDecision) {
 			fmt.Fprintf(w, "  Answer: %s\n", d.Command)
 			continue
 		}
+		if d.Prompt != "" {
+			fmt.Fprintf(w, "  Answer: agentd console reply --entry %s YOUR ANSWER, or --choice KEY\n", d.Entry)
+			continue
+		}
 		fmt.Fprintf(w, "  Answer: agentd console reply --entry %s --choice KEY [WORDS]\n", d.Entry)
 	}
 }
