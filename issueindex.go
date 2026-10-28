@@ -48,6 +48,7 @@ const (
 	idleBody       = 2000
 	idleComments   = 5
 	idleRetryAfter = time.Hour
+	idleTries      = 3
 	backfillCap    = 300
 	backfillAtOnce = 10
 )
@@ -137,14 +138,16 @@ func (i *IndexIssue) Number() int { n, _ := strconv.Atoi(i.Ref[1:]); return n }
 
 // IndexSentence is the latest sentence of a ref, and when it was logged;
 // IdleFor and IdleFailed the latest idle attempt, IdleFailed zero once
-// one worked; IdleWithheld whether it was withheld; Tried the hash each
-// writer last wrote, withheld or not.
+// one worked; IdleWithheld whether it was withheld; IdleTries the idle
+// calls that failed for IdleFor's change; Tried the hash each writer last
+// wrote, withheld or not.
 type IndexSentence struct {
 	SentencePayload
 	At           time.Time
 	IdleFor      time.Time
 	IdleFailed   time.Time
 	IdleWithheld bool
+	IdleTries    int
 	Tried        map[string]string
 }
 
@@ -213,7 +216,14 @@ func (st *LogState) applySentence(e Event) {
 		s.Tried[p.Writer] = p.Hash
 	}
 	if p.Writer == WriterIdle {
-		s.IdleFor, s.IdleFailed, s.IdleWithheld = p.For, time.Time{}, p.Withheld > 0
+		tries := 0
+		if p.Failed != "" {
+			tries = 1
+			if !s.IdleFailed.IsZero() && s.IdleFor.Equal(p.For) {
+				tries = s.IdleTries + 1
+			}
+		}
+		s.IdleFor, s.IdleFailed, s.IdleWithheld, s.IdleTries = p.For, time.Time{}, p.Withheld > 0, tries
 		if p.Failed != "" {
 			s.IdleFailed = e.Time
 		}
@@ -568,8 +578,7 @@ func workTerminal(state string) bool { return state == WorkDone || state == Work
 // first, at most idleBatch: an open issue no session or item works,
 // changed on the forge since the repository's first listing, since its
 // last idle sentence and since the status check or the loop last wrote
-// its sentence, whose last idle call for that change did not fail within
-// idleRetryAfter.
+// its sentence, for whose change no idle call is resting (idleResting).
 func idleDue(cfg *Config, st *LogState, repo string, now time.Time) []string {
 	busy := workingOn(cfg, st, repo)
 	var out []*IndexIssue
@@ -581,8 +590,8 @@ func idleDue(cfg *Config, st *LogState, repo string, now time.Time) []string {
 			if s.Text != "" && s.Writer != WriterIdle && !s.At.Before(i.Changed) {
 				continue // written since by what works on it
 			}
-			if !s.IdleFor.Before(i.Changed) && (s.IdleFailed.IsZero() || s.IdleFailed.Add(idleRetryAfter).After(now)) {
-				continue // written, or failed lately, for this change
+			if !s.IdleFor.Before(i.Changed) && (s.IdleFailed.IsZero() || idleResting(s, now)) {
+				continue // written, withheld or failed for this change
 			}
 		}
 		out = append(out, i)
@@ -598,20 +607,42 @@ func idleDue(cfg *Config, st *LogState, repo string, now time.Time) []string {
 	return refs
 }
 
+// idleResting says whether s's last idle call failed and is not to be
+// tried again yet for the change it was for: a withheld sentence is not
+// tried again until the issue changes, as it would only be withheld
+// again; a failed one waits idleRetryAfter, then twice that, and so on,
+// and after idleTries tries is not tried again until the issue changes.
+func idleResting(s *IndexSentence, now time.Time) bool {
+	if s.IdleFailed.IsZero() {
+		return false
+	}
+	if s.IdleWithheld || idleGaveUp(s) {
+		return true
+	}
+	return s.IdleFailed.Add(idleRetryAfter << max(s.IdleTries-1, 0)).After(now)
+}
+
+// idleGaveUp says whether s's idle calls failed idleTries times for one
+// change.
+func idleGaveUp(s *IndexSentence) bool {
+	return !s.IdleFailed.IsZero() && s.IdleTries >= idleTries
+}
+
 // backfillable says whether i is one the back-fill writes for: an open
 // issue no session or item works, not changed on the forge since the first
 // listing (a change is idleDue's), with no sentence, and whose idle
-// sentence was not withheld, which writing it again would only repeat.
+// sentence was not withheld, which writing it again would only repeat,
+// and whose idle calls did not fail idleTries times.
 func backfillable(st *LogState, repo string, i *IndexIssue, busy map[string]bool) bool {
 	if i.Ref[0] != '#' || busy[i.Ref] || i.Changed.After(i.Quiet) {
 		return false
 	}
 	s := st.Sentences[sentenceKey(repo, i.Ref)]
-	return s == nil || s.Text == "" && !s.IdleWithheld
+	return s == nil || s.Text == "" && !s.IdleWithheld && !idleGaveUp(s)
 }
 
 // backfillDue are repo's backfillable issues, the latest changed first,
-// whose last idle call did not fail within idleRetryAfter.
+// whose last idle call is not resting (idleResting).
 func backfillDue(cfg *Config, st *LogState, repo string, now time.Time) []string {
 	busy := workingOn(cfg, st, repo)
 	var out []*IndexIssue
@@ -619,7 +650,7 @@ func backfillDue(cfg *Config, st *LogState, repo string, now time.Time) []string
 		if !backfillable(st, repo, i, busy) {
 			continue
 		}
-		if s := st.Sentences[sentenceKey(repo, ref)]; s != nil && !s.IdleFailed.IsZero() && s.IdleFailed.Add(idleRetryAfter).After(now) {
+		if s := st.Sentences[sentenceKey(repo, ref)]; s != nil && idleResting(s, now) {
 			continue
 		}
 		out = append(out, i)
@@ -712,7 +743,7 @@ func backfillProgress(cfg *Config, st *LogState, repo string) *BackfillProgress 
 		if ref[0] != '#' || busy[ref] {
 			continue
 		}
-		if s := st.Sentences[sentenceKey(repo, ref)]; s != nil && s.Text == "" && s.IdleWithheld {
+		if s := st.Sentences[sentenceKey(repo, ref)]; s != nil && s.Text == "" && (s.IdleWithheld || idleGaveUp(s)) {
 			continue
 		}
 		p.Of++

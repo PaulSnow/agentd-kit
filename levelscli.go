@@ -103,7 +103,7 @@ func printIssueBox(w io.Writer, p uiPage, v RepoLevel, by, filter string) {
 		if i.Sentence != "" {
 			fmt.Fprintf(tw, "\t%s (%s)\n", i.Sentence, i.Writer)
 		} else {
-			fmt.Fprintf(tw, "\tNo sentence yet; the forge's title stands.\n")
+			fmt.Fprintf(tw, "\t%s\n", i.NoSentence())
 		}
 		if d := i.Decision; d != nil {
 			var opts []string
@@ -279,7 +279,7 @@ func printIssueLevel(w io.Writer, p uiPage, v IssueLevel) {
 	if v.Sentence != "" {
 		fmt.Fprintf(w, "%s (%s, %s ago)\n", v.Sentence, v.Writer, p.Ago(v.SentenceAt))
 	} else {
-		fmt.Fprintln(w, "No sentence yet; the forge's title stands.")
+		fmt.Fprintln(w, v.NoSentence())
 	}
 	var refs []string
 	for _, r := range v.Refs {
