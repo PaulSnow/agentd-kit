@@ -34,10 +34,11 @@
 <ul><li>wa1 is done when the owner says so. Go waits on your answer.</li></ul>
 
 </section>
-<section class="console-box" aria-labelledby="console-h"><h2 id="console-h">Console</h2>
+<section class="console-box" id="console-box" data-refresh aria-labelledby="console-h"><h2 id="console-h">Console</h2>
 <p class="muted">About #5: a question is answered from its steps, its session and its requests; a message goes to its session at its next turn.</p>
+
 <form method="post" action="/reply" enctype="multipart/form-data"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/repo/widgets/issue/5"><input type="hidden" name="src" value="live"><input type="hidden" name="repository" value="widgets"><input type="hidden" name="scope" value="widgets#5">
-<div class="composer-row"><textarea name="text" rows="2" maxlength="4000" aria-label="Your message" required placeholder="Ask, or tell agentd what to do here"></textarea><button type="submit">Send</button></div></form>
+<div class="composer-row"><textarea name="text" rows="2" maxlength="4000" aria-label="Your message" required placeholder="Ask, or tell agentd what to do here"></textarea><button type="submit">Send</button></div><label class="muted"><input type="checkbox" name="now" value="1"> now: type it into its session at once, not at its next turn</label></form>
 </section>
 </main>
 <footer class="foot muted">Shown 2026-10-23 12:00. The page refreshes every 30 seconds.</footer>

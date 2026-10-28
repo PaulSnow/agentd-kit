@@ -297,6 +297,7 @@ func workTitleOf(text string) string {
 // why and, at the repository's max, which sessions hold the places. It
 // says whether it started one.
 func (s *Supervisor) startOwnerWork(in *Instruction, repo string, w ThreadWork) bool {
+	scopedIssue(in, &w)
 	name, branch := ownerWorkName(repo, w.Title, in.ID)
 	if p, ok := s.st.Runtime[name]; ok && p.Owner == in.ID {
 		s.routeStep(in, RouteTo, name, true, "started "+name)

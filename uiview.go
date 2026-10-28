@@ -389,6 +389,7 @@ type uiIndex struct {
 	Home     []HomeRow
 	Today    TodayTokens
 	Src      string
+	Talk     []ScopeEntry
 	Runs     []uiRun
 	Accounts []uiAccount
 	Jobs     []uiJob

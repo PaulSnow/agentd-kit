@@ -50,6 +50,13 @@ type InstructionPayload struct {
 	// it, when it is a decision.
 	Re     *EntryRe     `json:"re,omitempty"`
 	Answer *EntryAnswer `json:"answer,omitempty"`
+	// Scope is the level the owner wrote it at (#69): home, a
+	// repository's name, or REPO#N for an issue. A scoped message is
+	// handed to a session only at the session's next turn, unless Now
+	// says to type it at once; one written at home or at a repository
+	// is never handed to a running session at all.
+	Scope string `json:"scope,omitempty"`
+	Now   bool   `json:"now,omitempty"`
 }
 
 // Instruction is an instruction as the log holds it, with when it came,
@@ -206,12 +213,15 @@ func recordInstruction(cfg *Config, log *Log, now time.Time, repos []string, con
 // which may be no more than answer, or its files, its words left out
 // (#59). The files are stored once the instruction is known good, then
 // it and their attachment events are logged in one write (#61).
-func recordInstructionRe(cfg *Config, log *Log, now time.Time, repos []string, console, to, from, text string, re *EntryRe, answer *EntryAnswer, files []stagedAttachment) error {
+func recordInstructionRe(cfg *Config, log *Log, now time.Time, repos []string, console, to, from, text string, re *EntryRe, answer *EntryAnswer, files []stagedAttachment, opts ...func(*InstructionPayload)) error {
 	text = strings.TrimSpace(text)
 	if text == "" && answer == nil && len(files) == 0 {
 		return errors.New("an empty instruction")
 	}
 	p := &InstructionPayload{Repositories: repos, Console: console, Text: text, Hash: shortHash(HashPane(text)), From: from, To: to, Route: true, Re: re, Answer: answer}
+	for _, o := range opts {
+		o(p)
+	}
 	for i, pat := range screenPatterns(cfg) {
 		if regexp.MustCompile(pat).MatchString(text) {
 			// Nothing of a withheld text is logged, not even its hash,
@@ -348,6 +358,17 @@ func ImportConsole(cfg *Config, log *Log, events []Event, now time.Time, repo st
 func (s *Supervisor) routeInstructions(now time.Time) {
 	for _, id := range sortedKeys(s.st.Instructions) {
 		in := s.st.Instructions[id]
+		// A question at home that names no repository: the home thread
+		// answers it from every repository's state (#69).
+		if in.Scope == ScopeHome && len(in.Repositories) == 0 && in.Route && !in.Agent && in.Replied.IsZero() && in.Failed == "" {
+			if !s.shadow {
+				s.startHomeThread(in, now)
+			}
+			if s.halt != nil {
+				return
+			}
+			continue
+		}
 		if s.ops != nil && in.Console != "" && in.Console == s.cfg.opsConsole() && len(in.Repositories) == 0 {
 			if s.routeOps(in, now); s.halt != nil {
 				return
@@ -658,6 +679,17 @@ func (st *LogState) freshInstructions(name string, unanswered bool, now time.Tim
 // into a session that can take a line. It says whether it tried to type.
 func (s *Supervisor) deliverInstructions(name string, sess Session, t *Track, ev Evidence, state State) bool {
 	ids := s.st.freshInstructions(name, false, s.clock.Now())
+	// A scoped message waits for the session's turn to end, unless the
+	// owner said now (#69).
+	if state == Working && !t.turnEnded(ev) {
+		var due []string
+		for _, id := range ids {
+			if in := s.st.Instructions[id]; in == nil || in.Scope == "" || in.Now {
+				due = append(due, id)
+			}
+		}
+		ids = due
+	}
 	// Only a session that can take a line: never one waiting on the
 	// owner, whose answers reach it through deliverAnswers.
 	if len(ids) == 0 || !ev.Alive || t.Limited || ev.Dialog != "" || ev.TrustPrompt || state != Working && state != Idle {

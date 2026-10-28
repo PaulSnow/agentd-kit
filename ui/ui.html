@@ -77,6 +77,7 @@
 <div><h4>By session</h4><ul>{{range .Today.BySession}}<li>{{.Name}} {{$.Tokens .Tokens}}</li>{{else}}<li class="muted">none</li>{{end}}</ul></div></div></details>
 </div>
 </section>
+{{if .Src}}{{template "console-box" .}}{{end}}
 <details class="home-detail" data-key="home-detail"><summary>Runs, sessions and requests in detail</summary>
 <section id="runs" class="runs" data-refresh aria-label="Runs">
 <ul class="chips">{{range .Runs}}<li class="chip">
@@ -260,10 +261,11 @@
 <div class="inline"><input type="text" name="text" maxlength="4000" placeholder="Or answer in your words" aria-label="Your answer"><button type="submit">Send</button></div></form>
 </article>{{end}}{{end}}
 
-{{define "console-box"}}<section class="console-box" aria-labelledby="console-h"><h2 id="console-h">Console</h2>
+{{define "console-box"}}<section class="console-box" id="console-box" data-refresh aria-labelledby="console-h"><h2 id="console-h">Console</h2>
 <p class="muted">{{.ScopeNote}}</p>
+{{with .Talk}}<ol class="talk">{{range .}}<li class="talk-entry"><p class="talk-owner"><time class="muted">{{$.When .At}}</time> {{.Text}}</p>{{if .Answer}}<p class="talk-answer">{{.Answer}}</p>{{end}}<p class="muted">{{.State}}</p></li>{{end}}</ol>{{end}}
 <form method="post" action="/reply" enctype="multipart/form-data"><input type="hidden" name="token" value="{{.Token}}"><input type="hidden" name="back" value="{{.Back}}"><input type="hidden" name="src" value="{{.Src}}"><input type="hidden" name="repository" value="{{.Repository}}"><input type="hidden" name="scope" value="{{.Scope}}">
-<div class="composer-row"><textarea name="text" rows="2" maxlength="4000" aria-label="Your message" required placeholder="Ask, or tell agentd what to do here"></textarea><button type="submit">Send</button></div></form>
+<div class="composer-row"><textarea name="text" rows="2" maxlength="4000" aria-label="Your message" required placeholder="Ask, or tell agentd what to do here"></textarea><button type="submit">Send</button></div>{{if .NowOffered}}<label class="muted"><input type="checkbox" name="now" value="1"> now: type it into its session at once, not at its next turn</label>{{end}}</form>
 </section>{{end}}
 
 {{define "repo"}}{{template "head" .}}

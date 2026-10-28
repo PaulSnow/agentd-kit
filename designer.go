@@ -257,6 +257,7 @@ func (s *Supervisor) designs(repo string) bool {
 func (s *Supervisor) openDesign(in *Instruction, repo string, w ThreadWork) {
 	id := workID(in.ID)
 	if s.st.Work[id] == nil {
+		scopedIssue(in, &w)
 		if s.issueForWork(id, repo, &w); s.halt != nil {
 			return
 		}
