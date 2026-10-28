@@ -110,6 +110,15 @@ var noneSaid = regexp.MustCompile(`(?i)^[-*\s]*\(\s*(none(\s+(yet|open|so\s+far)
 var listOrFence = regexp.MustCompile("^\\s*([-*+]\\s|\\d+[.)]\\s|```|~~~)")
 var noneAsks = regexp.MustCompile(`(?i)\b(but|need|needs|please|must|until|block|blocked|blocking|waiting|approve)\b`)
 
+// noneFirst matches a line whose first word is none, said as an answer:
+// "none. Owner asked ...", "None so far: ...", "- (none, ...". "None of
+// the tests pass" and "none-blocking" say something else.
+var noneFirst = regexp.MustCompile(`(?i)^[-*\s]*\(?\s*none(\s+(yet|open|so\s+far))?\s*([.,;:!)\x{2013}\x{2014}]|\s-\s|$)`)
+
+// noneParagraphAsks is what makes a none paragraph ask the owner something
+// after all: a question mark, or a request (#69).
+var noneParagraphAsks = regexp.MustCompile(`(?i)\?|\b(please|must|blocked|choose|say\s+if|tell\s+me)\b|\bowner\s*:`)
+
 // ParseStatus interprets STATUS.md text.
 func ParseStatus(text string) StatusEvidence {
 	ev := StatusEvidence{Exists: true, Progress: ParseProgress(text)}
@@ -150,7 +159,7 @@ func parseQuestions(text string, fences bool) (questions string, closed bool) {
 		// line within a question too, such as an option "- none", which
 		// leaves the question asked. A parenthesised reason wrapped onto
 		// the lines after it is judged as the one line it is.
-		var kept []string
+		var kept, lead []string
 		for i := 0; i < len(section); i++ {
 			t, j := strings.TrimSpace(section[i]), i
 			if strings.HasPrefix(strings.TrimLeft(t, "-* "), "(") && !strings.Contains(t, ")") {
@@ -174,7 +183,25 @@ func parseQuestions(text string, fences bool) (questions string, closed bool) {
 				i = j
 				continue
 			}
+			// A section whose first word is none: its paragraph, the plain
+			// lines up to a list item, a fence or a line asking a question,
+			// asks nothing unless it asks the owner something (#69). It is
+			// kept as the lead-in of a question after it.
+			if i == 0 && noneFirst.MatchString(t) {
+				k := j + 1
+				for ; k < len(section) && !listOrFence.MatchString(section[k]) && !strings.HasSuffix(strings.TrimRight(section[k], ")*_ "), "?"); k++ {
+					t += " " + section[k]
+				}
+				if !noneParagraphAsks.MatchString(t) {
+					lead = section[:k]
+					i = k - 1
+					continue
+				}
+			}
 			kept = append(kept, section[i])
+		}
+		if len(kept) > 0 {
+			kept = append(lead, kept...)
 		}
 		if joined := strings.Join(kept, "\n"); joined != "" {
 			found = append(found, joined)
