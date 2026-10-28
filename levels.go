@@ -253,8 +253,8 @@ func (st *LogState) noteSteps(e Event) {
 			issue = caseIssue(st.cfg.caseOf(withRuntime(st.cfg, st.Runtime).Sessions[e.Session]))
 		}
 		if i := st.Index[a.Repository][a.Ref]; issue == "" && i != nil {
-			if m := issueInTitle.FindStringSubmatch(i.Title); m != nil {
-				issue = "#" + m[1]
+			if k := requestIssue(i.Title); k > 0 {
+				issue = "#" + strconv.Itoa(k)
 			}
 		}
 		if issue != "" {
@@ -584,8 +584,8 @@ func requestNeeds(cfg *Config, st *LogState, repo string, now time.Time) []repoN
 		if k := c.Sessions[q.Session].Issue; k > 0 && !q.Outside {
 			n.Issue = "#" + strconv.Itoa(k)
 		} else if i := st.Index[repo][q.Ref]; i != nil {
-			if m := issueInTitle.FindStringSubmatch(i.Title); m != nil {
-				n.Issue = "#" + m[1]
+			if k := requestIssue(i.Title); k > 0 {
+				n.Issue = "#" + strconv.Itoa(k)
 			}
 		}
 		out = append(out, n)
@@ -693,8 +693,8 @@ func levelRequest(cfg *Config, st *LogState, repo string, i *IndexIssue) LevelRe
 		r.CI = c.State
 		r.Failing = c.State == "failed"
 	}
-	if m := issueInTitle.FindStringSubmatch(i.Title); m != nil {
-		r.Issue = "#" + m[1]
+	if k := requestIssue(i.Title); k > 0 {
+		r.Issue = "#" + strconv.Itoa(k)
 	}
 	return r
 }
@@ -830,9 +830,6 @@ func repoSentence(v RepoLevel, now time.Time) string {
 	}
 	return s
 }
-
-// issueInTitle finds the first #N a request's title names.
-var issueInTitle = regexp.MustCompile(`#([0-9]+)\b`)
 
 // IssueSorts are the issue box's sorts, the first the default.
 var IssueSorts = []string{"needs-me", "last-change", "working", "has-mr", "newest", "oldest", "stale", "label", "milestone", "author"}
