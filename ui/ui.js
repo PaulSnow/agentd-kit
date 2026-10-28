@@ -134,13 +134,24 @@
   }
   // box sorts: begin. The sorts are levels.go's sortIssues and
   // sortRequests, and a test runs this part against them on the same
-  // rows: text compares by its lower case, code unit by code unit, the
-  // same in every locale; ties go to the latest change, then the highest
-  // number.
+  // rows: text compares with A-Z as a-z, character by character by code
+  // point, as Go compares UTF-8 bytes, the same in every locale; none is
+  // last; ties go to the latest change, then the highest number.
   var wordRank = { "needs you": 0, "working": 1, "stopped": 2 };
   function num(row, k) { return Number(row.dataset[k] || 0); }
-  function text(row, k) { return (row.dataset[k] || "\uffff").toLowerCase(); }
-  function cmp(x, y) { return x < y ? -1 : x > y ? 1 : 0; }
+  function text(row, k) {
+    return (row.dataset[k] || "\udbff\udfff").replace(/[A-Z]/g, function (c) { return c.toLowerCase(); });
+  }
+  function cmp(x, y) {
+    var i = 0, j = 0;
+    while (i < x.length && j < y.length) {
+      var a = x.codePointAt(i), b = y.codePointAt(j);
+      if (a !== b) { return a < b ? -1 : 1; }
+      i += a > 0xffff ? 2 : 1;
+      j += b > 0xffff ? 2 : 1;
+    }
+    return i < x.length ? 1 : j < y.length ? -1 : 0;
+  }
   function rank(row) { return wordRank[row.dataset.word] !== undefined ? wordRank[row.dataset.word] : 3; }
   // run is how long ago a worked row's session started, the longest first.
   function run(row) { return num(row, "run") || Infinity; }
@@ -234,13 +245,15 @@
   (function () {
     var m = /[?&]sort=([a-z-]+)/.exec(location.search);
     var issues = document.querySelector('[data-box="issues"]');
-    if (!m || !issues || !sorts[m[1]]) { return; }
+    var select = issues ? issues.querySelector(".box-sort") : null;
+    if (!m || !select || !select.querySelector('option[value="' + m[1] + '"]')) { return; }
+    // Once: a reload keeps what the owner chooses after.
+    try { history.replaceState(null, "", location.pathname + location.hash); } catch (e) {}
     var key = "agentd-box:" + issues.dataset.key + ":issues";
     var state = stored(key);
     state.sort = m[1];
     store(key, state);
-    var select = issues.querySelector(".box-sort");
-    if (select) { select.value = m[1]; }
+    select.value = m[1];
   })();
   levelBoxes();
   talkBottom(document);

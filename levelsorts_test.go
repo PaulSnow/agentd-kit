@@ -83,8 +83,8 @@ console.log(JSON.stringify(out));
 // the page and on the command line alike.
 func TestSortsAgreeWithScript(t *testing.T) {
 	f := newLevelsFixture(t)
-	for n, label := range map[string]string{"#11": "Feature", "#12": "bug", "#13": "Zeta"} {
-		p := IndexPayload{Repository: "widgets", Ref: n, Title: "Labelled " + label, State: "open", Labels: []string{label}, Author: strings.ToLower(label), Opened: pageAt.Add(-time.Duration(len(label)) * time.Hour), Changed: pageAt.Add(-time.Hour)}
+	for n, label := range map[string]string{"#11": "Feature", "#12": "bug", "#13": "Zeta", "#14": "😀bot", "#15": "İ", "#16": "i!", "#17": "\ue000x"} {
+		p := IndexPayload{Repository: "widgets", Ref: n, Title: "Labelled " + label, State: "open", Labels: []string{label}, Author: label, Opened: pageAt.Add(-time.Duration(len(label)) * time.Hour), Changed: pageAt.Add(-time.Hour)}
 		if err := f.log.Append(Event{V: EventVersion, Time: pageAt.Add(-2 * time.Hour), Kind: KindIndex, Mode: ModeLive, Index: &p}); err != nil {
 			t.Fatal(err)
 		}

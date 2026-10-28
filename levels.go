@@ -867,9 +867,16 @@ func sortIssues(is []LevelIssue, by string) {
 			v = i.Author
 		}
 		if v == "" {
-			return "\uffff" // none last, as on the page
+			return "\U0010FFFF" // none last, as on the page
 		}
-		return strings.ToLower(v) // compared byte by byte, in no locale, as the page does
+		// A-Z as a-z, compared byte by byte, which is by code point, in no
+		// locale, as the page does.
+		return strings.Map(func(r rune) rune {
+			if 'A' <= r && r <= 'Z' {
+				return r + 'a' - 'A'
+			}
+			return r
+		}, v)
 	}
 	sort.SliceStable(is, func(a, b int) bool {
 		x, y := is[a], is[b]
