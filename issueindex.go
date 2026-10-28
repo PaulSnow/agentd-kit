@@ -62,7 +62,9 @@ const BackfillPoll = 30 * time.Second
 
 // IndexPayload is one open issue or request as the forge lists it, or one
 // that left the open list (Gone). First marks the repository's first
-// listing: its issues are known, not changed.
+// listing: its issues are known, not changed. A first listing that holds
+// nothing is one event with First and no Ref, so the log knows the
+// repository was listed and a restart does not take the next for the first.
 type IndexPayload struct {
 	Repository string    `json:"repository"`
 	Ref        string    `json:"ref"` // #N or !N
@@ -81,6 +83,9 @@ type IndexPayload struct {
 }
 
 func (p *IndexPayload) check() error {
+	if p.Ref == "" && p.Repository != "" && p.First && p.same(IndexPayload{}) {
+		return nil // an empty first listing
+	}
 	if p.Repository == "" || !issueRefPattern.MatchString(p.Ref) && !mrRefPattern.MatchString(p.Ref) {
 		return fmt.Errorf("an index event names its repository and an issue or request")
 	}
@@ -177,6 +182,9 @@ func (st *LogState) applyIndex(e Event) {
 	}
 	st.IndexRead[p.Repository] = e.Time
 	st.pruneClosed(p.Repository, e.Time)
+	if p.Ref == "" {
+		return // an empty first listing
+	}
 	prev := m[p.Ref]
 	if p.Gone {
 		// It is kept closed, with its steps and its sentence, until
@@ -549,11 +557,11 @@ func indexChanges(repo string, list []IndexPayload, known map[string]IndexPayloa
 	return out, missing
 }
 
-// indexRun is when each repository's index was last read, on the loop,
-// and the error last told for each, which its workers set.
+// indexRun is when each repository's last listing started, set by its
+// worker once the listing is done, and the error last told for each.
 type indexRun struct {
-	last   map[string]time.Time
 	mu     sync.Mutex
+	last   map[string]time.Time
 	failed map[string]string
 	listed map[string]bool // listed since agentd started, events or not
 	// missed are the known issues each repository's last listing missed,
@@ -603,6 +611,23 @@ func (r *indexRun) firstListing(repo string, read bool) bool {
 	return first
 }
 
+// due says whether repo's next listing is due at now: poll.every after
+// the last one done started.
+func (r *indexRun) due(repo string, now time.Time, every time.Duration) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	last := r.last[repo]
+	return last.IsZero() || !now.Before(last.Add(every))
+}
+
+// done records that repo's listing started at start is done, worked or
+// not, so the next is due poll.every after its start.
+func (r *indexRun) done(repo string, start time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.last[repo] = start
+}
+
 // failedOnce records repo's listing error, "" when it worked, and says
 // whether it is new and so to be told.
 func (r *indexRun) failedOnce(repo, msg string) bool {
@@ -640,14 +665,19 @@ func (s *Supervisor) readIndexes(now time.Time) {
 			}
 			s.backfill(repo, r, now)
 		}
-		if last := s.idx.last[repo]; last.IsZero() || !now.Before(last.Add(s.cfg.Poll.Every.Duration)) {
-			s.idx.last[repo] = now
+		// The listing counts once it is done, so one slower than
+		// poll.every is followed at the next pass, and the worker's key
+		// keeps two of one repository from running at once.
+		if !s.work.inFlight["index:"+repo] && s.idx.due(repo, now, s.cfg.Poll.Every.Duration) {
 			known := map[string]IndexPayload{}
 			for ref, i := range s.st.Index[repo] {
 				known[ref] = i.IndexPayload
 			}
 			_, read := s.st.IndexRead[repo]
-			s.spawnShared("index:"+repo, func(w *Supervisor) { w.readIndex(repo, r, known, read) })
+			s.spawnShared("index:"+repo, func(w *Supervisor) {
+				defer w.idx.done(repo, now)
+				w.readIndex(repo, r, known, read)
+			})
 		}
 	}
 }
@@ -680,6 +710,9 @@ func (s *Supervisor) readIndex(repo string, r Repository, known map[string]Index
 	}
 	s.idx.missed[repo] = missing
 	s.idx.mu.Unlock()
+	if first && len(changes) == 0 {
+		changes = []IndexPayload{{Repository: repo, First: true}}
+	}
 	for _, p := range changes {
 		p := p
 		s.emit("", Event{Kind: KindIndex, Index: &p})
