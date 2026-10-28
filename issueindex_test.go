@@ -30,8 +30,8 @@ func TestListOpenBothForges(t *testing.T) {
 		"/repos/o/p/issues?state=open&per_page=100&page=2": githubIssues(101, 103, 0, "2026-10-21T00:00:00Z"),
 		"/repos/o/p/pulls?state=open&per_page=100&page=1":  `[{"number":7,"head":{"ref":"fix/12-crash"}}]`,
 	}}
-	list, err := listOpen(gh, Repository{Forge: "github", Project: "o/p"})
-	if err != nil || len(list) != 103 {
+	list, cut, err := listOpen(gh, Repository{Forge: "github", Project: "o/p"})
+	if err != nil || len(list) != 103 || cut {
 		t.Fatalf("%d listed, %v", len(list), err)
 	}
 	if i := list[0]; i.Ref != "#1" || i.Title != "Issue 1" || strings.Join(i.Labels, ",") != "area/ui,bug" || i.Milestone != "v2" || i.Author != "author1" || i.Opened.IsZero() || i.Changed.IsZero() {
@@ -44,13 +44,13 @@ func TestListOpenBothForges(t *testing.T) {
 		"/issues?state=opened":         `[{"iid":4,"title":"Slow page","labels":["perf"],"milestone":{"title":"m1"},"author":{"username":"ann"},"created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-02T00:00:00Z"}]`,
 		"/merge_requests?state=opened": `[{"iid":9,"title":"Speed up #4","labels":[],"author":{"username":"bo"},"source_branch":"perf-4","created_at":"2026-10-03T00:00:00Z","updated_at":"2026-10-04T00:00:00Z"}]`,
 	}}
-	list, err = listOpen(gl, Repository{Forge: "gitlab", Project: "g/w"})
+	list, _, err = listOpen(gl, Repository{Forge: "gitlab", Project: "g/w"})
 	if err != nil || len(list) != 2 || list[0].Ref != "#4" || list[0].Milestone != "m1" || list[0].Author != "ann" || list[0].Labels[0] != "perf" ||
 		list[1].Ref != "!9" || list[1].Branch != "perf-4" || list[1].Author != "bo" {
 		t.Fatalf("%+v %v", list, err)
 	}
 	gl.set(func() { gl.gitlabErr = errors.New("glab down") })
-	if _, err := listOpen(gl, Repository{Forge: "gitlab", Project: "g/w"}); err == nil {
+	if _, _, err := listOpen(gl, Repository{Forge: "gitlab", Project: "g/w"}); err == nil {
 		t.Fatal("a failed listing is an error")
 	}
 }
@@ -202,7 +202,7 @@ func TestStatusAndLoopSentences(t *testing.T) {
 	sess := h.cfg.Sessions["s"]
 	sess.Issue = 4
 	h.sup.noteStatusSentence("s", sess, &StatusRecord{Summary: "Profiling the page; next the cache."}, "")
-	h.sup.noteStatusSentence("s", sess, &StatusRecord{Summary: "Profiling the page; next the cache."}, "Profiling the page; next the cache.")
+	h.sup.noteStatusSentence("s", sess, &StatusRecord{Summary: "Profiling the page; next the cache."}, textHash("Profiling the page; next the cache."))
 	q := loopRequest{ciWatched: ciWatched{Repository: "widgets", Ref: "!9"}, Case: "widgets#4"}
 	h.sup.noteLoopSentence(q, loopPlace{Phase: PlaceReviewing, Reason: "round 1"})
 	h.sup.noteLoopSentence(q, loopPlace{Phase: PlaceReviewing, Reason: "round 1"})
@@ -250,6 +250,11 @@ func TestIssueForWork(t *testing.T) {
 	if strings.Contains(h.forge.issues[0], "/home/") || strings.Contains(h.forge.issues[0], "example.com") {
 		t.Fatalf("the body names a path or host: %q", h.forge.issues[0])
 	}
+	ended := ThreadWork{Title: "Close it", DoneWhen: EndCheck{Kind: "forge", Ref: "#8", State: "closed"}}
+	h.sup.issueForWork("w4", "widgets", &ended)
+	if ended.Issue != 8 || len(h.forge.issues) != 1 {
+		t.Fatalf("work ending with #8's close opened another: %+v", ended)
+	}
 	named := ThreadWork{Title: "Fix it", Issue: 3}
 	h.sup.issueForWork("w3", "widgets", &named)
 	if named.Issue != 3 || len(h.forge.issues) != 1 {
@@ -276,5 +281,55 @@ func TestJoinIssue(t *testing.T) {
 	}
 	if c := indexCounts(h.cfg, h.sup.st, "widgets", func(ref string) bool { return ref == "#5" }); c.Working != 1 || c.Waiting != 1 || c.Open != 2 {
 		t.Fatalf("counts %+v", c)
+	}
+}
+
+// A failed idle call followed by one that works settles: no call again
+// until the issue changes.
+func TestIdleSentenceSettlesAfterARetry(t *testing.T) {
+	dir := fakeClaude(t)
+	claudeAnswers(t, dir, 1, "not json")
+	claudeAnswers(t, dir, 0, claudeResult(`{"sentence":"Asks for a faster page."}`))
+	h, api := indexHarness(t)
+	h.cfg.Jobs.Sentences.Enabled = true
+	h.ticks(1, time.Minute)
+	api.set(func() {
+		api.gitlab["widgets/issues?state=opened"] = strings.Replace(api.gitlab["widgets/issues?state=opened"], `"updated_at":"2026-10-02T00:00:00Z"}`, `"updated_at":"2026-10-06T00:00:00Z"}`, 1)
+	})
+	h.ticks(62, time.Minute)
+	h.ticks(10, time.Minute)
+	if n := claudeCalls(t, dir); n != 2 {
+		t.Fatalf("%d calls", n)
+	}
+	if s := h.sup.st.sentenceOf("widgets", "#4"); s == nil || s.Text != "Asks for a faster page." {
+		t.Fatalf("sentence %+v", s)
+	}
+}
+
+// An issue whose words match a confidential pattern is logged once,
+// withheld, its label, milestone and author too; a withheld sentence is
+// not logged again for the same text.
+func TestIndexWithheld(t *testing.T) {
+	h, _ := indexHarness(t)
+	h.cfg.ConfidentialPatterns = []string{"(?i)crash on"}
+	if err := h.cfg.finish(h.dir); err != nil {
+		t.Fatal(err)
+	}
+	h.restart(false)
+	api := &fakeForgeAPI{gitlab: map[string]string{
+		"widgets/issues?state=opened": `[{"iid":5,"title":"Crash on save","labels":["bug"],"milestone":{"title":"m"},"author":{"username":"cy"},"created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-02T00:00:00Z"}]`,
+	}}
+	h.sup.api = api
+	h.ticks(4, time.Minute)
+	ev := h.indexEvents()
+	if len(ev) != 1 || ev[0].Title != "" || ev[0].Labels != nil || ev[0].Milestone != "" || ev[0].Author != "" || ev[0].Withheld == 0 {
+		t.Fatalf("withheld issue logged %+v", ev)
+	}
+	q := loopRequest{ciWatched: ciWatched{Repository: "widgets", Ref: "!9"}, Case: "widgets#5"}
+	for k := 0; k < 3; k++ {
+		h.sup.noteLoopSentence(q, loopPlace{Phase: PlaceOwner, Reason: "crash on the judge"})
+	}
+	if n := h.count(KindSentence, "", ""); n != 2 { // the request and its issue, once each
+		t.Fatalf("%d withheld sentences logged", n)
 	}
 }

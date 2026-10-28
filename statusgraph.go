@@ -639,10 +639,11 @@ func (s *Supervisor) checkStatuses(now time.Time) {
 		if !s.statusDue(name, sess, s.track(name), now) {
 			continue
 		}
+		name := name
 		var said string
 		if sess.Issue > 0 {
-			if prev := s.st.sentenceOf(sess.Repository, "#"+strconv.Itoa(sess.Issue)); prev != nil && prev.Writer == WriterStatus {
-				said = prev.Text
+			if prev := s.st.Sentences[sentenceKey(sess.Repository, "#"+strconv.Itoa(sess.Issue))]; prev != nil {
+				said = prev.Tried[WriterStatus]
 			}
 		}
 		s.spawn(name, "status:"+name, func(w *Supervisor, t *Track) {

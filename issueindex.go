@@ -79,7 +79,7 @@ func (p *IndexPayload) check() error {
 func (p IndexPayload) same(q IndexPayload) bool {
 	return p.Title == q.Title && p.State == q.State && strings.Join(p.Labels, "\n") == strings.Join(q.Labels, "\n") &&
 		p.Milestone == q.Milestone && p.Author == q.Author && p.Branch == q.Branch && p.Draft == q.Draft &&
-		p.Opened.Equal(q.Opened) && p.Changed.Equal(q.Changed) && p.Gone == q.Gone
+		p.Opened.Equal(q.Opened) && p.Changed.Equal(q.Changed) && p.Gone == q.Gone && p.Withheld == q.Withheld
 }
 
 // SentencePayload is where an issue or request stands, in one sentence,
@@ -96,6 +96,9 @@ type SentencePayload struct {
 	Usage      *JobUsage `json:"usage,omitempty"`
 	Model      string    `json:"model,omitempty"`
 	Withheld   int       `json:"withheld,omitempty"`
+	// Hash is the text's hash as written, kept when the text is
+	// withheld, so the same text is not logged again.
+	Hash string `json:"hash,omitempty"`
 }
 
 func (p *SentencePayload) check() error {
@@ -125,13 +128,18 @@ type IndexIssue struct {
 func (i *IndexIssue) Number() int { n, _ := strconv.Atoi(i.Ref[1:]); return n }
 
 // IndexSentence is the latest sentence of a ref, and when it was logged;
-// IdleFor and IdleFailed the latest idle attempt.
+// IdleFor and IdleFailed the latest idle attempt, IdleFailed zero once
+// one worked; Tried the hash each writer last wrote, withheld or not.
 type IndexSentence struct {
 	SentencePayload
 	At         time.Time
 	IdleFor    time.Time
 	IdleFailed time.Time
+	Tried      map[string]string
 }
+
+// textHash is a sentence's hash, as Tried keeps it.
+func textHash(text string) string { return shortHash(HashPane(text)) }
 
 // sentenceKey keys a ref's sentence.
 func sentenceKey(repo, ref string) string { return repo + " " + ref }
@@ -176,8 +184,15 @@ func (st *LogState) applySentence(e Event) {
 		c := *prev
 		s = &c
 	}
+	s.Tried = copyMap(s.Tried)
+	if s.Tried == nil {
+		s.Tried = map[string]string{}
+	}
+	if p.Hash != "" {
+		s.Tried[p.Writer] = p.Hash
+	}
 	if p.Writer == WriterIdle {
-		s.IdleFor = p.For
+		s.IdleFor, s.IdleFailed = p.For, time.Time{}
 		if p.Failed != "" {
 			s.IdleFailed = e.Time
 		}
@@ -191,7 +206,8 @@ func (st *LogState) applySentence(e Event) {
 // listOpen lists repo's open issues and requests, a page at a time, with
 // their fields: GitHub's issues list holds both, its pulls list gives a
 // request's branch; GitLab lists them apart.
-func listOpen(api ForgeAPI, r Repository) ([]IndexPayload, error) {
+func listOpen(api ForgeAPI, r Repository) ([]IndexPayload, bool, error) {
+	truncated := false
 	type label struct {
 		Name string `json:"name"`
 	}
@@ -213,6 +229,7 @@ func listOpen(api ForgeAPI, r Repository) ([]IndexPayload, error) {
 				return nil
 			}
 		}
+		truncated = true
 		return nil
 	}
 	if r.Forge == "gitlab" {
@@ -243,7 +260,7 @@ func listOpen(api ForgeAPI, r Repository) ([]IndexPayload, error) {
 			return len(is), nil
 		})
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		err = page(func(n int) (APIResponse, error) {
 			return api.GitLab(fmt.Sprintf("/projects/%s/merge_requests?state=opened&per_page=%d&page=%d", p, indexPerPage, n))
@@ -273,7 +290,7 @@ func listOpen(api ForgeAPI, r Repository) ([]IndexPayload, error) {
 			return len(ms), nil
 		})
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	} else {
 		err := page(func(n int) (APIResponse, error) {
@@ -309,7 +326,7 @@ func listOpen(api ForgeAPI, r Repository) ([]IndexPayload, error) {
 			return len(is), nil
 		})
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		branches := map[string]string{}
 		err = page(func(n int) (APIResponse, error) {
@@ -328,7 +345,7 @@ func listOpen(api ForgeAPI, r Repository) ([]IndexPayload, error) {
 			return len(ps), nil
 		})
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		for i := range out {
 			out[i].Branch = branches[out[i].Ref]
@@ -342,13 +359,14 @@ func listOpen(api ForgeAPI, r Repository) ([]IndexPayload, error) {
 		}
 		sort.Strings(out[i].Labels)
 	}
-	return out, nil
+	return out, truncated, nil
 }
 
 // indexChanges is what a listing changes in the index known: each issue
-// new or changed, and each known one the listing no longer holds, gone.
-// A first listing marks every issue First.
-func indexChanges(repo string, list []IndexPayload, known map[string]IndexPayload, first bool) []IndexPayload {
+// new or changed, and each known one the listing no longer holds, gone,
+// unless the listing was cut short at indexPages. A first listing marks
+// every issue First.
+func indexChanges(repo string, list []IndexPayload, known map[string]IndexPayload, first, truncated bool) []IndexPayload {
 	var out []IndexPayload
 	listed := map[string]bool{}
 	for _, p := range list {
@@ -361,7 +379,7 @@ func indexChanges(repo string, list []IndexPayload, known map[string]IndexPayloa
 		out = append(out, p)
 	}
 	for _, ref := range sortedKeys(known) {
-		if !listed[ref] {
+		if !listed[ref] && !truncated {
 			out = append(out, IndexPayload{Repository: repo, Ref: ref, Gone: true})
 		}
 	}
@@ -374,6 +392,17 @@ type indexRun struct {
 	last   map[string]time.Time
 	mu     sync.Mutex
 	failed map[string]string
+	listed map[string]bool // listed since agentd started, events or not
+}
+
+// firstListing says whether repo was never listed, by the log or since
+// agentd started, and marks it listed.
+func (r *indexRun) firstListing(repo string, read bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	first := !read && !r.listed[repo]
+	r.listed[repo] = true
+	return first
 }
 
 // failedOnce records repo's listing error, "" when it worked, and says
@@ -399,7 +428,7 @@ func (s *Supervisor) readIndexes(now time.Time) {
 		return
 	}
 	if s.idx == nil {
-		s.idx = &indexRun{last: map[string]time.Time{}, failed: map[string]string{}}
+		s.idx = &indexRun{last: map[string]time.Time{}, failed: map[string]string{}, listed: map[string]bool{}}
 	}
 	for _, repo := range sortedKeys(s.cfg.Repositories) {
 		repo, r := repo, s.cfg.Repositories[repo]
@@ -413,7 +442,7 @@ func (s *Supervisor) readIndexes(now time.Time) {
 				known[ref] = i.IndexPayload
 			}
 			_, read := s.st.IndexRead[repo]
-			s.spawnShared("index:"+repo, func(w *Supervisor) { w.readIndex(repo, r, known, !read) })
+			s.spawnShared("index:"+repo, func(w *Supervisor) { w.readIndex(repo, r, known, read) })
 		}
 		if s.cfg.Jobs.Sentences.Enabled {
 			for _, ref := range idleDue(s.cfg, s.st, repo, now) {
@@ -426,8 +455,8 @@ func (s *Supervisor) readIndexes(now time.Time) {
 
 // readIndex lists repo's open issues and logs what changed; a failed
 // listing is logged once, until it works again.
-func (s *Supervisor) readIndex(repo string, r Repository, known map[string]IndexPayload, first bool) {
-	list, err := listOpen(s.api.At(r.Host), r)
+func (s *Supervisor) readIndex(repo string, r Repository, known map[string]IndexPayload, read bool) {
+	list, truncated, err := listOpen(s.api.At(r.Host), r)
 	msg := ""
 	if err != nil {
 		msg = oneLine(err.Error(), 300)
@@ -438,9 +467,22 @@ func (s *Supervisor) readIndex(repo string, r Repository, known map[string]Index
 	if err != nil {
 		return
 	}
-	for _, p := range indexChanges(repo, list, known, first) {
+	first := s.idx.firstListing(repo, read)
+	for k := range list {
+		s.screenIndex(&list[k])
+	}
+	for _, p := range indexChanges(repo, list, known, first, truncated) {
 		p := p
 		s.emit("", Event{Kind: KindIndex, Index: &p})
+	}
+}
+
+// screenIndex blanks a listed issue's words when any matches a
+// confidential pattern, before it is compared with the index, so a
+// withheld issue is logged once.
+func (s *Supervisor) screenIndex(p *IndexPayload) {
+	if i := s.confidentialMatch(append([]string{p.Title, p.Branch, p.Milestone, p.Author}, p.Labels...)...); i > 0 {
+		p.Title, p.Branch, p.Milestone, p.Author, p.Labels, p.Withheld = "", "", "", "", nil, i
 	}
 }
 
@@ -549,6 +591,7 @@ func (s *Supervisor) idleSentence(repo string, r Repository, i IndexIssue) {
 		}
 		if err = json.Unmarshal(raw, &a); err == nil {
 			p.Text = cutUTF8(oneLine(a.Sentence, sentenceMax), sentenceMax)
+			p.Hash = textHash(p.Text)
 			if p.Text == "" {
 				err = fmt.Errorf("the answer's sentence is empty")
 			}
@@ -620,17 +663,17 @@ func readIssueBrief(api ForgeAPI, r Repository, n int) (string, []string) {
 
 // noteStatusSentence logs a status check's summary as the sentence of the
 // issue the session works, when it says something other than said, the
-// status check's sentence it stands on.
+// hash of what the status check last wrote there.
 func (s *Supervisor) noteStatusSentence(name string, sess Session, r *StatusRecord, said string) {
 	if r == nil || sess.Repository == "" || sess.Issue <= 0 || strings.TrimSpace(r.Summary) == "" {
 		return
 	}
 	ref := "#" + strconv.Itoa(sess.Issue)
 	text := cutUTF8(oneLine(r.Summary, sentenceMax), sentenceMax)
-	if text == said {
+	if textHash(text) == said {
 		return
 	}
-	s.emit("", Event{Kind: KindSentence, Sentence: &SentencePayload{Repository: sess.Repository, Ref: ref, Text: text, Writer: WriterStatus, Session: name}})
+	s.emit("", Event{Kind: KindSentence, Sentence: &SentencePayload{Repository: sess.Repository, Ref: ref, Text: text, Writer: WriterStatus, Session: name, Hash: textHash(text)}})
 }
 
 // loopSentence is a request's place in its loop, in words.
@@ -643,22 +686,32 @@ func loopSentence(ref string, p loopPlace) string {
 }
 
 // noteLoopSentence logs a request's place as its sentence, and as its
-// issue's when the request serves one no session's status check writes
-// for, when the place moved.
+// issue's unless a session still running writes the issue's through its
+// status check, when the place moved.
 func (s *Supervisor) noteLoopSentence(q loopRequest, p loopPlace) {
 	text := loopSentence(q.Ref, p)
 	refs := []string{q.Ref}
 	if issue := caseIssue(q.Case); issue != "" {
-		if prev := s.st.Sentences[sentenceKey(q.Repository, issue)]; prev == nil || prev.Writer != WriterStatus {
+		prev := s.st.Sentences[sentenceKey(q.Repository, issue)]
+		if _, running := s.cfg.Sessions[sessionOf(prev)]; prev == nil || prev.Writer != WriterStatus || !running {
 			refs = append(refs, issue)
 		}
 	}
+	h := textHash(text)
 	for _, ref := range refs {
-		if prev := s.st.Sentences[sentenceKey(q.Repository, ref)]; prev != nil && prev.Text == text {
+		if prev := s.st.Sentences[sentenceKey(q.Repository, ref)]; prev != nil && prev.Tried[WriterLoop] == h && (prev.Writer == WriterLoop || prev.Text == "") {
 			continue
 		}
-		s.emit("", Event{Kind: KindSentence, Sentence: &SentencePayload{Repository: q.Repository, Ref: ref, Text: text, Writer: WriterLoop, Session: p.Session}})
+		s.emit("", Event{Kind: KindSentence, Sentence: &SentencePayload{Repository: q.Repository, Ref: ref, Text: text, Writer: WriterLoop, Session: p.Session, Hash: h}})
 	}
+}
+
+// sessionOf is the session a sentence names, "" for none.
+func sessionOf(s *IndexSentence) string {
+	if s == nil {
+		return ""
+	}
+	return s.Session
 }
 
 // caseIssue is the #N of a case id repo#N, or "".
@@ -823,11 +876,17 @@ func (f ExecForge) OpenIssue(repo Repository, title, body string) (int, error) {
 }
 
 // issueForWork opens an issue for work w of item id in repo, when it names
-// none, so every piece of work has one, and sets w.Issue to it. Where the
+// none, so every piece of work has one, and sets w.Issue to it; work
+// whose done_when is an issue's closing names that issue. It runs on the
+// loop, as a console thread's comment does, bounded by the forge timeout;
+// an open that fails is logged and not tried again. Where the
 // repository does not allow it, or the forge refuses, or the title matches
 // a confidential pattern, it opens none and logs why. A shadow run logs
 // what it would open.
 func (s *Supervisor) issueForWork(id, repo string, w *ThreadWork) {
+	if w.Issue <= 0 && w.DoneWhen.Kind == "forge" && issueRefPattern.MatchString(w.DoneWhen.Ref) {
+		w.Issue = refNumber(w.DoneWhen.Ref) // its end names the issue
+	}
 	if w.Issue > 0 || !indexed(s.cfg.Repositories[repo]) {
 		return
 	}

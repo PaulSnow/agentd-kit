@@ -201,9 +201,7 @@ func (s *Supervisor) screen(e *Event) {
 		e.Skip.Reason = s.withheld(e.Skip.Reason)
 	}
 	if e.Index != nil {
-		if i := s.confidentialMatch(e.Index.Title + "\n" + e.Index.Branch); i > 0 {
-			e.Index.Title, e.Index.Branch, e.Index.Withheld = "", "", i
-		}
+		s.screenIndex(e.Index)
 	}
 	if e.Sentence != nil {
 		if i := s.confidentialMatch(e.Sentence.Text); i > 0 {
