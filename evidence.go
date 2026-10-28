@@ -108,6 +108,7 @@ var noQuestions = regexp.MustCompile(`(?i)^[-*\s]*\(?\s*(none(\s+(yet|open|so\s+
 // something (noneAsks), makes it a question whatever it begins with.
 var noneSaid = regexp.MustCompile(`(?i)^[-*\s]*\(\s*(none(\s+(yet|open|so\s+far))?|no(\s+open)?\s+questions?(\s+(yet|open))?)\s*([;:,.\x{2013}\x{2014}]|\s-\s)[^?]*\)\s*\.?$`)
 var listOrFence = regexp.MustCompile("^\\s*([-*+]\\s|\\d+[.)]\\s|```|~~~)")
+var listStart = regexp.MustCompile(`^\s*([-*+]\s|\d+[.)]\s)`)
 var noneAsks = regexp.MustCompile(`(?i)\b(but|need|needs|please|must|until|block|blocked|blocking|waiting|approve)\b`)
 
 // noneFirst matches a line whose first word is none, said as an answer:
@@ -221,9 +222,10 @@ func parseQuestions(text string, fences bool) (questions string, closed bool) {
 		if level == 0 {
 			continue
 		}
-		// A blank line or a break ends a paragraph: "" marks it.
+		// A blank line or a break ends a paragraph, outside a code block:
+		// "" marks it.
 		if l == "" || thematicBreak.MatchString(strings.ReplaceAll(l, " ", "")) {
-			if len(section) > 0 && section[len(section)-1] != "" {
+			if fence == "" && len(section) > 0 && section[len(section)-1] != "" {
 				section = append(section, "")
 			}
 			continue
@@ -238,24 +240,28 @@ func parseQuestions(text string, fences bool) (questions string, closed bool) {
 // word is none (#69). It is read in paragraphs, which a blank line or a
 // list item starts. The first, the none paragraph, asks nothing unless it
 // asks the owner something (noneParagraphAsks); after it, a list item
-// counts, and a plain paragraph only when it asks. The none paragraph is
-// kept as the lead-in of what counts after it.
+// counts, and a plain paragraph or a code block only when it asks. The
+// none paragraph is kept as the lead-in of what counts after it.
 func noneSection(section []string) []string {
 	var paras [][]string
-	open := false
+	open, code := false, false // in a paragraph; in a code block, which is one
 	for _, l := range section {
 		if l == "" {
 			open = false
 			continue
 		}
-		if !open || listOrFence.MatchString(l) {
+		f, _ := fenceOf(l)
+		if !open || !code && listOrFence.MatchString(l) {
 			paras, open = append(paras, nil), true
+		}
+		if f != "" {
+			code = !code
 		}
 		paras[len(paras)-1] = append(paras[len(paras)-1], l)
 	}
 	var out []string
 	for k, p := range paras {
-		if k > 0 && listOrFence.MatchString(p[0]) || noneParagraphAsks.MatchString(strings.Join(p, " ")) {
+		if k > 0 && listStart.MatchString(p[0]) || noneParagraphAsks.MatchString(strings.Join(p, " ")) {
 			if k > 0 && len(out) == 0 {
 				out = append(out, paras[0]...)
 			}
