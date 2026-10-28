@@ -567,6 +567,13 @@ func (s *Supervisor) routeNext(in *Instruction) {
 	}
 	switch {
 	case choice == nextDrop:
+		// The work its agent proposed is dropped with it: no item starts
+		// a session for it once a place frees.
+		if it := s.st.Work[workID(orig.ID)]; it != nil && !it.terminal() {
+			if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepDeclined, Instruction: orig.ID, Note: "dropped on its next step", By: "owner"}); s.halt != nil {
+				return
+			}
+		}
 		say("dropped; nothing was sent")
 	case choice == nextStart:
 		if s.startOwnerWork(orig, repo, work) {

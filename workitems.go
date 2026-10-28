@@ -455,6 +455,10 @@ func (s *Supervisor) driveItems(now time.Time) {
 		if a == nil || a.Work == nil || len(in.Repositories) == 0 || s.st.Work[workID(in.ID)] != nil || in.Session == "" && in.Failed == "" {
 			continue
 		}
+		// The owner dropped it on its next step: no work is opened for it.
+		if r := s.st.nextAnswer(in); r != nil && r.Answer.Choice == nextDrop {
+			continue
+		}
 		w := *a.Work
 		scopedIssue(in, &w)
 		if s.issueForWork(workID(in.ID), in.Repositories[0], &w); s.halt != nil {

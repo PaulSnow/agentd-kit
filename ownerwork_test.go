@@ -181,7 +181,7 @@ func TestNextStepDropSendsNothing(t *testing.T) {
 			t.Fatalf("drop = %+v", o)
 		}
 	}
-	sessions := len(h.sup.st.Runtime)
+	sessions, delivered := len(h.sup.st.Runtime), in.Delivered
 	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
 	src.now = h.clock.Now
 	if err := src.respond("widgets", entryNext+in.ID, "", "", &AnswerPayload{Choice: nextDrop}, nil); err != nil {
@@ -218,7 +218,7 @@ func TestNextStepDropSendsNothing(t *testing.T) {
 			t.Fatalf("%s was started for the dropped message", n)
 		}
 	}
-	if in = h.sup.st.Instructions[in.ID]; in.Session != "" || !in.Delivered.IsZero() {
+	if in = h.sup.st.Instructions[in.ID]; in.Session != "" || !in.Delivered.Equal(delivered) {
 		t.Fatalf("the dropped message went on: %+v", in)
 	}
 }
