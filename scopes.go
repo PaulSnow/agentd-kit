@@ -43,6 +43,9 @@ func (c Scope) String() string {
 // ParseScope reads home, REPO or REPO#N, the repository one cfg holds.
 func ParseScope(cfg *Config, s string) (Scope, error) {
 	s = strings.TrimSpace(s)
+	if _, ok := cfg.Repositories[ScopeHome]; ok && s == ScopeHome {
+		return Scope{}, fmt.Errorf("a repository is named %s, so home is ambiguous: rename the repository", ScopeHome)
+	}
 	if s == "" || s == ScopeHome {
 		return Scope{}, nil
 	}

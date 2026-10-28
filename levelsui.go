@@ -191,13 +191,13 @@ func (v *uiIndex) ScopeNote() string {
 // is recorded as that decision's answer, as its button records it;
 // anything else is the scope's instruction, to the issue's session when
 // the scope is an issue one works.
-func (src *uiSource) scopeReply(c Scope, text string, now bool, files []stagedAttachment) error {
+func (src *uiSource) scopeReply(c Scope, text string, now bool, files []stagedAttachment) (string, error) {
 	at := src.clock()
 	src.mu.Lock()
 	cfg, rep, err := src.view(at)
 	if err != nil {
 		src.mu.Unlock()
-		return err
+		return "", err
 	}
 	ds := DecisionsFrom(cfg, src.st, rep)
 	var open []LevelDecision
@@ -229,14 +229,18 @@ func (src *uiSource) scopeReply(c Scope, text string, now bool, files []stagedAt
 	// repository's, and the owner answers one on its page.
 	src.mu.Unlock()
 	if entry, a := typedDecision(open, text); entry != "" {
-		return src.respond(repoOf[entry], entry, "", "", a, files)
+		return "the answer to " + entry, src.respond(repoOf[entry], entry, "", "", a, files)
 	}
 	src.mu.Lock()
 	defer src.mu.Unlock()
 	if err := src.catchUp(); err != nil {
-		return err
+		return "", err
 	}
-	return ScopeInstruction(withRuntime(src.cfg, src.st.Runtime), src.log, src.clock(), c, to, text, now, files)
+	what := "a message for " + c.String()
+	if to != "" {
+		what = "a message for " + to
+	}
+	return what, ScopeInstruction(withRuntime(src.cfg, src.st.Runtime), src.log, src.clock(), c, to, text, now, files)
 }
 
 // takesMessages says whether session name can be handed a message from
