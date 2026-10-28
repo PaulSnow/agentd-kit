@@ -437,6 +437,7 @@ func TestNoneParagraphAsksNothing(t *testing.T) {
 		"none.\nOwner asked for the lantern fix: nothing is blocking.\nWaiting on review of !5.",
 		"None\nNothing is blocking; waiting on review.",
 		"none yet\n\nThe kite repaint needs your approval on the console, which it has.",
+		"none.\n\n```\nlantern build ok\n\n- 3 wicks trimmed\n```",
 	} {
 		if ev := ParseStatus("# T\n\n## Questions\n\n" + body + "\n\n## Next\nwork\n"); ev.Questions != "" {
 			t.Errorf("%q: questions %q", body, ev.Questions)
