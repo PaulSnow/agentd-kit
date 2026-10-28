@@ -76,6 +76,7 @@
       .then(function (html) {
         var doc = new DOMParser().parseFromString(html, "text/html");
         var sections = document.querySelectorAll("[data-refresh][id]");
+        var scrolled = {}; // a box's scroll position, by its id
         for (var i = 0; i < sections.length; i++) {
           var old = sections[i];
           var next = doc.getElementById(old.id);
@@ -83,9 +84,15 @@
             continue;
           }
           reopen(old, next);
+          scrolled[old.id] = old.scrollTop;
           old.replaceWith(document.importNode(next, true));
         }
         levelBoxes();
+        // After the sort, so the box shows the rows the owner scrolled to.
+        Object.keys(scrolled).forEach(function (id) {
+          var el = document.getElementById(id);
+          if (el && scrolled[id] > 0) { el.scrollTop = scrolled[id]; }
+        });
       })
       .catch(function () {});
   }
