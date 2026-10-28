@@ -325,8 +325,6 @@ func levelDecisionsOf(cfg *Config, st *LogState, n int, j IssueJoin, decisions [
 	return out
 }
 
-// levelIssue is issue i of repo as a row: its sentence, its word, its
-// requests and its first open decision.
 // Why an issue has no sentence.
 const (
 	SentenceWithheld = "withheld"
@@ -337,13 +335,15 @@ const (
 func (i LevelIssue) NoSentence() string {
 	switch i.Missing {
 	case SentenceWithheld:
-		return "No sentence: the one written was withheld, as it matched a confidential pattern; the forge's title stands."
+		return "No sentence: the last one written was withheld, as it matched a confidential pattern; the forge's title stands."
 	case SentenceFailed:
-		return "No sentence: it could not be written; the forge's title stands."
+		return "No sentence: the last one could not be written; the forge's title stands."
 	}
 	return "No sentence yet; the forge's title stands."
 }
 
+// levelIssue is issue i of repo as a row: its sentence, its word, its
+// requests and its first open decision.
 func levelIssue(cfg *Config, st *LogState, repo string, i *IndexIssue, decisions []UIDecision, busy map[string]bool, secret func(...string) bool) (LevelIssue, IssueJoin, []LevelDecision) {
 	n := i.Number()
 	j := joinIssue(cfg, st, repo, n)
