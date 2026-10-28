@@ -549,3 +549,25 @@ func TestWaitsOnYouCountsWhatWaits(t *testing.T) {
 		t.Fatalf("waiting %d, issues waiting %d, needs %+v", v.Counts.Waiting, v.IssuesWaiting(), v.Needs)
 	}
 }
+
+// The issue box and the MR box are scroll containers a refresh swaps in:
+// the refresh keeps each one's scroll position across the swap and the
+// sort that follows it, so the box does not jump back to its top every
+// 30 seconds.
+func TestRefreshKeepsTheBoxScroll(t *testing.T) {
+	js, err := uiAssets.ReadFile("ui/ui.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(js)
+	start := strings.Index(s, "function refresh()")
+	end := strings.Index(s[start:], "\n  }\n")
+	if start < 0 || end < 0 {
+		t.Fatal("no refresh in ui.js")
+	}
+	body := s[start : start+end]
+	read, swap, sorted, restore := strings.Index(body, "= old.scrollTop"), strings.Index(body, "old.replaceWith"), strings.Index(body, "levelBoxes()"), strings.LastIndex(body, ".scrollTop =")
+	if read < 0 || swap < 0 || sorted < 0 || restore < 0 || !(read < swap && swap < sorted && sorted < restore) {
+		t.Fatalf("refresh does not keep a box's scroll across the swap and the sort:\n%s", body)
+	}
+}
