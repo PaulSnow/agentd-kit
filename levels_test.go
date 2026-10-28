@@ -350,11 +350,28 @@ func TestHomeLevel(t *testing.T) {
 		"Across 2 repositories: 3 issues and 0 requests open, 0 being worked. 2 issues wait on you, in a, b.": {
 			{Repository: "a", Listed: true, Counts: IndexCounts{Open: 1, Waiting: 1}}, {Repository: "b", Listed: true, Counts: IndexCounts{Open: 2, Waiting: 1}}},
 		"1 repository configured; agentd does not list its issues yet.": {{Repository: "a"}},
+		"Across 1 repository: 0 issues and 0 requests open, 0 being worked. 2 things wait on you, in lanterns.": {
+			{Repository: "lanterns", Listed: true, Counts: IndexCounts{Waiting: 2, Loose: 2}}},
+		"Across 2 repositories: 1 issue and 0 requests open, 0 being worked. 1 thing waits on you, in kites.": {
+			{Repository: "kites", Listed: true, Counts: IndexCounts{Waiting: 1, Loose: 1}}, {Repository: "lanterns", Listed: true, Counts: IndexCounts{Open: 1}}},
+		"Across 2 repositories: 1 issue and 0 requests open, 0 being worked. 2 things wait on you, in kites, lanterns.": {
+			{Repository: "kites", Listed: true, Counts: IndexCounts{Waiting: 1, Loose: 1}}, {Repository: "lanterns", Listed: true, Counts: IndexCounts{Open: 1, Waiting: 1}}},
 		"Across 1 repository: 1 issue and 1 request open, 1 being worked. Nothing waits on you. 1 repository not listed yet.": {
 			{Repository: "a", Listed: true, Counts: IndexCounts{Open: 1, Working: 1, Requests: 1}}, {Repository: "b"}},
 	} {
 		if got := homeSentence(want); got != rows {
 			t.Errorf("sentence %q, want %q", got, rows)
+		}
+	}
+	read := time.Date(2026, 10, 23, 9, 0, 0, 0, time.UTC)
+	for want, c := range map[string]IndexCounts{
+		"lanterns has 0 issues and 0 requests open: 2 need you, on no listed issue.":   {Waiting: 2, Loose: 2},
+		"lanterns has 0 issues and 0 requests open: 1 needs you, on no listed issue.":  {Waiting: 1, Loose: 1},
+		"lanterns has 3 issues and 0 requests open: 3 need you, 1 on no listed issue.": {Open: 3, Waiting: 3, Loose: 1},
+		"lanterns has 3 issues and 0 requests open: 2 need you.":                       {Open: 3, Waiting: 2},
+	} {
+		if got := repoSentence(RepoLevel{Repository: "lanterns", Tracked: true, Read: read, Counts: c}, read); got != want {
+			t.Errorf("repository sentence %q, want %q", got, want)
 		}
 	}
 	day := func(h int) time.Time { return time.Date(2026, 10, 23, h, 0, 0, 0, time.UTC) }
