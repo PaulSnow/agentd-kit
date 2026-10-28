@@ -625,10 +625,16 @@ func (s *Supervisor) checkThreadAnswer(raw json.RawMessage, running, finished ma
 		return a, fmt.Errorf("the agent's answer is empty or over %d characters", agentAnswer)
 	}
 	if a.HandTo = strings.TrimSpace(a.HandTo); a.HandTo != "" {
-		if !running[a.HandTo] {
+		switch {
+		case a.Work != nil && finished[a.HandTo]:
+			// Work is an item's, which a finished session never takes:
+			// Go starts a session for it (#68).
+			a.HandTo = ""
+		case !running[a.HandTo]:
 			return a, handToError(a.HandTo, finished)
+		default:
+			p.HandTo = a.HandTo
 		}
-		p.HandTo = a.HandTo
 	}
 	// Work is held as an item (#66), handed over or not: the session it
 	// was handed to holds it, else one Go starts for it (#65).

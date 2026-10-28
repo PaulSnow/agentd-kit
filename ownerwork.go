@@ -396,7 +396,14 @@ func (o *ownerProvision) brief(cfg *Config, p RuntimePayload) (map[string]any, e
 // whose tmux session runs, so it takes the owner's message routed to it;
 // it says whether it did.
 func (s *Supervisor) reopen(name string, sess Session, t *Track, ev Evidence) bool {
-	ids := s.st.freshInstructions(name, false, s.clock.Now())
+	var ids []string
+	for _, id := range s.st.freshInstructions(name, false, s.clock.Now()) {
+		// A message that carries work is its item's, not a finished
+		// session's (#68).
+		if in := s.st.Instructions[id]; in == nil || !in.carriesWork() {
+			ids = append(ids, id)
+		}
+	}
 	// Only at Claude's prompt, no turn running: never into a shell, nor
 	// mid-turn.
 	if len(ids) == 0 || !ev.Prompt {
@@ -433,10 +440,21 @@ func reopened(text string) string {
 	return strings.Join(lines, "\n") + "\n\nReopened by agentd for the owner's message in " + InstructionsFile + "; not finished.\n"
 }
 
+// carriesWork says whether in's thread agent read work in it, which a
+// work item holds.
+func (in *Instruction) carriesWork() bool {
+	return in.AgentLast != nil && in.AgentLast.Work != nil
+}
+
 // reopens says whether in waits on a session that finished and whose tmux
 // session runs: it takes in once its DONE is taken off, in its own step,
 // unless taking it off failed as often as a restart may.
 func (s *Supervisor) reopens(in *Instruction) bool {
+	// A message that carries work is an item's, which no finished
+	// session takes (#68).
+	if in.carriesWork() {
+		return false
+	}
 	return in.Session != "" && in.Delivered.IsZero() && in.Failed == "" && s.doneAlive(in.Session) && !s.failed(s.track(in.Session), "reopen:"+in.Session)
 }
 
@@ -460,7 +478,7 @@ const (
 // is at its max, when ending each of the sessions that hold the places
 // is offered; and send it to each session that takes messages, or
 // finished with its tmux session running.
-func nextOptions(cfg *Config, st *LogState, repo string) []DecisionOption {
+func nextOptions(cfg *Config, st *LogState, repo string, work bool) []DecisionOption {
 	var out []DecisionOption
 	if r, ok := cfg.Repositories[repo]; ok && r.Sessions != nil && r.Sessions.Host == "" {
 		rules, _ := effectivePolicy(cfg, st, repo)
@@ -480,7 +498,8 @@ func nextOptions(cfg *Config, st *LogState, repo string) []DecisionOption {
 		t := st.Tracks[n]
 		takes := t == nil || !t.Parked && t.State != Done && t.State != Stopped && t.State != CrashLooping
 		alive := t != nil && !t.Parked && t.State == Done && t.LastObs != nil && t.LastObs.Alive
-		if takes || alive {
+		// Work is an item's, which no finished session takes (#68).
+		if takes || alive && !work {
 			label := "Send it to " + n
 			if alive {
 				label += " (finished; agentd reopens it)"
@@ -497,7 +516,7 @@ func nextDecision(cfg *Config, st *LogState, in *Instruction, now time.Time) *De
 	if !in.Route || in.Failed == "" || len(in.Repositories) == 0 || in.Withheld > 0 || now.Sub(in.FailedAt) > nextSpan {
 		return nil
 	}
-	opts := nextOptions(cfg, st, in.Repositories[0])
+	opts := nextOptions(cfg, st, in.Repositories[0], in.carriesWork())
 	if len(opts) == 0 {
 		return nil
 	}
@@ -527,7 +546,7 @@ func (s *Supervisor) routeNext(in *Instruction) {
 	}
 	repo := orig.Repositories[0]
 	valid := false
-	for _, o := range nextOptions(s.cfg, s.st, repo) {
+	for _, o := range nextOptions(s.cfg, s.st, repo, orig.carriesWork()) {
 		valid = valid || o.Key == choice
 	}
 	// An end carried out before a halt cut the start short: start now.

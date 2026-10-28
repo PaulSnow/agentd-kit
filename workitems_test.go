@@ -499,3 +499,200 @@ func TestThreadAgentWorkOpensItem(t *testing.T) {
 		t.Fatalf("instruction = %+v", in)
 	}
 }
+
+// A new item never goes to a session that wrote DONE or is stopped, even
+// handed to it: it goes to a running session on the same issue, or to a
+// session started for it (#68).
+func TestNewItemNeverGoesToFinishedSession(t *testing.T) {
+	for _, c := range []string{"done", "stopped", "status DONE"} {
+		t.Run(c, func(t *testing.T) {
+			h := sessionsHarness(t)
+			w1 := h.startSession("issue-1", KindWork, 1)
+			h.ticks(2, time.Minute)
+			h.alive(w1, "w1 works")
+			h.ticks(1, time.Minute)
+			switch c {
+			case "done":
+				h.finish(w1)
+				h.alive(w1, "w1 is done")
+				h.ticks(1, time.Minute)
+				if st := h.state(w1); st != Done {
+					t.Fatalf("state = %v", st)
+				}
+			case "stopped":
+				tr := h.sup.track(w1)
+				tr.State, tr.Stopped = Stopped, "its spend cap"
+			case "status DONE":
+				// DONE written, the track not yet seen it.
+				h.finish(w1)
+			}
+			it := h.askWork("Ship the follow-up.", ThreadWork{Title: "Ship the follow-up", Brief: "Ship it.", DoneWhen: EndCheck{Kind: DoneOwner}}, w1)
+			h.ticks(1, time.Minute)
+			it = h.item(it.ID)
+			for _, step := range h.workItemAssigns(it.ID) {
+				if step == w1 {
+					t.Fatalf("the item went to %s, which is %s: item = %+v", w1, c, it)
+				}
+			}
+			if it.Session == "" || !it.Started {
+				t.Fatalf("no session started for it: item = %+v", it)
+			}
+			// Its message goes with it: w1 is not reopened, nor sent it.
+			h.alive(w1, "w1 pane\n"+idleScreen)
+			h.ticks(2, time.Minute)
+			if in := h.sup.st.Instructions[it.Instruction]; in.Session != it.Session || h.count(KindAction, ActReopen, w1) != 0 || h.count(KindAction, ActInstruct, w1) != 0 {
+				t.Fatalf("the message went to %s (%+v); reopened %d, instructed %d", in.Session, h.routeOf(in.ID), h.count(KindAction, ActReopen, w1), h.count(KindAction, ActInstruct, w1))
+			}
+		})
+	}
+	// A running session on the item's issue takes it.
+	h := sessionsHarness(t)
+	w1 := h.startSession("issue-1", KindWork, 1)
+	w2 := h.startSession("issue-1-b", KindWork, 1)
+	h.ticks(2, time.Minute)
+	h.alive(w1, "w1 works")
+	h.alive(w2, "w2 works")
+	h.ticks(1, time.Minute)
+	h.finish(w1)
+	h.alive(w1, "w1 is done")
+	h.ticks(1, time.Minute)
+	it := h.askWork("Ship the follow-up.", ThreadWork{Title: "Ship the follow-up", Brief: "Ship it.", Issue: 1, DoneWhen: EndCheck{Kind: DoneOwner}}, w1)
+	if it = h.item(it.ID); it.Session != w2 || it.Started {
+		t.Fatalf("not given to %s, on the same issue: item = %+v", w2, it)
+	}
+	// Its DONE, never naming the item, is its own issue's, not a claim.
+	h.status(w2, "# s\n\nissue 1 part b shipped\n\nDONE\n")
+	h.alive(w2, "w2 is done")
+	h.ticks(3, time.Minute)
+	if steps := h.workSteps(it.ID); contains(steps, WorkStepClaim) {
+		t.Fatalf("claimed: steps %v", steps)
+	}
+	if it = h.item(it.ID); len(it.Tried) == 0 || it.Tried[0] != w2 || !strings.Contains(it.Notes[0].Text, "without ever naming the item") {
+		t.Fatalf("not given back: item = %+v", it)
+	}
+}
+
+// workItemAssigns are the sessions item id was assigned to, in order.
+func (h *harness) workItemAssigns(id string) []string {
+	var out []string
+	for _, e := range h.events() {
+		if e.Kind == KindWorkItem && e.Work.ID == id && e.Work.Step == WorkStepAssign {
+			out = append(out, e.Work.Session)
+		}
+	}
+	return out
+}
+
+// A DONE that is not this assignment's claims nothing: one written
+// before the item was assigned, or one whose only done line names another
+// item; the item is given back (#68).
+func TestClaimRefusedWhenDoneOlderOrForOtherItem(t *testing.T) {
+	for _, c := range []string{"older", "other"} {
+		t.Run(c, func(t *testing.T) {
+			h := sessionsHarness(t)
+			h.alive("a", "a works")
+			it := h.askWork("Bump the version to 3.38.2.", ThreadWork{Title: "Bump the version", Brief: "Bump it.", DoneWhen: EndCheck{Kind: DoneOwner}}, "a")
+			if it.Session != "a" {
+				t.Fatalf("item = %+v", it)
+			}
+			// The message and the item are typed into a.
+			h.alive("a", "a works\n"+idleScreen)
+			h.ticks(2, time.Minute)
+			if in := h.sup.st.Instructions[it.Instruction]; in.Delivered.IsZero() {
+				t.Fatalf("not delivered: %+v", in)
+			}
+			path := filepath.Join(h.dir, "a", "STATUS.md")
+			switch c {
+			case "older":
+				h.status("a", "# Status\n\nall of it shipped\n\nDONE\n")
+				at := it.Assigned.Add(-time.Hour)
+				if err := os.Chtimes(path, at, at); err != nil {
+					t.Fatal(err)
+				}
+			case "other":
+				h.status("a", "# Status\n\nWdeadbeef done: the other one shipped\n\nDONE\n")
+				at := it.Assigned.Add(time.Minute)
+				if err := os.Chtimes(path, at, at); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h.alive("a", "a is done")
+			h.ticks(3, time.Minute)
+			for _, step := range h.workSteps(it.ID) {
+				if step == WorkStepClaim {
+					t.Fatalf("claimed: steps %v", h.workSteps(it.ID))
+				}
+			}
+			it = h.item(it.ID)
+			want := "DONE predates the assignment"
+			if c == "other" {
+				want = "DONE names Wdeadbeef, not this item"
+			}
+			if len(it.Tried) == 0 || it.Tried[0] != "a" || len(it.Notes) == 0 || !strings.Contains(it.Notes[0].Text, want) {
+				t.Fatalf("not reopened with %q: item = %+v", want, it)
+			}
+		})
+	}
+}
+
+// Work the thread agent hands to a finished session whose tmux runs is
+// not handed over: Go starts a session for it, and the finished one is
+// not reopened (#68).
+func TestWorkHandedToFinishedSessionStartsOne(t *testing.T) {
+	dir := fakeClaude(t)
+	h := sessionsHarness(t)
+	w1 := h.startSession("issue-1", KindWork, 1)
+	h.ticks(2, time.Minute)
+	h.alive(w1, "w1 works")
+	h.ticks(1, time.Minute)
+	h.finish(w1)
+	h.alive(w1, "w1 is done\n"+idleScreen)
+	h.ticks(1, time.Minute)
+	out, _ := json.Marshal(map[string]any{"answer": "Handed to " + w1 + ".", "hand_to": w1, "work": map[string]any{"title": "Ship step 1b", "brief": "Ship it.", "done_when": map[string]any{"kind": "owner"}}})
+	res, _ := json.Marshal(map[string]any{"type": "result", "subtype": "success", "is_error": false, "structured_output": json.RawMessage(out), "usage": map[string]any{"input_tokens": 12, "output_tokens": 300}, "total_cost_usd": 0.01})
+	claudeAnswers(t, dir, 0, string(res)+"\n")
+	if err := reply(h, "widgets", "Ship step 1b too."); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(4, time.Minute)
+	in := h.instruction(t)
+	it := h.sup.st.Work[workID(in.ID)]
+	if it == nil || it.Session == "" || it.Session == w1 || !in.Started || in.Session != it.Session || in.Failed != "" {
+		t.Fatalf("item = %+v, instruction = %+v", it, in)
+	}
+	if n := h.count(KindAction, ActReopen, w1); n != 0 {
+		t.Fatalf("%s reopened %d times", w1, n)
+	}
+}
+
+// At the repository's max, an item handed to a finished session waits,
+// saying so: the finished session is not reopened with its message, nor
+// given the item; the owner's next step offers no finished session
+// either (#68).
+func TestWorkMessageAtMaxNotReopened(t *testing.T) {
+	h := sessionsHarness(t)
+	w1 := h.startSession("issue-1", KindWork, 1)
+	w2 := h.startSession("issue-2", KindWork, 2)
+	h.ticks(2, time.Minute)
+	h.alive(w1, "w1 works")
+	h.alive(w2, "w2 works")
+	h.ticks(1, time.Minute)
+	h.finish(w1)
+	h.alive(w1, "w1 is done")
+	h.ticks(1, time.Minute)
+	it := h.askWork("Ship the follow-up.", ThreadWork{Title: "Ship the follow-up", Brief: "Ship it.", DoneWhen: EndCheck{Kind: DoneOwner}}, w1)
+	h.alive(w1, "w1 pane\n"+idleScreen)
+	h.ticks(3, time.Minute)
+	it = h.item(it.ID)
+	in := h.sup.st.Instructions[it.Instruction]
+	if n := h.count(KindAction, ActReopen, w1) + h.count(KindAction, ActInstruct, w1); n != 0 || contains(h.workItemAssigns(it.ID), w1) {
+		t.Fatalf("%s reopened or instructed %d times; assigns %v", w1, n, h.workItemAssigns(it.ID))
+	}
+	if !strings.Contains(in.Waiting, it.ID) {
+		t.Fatalf("instruction = %+v", in)
+	}
+	h.sup.emit("", Event{Kind: KindRoute, Route: &RoutePayload{Instruction: in.ID, Step: RouteFail, Reason: "a failure"}})
+	if d := nextDecision(h.sup.cfg, h.sup.st, h.sup.st.Instructions[in.ID], h.clock.Now()); d != nil && contains(decisionOptions(*d), nextSend+w1) {
+		t.Fatalf("next step offers %s: %+v", w1, d)
+	}
+}
