@@ -75,6 +75,11 @@ func levelCmd(cfg *Config, repo string, args []string, out io.Writer) error {
 		}
 		fmt.Fprintln(out, v.Sentence)
 		fmt.Fprintln(out)
+		if len(v.Needs) > 0 {
+			fmt.Fprintln(out, "Also waits on you, on no listed issue")
+			printDecisions(out, v.Needs)
+			fmt.Fprintln(out)
+		}
 		printIssueBox(out, p, v, *sortBy, *filter)
 		fmt.Fprintln(out)
 		printRequestBox(out, p, v.Requests)
@@ -92,7 +97,7 @@ func printIssueBox(w io.Writer, p uiPage, v RepoLevel, by, filter string) {
 	is := append([]LevelIssue(nil), v.Issues...)
 	sortIssues(is, by)
 	shown := filterIssues(is, filter)
-	fmt.Fprintf(w, "%d issues, %d need you, %d being worked, %d shown\n", v.Counts.Open, v.Counts.Waiting, v.Counts.Working, len(shown))
+	fmt.Fprintf(w, "%d issues, %d need you, %d being worked, %d shown\n", v.Counts.Open, v.IssuesWaiting(), v.Counts.Working, len(shown))
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	for _, i := range shown {
 		mr := strings.Join(i.Requests, " ")
@@ -114,6 +119,27 @@ func printIssueBox(w io.Writer, p uiPage, v RepoLevel, by, filter string) {
 		}
 	}
 	tw.Flush()
+}
+
+// printDecisions prints decision cards, each with how to answer it.
+func printDecisions(w io.Writer, ds []LevelDecision) {
+	for _, d := range ds {
+		if d.Entry == "" {
+			fmt.Fprintf(w, "Waits on you: %s\n", d.Asked)
+			continue
+		}
+		fmt.Fprintf(w, "Asks you (%s): %s\n", d.Entry, d.Asked)
+		if d.CameBack != "" {
+			fmt.Fprintf(w, "  What came back: %s\n", d.CameBack)
+		}
+		if d.Checked != "" {
+			fmt.Fprintf(w, "  What Go checked: %s\n", d.Checked)
+		}
+		for _, o := range d.Options {
+			fmt.Fprintf(w, "  %s: %s\n", o.Key, o.Consequence)
+		}
+		fmt.Fprintf(w, "  Answer: agentd console reply --entry %s --choice KEY [WORDS]\n", d.Entry)
+	}
 }
 
 // printRequestBox prints the MR box, in the loop's order.
@@ -296,19 +322,7 @@ func printIssueLevel(w io.Writer, p uiPage, v IssueLevel) {
 	if len(v.Decisions) == 0 {
 		fmt.Fprintln(w, "Nothing on this issue waits on you.")
 	}
-	for _, d := range v.Decisions {
-		fmt.Fprintf(w, "Asks you (%s): %s\n", d.Entry, d.Asked)
-		if d.CameBack != "" {
-			fmt.Fprintf(w, "  What came back: %s\n", d.CameBack)
-		}
-		if d.Checked != "" {
-			fmt.Fprintf(w, "  What Go checked: %s\n", d.Checked)
-		}
-		for _, o := range d.Options {
-			fmt.Fprintf(w, "  %s: %s\n", o.Key, o.Consequence)
-		}
-		fmt.Fprintf(w, "  Answer: agentd console reply --entry %s --choice KEY [WORDS]\n", d.Entry)
-	}
+	printDecisions(w, v.Decisions)
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "What has been done")
 	for _, s := range v.Steps {
