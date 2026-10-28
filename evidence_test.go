@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -157,7 +158,10 @@ func TestLogRoundTrip(t *testing.T) {
 	}
 }
 
-func TestExampleConfigLoads(t *testing.T) {
+// loadExampleConfig loads agentd.example.json through LoadConfig, under a
+// home that holds the paths it names.
+func loadExampleConfig(t *testing.T) (string, *Config) {
+	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	for _, d := range []string{"work-17", "repos/widgets-wt/17", "work-42", "repos/gadgets", "repos/agentd-kit/.git"} {
@@ -177,6 +181,11 @@ func TestExampleConfigLoads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return home, cfg
+}
+
+func TestExampleConfigLoads(t *testing.T) {
+	home, cfg := loadExampleConfig(t)
 	if cfg.Policies.Nudge.Message == "" || cfg.Policies.Restart.MaxRestarts != 3 || len(cfg.Sessions) != 2 {
 		t.Fatalf("config = %+v", cfg)
 	}
@@ -191,6 +200,39 @@ func TestExampleConfigLoads(t *testing.T) {
 	}
 	if cfg.Policies.Escalate.Command[0] == "~/bin/post-to-console" {
 		t.Fatal("escalate command not expanded")
+	}
+}
+
+// The example shows #69's keys as the README describes them: the idle
+// sentences off, and a repository whose delivery may open an issue.
+func TestExampleConfigShowsIssueIndexKeys(t *testing.T) {
+	data, err := os.ReadFile("agentd.example.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw struct {
+		Jobs struct {
+			Sentences *SentencesConfig `json:"sentences"`
+		} `json:"jobs"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw.Jobs.Sentences == nil || raw.Jobs.Sentences.Enabled {
+		t.Fatalf("jobs.sentences = %+v, want the block, off", raw.Jobs.Sentences)
+	}
+	_, cfg := loadExampleConfig(t)
+	if cfg.Jobs.Sentences.Enabled {
+		t.Fatal("jobs.sentences is on in the example")
+	}
+	issue := false
+	for _, r := range cfg.Repositories {
+		for _, a := range r.Policy.Delivery.Allow {
+			issue = issue || a == "issue"
+		}
+	}
+	if !issue {
+		t.Fatal("no repository's delivery.allow lists issue")
 	}
 }
 
