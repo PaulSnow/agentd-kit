@@ -32,7 +32,14 @@ const (
 	LoopApprove = "approve" // a request no session delivered converged at the head
 	LoopFailed  = "failed"  // a judgment session failed its step
 	LoopRetry   = "retry"   // the owner's word to take a failed step again
+	LoopSkip    = "skip"    // the owner's word to take a failed review as clean
+	LoopStop    = "stop"    // the owner's word to leave the request alone
 )
+
+// ownerLoopStep says whether a loop step is the owner's word.
+func ownerLoopStep(step string) bool {
+	return step == LoopRetry || step == LoopSkip || step == LoopStop
+}
 
 // Where a request stands in the loop.
 const (
@@ -62,7 +69,7 @@ const (
 
 func validLoopStep(step string) bool {
 	switch step {
-	case LoopReview, LoopJudge, LoopFix, LoopApprove, LoopFailed, LoopRetry:
+	case LoopReview, LoopJudge, LoopFix, LoopApprove, LoopFailed, LoopRetry, LoopSkip, LoopStop:
 		return true
 	}
 	return false
@@ -92,6 +99,13 @@ type LoopRecord struct {
 	FixHead     string
 	Failed      *LoopPayload
 	Failures    int // every failed step, so each is told to the owner
+	// Stopped: the owner stopped the loop on the request, which takes no
+	// step until a retry.
+	Stopped bool
+	// Skipped is the round whose failed review the owner took as clean,
+	// at SkipHead: it goes on as converged there.
+	Skipped  int
+	SkipHead string
 }
 
 // requestsTrackPrefix begins the name of the track a repository's
@@ -129,7 +143,8 @@ func (st *LogState) applyLoop(e Event) {
 		r.Failed = &f
 		r.Failures++
 	case LoopRetry:
-		// The failed step is due again: its round counts as not taken.
+		// The failed step is due again: its round counts as not taken. A
+		// skipped review is due again; a stopped request is taken up.
 		if f := r.Failed; f != nil {
 			switch f.Failed {
 			case LoopReview:
@@ -139,6 +154,16 @@ func (st *LogState) applyLoop(e Event) {
 			}
 			r.Failed = nil
 		}
+		if r.Skipped > 0 {
+			r.ReviewRound, r.Skipped, r.SkipHead = r.Skipped-1, 0, ""
+		}
+		r.Stopped = false
+	case LoopSkip:
+		if f := r.Failed; f != nil && f.Failed == LoopReview {
+			r.Skipped, r.SkipHead, r.Failed = f.Round, r.ReviewHead, nil
+		}
+	case LoopStop:
+		r.Stopped = true
 	}
 	st.Loops[key] = r
 }
@@ -281,6 +306,12 @@ func placeOf(cfg *Config, st *LogState, q loopRequest) loopPlace {
 		return owner("its session works no issue, so it has no case to keep review rounds in")
 	case !ok || r.Head == "":
 		return loopPlace{Phase: PlaceCI, Reason: "the CI watcher has not recorded its head yet"}
+	case L.Stopped && reviewing:
+		return loopPlace{Phase: PlaceOwner, Reason: "you stopped the loop on it", Do: "end", Session: reviewer}
+	case L.Stopped && judging:
+		return loopPlace{Phase: PlaceOwner, Reason: "you stopped the loop on it", Do: "end", Session: judge}
+	case L.Stopped:
+		return owner("you stopped the loop on it; agentd loop retry %s %s takes it up again", q.Repository, q.Ref)
 	case L.Failed != nil:
 		return owner("%s; agentd loop retry %s %s takes the step again", L.Failed.Reason, q.Repository, q.Ref)
 	}
@@ -366,6 +397,9 @@ func placeOf(cfg *Config, st *LogState, q loopRequest) loopPlace {
 		}
 	}
 	next := len(c.Rounds) + 1
+	if L.Skipped == next {
+		return skippedPlace(cfg, st, q, L, r, reviewing, reviewer)
+	}
 	switch {
 	case L.ReviewRound < next && reviewing:
 		return loopPlace{Phase: PlaceReviewing, Reason: "an earlier reviewer is still running", Do: "end", Session: reviewer}
@@ -383,6 +417,28 @@ func placeOf(cfg *Config, st *LogState, q loopRequest) loopPlace {
 		return loopPlace{Phase: PlaceReviewing, Do: LoopFailed, Failed: LoopReview, Session: reviewer, Round: next, Reason: fmt.Sprintf("the reviewer of round %d %s", next, why)}
 	}
 	return loopPlace{Phase: PlaceReviewing, Reason: fmt.Sprintf("round %d at %s", next, shortHash(L.ReviewHead))}
+}
+
+// skippedPlace is where q stands once the owner took round L.Skipped's
+// failed review as clean: as a converged review would, at the head the
+// review was of.
+func skippedPlace(cfg *Config, st *LogState, q loopRequest, L LoopRecord, r CIRecord, reviewing bool, reviewer string) loopPlace {
+	why := fmt.Sprintf("you skipped round %d's review", L.Skipped)
+	switch {
+	case reviewing:
+		return loopPlace{Phase: PlaceReviewing, Reason: why, Do: "end", Session: reviewer}
+	case L.SkipHead != r.Head:
+		return loopPlace{Phase: PlaceOwner, Reason: fmt.Sprintf("its head moved to %s after %s at %s; agentd loop retry %s %s reviews it", shortHash(r.Head), why, shortHash(L.SkipHead), q.Repository, q.Ref)}
+	case q.Outside && st.approvedAt(q.Repository, q.Ref) != r.Head:
+		return loopPlace{Phase: PlaceMerging, Reason: why, Do: LoopApprove, Head: r.Head}
+	case r.State == CIPending || r.State == CIUnknown:
+		return loopPlace{Phase: PlaceCI, Reason: fmt.Sprintf("CI on %s is %s; %s", shortHash(r.Head), r.State, why)}
+	case r.State != CISuccess:
+		return loopPlace{Phase: PlaceCI, Reason: fmt.Sprintf("CI on %s %s; %s", shortHash(r.Head), r.State, why)}
+	case !cfg.Repositories[q.Repository].Policy.Merge.Enabled:
+		return loopPlace{Phase: PlaceOwner, Reason: fmt.Sprintf("%s and CI is green; %s's policy does not merge, so the owner does", why, q.Repository)}
+	}
+	return loopPlace{Phase: PlaceMerging, Reason: why + " and CI is green; merging by policy"}
 }
 
 // lastFixRound is the latest fix round the work session was relaunched
@@ -716,17 +772,70 @@ func (s *Supervisor) startNext(now time.Time) {
 // RetryLoop is the owner's record that a request's failed step is taken
 // again: agentd loop retry REPO REF.
 func RetryLoop(cfg *Config, log *Log, events []Event, now time.Time, repo, ref string) error {
-	st := NewLogState(cfg, ModeLive).Fold(events)
+	return LoopStep(cfg, log, events, now, repo, ref, LoopRetry)
+}
+
+// LoopStep records the owner's word on request ref of repo's loop, from
+// the log's events, as `agentd loop retry|skip|stop` does.
+func LoopStep(cfg *Config, log *Log, events []Event, now time.Time, repo, ref, step string) error {
+	return ownerLoop(cfg, NewLogState(cfg, ModeLive).Fold(events), log, now, repo, ref, step)
+}
+
+// ownerLoop records the owner's word on a request's loop, read from st:
+// retry takes a failed step again, a skipped review again, or a stopped
+// request up again; skip takes a failed review as clean, so the request
+// goes on as converged; stop leaves the request alone until a retry. The
+// command line and the page's card both write through it.
+func ownerLoop(cfg *Config, st *LogState, log *Log, now time.Time, repo, ref, step string) error {
 	if _, ok := cfg.Repositories[repo]; !ok {
 		return fmt.Errorf("no repository %q is configured", repo)
 	}
 	if !requestRef.MatchString(ref) {
 		return fmt.Errorf("request %q is not a reference such as !12 or #12", ref)
 	}
-	if st.Loops[ciKey(repo, ref)].Failed == nil {
-		return fmt.Errorf("request %s in %s has no failed step to retry", ref, repo)
+	L := st.Loops[ciKey(repo, ref)]
+	switch step {
+	case LoopRetry:
+		if L.Failed == nil && !L.Stopped && L.Skipped == 0 {
+			return fmt.Errorf("request %s in %s has no failed step to retry, nor is it stopped or skipped", ref, repo)
+		}
+	case LoopSkip:
+		if L.Stopped || L.Failed == nil || L.Failed.Failed != LoopReview {
+			return fmt.Errorf("request %s in %s has no failed review to skip", ref, repo)
+		}
+	case LoopStop:
+		if L.Stopped {
+			return fmt.Errorf("the loop on request %s in %s is stopped already", ref, repo)
+		}
+	default:
+		return fmt.Errorf("a loop step is %s, %s or %s, not %q", LoopRetry, LoopSkip, LoopStop, step)
 	}
-	return log.Append(Event{V: EventVersion, Time: now, Kind: KindLoop, Mode: ModeOwner, Loop: &LoopPayload{Repository: repo, Ref: ref, Step: LoopRetry}})
+	return log.Append(Event{V: EventVersion, Time: now, Kind: KindLoop, Mode: ModeOwner, Loop: &LoopPayload{Repository: repo, Ref: ref, Step: step}})
+}
+
+// entryLoop is the entry id prefix of a request the loop waits on the
+// owner for: l:REF.
+const entryLoop = "l:"
+
+// loopOptions are the owner's words a request at PlaceOwner takes now,
+// each with what it does.
+func loopOptions(L LoopRecord) []LevelOption {
+	var out []LevelOption
+	switch {
+	case L.Stopped:
+		out = append(out, LevelOption{Key: LoopRetry, Label: "take it up again", Consequence: "the loop takes the request up where it stopped"})
+	case L.Failed != nil:
+		out = append(out, LevelOption{Key: LoopRetry, Label: "retry the step", Consequence: "the loop takes the failed step again"})
+	case L.Skipped > 0:
+		out = append(out, LevelOption{Key: LoopRetry, Label: "review it", Consequence: "the skipped review is due again"})
+	}
+	if !L.Stopped && L.Failed != nil && L.Failed.Failed == LoopReview {
+		out = append(out, LevelOption{Key: LoopSkip, Label: "skip to judging", Consequence: fmt.Sprintf("round %d counts as reviewed with no findings; the request goes on as converged: CI, then the merge by policy", L.Failed.Round)})
+	}
+	if !L.Stopped {
+		out = append(out, LevelOption{Key: LoopStop, Label: "stop", Consequence: "the loop leaves the request alone until you retry it"})
+	}
+	return out
 }
 
 // ReviewFact is the request a reviewer or judge agentd started serves:

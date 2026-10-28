@@ -239,6 +239,20 @@ func (src *uiSource) entryOf(cfg *Config, rep Report, repo, id string, now time.
 			return re, "", nil, nil
 		}
 		return re, "", d, nil
+	case strings.HasPrefix(id, entryLoop):
+		for _, n := range requestNeeds(cfg, src.st, repo, now) {
+			if n.Entry != id {
+				continue
+			}
+			re := EntryRe{ID: id, Kind: "decision", Decision: id, Question: n.Asked}
+			d := Decision{ID: id, Type: DecisionChooseOne, Question: n.Asked}
+			for _, o := range n.Options {
+				re.Options = append(re.Options, o.Key)
+				d.Options = append(d.Options, DecisionOption{Key: o.Key, Label: o.Label, Consequence: o.Consequence})
+			}
+			return re, "", &d, nil
+		}
+		return EntryRe{}, "", nil, fmt.Errorf("%s's loop waits on the owner for no request %q now", repo, strings.TrimPrefix(id, entryLoop))
 	case strings.HasPrefix(id, entryNeed):
 		for _, n := range src.needs(cfg, rep, src.askedAt) {
 			if n.Repository != repo || n.Decision != nil || needEntry(n.Session, n.Kind) != id {
@@ -290,6 +304,17 @@ func (src *uiSource) respond(repo, id, to, text string, a *AnswerPayload, files 
 		return err
 	}
 	text = strings.TrimSpace(text)
+	if strings.HasPrefix(id, entryLoop) {
+		// The card's word goes to the loop as `agentd loop` writes it,
+		// through the same function, and nowhere else.
+		switch {
+		case a == nil || a.Choice == "":
+			return fmt.Errorf("a request's card takes one of %s", strings.Join(decisionOptions(*dec), ", "))
+		case !contains(decisionOptions(*dec), a.Choice):
+			return fmt.Errorf("%q is not one of the steps offered", a.Choice)
+		}
+		return ownerLoop(cfg, src.st, src.log, now, repo, strings.TrimPrefix(id, entryLoop), a.Choice)
+	}
 	if a != nil && dec == nil && (a.Binding() || a.Other != "") {
 		if strings.HasPrefix(id, entryDecision) {
 			return errors.New("that decision is answered already; write about it instead")
