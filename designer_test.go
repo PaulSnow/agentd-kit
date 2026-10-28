@@ -228,8 +228,8 @@ func TestGoAnswersReachBriefUnderQuestions(t *testing.T) {
 	if err != nil || !strings.Contains(string(brief), want) {
 		t.Fatalf("BRIEF.md lacks the answers under their questions (%v):\n%s", err, brief)
 	}
-	if !strings.Contains(string(brief), "answered") {
-		t.Fatalf("BRIEF.md does not say answered questions are settled:\n%s", brief)
+	if !strings.Contains(string(brief), `("> Answer: …") is settled: follow the answer`) || strings.Contains(string(brief), "Not answered at go") {
+		t.Fatalf("BRIEF.md does not say the answered questions are settled:\n%s", brief)
 	}
 	h.alive(it.Session, "launched\n"+idleScreen)
 	h.ticks(2, time.Minute)
@@ -255,10 +255,43 @@ func TestSplitAnswers(t *testing.T) {
 		{"go ahead, all of it", 2, nil},
 		{"Q3: none such", 2, nil},
 		{"", 2, nil},
+		// A list inside a Qn answer, and a marker again, add to it.
+		{"Q1: Use both:\n1. Postgres\n2. Redis\nQ2: no", 2, []string{"Use both:\n1. Postgres\n2. Redis", "no"}},
+		{"Q1: a\nQ1: b", 2, []string{"a\nb", ""}},
+		// A number is no marker.
+		{"2.5 seconds is the timeout we want", 2, nil},
+		{"1.21 is the minimum Go", 1, []string{"1.21 is the minimum Go"}},
+		// A list in prose, or longer than the questions, answers none.
+		{"Fine by me.\nMy plan:\n1. ship\n2. test", 2, nil},
+		{"1. ship\n2. test\n3. tag", 2, nil},
+		{"Q1: yes\r\nmore\r\nand more\r\nQ2: no", 2, []string{"yes\nmore\nand more", "no"}},
 	} {
 		if got := splitAnswers(c.words, c.n); strings.Join(got, "|") != strings.Join(c.want, "|") || (got == nil) != (c.want == nil) {
 			t.Errorf("splitAnswers(%q, %d) = %q, want %q", c.words, c.n, got, c.want)
 		}
+	}
+}
+
+// An answer left out, and words with no markers for two questions, are
+// shown as such: the question stays open, or points to the words.
+func TestDesignMarkdownAnswers(t *testing.T) {
+	it := &WorkItem{ID: "W12345678", ThreadWork: ThreadWork{Title: "Paint"}, Designer: true, Approved: time.Now(),
+		Design: &WorkDesign{Brief: &DesignBrief{}, Questions: []string{"Which red?", "Which wall?"}}}
+	it.ApprovedWords = "Go.\nQ2: the north one"
+	md := designMarkdown(it, "Paint it.")
+	for _, want := range []string{"Q1. Which red?\n> Not answered at go", "Q2. Which wall?\n> Answer: the north one\n", "## Owner's answers at go\n\n> Go.\n"} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("lacks %q:\n%s", want, md)
+		}
+	}
+	it.ApprovedWords = "Looks good, thanks"
+	md = designMarkdown(it, "Paint it.")
+	if strings.Count(md, "may answer it") != 2 || !strings.Contains(md, "## Owner's answers at go\n\n> Looks good, thanks\n") || strings.Contains(md, "> Answer:") {
+		t.Fatalf("free text:\n%s", md)
+	}
+	it.ApprovedWords = ""
+	if md = designMarkdown(it, ""); strings.Count(md, "Not answered at go") != 2 || strings.Contains(md, "Owner's answers") {
+		t.Fatalf("no words:\n%s", md)
 	}
 }
 
