@@ -387,3 +387,32 @@ func TestOldFailureOffersNoNextStep(t *testing.T) {
 		t.Fatal("an old failure offers a next step")
 	}
 }
+
+// A hand-over to a name that matches a confidential pattern, or runs over
+// lines, is logged and told as "a session", one line (#68).
+func TestHandToDroppedNameScreened(t *testing.T) {
+	dir := fakeClaude(t)
+	h := sessionsHarness(t)
+	h.cfg.ConfidentialPatterns = []string{`(?i)secret-project`}
+	if err := h.cfg.finish(h.dir); err != nil {
+		t.Fatal(err)
+	}
+	h.restart(false)
+	claudeAnswers(t, dir, 0, agentOut("Handed over.", "secret-project\nsession"))
+	if err := reply(h, "widgets", "Paint it red."); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(4, time.Minute)
+	in := h.instruction(t)
+	if in.Failed != "" || in.AgentLast == nil || in.AgentLast.HandToDropped != "a session" {
+		t.Fatalf("instruction = %+v, agent = %+v", in, in.AgentLast)
+	}
+	if told := h.messages("The thread agent named a session, which is not running"); len(told) != 1 {
+		t.Fatalf("told %q", told)
+	}
+	for _, e := range h.events() {
+		if b, _ := json.Marshal(e); strings.Contains(string(b), "secret-project") && e.Kind != KindInstruction {
+			t.Fatalf("logged: %s", b)
+		}
+	}
+}

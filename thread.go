@@ -564,7 +564,11 @@ func (s *Supervisor) startThread(in *Instruction, repo, cwd string) {
 			// Handed to a session that is not running, with no work
 			// named: the work is the owner's message (#68).
 			if err == nil && p.HandToDropped != "" && p.Work == nil {
-				p.Work = &ThreadWork{Title: workTitleOf(in.Text), Brief: p.Answer, Withheld: p.Withheld > 0, DoneWhen: EndCheck{Kind: DoneOwner}}
+				brief := "Do the owner's message here: the thread agent handed it to " + p.HandToDropped + ", which is not running, so agentd opened it as work."
+				if p.Answer != "" {
+					brief += " The agent's note, which may name that session: " + p.Answer
+				}
+				p.Work = &ThreadWork{Title: workTitleOf(in.Text), Brief: cutUTF8(brief, workBrief), DoneWhen: EndCheck{Kind: DoneOwner}}
 				if in.Withheld > 0 || w.confidentialMatch(p.Work.Title) > 0 {
 					p.Work.Title = "owner work"
 				}
@@ -642,7 +646,10 @@ func (s *Supervisor) checkThreadAnswer(raw json.RawMessage, running, finished ma
 			// Work is an item's, which a finished session never takes;
 			// and no owner's message goes to a session that is not
 			// running: Go opens its work itself (#68).
-			p.HandToDropped, a.HandTo = a.HandTo, ""
+			p.HandToDropped, a.HandTo = oneLine(a.HandTo, 120), ""
+			if s.confidentialMatch(p.HandToDropped) > 0 {
+				p.HandToDropped = "a session"
+			}
 		default:
 			p.HandTo = a.HandTo
 		}

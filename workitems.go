@@ -463,14 +463,17 @@ func (s *Supervisor) driveItems(now time.Time) {
 		if s.workEmit(WorkPayload{ID: workID(in.ID), Step: WorkStepOpen, Repository: in.Repositories[0], Instruction: in.ID, Work: &w, HandTo: in.Session}); s.halt != nil {
 			return
 		}
-		if s.toldHandTo(in, s.st.Work[workID(in.ID)]); s.halt != nil {
-			return
-		}
 	}
 	for _, id := range s.st.sortedWork() {
 		it := s.st.Work[id]
 		if it.terminal() {
 			continue
+		}
+		// Once, even after a stop between the item's opening and this.
+		if in := s.st.Instructions[it.Instruction]; in != nil {
+			if s.toldHandTo(in, it); s.halt != nil {
+				return
+			}
 		}
 		if s.driveItem(it, now); s.halt != nil {
 			return
@@ -818,10 +821,16 @@ func (s *Supervisor) toldHandTo(in *Instruction, it *WorkItem) {
 	switch {
 	case it.Designer:
 		did = "has it designed first: the design comes to you on its entry"
+	case in.Failed != "":
+		did = "could not start a session for it yet: " + oneLine(in.Failed, 300)
 	case in.Session != "":
 		did = "started " + in.Session + " for it"
 	}
-	s.escalateItem(it, "handto", fmt.Sprintf("The thread agent named %s, which is not running; agentd opened %s from your message and %s.", a.HandToDropped, it.ID, did))
+	which := "which is not running"
+	if s.doneAlive(a.HandToDropped) {
+		which = "which has finished and takes no new work"
+	}
+	s.escalateItem(it, "handto", fmt.Sprintf("The thread agent named %s, %s; agentd opened %s from your message and %s.", a.HandToDropped, which, it.ID, did))
 }
 
 // followItem sends the item's message, not yet delivered, to the
