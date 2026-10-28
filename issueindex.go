@@ -1120,20 +1120,53 @@ type IssueJoin struct {
 	Case     string
 }
 
-// branchNumber matches a number as a word of a branch name.
-func branchNumber(n int) *regexp.Regexp {
-	return regexp.MustCompile(`(^|[/_.-])` + strconv.Itoa(n) + `($|[/_.-])`)
+// titleRef matches #N as a word of a title: not inside another word, nor
+// after a / or a name, so gadgets#7 and v#2 name no issue of this one.
+var titleRef = regexp.MustCompile(`(?:^|[^\w/])#([0-9]+)\b`)
+
+// titleIssues are the issues a request's title names, in order.
+func titleIssues(title string) []int {
+	var out []int
+	for _, m := range titleRef.FindAllStringSubmatch(title, -1) {
+		if n, err := strconv.Atoi(m[1]); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
-// titleNumber matches #N in a title, as a whole reference.
-func titleNumber(n int) *regexp.Regexp {
-	return regexp.MustCompile(`#` + strconv.Itoa(n) + `\b`)
+// requestIssue is the first issue a request's title names, 0 for none.
+func requestIssue(title string) int {
+	if ns := titleIssues(title); len(ns) > 0 {
+		return ns[0]
+	}
+	return 0
+}
+
+// branchNames reports whether a branch names issue n: one of its segments,
+// split on /, is n or starts with n- or n_, as fix/12-crash and 12_crash
+// do. A number elsewhere in a segment, as in release-1.2 or issue-12, is
+// not taken for an issue.
+func branchNames(branch string, n int) bool {
+	num := strconv.Itoa(n)
+	for _, seg := range strings.Split(branch, "/") {
+		if rest, ok := strings.CutPrefix(seg, num); ok && (rest == "" || rest[0] == '-' || rest[0] == '_') {
+			return true
+		}
+	}
+	return false
+}
+
+// requestJoins reports whether request i belongs to issue n, by its title
+// or its branch.
+func requestJoins(i *IndexIssue, n int) bool {
+	return containsInt(titleIssues(i.Title), n) || branchNames(i.Branch, n)
 }
 
 // joinIssue gathers what belongs to repo's issue n: the work items naming
 // it, by ThreadWork.Issue or a forge done_when; the sessions working it,
-// by Issue or by the item they serve; the open requests whose title says
-// #n or whose branch holds n as a word; and its case.
+// by Issue or by the item they serve; the open requests whose title names
+// #n or whose branch names n (requestJoins); and its case.
 func joinIssue(cfg *Config, st *LogState, repo string, n int) IssueJoin {
 	var j IssueJoin
 	ref := "#" + strconv.Itoa(n)
@@ -1161,14 +1194,13 @@ func joinIssue(cfg *Config, st *LogState, repo string, n int) IssueJoin {
 			j.Sessions = append(j.Sessions, w.Session)
 		}
 	}
-	title, branch := titleNumber(n), branchNumber(n)
 	for _, i := range st.Index[repo] {
-		if i.Ref[0] == '!' && (title.MatchString(i.Title) || branch.MatchString(i.Branch)) {
+		if i.Ref[0] == '!' && requestJoins(i, n) {
 			j.Requests = append(j.Requests, i.Ref)
 		}
 	}
 	for _, i := range st.Closed[repo] {
-		if i.Ref[0] == '!' && (title.MatchString(i.Title) || branch.MatchString(i.Branch)) {
+		if i.Ref[0] == '!' && requestJoins(i, n) {
 			j.Closed = append(j.Closed, i.Ref)
 		}
 	}
