@@ -675,7 +675,9 @@ func TestClosedIssueKeepsItsHistory(t *testing.T) {
 	api.set(func() { api.gitlab["widgets/issues?state=opened"] = `[]` })
 	h.ticks(2, time.Minute)
 	h.clock.advance(31 * 24 * time.Hour)
-	api.set(func() { api.gitlab["widgets/issues?state=opened"] = `[{"iid":6,"title":"New","created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-02T00:00:00Z"}]` })
+	api.set(func() {
+		api.gitlab["widgets/issues?state=opened"] = `[{"iid":6,"title":"New","created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-02T00:00:00Z"}]`
+	})
 	h.ticks(1, time.Minute)
 	if page := h.issuePage(5); strings.Contains(page, "closed") || len(h.sup.st.Steps[sentenceKey("widgets", "#5")]) != 0 {
 		t.Fatalf("kept past its time:\n%s", page)

@@ -433,6 +433,19 @@ func (i LevelIssue) NoSentence() string {
 	return "No sentence yet; the forge's title stands."
 }
 
+// closedWord is the state word of an issue closed at: closed today, or
+// closed on its date.
+func closedWord(at, now time.Time) string {
+	at = at.In(now.Location())
+	if y, m, d := at.Date(); y == now.Year() && m == now.Month() && d == now.Day() {
+		return "closed today"
+	}
+	if at.Year() != now.Year() {
+		return "closed " + at.Format("Jan 2, 2006")
+	}
+	return "closed " + at.Format("Jan 2")
+}
+
 // levelIssue is issue i of repo as a row: its sentence, its word, its
 // requests and its first open decision.
 func levelIssue(cfg *Config, st *LogState, repo string, i *IndexIssue, decisions []UIDecision, busy map[string]bool, secret func(...string) bool) (LevelIssue, IssueJoin, []LevelDecision) {
@@ -767,11 +780,17 @@ func BuildIssueLevel(cfg *Config, st *LogState, repo string, n int, decisions []
 	busy := workingOn(cfg, st, repo)
 	secret := confidentialMatcher(cfg)
 	i := st.Index[repo][ref]
+	if i == nil {
+		i = st.Closed[repo][ref]
+	}
 	known := i != nil
 	if i == nil {
 		i = &IndexIssue{IndexPayload: IndexPayload{Repository: repo, Ref: ref}}
 	}
 	li, j, ds := levelIssue(cfg, st, repo, i, decisions, busy, secret)
+	if !i.Closed.IsZero() {
+		li.Word = closedWord(i.Closed, now)
+	}
 	v := IssueLevel{LevelIssue: li, Known: known, Decisions: ds, Steps: []IssueStep{}, Refs: []LevelRef{}}
 	for _, it := range j.Work {
 		v.Refs = append(v.Refs, LevelRef{Kind: "item", Name: it.ID, Note: it.State})
@@ -808,7 +827,7 @@ func BuildIssueLevel(cfg *Config, st *LogState, repo string, n int, decisions []
 	// noted on the request and on its issue both.
 	var steps []IssueStep
 	seen := map[string]bool{}
-	for _, r := range append([]string{ref}, j.Requests...) {
+	for _, r := range append(append([]string{ref}, j.Requests...), j.Closed...) {
 		for _, s := range st.Steps[sentenceKey(repo, r)] {
 			k := s.At.String() + "\n" + s.Text
 			if seen[k] {

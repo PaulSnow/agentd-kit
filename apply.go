@@ -84,6 +84,10 @@ type LogState struct {
 	// sentence, by sentenceKey (#69).
 	Index     map[string]map[string]*IndexIssue
 	IndexRead map[string]time.Time
+	// Closed are the issues and requests gone from the open list, by
+	// repository and ref, kept with their steps and sentence for
+	// closedKept after they left it.
+	Closed    map[string]map[string]*IndexIssue
 	Sentences map[string]*IndexSentence
 	// Steps are each issue's and request's dated steps, by sentenceKey.
 	Steps map[string][]IssueStep
