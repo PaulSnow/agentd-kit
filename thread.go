@@ -107,7 +107,9 @@ const threadSystem = `You answer the owner of a software project on agentd's con
 	`as "the cards as of 07:41, the issue list as of 07:52, night-60's STATUS.md as of 07:52". ` +
 	`The running sessions' brief, now and status_at, the finished sessions' status, and the issues, are live facts, not cards; a card is what state returns, as of its updated time. ` +
 	`A session's STATUS.md outranks a card: a card marked stale is older than the STATUS.md it covers. When they disagree, trust the live facts, ` +
-	`and call history on the card's topic with why "missing-from-state" so its curator learns what it lacks.`
+	`and call history on the card's topic with why "missing-from-state" so its curator learns what it lacks. ` +
+	`When the input has a scope, the owner wrote at that level of agentd's pages: at a repository (scope REPO) the index lists its open issues with where each stands, and nothing you set in hand_to is followed, so work you read starts a session of its own, under the issue the owner names; ` +
+	`at an issue (scope REPO#N) issue_page is that issue's page: its sentence, open decisions, steps, what is next, its requests and its sessions' status, and work you read is that issue's.`
 
 // threadSchema is the JSON schema of a thread agent's answer.
 func threadSchema() []byte {
@@ -240,6 +242,84 @@ type threadInput struct {
 	Issues      []LiveIssue `json:"issues,omitempty"`
 	IssuesAt    *time.Time  `json:"issues_at,omitempty"`
 	IssuesError string      `json:"issues_error,omitempty"`
+	// Scope is the level the owner wrote at (#69): a repository, whose
+	// open issues the index gives as Index, or one of its issues, whose
+	// page is Issue. At a repository the agent hands nothing to a
+	// running session.
+	Scope string       `json:"scope,omitempty"`
+	Index []threadRow  `json:"index,omitempty"`
+	Issue *threadIssue `json:"issue_page,omitempty"`
+}
+
+// threadRow is an open issue or request as the index and its sentence
+// give it.
+type threadRow struct {
+	Ref      string `json:"ref"`
+	Title    string `json:"title"`
+	State    string `json:"state"`
+	Sentence string `json:"sentence,omitempty"`
+}
+
+// threadIssue is an issue's page as a thread at the issue is given it:
+// its sentence, its open decisions, its steps, what is next, and the
+// status window of the sessions that work it.
+type threadIssue struct {
+	Ref       string          `json:"ref"`
+	Title     string          `json:"title"`
+	Sentence  string          `json:"sentence,omitempty"`
+	Decisions []string        `json:"decisions,omitempty"`
+	Steps     []IssueStep     `json:"steps,omitempty"`
+	Next      []string        `json:"next,omitempty"`
+	Requests  []LevelRequest  `json:"requests,omitempty"`
+	Status    []*StatusRecord `json:"status,omitempty"`
+}
+
+// threadIndexKept bounds the index rows a repository's thread is given.
+const threadIndexKept = 40
+
+// scopeFacts adds the level's facts to x for in: at a repository its
+// index, needs-me first; at an issue its page and its sessions' status.
+func (s *Supervisor) scopeFacts(x *threadInput, in *Instruction, repo string, keep func(string) string) {
+	if in.Scope == "" {
+		return
+	}
+	x.Scope = in.Scope
+	now := s.clock.Now()
+	ds := DecisionsFrom(s.cfg, s.st, ReportFrom(s.cfg, s.st, "", now))
+	c := scopeOf(in.Scope)
+	if c.Issue == 0 {
+		for _, i := range BuildRepoLevel(s.cfg, s.st, repo, ds, now).Issues {
+			if len(x.Index) == threadIndexKept {
+				break
+			}
+			x.Index = append(x.Index, threadRow{Ref: i.Ref, Title: keep(i.Title), State: i.Word, Sentence: keep(i.Sentence)})
+		}
+		return
+	}
+	l := BuildIssueLevel(s.cfg, s.st, repo, c.Issue, ds, false, now)
+	ti := &threadIssue{Ref: l.Ref, Title: keep(l.Title), Sentence: keep(l.Sentence)}
+	for _, n := range l.Next {
+		ti.Next = append(ti.Next, keep(n))
+	}
+	for _, r := range l.Request {
+		r.Title, r.Place = keep(r.Title), keep(r.Place)
+		ti.Requests = append(ti.Requests, r)
+	}
+	for _, d := range l.Decisions {
+		ti.Decisions = append(ti.Decisions, keep(d.Entry+": "+d.Asked))
+	}
+	for _, st := range l.Steps {
+		st.Text = keep(st.Text)
+		ti.Steps = append(ti.Steps, st)
+	}
+	for _, r := range l.Refs {
+		if t := s.st.Tracks[r.Name]; r.Kind == "session" && t != nil && t.StatusLast != nil {
+			rec := *t.StatusLast
+			rec.Summary, rec.Next, rec.Blocker = keep(rec.Summary), keep(rec.Next), keep(rec.Blocker)
+			ti.Status = append(ti.Status, &rec)
+		}
+	}
+	x.Issue = ti
 }
 
 // threadCwd is where a thread agent of repo reads: the repository's
@@ -360,6 +440,12 @@ func (x threadInput) fit(max int) ([]byte, error) {
 		switch {
 		case len(x.Issues) > liveIssueFew:
 			x.Issues = x.Issues[:len(x.Issues)-1]
+		case len(x.Index) > liveIssueFew:
+			x.Index = x.Index[:len(x.Index)-1] // the level's least pressing first
+		case x.Issue != nil && len(x.Issue.Steps) > 3:
+			c := *x.Issue
+			c.Steps = c.Steps[1:]
+			x.Issue = &c
 		case len(x.Earlier) > 0:
 			x.Earlier = x.Earlier[1:]
 		case len(x.Issues) > 0:
@@ -413,6 +499,7 @@ func (s *Supervisor) startThread(in *Instruction, repo, cwd string) {
 	}
 	x := s.threadInputFor(in, repo, cwd)
 	x.Cards = s.threadCards(&x, s.keepText)
+	s.scopeFacts(&x, in, repo, func(t string) string { return cutUTF8(s.keepText(t), agentText) })
 	job := threadJob(s.cfg)
 	// Who it may hand work to: a running session, or a finished one whose
 	// tmux session runs (#65).
@@ -461,6 +548,12 @@ func (s *Supervisor) startThread(in *Instruction, repo, cwd string) {
 			var ran []TurnPayload
 			raw, usage, ran, err = job.RunAgent(w.runCtx, threadSystem, threadSchema(), input, cwd, mcp, agentAllowed(cwd, dirs...), dirs...)
 			p.Usage, p.Activity = &usage, ran
+			// Nothing written at home or at a repository is handed to a
+			// running session (#69): a hand-over is dropped, the owner is
+			// told so, and work starts a session of its own.
+			if err == nil && !scopeHandsOver(in.Scope) {
+				raw = dropHandOver(raw)
+			}
 			if err == nil {
 				a, err = w.checkThreadAnswer(raw, running, finished, p)
 			}

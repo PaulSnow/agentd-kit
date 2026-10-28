@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 type uiRepoPage struct {
 	uiPage
 	RepoLevel
+	Talk         []ScopeEntry
 	Src          string
 	IssueSorts   []string
 	RequestSorts []string
@@ -27,8 +29,9 @@ type uiRepoPage struct {
 type uiIssuePage struct {
 	uiPage
 	IssueLevel
-	Src string
-	All bool
+	Talk []ScopeEntry
+	Src  string
+	All  bool
 }
 
 // Scope is what the page's console box is about: a repository, or one
@@ -39,6 +42,15 @@ func (p *uiRepoPage) Scope() string { return p.Repository }
 func (p *uiRepoPage) ScopeNote() string {
 	return "About " + p.Repository + ": a question is answered from its issues, requests and sessions; an instruction becomes work under the issue it names, or a new one. Nothing here interrupts a session."
 }
+
+// NowOffered says whether the box offers "now": at an issue only.
+func (p *uiRepoPage) NowOffered() bool { return false }
+
+// NowOffered says whether the box offers "now": at an issue only.
+func (p *uiIssuePage) NowOffered() bool { return true }
+
+// NowOffered says whether the box offers "now": at an issue only.
+func (v *uiIndex) NowOffered() bool { return false }
 
 // Scope is the issue's scope, repo#N.
 func (p *uiIssuePage) Scope() string { return p.Repository + p.Ref }
@@ -85,6 +97,7 @@ func (u *UI) repoView(repo string, now time.Time) (*uiRepoPage, error) {
 	if !ok || err != nil {
 		return nil, err
 	}
+	v.Talk = u.conversation(v.Src, v.Scope())
 	return v, nil
 }
 
@@ -101,9 +114,10 @@ func (u *UI) issueView(repo string, n int, all bool, now time.Time) (*uiIssuePag
 		v = &uiIssuePage{uiPage: uiPage{Title: title, Token: u.token, Back: "/repo/" + url.PathEscape(repo) + "/issue/" + strconv.Itoa(n), Now: now, loc: u.loc},
 			IssueLevel: l, Src: src.Name, All: all}
 	})
-	if !ok || err != nil {
-		return nil, err
+	if !ok || err != nil || v == nil {
+		return v, err
 	}
+	v.Talk = u.conversation(v.Src, v.Scope())
 	return v, nil
 }
 
@@ -154,6 +168,9 @@ func (u *UI) homeLevel(v *uiIndex, now time.Time) error {
 		v.Home = append(v.Home, row)
 	}
 	v.Sentence = homeSentence(v.Home)
+	if v.Src != "" {
+		v.Talk = u.conversation(v.Src, ScopeHome)
+	}
 	v.Today = todayTokens([]*AccountLedger{spends}, now, u.loc)
 	return nil
 }
@@ -168,3 +185,138 @@ func (v *uiIndex) Repository() string { return "" }
 func (v *uiIndex) ScopeNote() string {
 	return "About every repository: a question is answered from their issues, requests and the usage ledger; an instruction goes to the repository it names, or to agentd itself. Nothing here interrupts a session."
 }
+
+// scopeReply records what the owner wrote in scope c's console box from
+// src. A typed answer that is an option of the scope's one open decision
+// is recorded as that decision's answer, as its button records it;
+// anything else is the scope's instruction, to the issue's session when
+// the scope is an issue one works.
+func (src *uiSource) scopeReply(c Scope, text string, now bool, files []stagedAttachment) error {
+	at := src.clock()
+	src.mu.Lock()
+	cfg, rep, err := src.view(at)
+	if err != nil {
+		src.mu.Unlock()
+		return err
+	}
+	ds := DecisionsFrom(cfg, src.st, rep)
+	var open []LevelDecision
+	repoOf := map[string]string{}
+	to := ""
+	switch {
+	case c.Issue > 0:
+		l := BuildIssueLevel(cfg, src.st, c.Repository, c.Issue, ds, false, at)
+		open = l.Decisions
+		for _, d := range open {
+			repoOf[d.Entry] = c.Repository
+		}
+		for _, r := range l.Refs {
+			if r.Kind == "session" && takesMessages(cfg, src.st, r.Name) {
+				to = r.Name
+				break
+			}
+		}
+	case c.Repository != "":
+		// Every decision open at the repository: on its issues, and its
+		// sessions' and items' that are on none; a typed answer binds
+		// only when there is one.
+		open = repoDecisions(cfg, src.st, c.Repository, ds)
+		for _, d := range open {
+			repoOf[d.Entry] = c.Repository
+		}
+	}
+	// At home a typed answer binds nothing: the decisions are every
+	// repository's, and the owner answers one on its page.
+	src.mu.Unlock()
+	if entry, a := typedDecision(open, text); entry != "" {
+		return src.respond(repoOf[entry], entry, "", "", a, files)
+	}
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	if err := src.catchUp(); err != nil {
+		return err
+	}
+	return ScopeInstruction(withRuntime(src.cfg, src.st.Runtime), src.log, src.clock(), c, to, text, now, files)
+}
+
+// takesMessages says whether session name can be handed a message from
+// the issue's box: one of the repository's that is not a reviewer or a
+// judge, and not done, stopped, failed, crash-looping or parked; else the
+// repository's thread takes the message.
+func takesMessages(cfg *Config, st *LogState, name string) bool {
+	s, ok := cfg.Sessions[name]
+	if !ok || s.Role != "" {
+		return false
+	}
+	t := st.Tracks[name]
+	switch stateOf(t) {
+	case Done, Stopped, Failed, CrashLooping:
+		return false
+	}
+	return t == nil || !t.Parked
+}
+
+// repoDecisions are every decision open at repo, each once: those on its
+// issues, and those of its sessions and its items on none.
+func repoDecisions(cfg *Config, st *LogState, repo string, ds []UIDecision) []LevelDecision {
+	var out []LevelDecision
+	seen := map[string]bool{}
+	add := func(d LevelDecision) {
+		if !seen[d.Entry] {
+			seen[d.Entry] = true
+			out = append(out, d)
+		}
+	}
+	secret := confidentialMatcher(cfg)
+	c := withRuntime(cfg, st.Runtime)
+	for ref, i := range st.Index[repo] {
+		if ref[0] == '#' {
+			for _, d := range levelDecisions(cfg, st, i.Number(), joinIssue(cfg, st, repo, i.Number()), ds, secret) {
+				add(d)
+			}
+		}
+	}
+	// Those on no issue the index holds count too, so one cannot be
+	// taken for the only one.
+	var items []*WorkItem
+	for _, id := range st.sortedWork() {
+		if it := st.Work[id]; it.Repository == repo {
+			items = append(items, it)
+		}
+	}
+	var sessions []string
+	for _, name := range sortedKeys(c.Sessions) {
+		if c.Sessions[name].Repository == repo {
+			sessions = append(sessions, name)
+		}
+	}
+	for _, d := range levelDecisionsOf(cfg, st, 0, IssueJoin{Work: items, Sessions: sessions}, ds) {
+		add(d)
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a].Entry < out[b].Entry })
+	return out
+}
+
+// Conversation is the page's console box's exchanges, newest last.
+func (u *UI) conversation(srcName, scope string) []ScopeEntry {
+	src := u.source(srcName)
+	if src == nil {
+		return nil
+	}
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	secret := confidentialMatcher(src.cfg)
+	out := src.st.scopeConversation(scope, scopeShown)
+	for k := range out {
+		if secret(out[k].Text) {
+			out[k].Text = withheldMessage
+		}
+		if secret(out[k].Answer) {
+			out[k].Answer = withheldMessage
+		}
+	}
+	return out
+}
+
+// scopeShown is how many exchanges a console box shows.
+const scopeShown = 10

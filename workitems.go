@@ -451,6 +451,7 @@ func (s *Supervisor) driveItems(now time.Time) {
 			continue
 		}
 		w := *a.Work
+		scopedIssue(in, &w)
 		if s.issueForWork(workID(in.ID), in.Repositories[0], &w); s.halt != nil {
 			return
 		}

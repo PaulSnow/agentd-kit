@@ -1011,6 +1011,20 @@ func (u *UI) serveReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	repo, to, text := strings.TrimSpace(r.PostForm.Get("repository")), strings.TrimSpace(r.PostForm.Get("session")), r.PostForm.Get("text")
+	// A level's console box names its scope (#69).
+	if scope := strings.TrimSpace(r.PostForm.Get("scope")); scope != "" {
+		c, err := ParseScope(src.cfg, scope)
+		if err != nil || strings.TrimSpace(text) == "" && len(files) == 0 || len(text) > maxReply {
+			http.Error(w, fmt.Sprintf("name home, a repository or REPO#N, and write at most %d bytes", maxReply), http.StatusBadRequest)
+			return
+		}
+		if err := src.scopeReply(c, text, r.PostForm.Get("now") != "", files); err != nil {
+			http.Error(w, "the message was not recorded: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		u.back(w, r)
+		return
+	}
 	if repo == "" || strings.TrimSpace(text) == "" && len(files) == 0 || len(text) > maxReply {
 		http.Error(w, fmt.Sprintf("name the repository and write a reply of at most %d bytes", maxReply), http.StatusBadRequest)
 		return

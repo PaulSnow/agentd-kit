@@ -465,7 +465,7 @@ func (e Event) check() error {
 		return errors.New("a ci event is a run's, for the session that delivered the request, and names its repository and request")
 	case e.Kind == KindFeed && (e.Session != "" || (e.Feed.Phase == FeedImported) != (e.Mode == ModeOwner) || e.Mode != ModeLive && e.Mode != ModeShadow && e.Mode != ModeOwner):
 		return errors.New("a feed event is a run's, for no one session; an imported line is the owner's")
-	case e.Kind == KindInstruction && (e.Session != "" || e.Mode != ModeOwner || e.Instruction.ID == "" || (len(e.Instruction.Repositories) == 0) == (e.Instruction.Console == "")):
+	case e.Kind == KindInstruction && (e.Session != "" || e.Mode != ModeOwner || e.Instruction.ID == "" || (len(e.Instruction.Repositories) == 0) == (e.Instruction.Console == "") && !e.Instruction.homeQuestion()):
 		return errors.New("an instruction event is the owner's, for no one session, and names its id and either its repositories or its console")
 	case e.Kind == KindAttachment && (e.Session != "" || e.Mode != ModeOwner || e.Attachment.check() != nil):
 		return fmt.Errorf("an attachment event is the owner's, for no one session: %v", e.Attachment.check())

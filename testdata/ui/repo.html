@@ -46,8 +46,9 @@
 <p class="row-sentence"><span class="muted">Outside the loop, or not yet placed.</span></p>
 </li></ol>
 </section>
-<section class="console-box" aria-labelledby="console-h"><h2 id="console-h">Console</h2>
+<section class="console-box" id="console-box" data-refresh aria-labelledby="console-h"><h2 id="console-h">Console</h2>
 <p class="muted">About widgets: a question is answered from its issues, requests and sessions; an instruction becomes work under the issue it names, or a new one. Nothing here interrupts a session.</p>
+
 <form method="post" action="/reply" enctype="multipart/form-data"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/repo/widgets"><input type="hidden" name="src" value="live"><input type="hidden" name="repository" value="widgets"><input type="hidden" name="scope" value="widgets">
 <div class="composer-row"><textarea name="text" rows="2" maxlength="4000" aria-label="Your message" required placeholder="Ask, or tell agentd what to do here"></textarea><button type="submit">Send</button></div></form>
 </section>
