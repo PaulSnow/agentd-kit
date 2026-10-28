@@ -1400,8 +1400,8 @@ func findOpenedIssue(api ForgeAPI, r Repository, line string) (int, error) {
 // the same number; an open whose outcome the log lacks, cut short or
 // failed, is looked for on the forge by its body's line before another. Where the
 // repository does not allow it, or the forge refuses, or the title matches
-// a confidential pattern, it opens none and logs why. A shadow run logs
-// what it would open.
+// a confidential pattern or names a session or another repository, it
+// opens none and logs why. A shadow run logs what it would open.
 func (s *Supervisor) issueForWork(id, repo string, w *ThreadWork) {
 	if w.Issue <= 0 && w.DoneWhen.Kind == "forge" && issueRefPattern.MatchString(w.DoneWhen.Ref) {
 		w.Issue = refNumber(w.DoneWhen.Ref) // its end names the issue
@@ -1427,6 +1427,10 @@ func (s *Supervisor) issueForWork(id, repo string, w *ThreadWork) {
 	}
 	if i := s.confidentialMatch(title); i > 0 {
 		skip(fmt.Sprintf("its title matches confidential pattern %d", i))
+		return
+	}
+	if name := s.namedInTitle(repo, title); name != "" {
+		skip(fmt.Sprintf("its title names %q, a session or another repository", name))
 		return
 	}
 	body := fmt.Sprintf(issueBodyLine, id)
@@ -1465,4 +1469,31 @@ func (s *Supervisor) issueForWork(id, repo string, w *ThreadWork) {
 	}); err == nil && n > 0 {
 		w.Issue = n
 	}
+}
+
+// namedInTitle is the first session, configured or started, or other
+// configured repository that title names as a whole word, in any case,
+// or "" for none. A name stands as a word where no letter, digit, _ or -
+// touches it, so one inside a longer name is not named; the public forge
+// is told neither.
+func (s *Supervisor) namedInTitle(repo, title string) string {
+	var names []string
+	for n := range s.cfg.Sessions {
+		names = append(names, n)
+	}
+	for n := range s.st.Runtime {
+		names = append(names, n)
+	}
+	for n := range s.cfg.Repositories {
+		if n != repo {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		if n != "" && regexp.MustCompile(`(?i)(^|[^\w-])`+regexp.QuoteMeta(n)+`($|[^\w-])`).MatchString(title) {
+			return n
+		}
+	}
+	return ""
 }

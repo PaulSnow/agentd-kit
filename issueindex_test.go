@@ -513,6 +513,41 @@ func TestBackfillWithheldSettles(t *testing.T) {
 // and gets the same number, from the log, after a restart too. When agentd
 // stops between the forge's open and the log's record of it, the next try
 // finds the issue by the line its body carries and opens no second one.
+// The title of an issue Go opens goes to the forge as the agent wrote it,
+// so one naming a session, configured or started, or another configured
+// repository, as a whole word in any case, opens none and logs why; this
+// repository's own name, or a name inside a longer word, does not refuse.
+func TestIssueForWorkScreensNames(t *testing.T) {
+	h := newHarness(t, false, "s")
+	r := h.cfg.Repositories["widgets"]
+	r.Policy.Delivery.Allow = append(r.Policy.Delivery.Allow, ActIssue)
+	h.cfg.Repositories["widgets"] = r
+	h.cfg.Repositories["gadgets"] = Repository{Forge: "github", Project: "example-org/gadgets"}
+	h.restart(false)
+	h.sup.st.Runtime["night-owl"] = RuntimePayload{ID: "night-owl", Repository: "widgets"}
+	for i, title := range []string{"Ask S about it", "Port the GADGETS styles", "Hand it to night-owl."} {
+		w := ThreadWork{Title: title}
+		h.sup.issueForWork(fmt.Sprintf("r%d", i), "widgets", &w)
+		if w.Issue != 0 {
+			t.Errorf("%q opened #%d", title, w.Issue)
+		}
+	}
+	refused := 0
+	for _, e := range h.events() {
+		if e.Kind == KindSkip && e.Skip.Action == ActIssue && strings.Contains(e.Skip.Reason, "its title names") {
+			refused++
+		}
+	}
+	if refused != 3 || len(h.forge.issues) != 0 {
+		t.Fatalf("%d refusals logged, %d opened", refused, len(h.forge.issues))
+	}
+	w := ThreadWork{Title: "Widgets: sessions page for gadgetsmith"}
+	h.sup.issueForWork("ok", "widgets", &w)
+	if w.Issue == 0 || len(h.forge.issues) != 1 {
+		t.Fatalf("a title naming no other session or repository was refused: %+v", w)
+	}
+}
+
 func TestIssueForWorkOpensOnce(t *testing.T) {
 	h, api := indexHarness(t)
 	r := h.cfg.Repositories["widgets"]
