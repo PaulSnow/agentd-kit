@@ -49,6 +49,9 @@ const (
 	idleComments   = 5
 	idleRetryAfter = time.Hour
 	idleTries      = 3
+	// closedKept is how long a closed issue or request is kept, its steps
+	// and its sentence, after it left the open list.
+	closedKept     = 30 * 24 * time.Hour
 	backfillCap    = 300
 	backfillAtOnce = 10
 )
@@ -131,6 +134,8 @@ type IndexIssue struct {
 	Seen  time.Time
 	At    time.Time
 	Quiet time.Time
+	// Closed is when it left the open list, for one in LogState.Closed.
+	Closed time.Time
 }
 
 // Number is the issue's or request's number.
@@ -171,16 +176,33 @@ func (st *LogState) applyIndex(e Event) {
 		st.IndexRead = map[string]time.Time{}
 	}
 	st.IndexRead[p.Repository] = e.Time
+	st.pruneClosed(p.Repository, e.Time)
 	prev := m[p.Ref]
 	if p.Gone {
-		// What is kept of it goes with it, so the fold does not grow
-		// with every issue ever closed.
-		delete(m, p.Ref)
-		delete(st.Steps, sentenceKey(p.Repository, p.Ref))
-		delete(st.Sentences, sentenceKey(p.Repository, p.Ref))
+		// It is kept closed, with its steps and its sentence, until
+		// closedKept has passed.
+		if prev != nil {
+			delete(m, p.Ref)
+			c := *prev
+			c.Closed = e.Time
+			st.closed(p.Repository)[p.Ref] = &c
+			what := "issue"
+			if p.Ref[0] == '!' {
+				what = "request"
+			}
+			st.noteStep(p.Repository, p.Ref, e.Time, fmt.Sprintf("The %s left the open list on the forge: it was closed or merged.", what))
+		}
 		return
 	}
 	i := &IndexIssue{IndexPayload: p, Seen: e.Time, At: e.Time}
+	if c := st.Closed[p.Repository][p.Ref]; prev == nil && c != nil {
+		// Back on the list: reopened, or missed by a listing.
+		delete(st.Closed[p.Repository], p.Ref)
+		i.Seen, i.Quiet = c.Seen, c.Quiet
+		st.noteStep(p.Repository, p.Ref, e.Time, "It is open on the forge again.")
+		m[p.Ref] = i
+		return
+	}
 	switch {
 	case prev != nil:
 		i.Seen, i.Quiet = prev.Seen, prev.Quiet
@@ -235,6 +257,30 @@ func (st *LogState) applySentence(e Event) {
 		s.SentencePayload, s.At = p, e.Time
 	}
 	st.Sentences[k] = s
+}
+
+// closed is repo's map of closed issues and requests, made when missing.
+func (st *LogState) closed(repo string) map[string]*IndexIssue {
+	if st.Closed == nil {
+		st.Closed = map[string]map[string]*IndexIssue{}
+	}
+	if st.Closed[repo] == nil {
+		st.Closed[repo] = map[string]*IndexIssue{}
+	}
+	return st.Closed[repo]
+}
+
+// pruneClosed drops repo's issues and requests closed more than
+// closedKept before now, with their steps and their sentence, so the fold
+// does not grow with every issue ever closed.
+func (st *LogState) pruneClosed(repo string, now time.Time) {
+	for ref, c := range st.Closed[repo] {
+		if now.Sub(c.Closed) > closedKept {
+			delete(st.Closed[repo], ref)
+			delete(st.Steps, sentenceKey(repo, ref))
+			delete(st.Sentences, sentenceKey(repo, ref))
+		}
+	}
 }
 
 // listOpen lists repo's open issues and requests, a page at a time, with
@@ -398,9 +444,13 @@ func listOpen(api ForgeAPI, r Repository) ([]IndexPayload, bool, error) {
 
 // indexChanges is what a listing changes in the index known: each issue
 // new or changed, and each known one the listing no longer holds, gone,
-// unless the listing was cut short at indexPages. A first listing marks
+// unless the listing was cut short at indexPages, and only when the
+// listing before missed it too (missed), as a close between two pages
+// shifts the later ones and one listing may miss an open issue. It
+// returns the known ones this listing missed. A first listing marks
 // every issue First.
-func indexChanges(repo string, list []IndexPayload, known map[string]IndexPayload, first, truncated bool) []IndexPayload {
+func indexChanges(repo string, list []IndexPayload, known map[string]IndexPayload, first, truncated bool, missed map[string]bool) ([]IndexPayload, map[string]bool) {
+	missing := map[string]bool{}
 	var out []IndexPayload
 	listed := map[string]bool{}
 	for _, p := range list {
@@ -413,11 +463,15 @@ func indexChanges(repo string, list []IndexPayload, known map[string]IndexPayloa
 		out = append(out, p)
 	}
 	for _, ref := range sortedKeys(known) {
-		if !listed[ref] && !truncated {
+		switch {
+		case listed[ref] || truncated:
+		case missed[ref]:
 			out = append(out, IndexPayload{Repository: repo, Ref: ref, Gone: true})
+		default:
+			missing[ref] = true
 		}
 	}
-	return out
+	return out, missing
 }
 
 // indexRun is when each repository's index was last read, on the loop,
@@ -427,6 +481,9 @@ type indexRun struct {
 	mu     sync.Mutex
 	failed map[string]string
 	listed map[string]bool // listed since agentd started, events or not
+	// missed are the known issues each repository's last listing missed,
+	// gone if the next misses them too.
+	missed map[string]map[string]bool
 	// fill is each repository's back-fill run under way: when it started
 	// and how many calls it started.
 	fill map[string]*backfillRun
@@ -538,7 +595,17 @@ func (s *Supervisor) readIndex(repo string, r Repository, known map[string]Index
 	for k := range list {
 		s.screenIndex(&list[k])
 	}
-	for _, p := range indexChanges(repo, list, known, first, truncated) {
+	s.idx.mu.Lock()
+	missed := s.idx.missed[repo]
+	s.idx.mu.Unlock()
+	changes, missing := indexChanges(repo, list, known, first, truncated, missed)
+	s.idx.mu.Lock()
+	if s.idx.missed == nil {
+		s.idx.missed = map[string]map[string]bool{}
+	}
+	s.idx.missed[repo] = missing
+	s.idx.mu.Unlock()
+	for _, p := range changes {
 		p := p
 		s.emit("", Event{Kind: KindIndex, Index: &p})
 	}
@@ -949,6 +1016,7 @@ type IssueJoin struct {
 	Work     []*WorkItem
 	Sessions []string
 	Requests []string // !N, oldest first
+	Closed   []string // the requests closed or merged, kept, oldest first
 	Case     string
 }
 
@@ -999,7 +1067,13 @@ func joinIssue(cfg *Config, st *LogState, repo string, n int) IssueJoin {
 			j.Requests = append(j.Requests, i.Ref)
 		}
 	}
+	for _, i := range st.Closed[repo] {
+		if i.Ref[0] == '!' && (title.MatchString(i.Title) || branch.MatchString(i.Branch)) {
+			j.Closed = append(j.Closed, i.Ref)
+		}
+	}
 	sort.Slice(j.Requests, func(a, b int) bool { return refNumber(j.Requests[a]) < refNumber(j.Requests[b]) })
+	sort.Slice(j.Closed, func(a, b int) bool { return refNumber(j.Closed[a]) < refNumber(j.Closed[b]) })
 	if _, ok := st.Cases[repo+ref]; ok {
 		j.Case = repo + ref
 	}
