@@ -667,20 +667,28 @@ var doneLine = regexp.MustCompile(`(?i)\b(W[0-9a-f]{8})[ *` + "`" + `]*done:`)
 // claim of the item: written before the item was assigned, or with done
 // lines that name other items only; "" when it may be its claim.
 func (s *Supervisor) foreignDone(it *WorkItem, status string) string {
-	if at := readSessionFiles(s.cfg.Sessions[it.Session].Workdir).StatusAt; !at.IsZero() && at.Before(it.Assigned) {
+	if at := readSessionFiles(s.cfg.Sessions[it.Session].Workdir).StatusAt; !at.IsZero() && at.Before(it.Assigned.Add(-doneSkew)) {
 		return "DONE predates the assignment"
 	}
+	// An item closed before is history; one open, or unknown, is not.
 	var others []string
 	for _, m := range doneLine.FindAllStringSubmatch(status, -1) {
-		if !strings.EqualFold(m[1], it.ID) && !contains(others, m[1]) {
+		if o := s.st.Work[m[1]]; !strings.EqualFold(m[1], it.ID) && !contains(others, m[1]) && (o == nil || !o.terminal()) {
 			others = append(others, m[1])
 		}
 	}
-	if len(others) > 0 {
+	switch {
+	case len(others) > 0:
 		return "DONE names " + strings.Join(others, ", ") + ", not this item"
+	case !it.Started && it.Acked.IsZero() && !itemMarks(it.ID, status).named:
+		return "DONE written without ever naming the item"
 	}
 	return ""
 }
+
+// doneSkew is how far a STATUS.md's time may lag the clock of the
+// assignment and still be after it.
+const doneSkew = 5 * time.Second
 
 // reopenItem gives an item back to be assigned again, with why and the
 // last STATUS.md its session left.
@@ -753,7 +761,9 @@ func (s *Supervisor) assignItem(it *WorkItem, now time.Time) {
 	}
 	for _, h := range cands {
 		if h != "" && !tried[h] && s.takesItem(h) {
-			s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepAssign, Session: h})
+			if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepAssign, Session: h}); s.halt == nil {
+				s.followItem(it, h, false)
+			}
 			return
 		}
 	}
@@ -777,16 +787,31 @@ func (s *Supervisor) assignItem(it *WorkItem, now time.Time) {
 		if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepAssign, Session: name, Started: true}); s.halt != nil {
 			return
 		}
-		// A designed item's message goes to the session started for it,
-		// whose reply answers it (#68).
-		if in := s.st.Instructions[it.Instruction]; it.Designer && in != nil && in.Session == "" && in.Replied.IsZero() {
-			s.routeStep(in, RouteTo, name, true, "started "+name)
-		}
+		s.followItem(it, name, true)
 		return
 	}
 	holders := sessionsOf(s.st.Runtime, repo)
 	s.escalateItem(it, "start:"+shortHash(HashPane(digits.ReplaceAllString(why, "N")))[:8], fmt.Sprintf("agentd cannot start a session for %s: %s. Holding places: %s. End one, and agentd starts it.",
 		it.ID, why, strings.Join(holders, ", ")))
+}
+
+// followItem sends the item's message, not yet delivered, to the
+// session given the item: a designed item's to the session started for
+// it, whose reply answers it, and one the agent handed to a session that
+// takes no item away from it (#68).
+func (s *Supervisor) followItem(it *WorkItem, name string, started bool) {
+	in := s.st.Instructions[it.Instruction]
+	switch {
+	case in == nil || in.Session == name || in.Failed != "" || !in.Delivered.IsZero():
+		return
+	case in.Session == "" && (!it.Designer || !in.Replied.IsZero()):
+		return
+	}
+	reason := "assigned " + it.ID
+	if started {
+		reason = "started " + name
+	}
+	s.routeStep(in, RouteTo, name, started, reason)
 }
 
 // digits are the counts a reason names, which change while it holds.
@@ -812,15 +837,15 @@ func lastNote(it *WorkItem) string {
 	return " Last: " + oneLine(it.Notes[len(it.Notes)-1].Text, 300)
 }
 
-// reachable says whether Go can type into session name: one it
-// supervises here. A session on another machine, or one it does not run,
-// would receive nothing.
 // takesItem says whether session name may be given an item: it runs
 // here, takes instructions, and its STATUS.md does not end with DONE.
 func (s *Supervisor) takesItem(name string) bool {
 	return s.takesInstructions(name) && s.reachable(name) && !readSessionFiles(s.cfg.Sessions[name].Workdir).Done
 }
 
+// reachable says whether Go can type into session name: one it
+// supervises here. A session on another machine, or one it does not run,
+// would receive nothing.
 func (s *Supervisor) reachable(name string) bool {
 	_, ok := s.cfg.Sessions[name]
 	return ok

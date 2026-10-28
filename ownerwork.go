@@ -437,6 +437,11 @@ func reopened(text string) string {
 // session runs: it takes in once its DONE is taken off, in its own step,
 // unless taking it off failed as often as a restart may.
 func (s *Supervisor) reopens(in *Instruction) bool {
+	// A message that carries work is an item's, which no finished
+	// session takes (#68).
+	if a := in.AgentLast; a != nil && a.Work != nil {
+		return false
+	}
 	return in.Session != "" && in.Delivered.IsZero() && in.Failed == "" && s.doneAlive(in.Session) && !s.failed(s.track(in.Session), "reopen:"+in.Session)
 }
 

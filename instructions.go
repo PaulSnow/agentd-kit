@@ -547,6 +547,12 @@ func (s *Supervisor) routeOne(in *Instruction, now time.Time) {
 		return
 	}
 	repo := in.Repositories[0]
+	if a := in.AgentLast; in.Agent && in.Session != "" && a != nil && a.Work != nil {
+		// Its work is an item's, which goes to a session that takes it,
+		// and the message with it (#68).
+		s.routeStep(in, RouteWait, "", false, "its work item "+workID(in.ID)+" goes to a session that takes it, and your message with it")
+		return
+	}
 	if in.Agent && in.Session != "" {
 		// An agent handed it to a session that can no longer take it:
 		// the owner says again where it goes.

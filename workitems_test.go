@@ -537,6 +537,12 @@ func TestNewItemNeverGoesToFinishedSession(t *testing.T) {
 			if it.Session == "" || !it.Started {
 				t.Fatalf("no session started for it: item = %+v", it)
 			}
+			// Its message goes with it: w1 is not reopened, nor sent it.
+			h.alive(w1, "w1 pane\n"+idleScreen)
+			h.ticks(2, time.Minute)
+			if in := h.sup.st.Instructions[it.Instruction]; in.Session != it.Session || h.count(KindAction, ActReopen, w1) != 0 || h.count(KindAction, ActInstruct, w1) != 0 {
+				t.Fatalf("the message went to %s (%+v); reopened %d, instructed %d", in.Session, h.routeOf(in.ID), h.count(KindAction, ActReopen, w1), h.count(KindAction, ActInstruct, w1))
+			}
 		})
 	}
 	// A running session on the item's issue takes it.
@@ -553,6 +559,16 @@ func TestNewItemNeverGoesToFinishedSession(t *testing.T) {
 	it := h.askWork("Ship the follow-up.", ThreadWork{Title: "Ship the follow-up", Brief: "Ship it.", Issue: 1, DoneWhen: EndCheck{Kind: DoneOwner}}, w1)
 	if it = h.item(it.ID); it.Session != w2 || it.Started {
 		t.Fatalf("not given to %s, on the same issue: item = %+v", w2, it)
+	}
+	// Its DONE, never naming the item, is its own issue's, not a claim.
+	h.status(w2, "# s\n\nissue 1 part b shipped\n\nDONE\n")
+	h.alive(w2, "w2 is done")
+	h.ticks(3, time.Minute)
+	if steps := h.workSteps(it.ID); contains(steps, WorkStepClaim) {
+		t.Fatalf("claimed: steps %v", steps)
+	}
+	if it = h.item(it.ID); len(it.Tried) == 0 || it.Tried[0] != w2 || !strings.Contains(it.Notes[0].Text, "without ever naming the item") {
+		t.Fatalf("not given back: item = %+v", it)
 	}
 }
 
@@ -595,6 +611,10 @@ func TestClaimRefusedWhenDoneOlderOrForOtherItem(t *testing.T) {
 				}
 			case "other":
 				h.status("a", "# Status\n\nWdeadbeef done: the other one shipped\n\nDONE\n")
+				at := it.Assigned.Add(time.Minute)
+				if err := os.Chtimes(path, at, at); err != nil {
+					t.Fatal(err)
+				}
 			}
 			h.alive("a", "a is done")
 			h.ticks(3, time.Minute)
@@ -612,5 +632,35 @@ func TestClaimRefusedWhenDoneOlderOrForOtherItem(t *testing.T) {
 				t.Fatalf("not reopened with %q: item = %+v", want, it)
 			}
 		})
+	}
+}
+
+// Work the thread agent hands to a finished session whose tmux runs is
+// not handed over: Go starts a session for it, and the finished one is
+// not reopened (#68).
+func TestWorkHandedToFinishedSessionStartsOne(t *testing.T) {
+	dir := fakeClaude(t)
+	h := sessionsHarness(t)
+	w1 := h.startSession("issue-1", KindWork, 1)
+	h.ticks(2, time.Minute)
+	h.alive(w1, "w1 works")
+	h.ticks(1, time.Minute)
+	h.finish(w1)
+	h.alive(w1, "w1 is done\n"+idleScreen)
+	h.ticks(1, time.Minute)
+	out, _ := json.Marshal(map[string]any{"answer": "Handed to " + w1 + ".", "hand_to": w1, "work": map[string]any{"title": "Ship step 1b", "brief": "Ship it.", "done_when": map[string]any{"kind": "owner"}}})
+	res, _ := json.Marshal(map[string]any{"type": "result", "subtype": "success", "is_error": false, "structured_output": json.RawMessage(out), "usage": map[string]any{"input_tokens": 12, "output_tokens": 300}, "total_cost_usd": 0.01})
+	claudeAnswers(t, dir, 0, string(res)+"\n")
+	if err := reply(h, "widgets", "Ship step 1b too."); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(4, time.Minute)
+	in := h.instruction(t)
+	it := h.sup.st.Work[workID(in.ID)]
+	if it == nil || it.Session == "" || it.Session == w1 || !in.Started || in.Session != it.Session || in.Failed != "" {
+		t.Fatalf("item = %+v, instruction = %+v", it, in)
+	}
+	if n := h.count(KindAction, ActReopen, w1); n != 0 {
+		t.Fatalf("%s reopened %d times", w1, n)
 	}
 }
