@@ -1075,17 +1075,98 @@ func (f ExecForge) OpenIssue(repo Repository, title, body string) (int, error) {
 	return got.Number, nil
 }
 
+// OpenedIssue is what the log says of the issue Go opened for a work item:
+// its number, or Unsure when an open was begun and its outcome is not
+// known, a crash or an error between the forge's call and the record.
+type OpenedIssue struct {
+	Number int
+	Unsure bool
+}
+
+// noteOpenedIssue folds Go's opening of an issue for a work item: the
+// intent marks it unsure until the action names the number. An error
+// leaves it unsure, as a forge that timed out may have opened it.
+func (st *LogState) noteOpenedIssue(e Event) {
+	a := e.Act
+	switch {
+	case e.Kind == KindError && e.Error != nil:
+		a = e.Error.Act
+	case e.Kind == KindWarning && e.Warning != nil:
+		a = e.Warning.Intent
+	}
+	if a == nil || a.Action != ActIssue || a.Key == "" {
+		return
+	}
+	if st.IssuesOpened == nil {
+		st.IssuesOpened = map[string]OpenedIssue{}
+	}
+	switch e.Kind {
+	case KindIntent:
+		if st.IssuesOpened[a.Key].Number == 0 {
+			st.IssuesOpened[a.Key] = OpenedIssue{Unsure: true}
+		}
+	case KindAction:
+		if n := refNumber(a.Ref); n > 0 {
+			st.IssuesOpened[a.Key] = OpenedIssue{Number: n}
+		}
+	}
+}
+
+// findOpenedIssue looks through repo's issues, open or closed, newest
+// first, for the one whose body carries line, and returns its number, or
+// 0 when none does.
+func findOpenedIssue(api ForgeAPI, r Repository, line string) (int, error) {
+	for n := 1; n <= indexPages; n++ {
+		var resp APIResponse
+		var err error
+		if r.Forge == "gitlab" {
+			resp, err = api.GitLab(fmt.Sprintf("/projects/%s/issues?state=all&order_by=created_at&sort=desc&per_page=%d&page=%d", url.PathEscape(r.Project), indexPerPage, n))
+		} else {
+			resp, err = api.GitHub(fmt.Sprintf("repos/%s/issues?state=all&sort=created&direction=desc&per_page=%d&page=%d", r.Project, indexPerPage, n), nil)
+		}
+		if err != nil {
+			return 0, err
+		}
+		if resp.Status != 200 {
+			return 0, statusError("issues", resp)
+		}
+		var is []struct {
+			Number      int    `json:"number"`
+			IID         int    `json:"iid"`
+			Body        string `json:"body"`
+			Description string `json:"description"`
+		}
+		if err := json.Unmarshal(resp.Body, &is); err != nil {
+			return 0, fmt.Errorf("issues: %w", err)
+		}
+		for _, i := range is {
+			if strings.Contains(i.Body+i.Description, line) {
+				return max(i.Number, i.IID), nil
+			}
+		}
+		if len(is) < indexPerPage {
+			return 0, nil
+		}
+	}
+	return 0, nil
+}
+
 // issueForWork opens an issue for work w of item id in repo, when it names
 // none, so every piece of work has one, and sets w.Issue to it; work
 // whose done_when is an issue's closing names that issue. It runs on the
-// loop, as a console thread's comment does, bounded by the forge timeout;
-// an open that fails is logged and not tried again. Where the
+// loop, as a console thread's comment does, bounded by the forge timeout.
+// The issue opened is folded from the log, so an item asking again gets
+// the same number; an open whose outcome the log lacks, cut short or
+// failed, is looked for on the forge by its body's line before another. Where the
 // repository does not allow it, or the forge refuses, or the title matches
 // a confidential pattern, it opens none and logs why. A shadow run logs
 // what it would open.
 func (s *Supervisor) issueForWork(id, repo string, w *ThreadWork) {
 	if w.Issue <= 0 && w.DoneWhen.Kind == "forge" && issueRefPattern.MatchString(w.DoneWhen.Ref) {
 		w.Issue = refNumber(w.DoneWhen.Ref) // its end names the issue
+	}
+	if o := s.st.IssuesOpened["issue:"+id]; w.Issue <= 0 && o.Number > 0 {
+		w.Issue = o.Number // opened for this item before
 	}
 	if w.Issue > 0 || !indexed(s.cfg.Repositories[repo]) {
 		return
@@ -1109,6 +1190,25 @@ func (s *Supervisor) issueForWork(id, repo string, w *ThreadWork) {
 	}
 	body := fmt.Sprintf(issueBodyLine, id)
 	a := &ActPayload{Repository: repo, Key: "issue:" + id, Message: title}
+	if o := s.st.IssuesOpened[a.Key]; o.Unsure {
+		// An open with no recorded outcome may have reached the forge: the
+		// issue it opened is found by its body's line, never opened twice.
+		if s.api == nil {
+			skip("an earlier open has no recorded outcome and no forge API is set to look for it")
+			return
+		}
+		n, err := findOpenedIssue(s.api.At(s.cfg.Repositories[repo].Host), s.cfg.Repositories[repo], body)
+		if err != nil {
+			skip("an earlier open has no recorded outcome and the forge's issues could not be read: " + err.Error())
+			return
+		}
+		if n > 0 {
+			a.Action, a.Ref = ActIssue, "#"+strconv.Itoa(n)
+			s.emit("", Event{Kind: KindAction, Act: a})
+			w.Issue = n
+			return
+		}
+	}
 	n := 0
 	if err := s.act("", ActIssue, a, func() error {
 		var err error
