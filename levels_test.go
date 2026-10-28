@@ -269,6 +269,59 @@ func TestIssueLevelScreensAndDedupes(t *testing.T) {
 	}
 }
 
+// An issue's or a request's number opens it on the repository's forge,
+// GitHub's or GitLab's, in a new tab, and the title agentd's own page;
+// with no forge address configured, no forge link is made up.
+func TestLevelForgeLinks(t *testing.T) {
+	for _, c := range []struct {
+		repo Repository
+		kind byte
+		n    int
+		want string
+	}{
+		{Repository{Forge: "github", Project: "o/w"}, 0, 0, "https://github.com/o/w"},
+		{Repository{Forge: "github", Project: "o/w"}, '#', 5, "https://github.com/o/w/issues/5"},
+		{Repository{Forge: "github", Host: "ghe.example", Project: "o/w"}, '!', 9, "https://ghe.example/o/w/pull/9"},
+		{Repository{Forge: "gitlab", Project: "g/s/w"}, '#', 5, "https://gitlab.com/g/s/w/-/issues/5"},
+		{Repository{Forge: "gitlab", Host: "gitlab.example", Project: "g/w"}, '!', 9, "https://gitlab.example/g/w/-/merge_requests/9"},
+		{Repository{Forge: "gitlab", Project: "g/a b"}, 0, 0, "https://gitlab.com/g/a%20b"},
+		{Repository{Forge: "github"}, '#', 5, ""},
+		{Repository{Project: "o/w"}, '#', 5, ""},
+		{Repository{Forge: "github", Project: "o/../w"}, 0, 0, ""},
+		{Repository{Forge: "github", Host: "evil.example/x", Project: "o/w"}, 0, 0, ""},
+	} {
+		if got := webURL(c.repo, c.kind, c.n); got != c.want {
+			t.Errorf("%+v %c%d: %q, want %q", c.repo, c.kind, c.n, got, c.want)
+		}
+	}
+	f := newLevelsFixture(t)
+	u, _ := testUI(t, UIConfig{}, f.src)
+	for path, want := range map[string]string{
+		"/repo/widgets/issue/5": `<h2><a class="forge-ref" href="https://github.com/example-org/widgets/issues/5" target="_blank" rel="noopener"`,
+		"/repo/widgets":         `<a class="forge-ref" href="https://github.com/example-org/widgets/pull/9" target="_blank" rel="noopener" title="Open !9 on its forge">!9</a> <strong class="row-title"><a href="/repo/widgets/issue/4#mr-9">Speed up #4</a></strong>`,
+	} {
+		if body := owner(t, u, path); !strings.Contains(body, want) {
+			t.Errorf("%s: missing %q", path, want)
+		}
+	}
+	r := f.cfg.Repositories["widgets"]
+	r.Project = ""
+	f.cfg.Repositories["widgets"] = r
+	u, _ = testUI(t, UIConfig{}, f.src)
+	for _, path := range []string{"/", "/repo/widgets", "/repo/widgets/issue/5"} {
+		body := owner(t, u, path)
+		if path == "/" && !strings.Contains(body, `<a href="/repo/widgets">widgets</a></th>`) {
+			t.Errorf("/: the repository's row is missing:\n%s", body)
+		}
+		if strings.Contains(body, "forge-link") || strings.Contains(body, "forge-ref") || strings.Contains(body, "github.com") {
+			t.Errorf("%s: a forge link with no forge address:\n%s", path, body)
+		}
+	}
+	if body := owner(t, u, "/repo/widgets"); !strings.Contains(body, `<a href="/repo/widgets/issue/5">#5</a> <strong class="row-title"><a href="/repo/widgets/issue/5">Choose a cache</a></strong>`) {
+		t.Errorf("with no forge address the number does not open agentd's page:\n%s", body)
+	}
+}
+
 // Level 1: a sentence across the repositories, a row each with its
 // counts, linked to its page, and the token meter; today's tokens split
 // by kind, repository and session.
@@ -278,7 +331,7 @@ func TestHomeLevel(t *testing.T) {
 	body := owner(t, u, "/")
 	for _, want := range []string{
 		"Across 1 repository: 4 issues and 2 requests open, 2 being worked. 1 issue waits on you, in widgets.",
-		`<a href="/repo/widgets">widgets</a></th><td>4</td><td>2</td><td>2</td><td><strong>1</strong></td><td>3h</td>`,
+		`<a href="/repo/widgets">widgets</a> <a class="forge-link" href="https://github.com/example-org/widgets" target="_blank" rel="noopener" title="Open on its forge">github.com/example-org/widgets ↗</a></th><td>4</td><td>2</td><td>2</td><td><strong>1</strong></td><td>3h</td>`,
 		`class="meter"`,
 	} {
 		if !strings.Contains(body, want) {

@@ -143,12 +143,14 @@ func levelPath(path string) (repo string, n int, ok bool) {
 // repository from the run that serves it, the sentence across them, and
 // today's tokens from every source's ledger.
 func (u *UI) homeLevel(v *uiIndex, now time.Time) error {
-	names := map[string]bool{}
-	spends := &AccountLedger{} // copies, read under each source's lock
+	names := map[string]string{} // each repository's forge page
+	spends := &AccountLedger{}   // copies, read under each source's lock
 	for _, src := range u.sources {
 		src.mu.Lock()
-		for r := range src.cfg.Repositories {
-			names[r] = true
+		for r, c := range src.cfg.Repositories {
+			if w := webURL(c, 0, 0); w != "" || names[r] == "" {
+				names[r] = w
+			}
 		}
 		if src.st.Ledger != nil && src.st.Mode == ModeLive && !src.echo { // as the account reports count
 			spends.Spends = append(spends.Spends, src.st.Ledger.Spends...)
@@ -159,7 +161,7 @@ func (u *UI) homeLevel(v *uiIndex, now time.Time) error {
 		src.mu.Unlock()
 	}
 	for _, repo := range sortedKeys(names) {
-		row := HomeRow{Repository: repo, Sentence: "No live run serves " + repo + "."}
+		row := HomeRow{Repository: repo, Sentence: "No live run serves " + repo + ".", URL: names[repo]}
 		if _, err := u.levelSource(repo, now, func(_ *uiSource, cfg *Config, st *LogState, ds []UIDecision) {
 			row = BuildHomeRow(cfg, st, repo, ds, now)
 		}); err != nil {
