@@ -530,11 +530,14 @@ func TestWaitsOnYouCountsWhatWaits(t *testing.T) {
 	if row := BuildHomeRow(h.cfg, h.sup.st, "widgets", nil, now); row.Counts.Waiting != 1 {
 		t.Fatalf("a request waiting on the owner: home counts %d", row.Counts.Waiting)
 	}
+	if h.sup.st.Work == nil {
+		h.sup.st.Work = map[string]*WorkItem{}
+	}
 	h.sup.st.Work["w9"] = &WorkItem{ID: "w9", Repository: "widgets", State: WorkBlocked, Question: "Which cache size?", ThreadWork: ThreadWork{Title: "Pick the cache"}}
 	ds := []UIDecision{{Session: "d", Repository: "widgets", Decision: Decision{ID: "q1", Question: "Ship it on Friday?"}}}
 	v := BuildRepoLevel(h.cfg, h.sup.st, "widgets", ds, now)
-	if v.Counts.Waiting != 3 {
-		t.Fatalf("waiting %d", v.Counts.Waiting)
+	if v.Counts.Waiting != 3 || len(v.Needs) != 3 {
+		t.Fatalf("waiting %d, needs %+v", v.Counts.Waiting, v.Needs)
 	}
 	if row := BuildHomeRow(h.cfg, h.sup.st, "widgets", ds, now); row.Counts.Waiting != 3 {
 		t.Fatalf("home counts %d", row.Counts.Waiting)

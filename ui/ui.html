@@ -273,6 +273,8 @@
 {{define "repo"}}{{template "head" .}}
 <nav class="crumbs"><a href="/">Home</a> › {{.Repository}}{{template "forge-link" .URL}} · <a href="/console/{{.Repository}}">history</a></nav>
 <section id="state" data-refresh><p class="state-sentence">{{.Sentence}}</p></section>
+<section id="needs" data-refresh aria-label="Also waits on you">{{with .Needs}}<h2>Also waits on you, on no listed issue</h2>
+{{range .}}{{if .Entry}}{{template "level-decision" (ctx $ .)}}{{else}}<article class="card decision-card"><p class="asked"><strong>Waits on you:</strong> {{.Asked}}</p></article>{{end}}{{end}}{{end}}</section>
 <section id="issues" class="level-box issue-box" data-refresh data-box="issues" data-key="{{.Repository}}" aria-label="Issues">
 <header class="box-head"><span class="box-count" data-total="{{.Counts.Open}}" data-need="{{.Counts.Waiting}}" data-working="{{.Counts.Working}}">{{.Counts.Open}} issues, {{.Counts.Waiting}} need you, {{.Counts.Working}} being worked, <span class="box-shown">{{.Shown}}</span> shown</span>
 <label>Sort <select class="box-sort" aria-label="Sort the issues">{{range .IssueSorts}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>

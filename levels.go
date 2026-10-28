@@ -208,6 +208,10 @@ type RepoLevel struct {
 	Counts     IndexCounts    `json:"counts"`
 	Issues     []LevelIssue   `json:"issues"`
 	Requests   []LevelRequest `json:"requests"`
+	// Needs are what waits on the owner that no listed issue shows: a
+	// session's decision, an item, or a request the loop waits on the
+	// owner for, whose issue is not listed or who has none.
+	Needs []LevelDecision `json:"needs,omitempty"`
 	// URL is the repository's page on its forge, "" when none is
 	// configured.
 	URL string `json:"url,omitempty"`
@@ -261,8 +265,34 @@ func levelDecisions(cfg *Config, st *LogState, n int, j IssueJoin, decisions []U
 func levelDecisionsOf(cfg *Config, st *LogState, n int, j IssueJoin, decisions []UIDecision) []LevelDecision {
 	var out []LevelDecision
 	for _, it := range j.Work {
-		if it.terminal() {
+		if ld, ok := workDecision(it); ok {
+			out = append(out, ld)
+		}
+	}
+	in := map[string]bool{}
+	for _, s := range j.Sessions {
+		in[s] = true
+	}
+	c := withRuntime(cfg, st.Runtime)
+	for _, d := range decisions {
+		if !in[d.Session] {
 			continue
+		}
+		if own := c.Sessions[d.Session].Issue; own > 0 && own != n {
+			continue // its decisions are its own issue's
+		}
+		out = append(out, sessionDecision(d))
+	}
+	return out
+}
+
+// workDecision is work item it's card, when it waits on the owner: its
+// design waiting on a go, its question, or its claim of being done under
+// the owner's own check.
+func workDecision(it *WorkItem) (LevelDecision, bool) {
+	{
+		if it.terminal() {
+			return LevelDecision{}, false
 		}
 		if it.State == WorkDesigned {
 			d := designDecision(it, "")
@@ -276,11 +306,10 @@ func levelDecisionsOf(cfg *Config, st *LogState, n int, j IssueJoin, decisions [
 			for _, o := range d.Options {
 				ld.Options = append(ld.Options, LevelOption{Key: o.Key, Label: o.Label, Consequence: o.Consequence})
 			}
-			out = append(out, ld)
-			continue
+			return ld, true
 		}
 		if it.Question == "" && !(it.DoneWhen.Kind == DoneOwner && it.Claim != "") {
-			continue
+			return LevelDecision{}, false
 		}
 		ld := LevelDecision{Entry: entryWork + it.ID, Session: it.Session}
 		if it.Question != "" {
@@ -295,20 +324,13 @@ func levelDecisionsOf(cfg *Config, st *LogState, n int, j IssueJoin, decisions [
 		for _, o := range it.workOptions() {
 			ld.Options = append(ld.Options, LevelOption{Key: o, Label: o, Consequence: workConsequences[o]})
 		}
-		out = append(out, ld)
+		return ld, true
 	}
-	in := map[string]bool{}
-	for _, s := range j.Sessions {
-		in[s] = true
-	}
-	c := withRuntime(cfg, st.Runtime)
-	for _, d := range decisions {
-		if !in[d.Session] {
-			continue
-		}
-		if own := c.Sessions[d.Session].Issue; own > 0 && own != n {
-			continue // its decisions are its own issue's
-		}
+}
+
+// sessionDecision is a session's open decision d as a card.
+func sessionDecision(d UIDecision) LevelDecision {
+	{
 		dec := d.Decision
 		ld := LevelDecision{Decision: &dec, Entry: decisionEntry(d.Session, d.ID), Session: d.Session, Asked: oneLine(d.Question, 400), CameBack: oneLine(d.Context, 400)}
 		if d.Withheld != "" {
@@ -320,7 +342,55 @@ func levelDecisionsOf(cfg *Config, st *LogState, n int, j IssueJoin, decisions [
 		for _, o := range d.Options {
 			ld.Options = append(ld.Options, LevelOption{Key: o.Key, Label: o.Label, Consequence: o.Consequence})
 		}
-		out = append(out, ld)
+		return ld
+	}
+}
+
+// repoNeed is what waits on the owner in a repository, as a card, and the
+// issue it is of, "" for none known.
+type repoNeed struct {
+	LevelDecision
+	Issue string
+}
+
+// repoNeeds is everything in repo that waits on the owner, as the old
+// console's Needs you lists it and more: every open work item that asks
+// or waits on a go, every session's open decision, and every request the
+// loop waits on the owner for. An issue's cards are among them.
+func repoNeeds(cfg *Config, st *LogState, repo string, decisions []UIDecision, now time.Time) []repoNeed {
+	var out []repoNeed
+	for _, id := range sortedKeys(st.Work) {
+		it := st.Work[id]
+		if it.Repository != repo {
+			continue
+		}
+		if ld, ok := workDecision(it); ok {
+			out = append(out, repoNeed{LevelDecision: ld})
+		}
+	}
+	for _, d := range decisions {
+		if d.Repository == repo {
+			out = append(out, repoNeed{LevelDecision: sessionDecision(d)})
+		}
+	}
+	c := withRuntime(cfg, st.Runtime)
+	for _, q := range loopRequests(cfg, st, now) {
+		if q.Repository != repo {
+			continue
+		}
+		p := placeOf(cfg, st, q)
+		if p.Phase != PlaceOwner {
+			continue
+		}
+		n := repoNeed{LevelDecision: LevelDecision{Asked: fmt.Sprintf("%s is %s: %s.", q.Ref, PlaceOwner, p.Reason)}}
+		if k := c.Sessions[q.Session].Issue; k > 0 && !q.Outside {
+			n.Issue = "#" + strconv.Itoa(k)
+		} else if i := st.Index[repo][q.Ref]; i != nil {
+			if m := issueInTitle.FindStringSubmatch(i.Title); m != nil {
+				n.Issue = "#" + m[1]
+			}
+		}
+		out = append(out, n)
 	}
 	return out
 }
@@ -417,15 +487,19 @@ func BuildRepoLevel(cfg *Config, st *LogState, repo string, decisions []UIDecisi
 	busy := workingOn(cfg, st, repo)
 	secret := confidentialMatcher(cfg)
 	needs := map[string]bool{}
+	shown := map[string]bool{} // the entries an issue's card shows
 	for _, ref := range sortedKeys(st.Index[repo]) {
 		i := st.Index[repo][ref]
 		if ref[0] == '!' {
 			v.Requests = append(v.Requests, levelRequest(cfg, st, repo, i))
 			continue
 		}
-		li, j, _ := levelIssue(cfg, st, repo, i, decisions, busy, secret)
+		li, j, ds := levelIssue(cfg, st, repo, i, decisions, busy, secret)
 		if li.Decision != nil {
 			needs[ref] = true
+		}
+		for _, d := range ds {
+			shown[d.Entry] = true
 		}
 		for _, q := range j.Requests {
 			for k := range v.Requests {
@@ -454,7 +528,23 @@ func BuildRepoLevel(cfg *Config, st *LogState, repo string, decisions []UIDecisi
 		}
 		return v.Requests[a].Changed.After(v.Requests[b].Changed)
 	})
+	// What waits on the owner and no listed issue's card shows: a request
+	// the loop waits on the owner for counts its listed issue; the rest
+	// are the repository's own needs.
+	for _, n := range repoNeeds(cfg, st, repo, decisions, now) {
+		switch {
+		case n.Entry != "" && shown[n.Entry]:
+		case n.Entry == "" && st.Index[repo][n.Issue] != nil:
+			needs[n.Issue] = true
+		default:
+			if secret(n.Asked, n.CameBack, n.Checked) {
+				n.Asked, n.CameBack, n.Checked = withheldSecret, "", ""
+			}
+			v.Needs = append(v.Needs, n.LevelDecision)
+		}
+	}
 	v.Counts = indexCounts(cfg, st, repo, func(ref string) bool { return needs[ref] })
+	v.Counts.Waiting += len(v.Needs)
 	v.Sentence = repoSentence(v, now)
 	return v
 }
