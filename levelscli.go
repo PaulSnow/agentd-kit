@@ -70,6 +70,9 @@ func levelCmd(cfg *Config, repo string, args []string, out io.Writer) error {
 	case *issues:
 		printIssueBox(out, p, v, *sortBy, *filter)
 	default:
+		if v.URL != "" {
+			fmt.Fprintln(out, v.URL)
+		}
 		fmt.Fprintln(out, v.Sentence)
 		fmt.Fprintln(out)
 		printIssueBox(out, p, v, *sortBy, *filter)
@@ -270,6 +273,9 @@ func issueCmd(args []string, out io.Writer) error {
 // printIssueLevel prints an issue's page.
 func printIssueLevel(w io.Writer, p uiPage, v IssueLevel) {
 	fmt.Fprintf(w, "%s %s (%s)\n", v.Ref, v.Title, v.Word)
+	if v.URL != "" {
+		fmt.Fprintln(w, v.URL)
+	}
 	if v.Sentence != "" {
 		fmt.Fprintf(w, "%s (%s, %s ago)\n", v.Sentence, v.Writer, p.Ago(v.SentenceAt))
 	} else {

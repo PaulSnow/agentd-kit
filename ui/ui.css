@@ -285,6 +285,8 @@ form.attach-over { outline: 2px dashed var(--accent); outline-offset: 2px; }
 .box-row[hidden] { display: none; }
 .row-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); }
 .row-title { overflow-wrap: anywhere; }
+.row-title a { color: inherit; }
+.forge-link { font-size: var(--size-s); font-weight: normal; margin-left: var(--space-1); overflow-wrap: anywhere; }
 .row-sentence, .row-options { margin: var(--space-1) 0 0; }
 .word-needs-you .word { background: var(--alert-bg); color: var(--alert); }
 .decision-card .options { list-style: none; margin: var(--space-2) 0; padding: 0; display: grid; gap: var(--space-1); }

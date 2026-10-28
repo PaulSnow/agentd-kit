@@ -33,6 +33,7 @@ var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
 	"yes":      func(b *bool) bool { return b != nil && *b },
 	"ctx":      func(p, v any) map[string]any { return map[string]any{"P": p, "V": v} },
 	"path":     url.PathEscape,
+	"site":     func(u string) string { return strings.TrimPrefix(u, "https://") },
 }).Parse(uiHTML))
 
 // uiPage is what every view carries: the form token, the time the view

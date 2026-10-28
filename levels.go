@@ -129,6 +129,8 @@ type LevelIssue struct {
 	// Decision is the first open decision, whose options the row offers.
 	Decision *LevelDecision `json:"decision,omitempty"`
 	Working  bool           `json:"working,omitempty"`
+	// URL is the issue's page on its forge, "" when none is configured.
+	URL string `json:"url,omitempty"`
 }
 
 // FilterText is what the filter's words are matched in: title,
@@ -168,6 +170,8 @@ type LevelRequest struct {
 	Draft   bool      `json:"draft,omitempty"`
 	Opened  time.Time `json:"opened"`
 	Changed time.Time `json:"changed"`
+	// URL is the request's page on its forge, "" when none is configured.
+	URL string `json:"url,omitempty"`
 }
 
 // LevelDecision is an open decision as a card shows it: its entry, what
@@ -201,6 +205,9 @@ type RepoLevel struct {
 	Counts     IndexCounts    `json:"counts"`
 	Issues     []LevelIssue   `json:"issues"`
 	Requests   []LevelRequest `json:"requests"`
+	// URL is the repository's page on its forge, "" when none is
+	// configured.
+	URL string `json:"url,omitempty"`
 }
 
 // IssueLevel is level 3: an issue, what belongs to it, its open
@@ -321,7 +328,7 @@ func levelIssue(cfg *Config, st *LogState, repo string, i *IndexIssue, decisions
 	n := i.Number()
 	j := joinIssue(cfg, st, repo, n)
 	li := LevelIssue{Repository: repo, Ref: i.Ref, Number: n, Title: i.Title, Labels: i.Labels, Milestone: i.Milestone, Author: i.Author,
-		Opened: i.Opened, Changed: i.Changed, Requests: j.Requests, Working: busy[i.Ref], Word: WordOpen}
+		Opened: i.Opened, Changed: i.Changed, Requests: j.Requests, Working: busy[i.Ref], Word: WordOpen, URL: webURL(cfg.Repositories[repo], '#', n)}
 	if i.Withheld > 0 {
 		li.Title = "(withheld: it matched a confidential pattern)"
 	}
@@ -351,8 +358,9 @@ func levelIssue(cfg *Config, st *LogState, repo string, i *IndexIssue, decisions
 var loopRanks = []string{PlaceOwner, PlaceFixing, PlaceJudging, PlaceReviewing, PlaceMerging, PlaceCI, PlaceOutside}
 
 // levelRequest is request i of repo as the MR box shows it.
-func levelRequest(st *LogState, repo string, i *IndexIssue) LevelRequest {
-	r := LevelRequest{Ref: i.Ref, Number: i.Number(), Title: i.Title, Author: i.Author, Branch: i.Branch, Draft: i.Draft, Opened: i.Opened, Changed: i.Changed, Rank: len(loopRanks)}
+func levelRequest(cfg *Config, st *LogState, repo string, i *IndexIssue) LevelRequest {
+	r := LevelRequest{Ref: i.Ref, Number: i.Number(), Title: i.Title, Author: i.Author, Branch: i.Branch, Draft: i.Draft, Opened: i.Opened, Changed: i.Changed, Rank: len(loopRanks),
+		URL: webURL(cfg.Repositories[repo], '!', i.Number())}
 	if i.Withheld > 0 {
 		r.Title = "(withheld: it matched a confidential pattern)"
 	}
@@ -378,7 +386,8 @@ func levelRequest(st *LogState, repo string, i *IndexIssue) LevelRequest {
 // BuildRepoLevel is level 2 of repo from the fold, with decisions the open
 // session decisions; it calls no forge and no model.
 func BuildRepoLevel(cfg *Config, st *LogState, repo string, decisions []UIDecision, now time.Time) RepoLevel {
-	v := RepoLevel{Repository: repo, Tracked: indexed(cfg.Repositories[repo]) && cfg.Poll.Index, Issues: []LevelIssue{}, Requests: []LevelRequest{}}
+	v := RepoLevel{Repository: repo, Tracked: indexed(cfg.Repositories[repo]) && cfg.Poll.Index, Issues: []LevelIssue{}, Requests: []LevelRequest{},
+		URL: webURL(cfg.Repositories[repo], 0, 0)}
 	v.Read = st.IndexRead[repo]
 	busy := workingOn(cfg, st, repo)
 	secret := confidentialMatcher(cfg)
@@ -386,7 +395,7 @@ func BuildRepoLevel(cfg *Config, st *LogState, repo string, decisions []UIDecisi
 	for _, ref := range sortedKeys(st.Index[repo]) {
 		i := st.Index[repo][ref]
 		if ref[0] == '!' {
-			v.Requests = append(v.Requests, levelRequest(st, repo, i))
+			v.Requests = append(v.Requests, levelRequest(cfg, st, repo, i))
 			continue
 		}
 		li, j, _ := levelIssue(cfg, st, repo, i, decisions, busy, secret)
@@ -616,7 +625,7 @@ func BuildIssueLevel(cfg *Config, st *LogState, repo string, n int, decisions []
 	for _, q := range j.Requests {
 		v.Refs = append(v.Refs, LevelRef{Kind: "request", Name: q})
 		if r := st.Index[repo][q]; r != nil {
-			v.Request = append(v.Request, levelRequest(st, repo, r))
+			v.Request = append(v.Request, levelRequest(cfg, st, repo, r))
 		}
 	}
 	if j.Case != "" {
@@ -690,6 +699,9 @@ type HomeRow struct {
 	Listed     bool        `json:"listed"`
 	Counts     IndexCounts `json:"counts"`
 	Sentence   string      `json:"sentence"`
+	// URL is the repository's page on its forge, "" when none is
+	// configured.
+	URL string `json:"url,omitempty"`
 }
 
 // homeSentence says where the repositories stand together.
@@ -736,7 +748,7 @@ func homeSentence(rows []HomeRow) string {
 // BuildHomeRow is repo's row on the home page, from the fold.
 func BuildHomeRow(cfg *Config, st *LogState, repo string, decisions []UIDecision, now time.Time) HomeRow {
 	v := BuildRepoLevel(cfg, st, repo, decisions, now)
-	return HomeRow{Repository: repo, Tracked: v.Tracked, Listed: v.Tracked && !v.Read.IsZero(), Counts: v.Counts, Sentence: v.Sentence}
+	return HomeRow{Repository: repo, Tracked: v.Tracked, Listed: v.Tracked && !v.Read.IsZero(), Counts: v.Counts, Sentence: v.Sentence, URL: v.URL}
 }
 
 // listedRepos is n repositories, in words.

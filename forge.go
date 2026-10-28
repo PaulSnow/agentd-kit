@@ -147,6 +147,42 @@ func pushURL(r Repository) string {
 	return "git@" + r.Host + ":" + r.Project + ".git"
 }
 
+// webURL is r's page on its forge, built from the configuration alone,
+// or "" when it names no forge, host or project. With a number and a ref
+// kind it is that issue's page ('#') or that request's ('!').
+func webURL(r Repository, kind byte, n int) string {
+	host := r.Host
+	if host == "" {
+		host = map[string]string{"gitlab": "gitlab.com", "github": "github.com"}[r.Forge]
+	}
+	project := strings.Trim(r.Project, "/")
+	if host == "" || project == "" || strings.ContainsAny(host, "/?#@ ") {
+		return ""
+	}
+	segs := strings.Split(project, "/")
+	for i, s := range segs {
+		if s == "" || s == "." || s == ".." {
+			return ""
+		}
+		segs[i] = url.PathEscape(s)
+	}
+	base := "https://" + host + "/" + strings.Join(segs, "/")
+	if n <= 0 {
+		return base
+	}
+	switch {
+	case r.Forge == "github" && kind == '#':
+		return base + "/issues/" + strconv.Itoa(n)
+	case r.Forge == "github" && kind == '!':
+		return base + "/pull/" + strconv.Itoa(n)
+	case r.Forge == "gitlab" && kind == '#':
+		return base + "/-/issues/" + strconv.Itoa(n)
+	case r.Forge == "gitlab" && kind == '!':
+		return base + "/-/merge_requests/" + strconv.Itoa(n)
+	}
+	return ""
+}
+
 // glabArgs points a glab call at the repository's host.
 func glabArgs(r Repository, args ...string) []string {
 	if r.Host != "" {

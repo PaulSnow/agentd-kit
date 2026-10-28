@@ -68,7 +68,7 @@
 <section id="home" data-refresh aria-labelledby="home-h"><h2 id="home-h" class="visually-hidden">Where things stand</h2>
 <p class="state-sentence">{{.Sentence}}</p>
 <table class="home-table"><thead><tr><th scope="col">Repository</th><th scope="col">Open</th><th scope="col">Being worked</th><th scope="col">Requests</th><th scope="col">Waits on you</th><th scope="col">Last change</th></tr></thead>
-<tbody>{{range .Home}}<tr{{if .Counts.Waiting}} class="row-alert"{{end}}><th scope="row"><a href="/repo/{{path .Repository}}">{{.Repository}}</a></th>{{if .Listed}}<td>{{.Counts.Open}}</td><td>{{.Counts.Working}}</td><td>{{.Counts.Requests}}</td><td>{{if .Counts.Waiting}}<strong>{{.Counts.Waiting}}</strong>{{else}}0{{end}}</td><td>{{$.Ago .Counts.Last}}</td>{{else}}<td colspan="5" class="muted">{{.Sentence}}</td>{{end}}</tr>{{end}}</tbody></table>
+<tbody>{{range .Home}}<tr{{if .Counts.Waiting}} class="row-alert"{{end}}><th scope="row"><a href="/repo/{{path .Repository}}">{{.Repository}}</a>{{template "forge-link" .URL}}</th>{{if .Listed}}<td>{{.Counts.Open}}</td><td>{{.Counts.Working}}</td><td>{{.Counts.Requests}}</td><td>{{if .Counts.Waiting}}<strong>{{.Counts.Waiting}}</strong>{{else}}0{{end}}</td><td>{{$.Ago .Counts.Last}}</td>{{else}}<td colspan="5" class="muted">{{.Sentence}}</td>{{end}}</tr>{{end}}</tbody></table>
 <div class="meter" aria-label="Token meter"><h3>Tokens</h3>
 <ul class="meter-accounts">{{range .Accounts}}{{with .Report}}<li><strong>{{.Account}}</strong> {{if .Weekly}}week {{pct .Weekly}}{{with .WeeklyReset}}, resets {{$.Day .}}{{end}}{{else}}<span class="muted">no reading</span>{{end}}</li>{{end}}{{end}}</ul>
 <details class="meter-today" data-key="home-today"><summary>Today {{.Tokens .Today.Total}} tokens{{range $i, $k := .Today.ByKind}}{{if lt $i 4}} · {{$k.Name}} {{$.Tokens $k.Tokens}}{{end}}{{end}}</summary>
@@ -268,15 +268,17 @@
 <div class="composer-row"><textarea name="text" rows="2" maxlength="4000" aria-label="Your message" required placeholder="Ask, or tell agentd what to do here"></textarea><button type="submit">Send</button></div>{{if .NowOffered}}<label class="muted"><input type="checkbox" name="now" value="1"> now: type it into its session at once, not at its next turn</label>{{end}}</form>
 </section>{{end}}
 
+{{define "forge-link"}}{{with .}} <a class="forge-link" href="{{.}}" target="_blank" rel="noopener" title="Open on its forge">{{site .}} ↗</a>{{end}}{{end}}
+
 {{define "repo"}}{{template "head" .}}
-<nav class="crumbs"><a href="/">Home</a> › {{.Repository}} · <a href="/console/{{.Repository}}">history</a></nav>
+<nav class="crumbs"><a href="/">Home</a> › {{.Repository}}{{template "forge-link" .URL}} · <a href="/console/{{.Repository}}">history</a></nav>
 <section id="state" data-refresh><p class="state-sentence">{{.Sentence}}</p></section>
 <section id="issues" class="level-box issue-box" data-refresh data-box="issues" data-key="{{.Repository}}" aria-label="Issues">
 <header class="box-head"><span class="box-count" data-total="{{.Counts.Open}}" data-need="{{.Counts.Waiting}}" data-working="{{.Counts.Working}}">{{.Counts.Open}} issues, {{.Counts.Waiting}} need you, {{.Counts.Working}} being worked, <span class="box-shown">{{.Shown}}</span> shown</span>
 <label>Sort <select class="box-sort" aria-label="Sort the issues">{{range .IssueSorts}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
 <input type="search" class="box-filter" placeholder="Filter: words, a label, #N or !N" aria-label="Filter the issues"></header>
 <ol class="box-rows">{{range $i := .Issues}}<li class="box-row word-{{.WordClass}}" data-ref="{{.Ref}}" data-number="{{.Number}}" data-word="{{.Word}}" data-working="{{if .Working}}1{{end}}" data-mr="{{len .Requests}}" data-opened="{{.Opened.Unix}}" data-changed="{{.Changed.Unix}}" data-label="{{range $i, $l := .Labels}}{{if $i}} {{end}}{{$l}}{{end}}" data-milestone="{{.Milestone}}" data-author="{{.Author}}" data-text="{{.FilterText}}" data-refs="{{.Ref}}{{range .Requests}} {{.}}{{end}}">
-<div class="row-head"><a href="/repo/{{path .Repository}}/issue/{{.Number}}">{{.Ref}}</a> <strong class="row-title">{{.Title}}</strong> <span class="badge word">{{.Word}}</span>{{range .Labels}} <span class="badge label">{{.}}</span>{{end}}{{range .Requests}} <span class="badge mr">{{.}}</span>{{end}} <span class="muted">changed {{$.Ago .Changed}}</span></div>
+<div class="row-head">{{if .URL}}<a class="forge-ref" href="{{.URL}}" target="_blank" rel="noopener" title="Open {{.Ref}} on its forge">{{.Ref}}</a>{{else}}<a href="/repo/{{path .Repository}}/issue/{{.Number}}">{{.Ref}}</a>{{end}} <strong class="row-title"><a href="/repo/{{path .Repository}}/issue/{{.Number}}">{{.Title}}</a></strong> <span class="badge word">{{.Word}}</span>{{range .Labels}} <span class="badge label">{{.}}</span>{{end}}{{range .Requests}} <span class="badge mr">{{.}}</span>{{end}} <span class="muted">changed {{$.Ago .Changed}}</span></div>
 <p class="row-sentence">{{if .Sentence}}{{.Sentence}} <span class="muted">({{.Writer}})</span>{{else}}<span class="muted">No sentence yet; the forge's title stands.</span>{{end}}</p>
 {{with .Decision}}<p class="row-options"><a href="/repo/{{path $i.Repository}}/issue/{{$i.Number}}#{{.Anchor}}">{{.Asked}}</a>{{range .Options}} <span class="badge">{{.Label}}</span>{{end}}</p>{{end}}
 </li>{{else}}<li class="empty">No open issues listed.</li>{{end}}</ol>
@@ -285,7 +287,7 @@
 <header class="box-head"><span class="box-count">{{len .Requests}} open requests, <span class="box-shown">{{len .Requests}}</span> shown</span>
 <label>Sort <select class="box-sort" aria-label="Sort the requests">{{range .RequestSorts}}<option value="{{.}}">{{.}}</option>{{end}}</select></label></header>
 <ol class="box-rows">{{range .Requests}}<li class="box-row" data-ref="{{.Ref}}" data-number="{{.Number}}" data-rank="{{.Rank}}" data-failing="{{if .Failing}}1{{end}}" data-opened="{{.Opened.Unix}}" data-changed="{{.Changed.Unix}}">
-<div class="row-head">{{if .Issue}}<a href="/repo/{{path $.Repository}}/issue/{{slice .Issue 1}}#mr-{{.Number}}">{{.Ref}}</a>{{else}}<span class="ref">{{.Ref}}</span>{{end}} <strong class="row-title">{{.Title}}</strong>{{with .Issue}} <span class="muted">for {{.}}</span>{{end}} <span class="badge ci-{{if .CI}}{{.CI}}{{else}}unwatched{{end}}">CI {{if .CI}}{{.CI}}{{else}}not watched{{end}}</span>{{if .Draft}} <span class="badge">draft</span>{{end}} <span class="muted">changed {{$.Ago .Changed}}</span></div>
+<div class="row-head">{{if .URL}}<a class="forge-ref" href="{{.URL}}" target="_blank" rel="noopener" title="Open {{.Ref}} on its forge">{{.Ref}}</a>{{else if .Issue}}<a href="/repo/{{path $.Repository}}/issue/{{slice .Issue 1}}#mr-{{.Number}}">{{.Ref}}</a>{{else}}<span class="ref">{{.Ref}}</span>{{end}} <strong class="row-title">{{if .Issue}}<a href="/repo/{{path $.Repository}}/issue/{{slice .Issue 1}}#mr-{{.Number}}">{{.Title}}</a>{{else}}{{.Title}}{{end}}</strong>{{with .Issue}} <span class="muted">for {{.}}</span>{{end}} <span class="badge ci-{{if .CI}}{{.CI}}{{else}}unwatched{{end}}">CI {{if .CI}}{{.CI}}{{else}}not watched{{end}}</span>{{if .Draft}} <span class="badge">draft</span>{{end}} <span class="muted">changed {{$.Ago .Changed}}</span></div>
 <p class="row-sentence">{{if .Place}}{{.Place}}{{else}}<span class="muted">Outside the loop, or not yet placed.</span>{{end}}</p>
 </li>{{else}}<li class="empty">No open requests.</li>{{end}}</ol>
 </section>
@@ -295,7 +297,7 @@
 {{define "issue"}}{{template "head" .}}
 <nav class="crumbs"><a href="/">Home</a> › <a href="/repo/{{path .Repository}}">{{.Repository}}</a> › {{.Ref}} · <a href="/console/{{.Repository}}">history</a></nav>
 <section id="issue-head" data-refresh>
-<h2>{{.Ref}} {{.LevelIssue.Title}} <span class="badge word">{{.Word}}</span></h2>
+<h2>{{if .URL}}<a class="forge-ref" href="{{.URL}}" target="_blank" rel="noopener" title="Open {{.Ref}} on its forge">{{.Ref}}</a>{{else}}{{.Ref}}{{end}} {{.LevelIssue.Title}} <span class="badge word">{{.Word}}</span></h2>
 <p class="state-sentence">{{if .Sentence}}{{.Sentence}} <span class="muted">— {{.Writer}}, {{.Ago .SentenceAt}} ago</span>{{else}}<span class="muted">No sentence yet; the forge's title stands.</span>{{end}}</p>
 <p class="refs">{{range .Refs}}<span class="badge ref-{{.Kind}}">{{.Kind}} {{.Name}}{{with .Note}} · {{.}}{{end}}</span> {{end}}{{range .Labels}}<span class="badge label">{{.}}</span> {{end}}{{with .Milestone}}<span class="badge">milestone {{.}}</span> {{end}}{{with .Author}}<span class="muted">opened by {{.}} {{$.Ago $.Opened}} ago</span>{{end}}</p>
 </section>
@@ -307,7 +309,7 @@
 </section>
 <section id="next" data-refresh aria-labelledby="next-h"><h2 id="next-h">Next</h2>
 <ul>{{range .Next}}<li>{{.}}</li>{{end}}</ul>
-{{range .Request}}<p id="mr-{{.Number}}" class="mr-line"><strong>{{.Ref}}</strong> {{.Title}} <span class="badge ci-{{if .CI}}{{.CI}}{{else}}unwatched{{end}}">CI {{if .CI}}{{.CI}}{{else}}not watched{{end}}</span>{{with .Place}} · {{.}}{{end}}</p>{{end}}
+{{range .Request}}<p id="mr-{{.Number}}" class="mr-line"><strong>{{if .URL}}<a class="forge-ref" href="{{.URL}}" target="_blank" rel="noopener" title="Open {{.Ref}} on its forge">{{.Ref}}</a>{{else}}{{.Ref}}{{end}}</strong> {{.Title}} <span class="badge ci-{{if .CI}}{{.CI}}{{else}}unwatched{{end}}">CI {{if .CI}}{{.CI}}{{else}}not watched{{end}}</span>{{with .Place}} · {{.}}{{end}}</p>{{end}}
 </section>
 {{template "console-box" .}}
 {{template "foot" .}}{{end}}
