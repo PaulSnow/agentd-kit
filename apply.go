@@ -91,6 +91,9 @@ type LogState struct {
 	Sentences map[string]*IndexSentence
 	// Steps are each issue's and request's dated steps, by sentenceKey.
 	Steps map[string][]IssueStep
+	// Swept is when the steps and sentences were last swept of what
+	// nothing holds (sweepSteps), by the events' time.
+	Swept time.Time
 
 	cfg *Config // its policies, read as each event is applied
 }
@@ -164,6 +167,7 @@ func (st *LogState) apply(e Event) {
 	// After the fold, so a placement is the ledger's only once it holds.
 	defer st.applyLedger(e)
 	defer st.noteSteps(e)
+	defer st.sweepSteps(e.Time)
 	st.noteOpenedIssue(e)
 	if e.Kind == KindCase {
 		st.applyCase(e)
