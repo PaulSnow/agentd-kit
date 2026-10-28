@@ -103,7 +103,7 @@ func TestIndexFoldsTheListing(t *testing.T) {
 	api.set(func() {
 		api.gitlab["widgets/issues?state=opened"] = `[{"iid":4,"title":"Slow page, again","labels":["perf"],"milestone":{"title":"m1"},"author":{"username":"ann"},"created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-05T00:00:00Z"}]`
 	})
-	h.ticks(1, time.Minute)
+	h.ticks(2, time.Minute) // gone once a second listing confirms it
 	ev = h.indexEvents()[3:]
 	if len(ev) != 2 || ev[0].Ref != "#4" || ev[0].First || ev[1].Ref != "#5" || !ev[1].Gone {
 		t.Fatalf("change: %+v", ev)
@@ -626,4 +626,58 @@ func (h *harness) issuePage(n int) string {
 	now := h.clock.Now()
 	printIssueLevel(&b, uiPage{Now: now, loc: time.UTC}, BuildIssueLevel(h.cfg, h.sup.st, "widgets", n, nil, false, now))
 	return b.String()
+}
+
+// A closed issue keeps its steps and sentence: its page says it is
+// closed, today or on its date, and a request gone from the list keeps
+// its steps on its issue's page. One listing that misses an issue, as a
+// page shifted by a close between two pages may, closes nothing; a second
+// confirms it. What is closed is dropped after closedKept.
+func TestClosedIssueKeepsItsHistory(t *testing.T) {
+	h, api := indexHarness(t)
+	h.ticks(1, time.Minute)
+	h.sup.noteLoopSentence(loopRequest{ciWatched: ciWatched{Repository: "widgets", Ref: "!9"}, Case: "widgets#4"}, loopPlace{Phase: PlaceReviewing, Reason: "round 1"})
+	listed := api.gitlab["widgets/issues?state=opened"]
+	api.set(func() {
+		api.gitlab["widgets/issues?state=opened"] = `[{"iid":4,"title":"Slow page, again","labels":["perf"],"author":{"username":"ann"},"created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-02T00:00:00Z"}]`
+		api.gitlab["widgets/merge_requests?state=opened"] = `[]`
+	})
+	h.ticks(1, time.Minute)
+	if _, ok := h.sup.st.Index["widgets"]["#5"]; !ok {
+		t.Fatal("one listing that missed #5 closed it")
+	}
+	h.ticks(1, time.Minute)
+	if _, ok := h.sup.st.Index["widgets"]["#5"]; ok {
+		t.Fatal("#5 is open after two listings missed it")
+	}
+	page := h.issuePage(5)
+	if !strings.Contains(page, "#5 Crash on save (closed today)") {
+		t.Fatalf("the closed issue's page:\n%s", page)
+	}
+	if page := h.issuePage(4); !strings.Contains(page, "round 1") {
+		t.Fatalf("#4's page lost its merged request's steps:\n%s", page)
+	}
+	h.clock.advance(3 * 24 * time.Hour)
+	if page := h.issuePage(5); !strings.Contains(page, "(closed Oct 22)") {
+		t.Fatalf("the closed issue's page, days later:\n%s", page)
+	}
+	h.restart(false)
+	h.sup.api = api
+	if page := h.issuePage(5); !strings.Contains(page, "closed") {
+		t.Fatalf("replayed:\n%s", page)
+	}
+	// Reopened, it is open again with what it had.
+	api.set(func() { api.gitlab["widgets/issues?state=opened"] = listed })
+	h.ticks(1, time.Minute)
+	if i := h.sup.st.Index["widgets"]["#5"]; i == nil {
+		t.Fatal("the reopened issue is not open")
+	}
+	api.set(func() { api.gitlab["widgets/issues?state=opened"] = `[]` })
+	h.ticks(2, time.Minute)
+	h.clock.advance(31 * 24 * time.Hour)
+	api.set(func() { api.gitlab["widgets/issues?state=opened"] = `[{"iid":6,"title":"New","created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-02T00:00:00Z"}]` })
+	h.ticks(1, time.Minute)
+	if page := h.issuePage(5); strings.Contains(page, "closed") || len(h.sup.st.Steps[sentenceKey("widgets", "#5")]) != 0 {
+		t.Fatalf("kept past its time:\n%s", page)
+	}
 }
