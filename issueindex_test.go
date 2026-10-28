@@ -683,3 +683,32 @@ func TestClosedIssueKeepsItsHistory(t *testing.T) {
 		t.Fatalf("kept past its time:\n%s", page)
 	}
 }
+
+// An issue is being worked only when a session works it now: a live
+// session whose issue it is, or one holding an item on it that is
+// assigned or under way. An item being designed, or one whose session is
+// gone, does not count, nor does a session that is done.
+func TestBeingWorkedMeansASession(t *testing.T) {
+	h, _ := indexHarness(t)
+	h.ticks(1, time.Minute)
+	h.sup.st.Work = map[string]*WorkItem{
+		"w1": {ID: "w1", Repository: "widgets", ThreadWork: ThreadWork{Issue: 4}, State: WorkDesigned},
+		"w2": {ID: "w2", Repository: "widgets", ThreadWork: ThreadWork{Issue: 5}, State: WorkWorking, Session: "gone"},
+	}
+	if w := workingOn(h.cfg, h.sup.st, "widgets"); len(w) != 0 {
+		t.Fatalf("worked with no session: %v", w)
+	}
+	h.cfg.Sessions["s"] = Session{Repository: "widgets", Issue: 4, Workdir: h.dir, Cwd: h.dir}
+	if w := workingOn(h.cfg, h.sup.st, "widgets"); len(w) != 0 {
+		t.Fatalf("worked by a session never seen: %v", w)
+	}
+	h.sup.track("s").State = Working
+	h.sup.st.Work["w2"].Session = "s"
+	if w := workingOn(h.cfg, h.sup.st, "widgets"); !w["#4"] || !w["#5"] {
+		t.Fatalf("a live session's issue and item: %v", w)
+	}
+	h.sup.track("s").State = Done
+	if w := workingOn(h.cfg, h.sup.st, "widgets"); len(w) != 0 {
+		t.Fatalf("worked by a session that is done: %v", w)
+	}
+}
