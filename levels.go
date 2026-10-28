@@ -290,64 +290,61 @@ func levelDecisionsOf(cfg *Config, st *LogState, n int, j IssueJoin, decisions [
 // design waiting on a go, its question, or its claim of being done under
 // the owner's own check.
 func workDecision(it *WorkItem) (LevelDecision, bool) {
-	{
-		if it.terminal() {
-			return LevelDecision{}, false
-		}
-		if it.State == WorkDesigned {
-			d := designDecision(it, "")
-			ld := LevelDecision{Entry: entryDesign + it.ID, Session: it.Session, Asked: d.Question}
-			if it.Design != nil && it.Design.Brief != nil {
-				ld.CameBack = fmt.Sprintf("The designer's round %d brief.", it.Design.Round)
-			}
-			if it.Design != nil && it.Design.Rating != nil {
-				ld.Checked = "Go checked whether the design is contained; it waits on your go."
-			}
-			for _, o := range d.Options {
-				ld.Options = append(ld.Options, LevelOption{Key: o.Key, Label: o.Label, Consequence: o.Consequence})
-			}
-			return ld, true
-		}
-		if it.Question == "" && !(it.DoneWhen.Kind == DoneOwner && it.Claim != "") {
-			return LevelDecision{}, false
-		}
-		ld := LevelDecision{Entry: entryWork + it.ID, Session: it.Session}
-		if it.Question != "" {
-			ld.Asked = fmt.Sprintf("%s asks: %s", it.Session, oneLine(it.Question, 400))
-		} else {
-			ld.Asked = fmt.Sprintf("Is %s done?", it.ID)
-			ld.CameBack = fmt.Sprintf("%s says: %s", it.Session, oneLine(it.Claim, 400))
-		}
-		if it.Check != nil {
-			ld.Checked = oneLine(it.Check.Detail, 300)
-		}
-		for _, o := range it.workOptions() {
-			ld.Options = append(ld.Options, LevelOption{Key: o, Label: o, Consequence: workConsequences[o]})
-		}
-		return ld, true
+	if it.terminal() {
+		return LevelDecision{}, false
 	}
-}
-
-// sessionDecision is a session's open decision d as a card.
-func sessionDecision(d UIDecision) LevelDecision {
-	{
-		dec := d.Decision
-		ld := LevelDecision{Decision: &dec, Entry: decisionEntry(d.Session, d.ID), Session: d.Session, Asked: oneLine(d.Question, 400), CameBack: oneLine(d.Context, 400)}
-		if d.Withheld != "" {
-			ld.Asked, ld.CameBack = d.Withheld, ""
+	if it.State == WorkDesigned {
+		d := designDecision(it, "")
+		ld := LevelDecision{Entry: entryDesign + it.ID, Session: it.Session, Asked: d.Question}
+		if it.Design != nil && it.Design.Brief != nil {
+			ld.CameBack = fmt.Sprintf("The designer's round %d brief.", it.Design.Round)
 		}
-		if d.Recommendation != "" {
-			ld.Checked = "Recommended: " + oneLine(d.Recommendation, 300)
+		if it.Design != nil && it.Design.Rating != nil {
+			ld.Checked = "Go checked whether the design is contained; it waits on your go."
 		}
 		for _, o := range d.Options {
 			ld.Options = append(ld.Options, LevelOption{Key: o.Key, Label: o.Label, Consequence: o.Consequence})
 		}
-		return ld
+		return ld, true
 	}
+	if it.Question == "" && !(it.DoneWhen.Kind == DoneOwner && it.Claim != "") {
+		return LevelDecision{}, false
+	}
+	ld := LevelDecision{Entry: entryWork + it.ID, Session: it.Session}
+	if it.Question != "" {
+		ld.Asked = fmt.Sprintf("%s asks: %s", it.Session, oneLine(it.Question, 400))
+	} else {
+		ld.Asked = fmt.Sprintf("Is %s done?", it.ID)
+		ld.CameBack = fmt.Sprintf("%s says: %s", it.Session, oneLine(it.Claim, 400))
+	}
+	if it.Check != nil {
+		ld.Checked = oneLine(it.Check.Detail, 300)
+	}
+	for _, o := range it.workOptions() {
+		ld.Options = append(ld.Options, LevelOption{Key: o, Label: o, Consequence: workConsequences[o]})
+	}
+	return ld, true
+}
+
+// sessionDecision is a session's open decision d as a card.
+func sessionDecision(d UIDecision) LevelDecision {
+	dec := d.Decision
+	ld := LevelDecision{Decision: &dec, Entry: decisionEntry(d.Session, d.ID), Session: d.Session, Asked: oneLine(d.Question, 400), CameBack: oneLine(d.Context, 400)}
+	if d.Withheld != "" {
+		ld.Asked, ld.CameBack = d.Withheld, ""
+	}
+	if d.Recommendation != "" {
+		ld.Checked = "Recommended: " + oneLine(d.Recommendation, 300)
+	}
+	for _, o := range d.Options {
+		ld.Options = append(ld.Options, LevelOption{Key: o.Key, Label: o.Label, Consequence: o.Consequence})
+	}
+	return ld
 }
 
 // repoNeed is what waits on the owner in a repository, as a card, and the
-// issue it is of, "" for none known.
+// issue it is of, "" for none known, so what waits on one issue counts
+// once.
 type repoNeed struct {
 	LevelDecision
 	Issue string
@@ -359,32 +356,37 @@ type repoNeed struct {
 // loop waits on the owner for. An issue's cards are among them.
 func repoNeeds(cfg *Config, st *LogState, repo string, decisions []UIDecision, now time.Time) []repoNeed {
 	var out []repoNeed
+	c := withRuntime(cfg, st.Runtime)
+	number := func(n int) string {
+		if n <= 0 {
+			return ""
+		}
+		return "#" + strconv.Itoa(n)
+	}
 	for _, id := range sortedKeys(st.Work) {
 		it := st.Work[id]
 		if it.Repository != repo {
 			continue
 		}
 		if ld, ok := workDecision(it); ok {
-			out = append(out, repoNeed{LevelDecision: ld})
+			out = append(out, repoNeed{LevelDecision: ld, Issue: number(it.Issue)})
 		}
 	}
 	for _, d := range decisions {
 		if d.Repository == repo {
-			out = append(out, repoNeed{LevelDecision: sessionDecision(d)})
+			out = append(out, repoNeed{LevelDecision: sessionDecision(d), Issue: number(c.Sessions[d.Session].Issue)})
 		}
 	}
-	c := withRuntime(cfg, st.Runtime)
 	for _, q := range loopRequests(cfg, st, now) {
 		if q.Repository != repo {
 			continue
 		}
-		p := placeOf(cfg, st, q)
-		if p.Phase != PlaceOwner {
-			continue
+		if p := placeOf(cfg, st, q); p.Phase != PlaceOwner || p.Do != "" {
+			continue // moving, or a step of the loop's own is due
 		}
-		n := repoNeed{LevelDecision: LevelDecision{Asked: fmt.Sprintf("%s is %s: %s.", q.Ref, PlaceOwner, p.Reason)}}
+		n := repoNeed{LevelDecision: LevelDecision{Asked: fmt.Sprintf("%s is %s: %s.", q.Ref, PlaceOwner, placeOf(cfg, st, q).Reason)}}
 		if k := c.Sessions[q.Session].Issue; k > 0 && !q.Outside {
-			n.Issue = "#" + strconv.Itoa(k)
+			n.Issue = number(k)
 		} else if i := st.Index[repo][q.Ref]; i != nil {
 			if m := issueInTitle.FindStringSubmatch(i.Title); m != nil {
 				n.Issue = "#" + m[1]
@@ -530,7 +532,8 @@ func BuildRepoLevel(cfg *Config, st *LogState, repo string, decisions []UIDecisi
 	})
 	// What waits on the owner and no listed issue's card shows: a request
 	// the loop waits on the owner for counts its listed issue; the rest
-	// are the repository's own needs.
+	// are the repository's own needs, counted once an issue they name.
+	loose := map[string]bool{}
 	for _, n := range repoNeeds(cfg, st, repo, decisions, now) {
 		switch {
 		case n.Entry != "" && shown[n.Entry]:
@@ -541,13 +544,23 @@ func BuildRepoLevel(cfg *Config, st *LogState, repo string, decisions []UIDecisi
 				n.Asked, n.CameBack, n.Checked = withheldSecret, "", ""
 			}
 			v.Needs = append(v.Needs, n.LevelDecision)
+			if n.Issue == "" || !loose[n.Issue] {
+				v.Counts.Loose++
+			}
+			loose[n.Issue] = n.Issue != ""
 		}
 	}
+	loosely := v.Counts.Loose
 	v.Counts = indexCounts(cfg, st, repo, func(ref string) bool { return needs[ref] })
-	v.Counts.Waiting += len(v.Needs)
+	v.Counts.Loose = loosely
+	v.Counts.Waiting += loosely
 	v.Sentence = repoSentence(v, now)
 	return v
 }
+
+// IssuesWaiting are the listed issues that wait on the owner, the issue
+// box's own count.
+func (v RepoLevel) IssuesWaiting() int { return v.Counts.Waiting - v.Counts.Loose }
 
 // repoSentence says where repo stands, in a sentence.
 func repoSentence(v RepoLevel, now time.Time) string {

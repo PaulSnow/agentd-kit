@@ -1020,7 +1020,10 @@ func refNumber(ref string) int {
 // wait on the owner.
 type IndexCounts struct {
 	Open, Working, Requests, Waiting int
-	Last                             time.Time
+	// Loose are those of Waiting that no listed issue shows: a decision,
+	// an item or a request whose issue is not listed, or that has none.
+	Loose int
+	Last  time.Time
 	// Backfill is how far the idle issues' sentences are written, while
 	// some are not.
 	Backfill *BackfillProgress `json:"backfill,omitempty"`

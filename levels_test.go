@@ -534,12 +534,18 @@ func TestWaitsOnYouCountsWhatWaits(t *testing.T) {
 		h.sup.st.Work = map[string]*WorkItem{}
 	}
 	h.sup.st.Work["w9"] = &WorkItem{ID: "w9", Repository: "widgets", State: WorkBlocked, Question: "Which cache size?", ThreadWork: ThreadWork{Title: "Pick the cache"}}
-	ds := []UIDecision{{Session: "d", Repository: "widgets", Decision: Decision{ID: "q1", Question: "Ship it on Friday?"}}}
+	ds := []UIDecision{{Session: "e", Repository: "widgets", Decision: Decision{ID: "q1", Question: "Ship it on Friday?"}}}
 	v := BuildRepoLevel(h.cfg, h.sup.st, "widgets", ds, now)
 	if v.Counts.Waiting != 3 || len(v.Needs) != 3 {
 		t.Fatalf("waiting %d, needs %+v", v.Counts.Waiting, v.Needs)
 	}
 	if row := BuildHomeRow(h.cfg, h.sup.st, "widgets", ds, now); row.Counts.Waiting != 3 {
 		t.Fatalf("home counts %d", row.Counts.Waiting)
+	}
+	// The delivering session's own decision is about the same issue as its
+	// request, which is not listed: one thing waits, shown twice.
+	ds = append(ds, UIDecision{Session: "d", Repository: "widgets", Decision: Decision{ID: "q2", Question: "Rename the flag?"}})
+	if v := BuildRepoLevel(h.cfg, h.sup.st, "widgets", ds, now); v.Counts.Waiting != 3 || len(v.Needs) != 4 || v.IssuesWaiting() != 0 {
+		t.Fatalf("waiting %d, issues waiting %d, needs %+v", v.Counts.Waiting, v.IssuesWaiting(), v.Needs)
 	}
 }

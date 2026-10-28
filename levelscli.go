@@ -97,7 +97,7 @@ func printIssueBox(w io.Writer, p uiPage, v RepoLevel, by, filter string) {
 	is := append([]LevelIssue(nil), v.Issues...)
 	sortIssues(is, by)
 	shown := filterIssues(is, filter)
-	fmt.Fprintf(w, "%d issues, %d need you, %d being worked, %d shown\n", v.Counts.Open, v.Counts.Waiting, v.Counts.Working, len(shown))
+	fmt.Fprintf(w, "%d issues, %d need you, %d being worked, %d shown\n", v.Counts.Open, v.IssuesWaiting(), v.Counts.Working, len(shown))
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	for _, i := range shown {
 		mr := strings.Join(i.Requests, " ")
