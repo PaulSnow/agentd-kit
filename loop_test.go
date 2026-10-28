@@ -798,11 +798,42 @@ func TestLoopStopAndSkip(t *testing.T) {
 	if err := LoopStep(s.cfg, NewLogWriter(s.buf), s.events(), s.clock.Now(), "widgets", "!1", LoopSkip); err != nil {
 		t.Fatal(err)
 	}
+	sapi := s.sup.api
 	s.restart(false)
+	s.sup.api = sapi
 	if p := s.place("!1"); p.Phase == PlaceOwner || p.Phase == PlaceReviewing || !strings.Contains(p.Reason, "skipped") {
 		t.Fatalf("skipped: %+v", p)
 	}
 	if LoopStep(s.cfg, NewLogWriter(s.buf), s.events(), s.clock.Now(), "widgets", "!1", LoopSkip) == nil {
 		t.Fatal("a skip with no failed review was recorded")
 	}
+	s.ticks(3, 5*time.Minute)
+	if !mergedRef(s, "!1") {
+		t.Fatalf("the skipped request did not merge: %+v, merges %+v", s.place("!1"), s.forge.merges)
+	}
+
+	// A skipped request the owner then stops does not merge.
+	x := loopAtOwner(t)
+	for _, step := range []string{LoopSkip, LoopStop} {
+		if err := LoopStep(x.cfg, NewLogWriter(x.buf), x.events(), x.clock.Now(), "widgets", "!1", step); err != nil {
+			t.Fatal(err)
+		}
+	}
+	api := x.sup.api
+	x.restart(false)
+	x.sup.api = api
+	x.ticks(3, 5*time.Minute)
+	if mergedRef(x, "!1") {
+		t.Fatal("a stopped request merged")
+	}
+}
+
+// mergedRef says whether h's forge merged ref.
+func mergedRef(h *harness, ref string) bool {
+	for _, m := range h.forge.merges {
+		if m.ref == ref {
+			return true
+		}
+	}
+	return false
 }

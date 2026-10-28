@@ -308,6 +308,10 @@ func (src *uiSource) respond(repo, id, to, text string, a *AnswerPayload, files 
 		// The card's word goes to the loop as `agentd loop` writes it,
 		// through the same function, and nowhere else.
 		switch {
+		case src.st.Mode != ModeLive:
+			return errors.New("only the live run's page takes a step of the loop")
+		case text != "" || len(files) > 0:
+			return errors.New("a request's card takes its step alone; write about it in the console below")
 		case a == nil || a.Choice == "":
 			return fmt.Errorf("a request's card takes one of %s", strings.Join(decisionOptions(*dec), ", "))
 		case !contains(decisionOptions(*dec), a.Choice):

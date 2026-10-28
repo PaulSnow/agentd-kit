@@ -155,6 +155,11 @@ func (st *LogState) applyLoop(e Event) {
 			r.Failed = nil
 		}
 		if r.Skipped > 0 {
+			// The approval the skip gave a request no session delivered
+			// goes with it, so it merges only on the review taken again.
+			if a, ok := st.Approvals[key]; ok && a.SHA == r.SkipHead && a.By == "agentd" {
+				delete(st.Approvals, key)
+			}
 			r.ReviewRound, r.Skipped, r.SkipHead = r.Skipped-1, 0, ""
 		}
 		r.Stopped = false

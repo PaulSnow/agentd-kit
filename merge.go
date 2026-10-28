@@ -71,9 +71,8 @@ func (s *Supervisor) mergeGreen(now time.Time) {
 		// A request no session delivered is reviewed by the loop's
 		// approval at its head; a delivered one by its case's rounds, or
 		// by the owner's skip of its failed review at its head.
-		L := s.st.Loops[key]
 		reviewed := ok && r.Head != "" && s.st.approvedAt(w.Repository, w.Ref) == r.Head || !out && s.reviewConverged(w.Session) ||
-			!out && ok && r.Head != "" && L.Skipped > 0 && L.SkipHead == r.Head
+			!out && ok && s.reviewSkipped(w.Session, s.st.Loops[key], r.Head)
 		require := requireOf(pol, pol.Merge.Require, out)
 		if looped(s.cfg.Repositories[w.Repository]) {
 			// agentd reviews every request of a repository it runs the
@@ -85,6 +84,9 @@ func (s *Supervisor) mergeGreen(now time.Time) {
 			reviewed = reviewed && (out || s.st.Loops[key].ReviewHead == r.Head)
 		}
 		code, why := s.mergeBlocked(t, w, r, ok, require, reviewed, out, now)
+		if s.st.Loops[key].Stopped {
+			code, why = "stopped", "the owner stopped the loop on it; agentd loop retry takes it up again"
+		}
 		if code != "" {
 			s.mergeSkip(w.Session, t, w, r.Head, code, why)
 			continue
@@ -114,6 +116,18 @@ func requireOf(pol RepoPolicy, require []string, outside bool) []string {
 func (s *Supervisor) reviewConverged(name string) bool {
 	c := s.st.Cases[s.cfg.caseOf(s.cfg.Sessions[name])]
 	return c != nil && c.RoundStop != nil && c.RoundStop.Reason == RoundsConverged
+}
+
+// reviewSkipped says whether the owner's skip of a failed review stands
+// for the review of the session's request at head: the round skipped is
+// the case's next, no round was recorded since nor the rounds stopped or
+// the case closed, and the head is the one that review was of.
+func (s *Supervisor) reviewSkipped(name string, L LoopRecord, head string) bool {
+	c := s.st.Cases[s.cfg.caseOf(s.cfg.Sessions[name])]
+	if c == nil {
+		c = &Case{}
+	}
+	return L.Skipped > 0 && head != "" && L.SkipHead == head && L.Skipped == len(c.Rounds)+1 && c.RoundStop == nil && !c.Closed
 }
 
 // mergeBlocked is why the state alone says a request may not merge now,

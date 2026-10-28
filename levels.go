@@ -147,7 +147,7 @@ func (i LevelIssue) WordClass() string { return strings.ReplaceAll(i.Word, " ", 
 
 // Anchor is the decision card's id on its issue's page.
 func (d LevelDecision) Anchor() string {
-	return "decision-" + strings.NewReplacer(":", "-", "/", "-").Replace(d.Entry)
+	return "decision-" + strings.NewReplacer(":", "-", "/", "-", "#", "n").Replace(d.Entry)
 }
 
 // Issue state words.
