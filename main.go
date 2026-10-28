@@ -145,7 +145,11 @@ func configFirst(args []string) []string {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `usage:
+	fmt.Fprintln(os.Stderr, usageLines)
+}
+
+// usageLines are agentd's usage.
+const usageLines = `usage:
   agentd run [--config PATH] [--log PATH] [--shadow] [--once] [--every 5m]
   agentd status [--config PATH] [--log PATH] [--mode live|shadow]
   agentd config [--config PATH]
@@ -184,7 +188,9 @@ func usage() {
   agentd version
 
 --config PATH and --log PATH may come anywhere after the command, before
-or after its own words and flags; "--" ends the flags.
+or after its own words and flags, up to a "--". A word --config or --log
+meant as text is read as the flag: quote it with the words around it,
+as in "try --log next".
 
 run supervises the configured sessions; --shadow observes and logs what it
 would do without acting. status prints the state table from the event log.
@@ -241,8 +247,7 @@ answer is what it is to watch and do. node reports this machine's
 clones to node.hub every node.every and creates a clone the hub's policy
 (repositories.NAME.clone_on) requires where none is; it never touches a
 clone that exists. nodes prints each host's clones from the log, a host
-silent for hub.silent_after as unknown.`)
-}
+silent for hub.silent_after as unknown.`
 
 func loadConfigFlag(fs *flag.FlagSet, args []string) (*Config, *string, error) {
 	configPath := fs.String("config", defaultConfigPath, "configuration file")

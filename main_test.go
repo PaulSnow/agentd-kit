@@ -156,7 +156,7 @@ func TestConfigAfterSubcommand(t *testing.T) {
 			t.Errorf("%q: %q, want %q", args, got, want)
 		}
 	}
-	if !strings.Contains(usageText, "quote it with the words around it") {
+	if !strings.Contains(usageLines, "quote it with the words around it") {
 		t.Error("the usage does not say how to write --config as text")
 	}
 	if _, err := runCommand("no-such-command", nil); err != nil {
