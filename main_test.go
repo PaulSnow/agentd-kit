@@ -115,3 +115,54 @@ func TestConsoleCommand(t *testing.T) {
 		t.Fatalf("events = %+v, %v", events, err)
 	}
 }
+
+// --config and --log may come anywhere after the command, as status
+// takes them: every console form, issue and the other commands read
+// the configuration named after their own words (#69). A missing file
+// there is the proof it was read; "--" ends the flags.
+func TestConfigAfterSubcommand(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "lanterns.json")
+	for _, args := range [][]string{
+		{"console", "ask", "home", "hi", "--config", p},
+		{"console", "ask", "lanterns#5", "trim", "the", "wicks", "--config=" + p},
+		{"console", "reply", "--entry", "x:I1", "--choice", "drop", "--config", p},
+		{"console", "message", "--to", "lamplighter", "hi", "--config", p},
+		{"console", "lanterns", "--issues", "--config", p},
+		{"console", "post", "lanterns", "hi", "--config", p},
+		{"console", "inbox", "lanterns", "--config", p},
+		{"console", "reply", "lanterns", "seen", "x1", "--config", p},
+		{"issue", "lanterns", "5", "--config", p},
+		{"status", "--log", "x.jsonl", "--config", p},
+		{"sessions", "end", "lamplighter", "--config", p},
+		{"loop", "retry", "lanterns", "!3", "--config", p},
+		{"releases", "--config", p},
+		{"policy", "show", "lanterns", "--config", p},
+		{"cases", "--json", "--config", p},
+		{"context", "stats", "lanterns", "--config", p},
+	} {
+		handled, err := runCommand(args[0], args[1:])
+		if !handled || err == nil || !strings.Contains(err.Error(), p) {
+			t.Errorf("%q: handled %v, err %v, want the missing %s", args, handled, err, p)
+		}
+	}
+	for args, want := range map[string]string{
+		"ask home hi --config P":        "--config P ask home hi",
+		"ask --log=L home hi -config P": "--log=L -config P ask home hi",
+		"post lanterns -- --config P":   "post lanterns -- --config P",
+		"post lanterns hi --config":     "post lanterns hi --config",
+		"reply lanterns try --log L":    "--log L reply lanterns try",
+	} {
+		if got := strings.Join(configFirst(strings.Fields(args)), " "); got != want {
+			t.Errorf("%q: %q, want %q", args, got, want)
+		}
+	}
+	if !strings.Contains(usageLines, "quote it with the words around it") {
+		t.Error("the usage does not say how to write --config as text")
+	}
+	if _, err := runCommand("no-such-command", nil); err != nil {
+		t.Fatal(err)
+	}
+	if handled, _ := runCommand("no-such-command", nil); handled {
+		t.Fatal("an unknown command was handled")
+	}
+}

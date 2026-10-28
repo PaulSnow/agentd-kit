@@ -40,56 +40,7 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
-	var err error
 	switch os.Args[1] {
-	case "run":
-		err = runCmd(os.Args[2:])
-	case "status":
-		err = statusCmd(os.Args[2:])
-	case "config":
-		err = configCmd(os.Args[2:])
-	case "mark-delivered":
-		err = markDeliveredCmd(os.Args[2:])
-	case "clear":
-		err = clearCmd(os.Args[2:])
-	case "sessions":
-		err = sessionsCmd(os.Args[2:])
-	case "loop":
-		err = loopCmd(os.Args[2:])
-	case "console":
-		err = consoleCmd(os.Args[2:])
-	case "policy":
-		err = policyCmd(os.Args[2:], os.Stdout)
-	case "inventory":
-		err = inventoryCmd(os.Args[2:], os.Stdout)
-	case "report":
-		err = reportCmd(os.Args[2:])
-	case "ui":
-		err = uiCmd(os.Args[2:])
-	case "accounts":
-		err = accountsCmd(os.Args[2:], os.Stdout)
-	case "items":
-		err = itemsCmd(os.Args[2:], os.Stdout)
-	case "triage":
-		err = triageCmd(os.Args[2:], os.Stdout)
-	case "status-check":
-		err = statusCheckCmd(os.Args[2:], os.Stdout)
-	case "context":
-		err = contextCmd(os.Args[2:], os.Stdout)
-	case "cases":
-		err = casesCmd(os.Args[2:], os.Stdout)
-	case "issue":
-		err = issueCmd(os.Args[2:], os.Stdout)
-	case "mcp":
-		err = mcpCmd(os.Args[2:], os.Stdin, os.Stdout)
-	case "hub":
-		err = hubCmd(os.Args[2:])
-	case "node":
-		err = nodeCmd(os.Args[2:])
-	case "nodes":
-		err = nodesCmd(os.Args[2:], os.Stdout)
-	case "releases":
-		err = releasesCmd(os.Args[2:], os.Stdout)
 	case "version", "--version":
 		if c := buildCommit(); c != "" {
 			fmt.Println("agentd", version, c)
@@ -100,7 +51,9 @@ func main() {
 	case "-h", "--help", "help":
 		usage()
 		return
-	default:
+	}
+	handled, err := runCommand(os.Args[1], os.Args[2:])
+	if !handled {
 		usage()
 		os.Exit(2)
 	}
@@ -110,8 +63,93 @@ func main() {
 	}
 }
 
+// runCommand runs the command named, with --config and --log taken
+// wherever they come after it; handled is false for no command.
+func runCommand(name string, args []string) (handled bool, err error) {
+	args = configFirst(args)
+	switch name {
+	case "run":
+		return true, runCmd(args)
+	case "status":
+		return true, statusCmd(args)
+	case "config":
+		return true, configCmd(args)
+	case "mark-delivered":
+		return true, markDeliveredCmd(args)
+	case "clear":
+		return true, clearCmd(args)
+	case "sessions":
+		return true, sessionsCmd(args)
+	case "loop":
+		return true, loopCmd(args)
+	case "console":
+		return true, consoleCmd(args)
+	case "policy":
+		return true, policyCmd(args, os.Stdout)
+	case "inventory":
+		return true, inventoryCmd(args, os.Stdout)
+	case "report":
+		return true, reportCmd(args)
+	case "ui":
+		return true, uiCmd(args)
+	case "accounts":
+		return true, accountsCmd(args, os.Stdout)
+	case "items":
+		return true, itemsCmd(args, os.Stdout)
+	case "triage":
+		return true, triageCmd(args, os.Stdout)
+	case "status-check":
+		return true, statusCheckCmd(args, os.Stdout)
+	case "context":
+		return true, contextCmd(args, os.Stdout)
+	case "cases":
+		return true, casesCmd(args, os.Stdout)
+	case "issue":
+		return true, issueCmd(args, os.Stdout)
+	case "mcp":
+		return true, mcpCmd(args, os.Stdin, os.Stdout)
+	case "hub":
+		return true, hubCmd(args)
+	case "node":
+		return true, nodeCmd(args)
+	case "nodes":
+		return true, nodesCmd(args, os.Stdout)
+	case "releases":
+		return true, releasesCmd(args, os.Stdout)
+	}
+	return false, nil
+}
+
+// configFirst moves --config and --log, with their values, before the
+// other arguments, so every command reads them wherever they come after
+// it, as status does; "--" ends the flags.
+func configFirst(args []string) []string {
+	var flags, rest []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			return append(flags, append(rest, args[i:]...)...)
+		}
+		name, _, value := strings.Cut(strings.TrimLeft(a, "-"), "=")
+		if !strings.HasPrefix(a, "-") || name != "config" && name != "log" || !value && i+1 == len(args) {
+			rest = append(rest, a)
+			continue
+		}
+		flags = append(flags, a)
+		if !value {
+			i++
+			flags = append(flags, args[i])
+		}
+	}
+	return append(flags, rest...)
+}
+
 func usage() {
-	fmt.Fprintln(os.Stderr, `usage:
+	fmt.Fprintln(os.Stderr, usageLines)
+}
+
+// usageLines are agentd's usage.
+const usageLines = `usage:
   agentd run [--config PATH] [--log PATH] [--shadow] [--once] [--every 5m]
   agentd status [--config PATH] [--log PATH] [--mode live|shadow]
   agentd config [--config PATH]
@@ -148,6 +186,11 @@ func usage() {
   agentd node [--config PATH] [--once]
   agentd nodes [--config PATH] [--log PATH]
   agentd version
+
+--config PATH and --log PATH may come anywhere after the command, before
+or after its own words and flags, up to a "--". A word --config or --log
+meant as text is read as the flag: quote it with the words around it,
+as in "try --log next".
 
 run supervises the configured sessions; --shadow observes and logs what it
 would do without acting. status prints the state table from the event log.
@@ -204,8 +247,7 @@ answer is what it is to watch and do. node reports this machine's
 clones to node.hub every node.every and creates a clone the hub's policy
 (repositories.NAME.clone_on) requires where none is; it never touches a
 clone that exists. nodes prints each host's clones from the log, a host
-silent for hub.silent_after as unknown.`)
-}
+silent for hub.silent_after as unknown.`
 
 func loadConfigFlag(fs *flag.FlagSet, args []string) (*Config, *string, error) {
 	configPath := fs.String("config", defaultConfigPath, "configuration file")
