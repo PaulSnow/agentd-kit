@@ -745,3 +745,25 @@ func TestTalkShowsItsNewest(t *testing.T) {
 		t.Fatalf("a refresh does not keep the conversation at its newest entry unless scrolled up:\n%s", refresh)
 	}
 }
+
+// The README's #69 part says, as #63's and #68's do of theirs, that a
+// binary from before #69 cannot read the log once #69's events are in it,
+// so the previous binaries must be kept; there is no tolerant reader.
+func TestReadmeSaysRollbackIsImpossible(t *testing.T) {
+	b, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	start := strings.Index(s, "## The owner's UI")
+	end := strings.Index(s, "## The design before the work (#68)")
+	if start < 0 || end < start {
+		t.Fatal("no owner's UI section")
+	}
+	part := s[start:end]
+	for _, want := range []string{"A binary from before #69", "refuses the whole log", "`index`", "`sentence`", "scope", "cannot be rolled back", "keep the previous binaries"} {
+		if !strings.Contains(part, want) {
+			t.Errorf("the #69 part does not say %q", want)
+		}
+	}
+}
