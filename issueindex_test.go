@@ -546,3 +546,23 @@ func TestIssueForWorkOpensOnce(t *testing.T) {
 		t.Fatalf("not found and not opened: %d, %d", none.Issue, len(h.forge.issues))
 	}
 }
+
+// On GitHub the issue is found by its body among issues and requests; a
+// listing too long to look through to its end finds none and is an error.
+func TestFindOpenedIssue(t *testing.T) {
+	r := Repository{Forge: "github", Project: "example-org/widgets"}
+	line := fmt.Sprintf(issueBodyLine, "w7")
+	api := &fakeForgeAPI{github: map[string]string{
+		fmt.Sprintf("repos/example-org/widgets/issues?state=all&sort=created&direction=desc&per_page=%d&page=1", indexPerPage): `[{"number":12,"body":null,"pull_request":{}},{"number":11,"body":"x\n` + line + `"}]`,
+	}}
+	if n, err := findOpenedIssue(api, r, line); err != nil || n != 11 {
+		t.Fatalf("found %d, %v", n, err)
+	}
+	full := "[" + strings.TrimSuffix(strings.Repeat(`{"number":1,"body":""},`, indexPerPage), ",") + "]"
+	for p := 1; p <= indexPages; p++ {
+		api.github[fmt.Sprintf("repos/example-org/widgets/issues?state=all&sort=created&direction=desc&per_page=%d&page=%d", indexPerPage, p)] = full
+	}
+	if n, err := findOpenedIssue(api, r, line); err == nil || n != 0 {
+		t.Fatalf("a listing past its end: %d, %v", n, err)
+	}
+}

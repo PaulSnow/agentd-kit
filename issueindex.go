@@ -1114,7 +1114,8 @@ func (st *LogState) noteOpenedIssue(e Event) {
 
 // findOpenedIssue looks through repo's issues, open or closed, newest
 // first, for the one whose body carries line, and returns its number, or
-// 0 when none does.
+// 0 when none does; one it cannot look through to the end is an error, so
+// the caller opens none.
 func findOpenedIssue(api ForgeAPI, r Repository, line string) (int, error) {
 	for n := 1; n <= indexPages; n++ {
 		var resp APIResponse
@@ -1148,7 +1149,7 @@ func findOpenedIssue(api ForgeAPI, r Repository, line string) (int, error) {
 			return 0, nil
 		}
 	}
-	return 0, nil
+	return 0, fmt.Errorf("more than %d issues to look through", indexPages*indexPerPage)
 }
 
 // issueForWork opens an issue for work w of item id in repo, when it names
@@ -1203,8 +1204,12 @@ func (s *Supervisor) issueForWork(id, repo string, w *ThreadWork) {
 			return
 		}
 		if n > 0 {
-			a.Action, a.Ref = ActIssue, "#"+strconv.Itoa(n)
-			s.emit("", Event{Kind: KindAction, Act: a})
+			a.Action, a.Ref, a.Intent = ActIssue, "#"+strconv.Itoa(n), newIntentID()
+			kind := KindAction
+			if s.shadow {
+				kind = KindWould
+			}
+			s.emit("", Event{Kind: kind, Act: a})
 			w.Issue = n
 			return
 		}
