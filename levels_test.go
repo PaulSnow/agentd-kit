@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -668,5 +669,34 @@ func TestAddStep(t *testing.T) {
 	}
 	if got := scrubIDs("the reviewer 1bdb6beef6abadb2 of !12 for W0a1b2c3d on #7 failed"); got != "the reviewer a session of a request for an item on an issue failed" {
 		t.Fatalf("scrubbed: %q", got)
+	}
+}
+
+// The issue's console box offers "now" only when a session that takes
+// messages works the issue; a message sent with now where none does is
+// refused and says why, from the page and the command line alike, and
+// nothing is recorded.
+func TestNowOnlyWithASession(t *testing.T) {
+	f := newLevelsFixture(t)
+	u, _ := testUI(t, UIConfig{}, f.src)
+	if body := owner(t, u, "/repo/widgets/issue/4"); !strings.Contains(body, `name="now"`) {
+		t.Fatal("#4, which w4 works, offers no now")
+	}
+	if body := owner(t, u, "/repo/widgets/issue/6"); strings.Contains(body, `name="now"`) || !strings.Contains(body, "no session works it now") {
+		t.Fatal("#6, which no session works, offers now")
+	}
+	before := f.buf.Len()
+	w := ownerPost(u, "/reply", url.Values{"src": {"live"}, "repository": {"widgets"}, "scope": {"widgets#6"}, "text": {"Look at the typo."}, "now": {"1"}, "back": {"/repo/widgets/issue/6"}})
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "no session") || f.buf.Len() != before {
+		t.Fatalf("now with no session: %d %s", w.Code, w.Body.String())
+	}
+	if _, err := f.src.scopeReply(Scope{Repository: "widgets", Issue: 6}, "Look at the typo.", true, nil); err == nil || f.buf.Len() != before {
+		t.Fatal("the command line's ask --now with no session was recorded")
+	}
+	if _, err := f.src.scopeReply(Scope{Repository: "widgets"}, "Look at the typo.", true, nil); err == nil || !strings.Contains(err.Error(), "only at an issue") || f.buf.Len() != before {
+		t.Fatalf("now at a repository: %v", err)
+	}
+	if w := ownerPost(u, "/reply", url.Values{"src": {"live"}, "repository": {"widgets"}, "scope": {"widgets#6"}, "text": {"Look at the typo."}, "back": {"/repo/widgets/issue/6"}}); w.Code != http.StatusSeeOther {
+		t.Fatalf("without now: %d %s", w.Code, w.Body.String())
 	}
 }
