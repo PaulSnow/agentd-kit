@@ -178,7 +178,7 @@ func TestIssueLevel(t *testing.T) {
 	for _, want := range []string{
 		"item wa1 · blocked", "session w4", "w4 asks: Which cache size, 64 or 256 MB?",
 		`name="entry" value="w:wa1"`, `value="decline">decline</button> <span class="muted">the item closes and nothing more is done on it</span>`,
-		"Work item wa1 opened: Pick the cache.", "wa1 given to w4.", "wa1 asks you: Which cache size",
+		"The item to pick the cache was opened.", "The item to pick the cache was given to a session.", "The item to pick the cache asks you: Which cache size",
 		"wa1 is done when the owner says so. Go waits on your answer.", `name="scope" value="widgets#5"`,
 	} {
 		if !strings.Contains(body, want) {
@@ -186,7 +186,7 @@ func TestIssueLevel(t *testing.T) {
 		}
 	}
 	body = owner(t, u, "/repo/widgets/issue/4")
-	for _, want := range []string{"Profiling the settings page; the cache is next.", "status", "request !9", "!9: review round 1 started.", `id="mr-9"`} {
+	for _, want := range []string{"Profiling the settings page; the cache is next.", "status", "request !9", "Review round 1 started on the request “Speed up #4”.", `href="#mr-9">request !9</a>`, `id="mr-9"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("#4 missing %q", want)
 		}
@@ -218,8 +218,8 @@ func TestIssueLevel(t *testing.T) {
 func TestIssueStepsEveryEntry(t *testing.T) {
 	f := newLevelsFixture(t)
 	for k := 0; k < 20; k++ {
-		p := SentencePayload{Repository: "widgets", Ref: "#6", Text: "Step " + string(rune('a'+k)), Writer: WriterIdle, For: pageAt}
-		if err := f.log.Append(Event{V: EventVersion, Time: pageAt.Add(time.Duration(k-30) * time.Minute), Kind: KindSentence, Mode: ModeLive, Sentence: &p}); err != nil {
+		p := IndexPayload{Repository: "widgets", Ref: "#6", Title: "Step " + string(rune('a'+k)), State: "open", Labels: []string{"docs"}, Author: "cy", Opened: pageAt.Add(-480 * time.Hour), Changed: pageAt.Add(time.Duration(k-30) * time.Minute)}
+		if err := f.log.Append(Event{V: EventVersion, Time: pageAt.Add(time.Duration(k-30) * time.Minute), Kind: KindIndex, Mode: ModeLive, Index: &p}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -228,7 +228,7 @@ func TestIssueStepsEveryEntry(t *testing.T) {
 	if strings.Contains(body, "Step a") || !strings.Contains(body, "Step t") || !strings.Contains(body, `href="?steps=all">every entry`) {
 		t.Fatal("the latest steps, with every entry behind a link")
 	}
-	if body := owner(t, u, "/repo/widgets/issue/6?steps=all"); !strings.Contains(body, "Step a") || !strings.Contains(body, "Retitled on the forge: Typo in the help page") {
+	if body := owner(t, u, "/repo/widgets/issue/6?steps=all"); !strings.Contains(body, "Step a") || !strings.Contains(body, "Retitled on the forge to “Typo in the help page”.") {
 		t.Fatal("every entry")
 	}
 }
@@ -258,7 +258,7 @@ func TestIssueLevelScreensAndDedupes(t *testing.T) {
 	if strings.Contains(body, "256 MB") || !strings.Contains(body, "withheld") || !strings.Contains(body, `name="entry" value="w:wa1"`) {
 		t.Fatalf("not withheld:\n%s", body)
 	}
-	if n := strings.Count(owner(t, u, "/repo/widgets/issue/4"), "!9: review round 1 started."); n != 1 {
+	if n := strings.Count(owner(t, u, "/repo/widgets/issue/4"), "Review round 1 started on the request"); n != 1 {
 		t.Fatalf("the loop step shows %d times", n)
 	}
 	for path, want := range map[string]struct {
@@ -420,7 +420,7 @@ func TestLevelsCLI(t *testing.T) {
 	if box := run("widgets", "--issues", "--sort", "oldest", "--filter", "docs"); !strings.Contains(box, "4 issues, 1 need you, 2 being worked, 1 shown") || !strings.Contains(box, "#6") || strings.Contains(box, "#4 ") {
 		t.Errorf("issue box:\n%s", box)
 	}
-	if h := run("widgets", "--history"); !strings.Contains(h, "#5  Work item wa1 opened: Pick the cache.") || !strings.Contains(h, "!9  !9: review round 1 started.") {
+	if h := run("widgets", "--history"); !strings.Contains(h, "#5  The item to pick the cache was opened.") || !strings.Contains(h, "!9  Review round 1 started on the request “Speed up #4”.") {
 		t.Errorf("history:\n%s", h)
 	}
 	var out bytes.Buffer
@@ -428,7 +428,7 @@ func TestLevelsCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"#5 Choose a cache (needs you)", "Asks you (w:wa1): w4 asks: Which cache size", "decline: the item closes and nothing more is done on it",
-		"Work item wa1 opened: Pick the cache.", "wa1 is done when the owner says so. Go waits on your answer."} {
+		"The item to pick the cache was opened. [item wa1]", "wa1 is done when the owner says so. Go waits on your answer."} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("issue widgets 5 lacks %q:\n%s", want, out.String())
 		}
@@ -588,7 +588,7 @@ func stepTexts(t *testing.T, body string) (texts []string, chips string) {
 		t.Fatalf("no steps:\n%s", body)
 	}
 	for _, li := range strings.Split(body[start:start+end], "<li>")[1:] {
-		if c := strings.Index(li, `<span class="chips">`); c >= 0 {
+		if c := strings.Index(li, `<span class="step-chips">`); c >= 0 {
 			chips += li[c:]
 			li = li[:c]
 		}
@@ -605,12 +605,6 @@ func stepTexts(t *testing.T, body string) (texts []string, chips string) {
 // that matter are kept when the ring is trimmed.
 func TestStepsAreSentences(t *testing.T) {
 	f := newLevelsFixture(t)
-	for k := 0; k < stepsKept+20; k++ {
-		p := IndexPayload{Repository: "widgets", Ref: "#5", Title: fmt.Sprintf("Choose a cache, take %d", k), State: "open", Labels: []string{"design"}, Author: "bo", Opened: pageAt.Add(-48 * time.Hour), Changed: pageAt.Add(time.Duration(k-200) * time.Minute)}
-		if err := f.log.Append(Event{V: EventVersion, Time: pageAt.Add(time.Duration(k-200) * time.Minute), Kind: KindIndex, Mode: ModeLive, Index: &p}); err != nil {
-			t.Fatal(err)
-		}
-	}
 	u, _ := testUI(t, UIConfig{}, f.src)
 	ids := regexp.MustCompile(`\bW[0-9a-f]{8}\b|\b[0-9a-f]{12,}\b|\bwa1\b|\bw4\b`)
 	bare := regexp.MustCompile(`[#!][0-9]+`)
@@ -636,5 +630,17 @@ func TestStepsAreSentences(t *testing.T) {
 	}
 	if !strings.Contains(chips, "wa1") || !strings.Contains(chips, "!9") {
 		t.Errorf("the chips hold no ids: %s", chips)
+	}
+
+	// Past the ring's size the item's opening stays.
+	for k := 0; k < stepsKept+20; k++ {
+		p := IndexPayload{Repository: "widgets", Ref: "#5", Title: fmt.Sprintf("Choose a cache, take %d", k), State: "open", Labels: []string{"design"}, Author: "bo", Opened: pageAt.Add(-48 * time.Hour), Changed: pageAt.Add(time.Duration(k-50) * time.Minute)}
+		if err := f.log.Append(Event{V: EventVersion, Time: pageAt.Add(time.Duration(k-50) * time.Minute), Kind: KindIndex, Mode: ModeLive, Index: &p}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	texts, _ := stepTexts(t, owner(t, u, "/repo/widgets/issue/5?steps=all"))
+	if len(texts) != stepsKept || !contains(texts, "The item to pick the cache was opened.") {
+		t.Errorf("%d steps, the opening kept: %v", len(texts), contains(texts, "The item to pick the cache was opened."))
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // The owner's three levels (#69): home, a repository, an issue. Each says
@@ -14,11 +15,23 @@ import (
 // read from the fold alone; building a level calls no forge and no model.
 // The pages and the CLI print the same views.
 
-// IssueStep is one dated step of an issue or request, in a sentence.
+// IssueStep is one dated step of an issue or request, in a sentence a
+// person would write: things by their names, never by their ids, which
+// are in Chips alone. Key marks a step the trim of the ring keeps.
 type IssueStep struct {
-	At   time.Time `json:"at"`
-	Ref  string    `json:"ref"`
-	Text string    `json:"text"`
+	At    time.Time `json:"at"`
+	Ref   string    `json:"ref"`
+	Text  string    `json:"text"`
+	Chips []StepRef `json:"chips,omitempty"`
+	Key   bool      `json:"key,omitempty"`
+}
+
+// StepRef is what a step is about, by its id: a work item, a session or
+// a request; Link is where it opens, set when the page is built.
+type StepRef struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+	Link string `json:"link,omitempty"`
 }
 
 // stepsKept bounds the steps the fold keeps per issue or request.
@@ -26,28 +39,93 @@ const stepsKept = 100
 
 // noteStep adds a step to ref's steps in repo.
 func (st *LogState) noteStep(repo, ref string, at time.Time, text string) {
-	if repo == "" || ref == "" || strings.TrimSpace(text) == "" {
+	st.addStep(repo, IssueStep{At: at, Ref: ref, Text: text})
+}
+
+// addStep adds step s to its ref's steps in repo, unless it says what the
+// latest says. Past stepsKept the oldest step goes, but one that matters
+// (Key: opened, a design approved or declined, a session started, merged,
+// done) goes only when the ring holds nothing else.
+func (st *LogState) addStep(repo string, s IssueStep) {
+	if repo == "" || s.Ref == "" || strings.TrimSpace(s.Text) == "" {
 		return
 	}
 	if st.Steps == nil {
 		st.Steps = map[string][]IssueStep{}
 	}
-	k := sentenceKey(repo, ref)
-	s := st.Steps[k]
-	if n := len(s); n > 0 && s[n-1].Text == text {
+	k := sentenceKey(repo, s.Ref)
+	steps := st.Steps[k]
+	if n := len(steps); n > 0 && steps[n-1].Text == s.Text {
 		return
 	}
-	s = append(s, IssueStep{At: at, Ref: ref, Text: cutUTF8(text, 400)})
-	if len(s) > stepsKept {
-		s = append([]IssueStep(nil), s[len(s)-stepsKept:]...)
+	s.Text = cutUTF8(s.Text, 400)
+	steps = append(steps[:len(steps):len(steps)], s)
+	if len(steps) > stepsKept {
+		drop := 0
+		for drop < len(steps)-1 && steps[drop].Key {
+			drop++
+		}
+		if drop == len(steps)-1 {
+			drop = 0
+		}
+		steps = append(append([]IssueStep(nil), steps[:drop]...), steps[drop+1:]...)
 	}
-	st.Steps[k] = s
+	st.Steps[k] = steps
+}
+
+// itemName is a work item by its title, as a sentence names it: "the
+// item to pick the cache".
+func itemName(it *WorkItem) string {
+	t := oneLine(it.Title, 120)
+	if strings.TrimSpace(t) == "" {
+		return "the work item"
+	}
+	r := []rune(t)
+	if len(r) == 1 || len(r) > 1 && !unicode.IsUpper(r[1]) {
+		r[0] = unicode.ToLower(r[0])
+	}
+	return "the item to " + strings.TrimSuffix(string(r), ".")
+}
+
+// capital is s with its first letter a capital.
+func capital(s string) string {
+	r := []rune(s)
+	if len(r) > 0 {
+		r[0] = unicode.ToUpper(r[0])
+	}
+	return string(r)
+}
+
+// requestName is a request by its title, as a sentence names it: "the
+// request “Speed up the page”", or "its request" with no title known.
+func (st *LogState) requestName(repo, ref string) string {
+	i := st.Index[repo][ref]
+	if i == nil {
+		i = st.Closed[repo][ref]
+	}
+	if i == nil || i.Title == "" {
+		return "its request"
+	}
+	return "the request “" + oneLine(i.Title, 120) + "”"
+}
+
+// roleName is how a step names a session of kind: a reviewer, a judge,
+// or a session.
+func roleName(kind string) string {
+	switch kind {
+	case KindReviewer:
+		return "A reviewer"
+	case KindJudge:
+		return "A judge"
+	}
+	return "A session"
 }
 
 // noteSteps folds what event e did to an issue or request into its steps,
-// after e is applied: a work item's steps on its issue, a session started
-// on one, and a request's loop steps, on the request and its case's issue.
-// The index and the sentences note their own.
+// after e is applied, each as one sentence: a work item's steps on its
+// issue, a session started on one, a request's loop steps and its merge,
+// on the request and its case's issue. The index notes its own; a
+// sentence rewritten is no step.
 func (st *LogState) noteSteps(e Event) {
 	switch {
 	case e.Kind == KindWorkItem && e.Work != nil:
@@ -56,55 +134,86 @@ func (st *LogState) noteSteps(e Event) {
 		if it == nil || it.Issue <= 0 {
 			return
 		}
-		ref := "#" + strconv.Itoa(it.Issue)
-		var text string
+		name := itemName(it)
+		s := IssueStep{At: e.Time, Ref: "#" + strconv.Itoa(it.Issue), Chips: []StepRef{{Kind: "item", ID: it.ID}}}
 		switch p.Step {
 		case WorkStepOpen:
-			text = fmt.Sprintf("Work item %s opened: %s.", it.ID, it.Title)
+			s.Text, s.Key = capital(name)+" was opened.", true
 		case WorkStepAssign:
-			text = fmt.Sprintf("%s given to %s.", it.ID, p.Session)
+			s.Text = capital(name) + " was given to a session."
+			if p.Session != "" {
+				s.Chips = append(s.Chips, StepRef{Kind: "session", ID: p.Session})
+			}
 		case WorkStepDesign:
 			if p.Design != nil && p.Design.Error == "" {
-				text = fmt.Sprintf("%s designed, round %d.", it.ID, p.Design.Round)
+				s.Text = capital(name) + " was designed."
+				if p.Design.Round > 1 {
+					s.Text = fmt.Sprintf("%s was designed again, a round %d design.", capital(name), p.Design.Round)
+				}
 			}
 		case WorkStepGo:
-			text = fmt.Sprintf("%s's design approved.", it.ID)
+			s.Text, s.Key = capital(name)+"'s design was approved.", true
 		case WorkStepChange:
-			text = fmt.Sprintf("%s's design sent back with your words.", it.ID)
+			s.Text = capital(name) + "'s design was sent back with your words."
 		case WorkStepBlocked:
-			text = fmt.Sprintf("%s asks you: %s", it.ID, oneLine(it.Question, 200))
+			s.Text = fmt.Sprintf("%s asks you: %s", capital(name), oneLine(it.Question, 200))
 		case WorkStepClaim:
-			text = fmt.Sprintf("%s says it is done.", it.ID)
+			s.Text = fmt.Sprintf("Its session says %s is done.", name)
 		case WorkStepCheck:
 			if p.Check != nil {
-				text = fmt.Sprintf("%s checked: %s", it.ID, oneLine(p.Check.Detail, 200))
+				s.Text = fmt.Sprintf("Go checked whether %s is done: not yet.", name)
+				if p.Check.OK {
+					s.Text = fmt.Sprintf("Go checked whether %s is done: it is.", name)
+				}
 			}
 		case WorkStepDone:
-			text = fmt.Sprintf("%s done.", it.ID)
+			s.Text, s.Key = capital(name)+" is done.", true
 		case WorkStepDeclined:
-			text = fmt.Sprintf("%s declined.", it.ID)
+			s.Text, s.Key = capital(name)+" was declined.", true
 		}
-		st.noteStep(it.Repository, ref, e.Time, text)
+		st.addStep(it.Repository, s)
 	case e.Kind == KindSession && e.Runtime != nil && e.Runtime.Issue > 0 && e.Runtime.Action == SessionStart:
-		st.noteStep(e.Runtime.Repository, "#"+strconv.Itoa(e.Runtime.Issue), e.Time, fmt.Sprintf("Session %s started on it.", e.Runtime.ID))
+		s := IssueStep{At: e.Time, Ref: "#" + strconv.Itoa(e.Runtime.Issue), Key: true,
+			Text: fmt.Sprintf("%s started on it at %s.", roleName(e.Runtime.Kind), e.Time.In(time.Local).Format("15:04"))}
+		if e.Session != "" {
+			s.Chips = []StepRef{{Kind: "session", ID: e.Session}}
+		}
+		st.addStep(e.Runtime.Repository, s)
 	case e.Kind == KindLoop && e.Loop != nil && e.Mode != ModeOwner:
 		p := e.Loop
-		var text string
+		name := st.requestName(p.Repository, p.Ref)
+		s := IssueStep{At: e.Time, Ref: p.Ref, Chips: []StepRef{{Kind: "request", ID: p.Ref}}}
 		switch p.Step {
 		case LoopReview:
-			text = fmt.Sprintf("%s: review round %d started.", p.Ref, p.Round)
+			s.Text = fmt.Sprintf("Review round %d started on %s.", p.Round, name)
 		case LoopJudge:
-			text = fmt.Sprintf("%s: judge round %d started.", p.Ref, p.Round)
+			s.Text = fmt.Sprintf("A judge took up round %d of %s.", p.Round, name)
 		case LoopFix:
-			text = fmt.Sprintf("%s: fix round %d.", p.Ref, p.Round)
+			s.Text = fmt.Sprintf("Its session was sent back to fix what round %d of %s found.", p.Round, name)
 		case LoopApprove:
-			text = fmt.Sprintf("%s approved by the loop.", p.Ref)
+			s.Text = fmt.Sprintf("The loop approved %s.", name)
 		case LoopFailed:
-			text = fmt.Sprintf("%s: the %s step failed: %s", p.Ref, p.Failed, oneLine(p.Reason, 200))
+			what := "review"
+			if p.Failed == LoopJudge {
+				what = "judging"
+			}
+			s.Text = fmt.Sprintf("The %s of %s failed: %s.", what, name, strings.TrimSuffix(oneLine(p.Reason, 200), "."))
 		}
-		st.noteStep(p.Repository, p.Ref, e.Time, text)
+		st.addStep(p.Repository, s)
 		if issue := caseIssue(p.Case); issue != "" {
-			st.noteStep(p.Repository, issue, e.Time, text)
+			s.Ref = issue
+			st.addStep(p.Repository, s)
+		}
+	case e.Kind == KindAction && e.Act != nil && e.Act.Action == ActMerge && requestRef.MatchString(e.Act.Ref):
+		a := e.Act
+		name := st.requestName(a.Repository, a.Ref)
+		s := IssueStep{At: e.Time, Ref: a.Ref, Key: true, Text: capital(name) + " was merged.", Chips: []StepRef{{Kind: "request", ID: a.Ref}}}
+		st.addStep(a.Repository, s)
+		if i := st.Index[a.Repository][a.Ref]; i != nil {
+			if m := issueInTitle.FindStringSubmatch(i.Title); m != nil {
+				s.Ref = "#" + m[1]
+				st.addStep(a.Repository, s)
+			}
 		}
 	}
 }
@@ -837,6 +946,14 @@ func BuildIssueLevel(cfg *Config, st *LogState, repo string, n int, decisions []
 			if secret(s.Text) {
 				s.Text = "(withheld: it matched a confidential pattern)"
 			}
+			chips := make([]StepRef, len(s.Chips))
+			for k, c := range s.Chips {
+				if c.Kind == "request" && contains(j.Requests, c.ID) {
+					c.Link = "#mr-" + c.ID[1:]
+				}
+				chips[k] = c
+			}
+			s.Chips = chips
 			steps = append(steps, s)
 		}
 	}
