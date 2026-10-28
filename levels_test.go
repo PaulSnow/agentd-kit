@@ -682,7 +682,7 @@ func TestNowOnlyWithASession(t *testing.T) {
 	if body := owner(t, u, "/repo/widgets/issue/4"); !strings.Contains(body, `name="now"`) {
 		t.Fatal("#4, which w4 works, offers no now")
 	}
-	if body := owner(t, u, "/repo/widgets/issue/6"); strings.Contains(body, `name="now"`) {
+	if body := owner(t, u, "/repo/widgets/issue/6"); strings.Contains(body, `name="now"`) || !strings.Contains(body, "no session works it now") {
 		t.Fatal("#6, which no session works, offers now")
 	}
 	before := f.buf.Len()

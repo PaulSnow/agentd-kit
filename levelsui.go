@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/url"
 	"sort"
 	"strconv"
@@ -32,6 +33,9 @@ type uiIssuePage struct {
 	Talk []ScopeEntry
 	Src  string
 	All  bool
+	// To is the session that works the issue and takes messages, "" for
+	// none: the box offers now only with one.
+	To string
 }
 
 // Scope is what the page's console box is about: a repository, or one
@@ -46,8 +50,9 @@ func (p *uiRepoPage) ScopeNote() string {
 // NowOffered says whether the box offers "now": at an issue only.
 func (p *uiRepoPage) NowOffered() bool { return false }
 
-// NowOffered says whether the box offers "now": at an issue only.
-func (p *uiIssuePage) NowOffered() bool { return true }
+// NowOffered says whether the box offers "now": at an issue a session
+// that takes messages works.
+func (p *uiIssuePage) NowOffered() bool { return p.To != "" }
 
 // NowOffered says whether the box offers "now": at an issue only.
 func (v *uiIndex) NowOffered() bool { return false }
@@ -57,6 +62,9 @@ func (p *uiIssuePage) Scope() string { return p.Repository + p.Ref }
 
 // ScopeNote says where the console box's words go.
 func (p *uiIssuePage) ScopeNote() string {
+	if p.To == "" {
+		return "About " + p.Ref + ": a question is answered from its steps and its requests; no session works it now, so a message goes to the repository's thread."
+	}
 	return "About " + p.Ref + ": a question is answered from its steps, its session and its requests; a message goes to its session at its next turn."
 }
 
@@ -112,7 +120,7 @@ func (u *UI) issueView(repo string, n int, all bool, now time.Time) (*uiIssuePag
 		}
 		title := repo + " #" + strconv.Itoa(n)
 		v = &uiIssuePage{uiPage: uiPage{Title: title, Token: u.token, Back: "/repo/" + url.PathEscape(repo) + "/issue/" + strconv.Itoa(n), Now: now, loc: u.loc},
-			IssueLevel: l, Src: src.Name, All: all}
+			IssueLevel: l, Src: src.Name, All: all, To: issueSession(cfg, st, l)}
 	})
 	if !ok || err != nil || v == nil {
 		return v, err
@@ -212,12 +220,7 @@ func (src *uiSource) scopeReply(c Scope, text string, now bool, files []stagedAt
 		for _, d := range open {
 			repoOf[d.Entry] = c.Repository
 		}
-		for _, r := range l.Refs {
-			if r.Kind == "session" && takesMessages(cfg, src.st, r.Name) {
-				to = r.Name
-				break
-			}
-		}
+		to = issueSession(cfg, src.st, l)
 	case c.Repository != "":
 		// Every decision open at the repository: on its issues, and its
 		// sessions' and items' that are on none; a typed answer binds
@@ -230,6 +233,9 @@ func (src *uiSource) scopeReply(c Scope, text string, now bool, files []stagedAt
 	// At home a typed answer binds nothing: the decisions are every
 	// repository's, and the owner answers one on its page.
 	src.mu.Unlock()
+	if now && to == "" {
+		return "", fmt.Errorf("no session that takes messages works %s, so nothing can be typed into one now; send it without now and it goes to the repository's thread", c)
+	}
 	if entry, a := typedDecision(open, text); entry != "" {
 		return "the answer to " + entry, src.respond(repoOf[entry], entry, "", "", a, files)
 	}
@@ -243,6 +249,17 @@ func (src *uiSource) scopeReply(c Scope, text string, now bool, files []stagedAt
 		what = "a message for " + to
 	}
 	return what, ScopeInstruction(withRuntime(src.cfg, src.st.Runtime), src.log, src.clock(), c, to, text, now, files)
+}
+
+// issueSession is the session that works issue l and takes messages, ""
+// for none.
+func issueSession(cfg *Config, st *LogState, l IssueLevel) string {
+	for _, r := range l.Refs {
+		if r.Kind == "session" && takesMessages(cfg, st, r.Name) {
+			return r.Name
+		}
+	}
+	return ""
 }
 
 // takesMessages says whether session name can be handed a message from
