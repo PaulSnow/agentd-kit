@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -184,6 +185,28 @@ func TestScopes(t *testing.T) {
 	}
 	if namedRepository(h.cfg, "How is widgets doing?") != "widgets" || namedRepository(h.cfg, "widgets and readonly") != "" || namedRepository(h.cfg, "gadgets") != "" {
 		t.Error("named repository")
+	}
+}
+
+// A repository named home, in any case, would share the home level's
+// scope: the config refuses it, and a scope built for it by value is
+// refused before anything is recorded.
+func TestHomeIsNoRepository(t *testing.T) {
+	for _, name := range []string{"home", "Home", "HOME"} {
+		path := filepath.Join(t.TempDir(), "c.json")
+		writeFile(t, path, `{"repositories": {"`+name+`": {"forge": "gitlab", "project": "example-org/widgets"}}}`)
+		if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "home level") {
+			t.Errorf("a repository named %s loaded: %v", name, err)
+		}
+	}
+	h := newHarness(t, false)
+	h.cfg.Repositories["home"] = Repository{Forge: "gitlab", Project: "example-org/home"}
+	before := len(h.events())
+	if err := ScopeInstruction(h.sup.cfg, NewLogWriter(h.buf), h.clock.Now(), Scope{Repository: "home"}, "", "how is it going?", false, nil); err == nil {
+		t.Error("a scope at a repository named home was recorded")
+	}
+	if len(h.events()) != before {
+		t.Fatalf("logged: %+v", h.events()[before:])
 	}
 }
 
