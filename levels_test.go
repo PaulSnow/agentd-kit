@@ -700,3 +700,28 @@ func TestNowOnlyWithASession(t *testing.T) {
 		t.Fatalf("without now: %d %s", w.Code, w.Body.String())
 	}
 }
+
+// A blocked item's question gets an answer card: the owner's words go to
+// its session as the answer, and decline stays; done and reassign are not
+// offered to a question.
+func TestBlockedItemTakesAnAnswer(t *testing.T) {
+	f := newLevelsFixture(t)
+	u, _ := testUI(t, UIConfig{}, f.src)
+	body := owner(t, u, "/repo/widgets/issue/5")
+	start := strings.Index(body, `id="decision-w-wa1"`)
+	end := strings.Index(body[start:], "</article>")
+	if start < 0 || end < 0 {
+		t.Fatalf("no card:\n%s", body)
+	}
+	card := body[start : start+end]
+	if strings.Contains(card, `value="done"`) || strings.Contains(card, `value="reassign"`) || !strings.Contains(card, `value="decline"`) || !strings.Contains(card, `placeholder="Your answer"`) {
+		t.Fatalf("the card:\n%s", card)
+	}
+	w := ownerPost(u, "/respond", url.Values{"src": {"live"}, "repository": {"widgets"}, "entry": {"w:wa1"}, "choice": {"done"}, "back": {"/repo/widgets/issue/5"}})
+	if w.Code == http.StatusSeeOther {
+		t.Fatal("done was taken as the answer to a question")
+	}
+	if w := ownerPost(u, "/respond", url.Values{"src": {"live"}, "repository": {"widgets"}, "entry": {"w:wa1"}, "text": {"256 MB."}, "back": {"/repo/widgets/issue/5"}}); w.Code != http.StatusSeeOther {
+		t.Fatalf("the answer: %d %s", w.Code, w.Body.String())
+	}
+}
