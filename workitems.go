@@ -451,6 +451,9 @@ func (s *Supervisor) driveItems(now time.Time) {
 			continue
 		}
 		w := *a.Work
+		if s.issueForWork(workID(in.ID), in.Repositories[0], &w); s.halt != nil {
+			return
+		}
 		if s.workEmit(WorkPayload{ID: workID(in.ID), Step: WorkStepOpen, Repository: in.Repositories[0], Instruction: in.ID, Work: &w, HandTo: in.Session}); s.halt != nil {
 			return
 		}

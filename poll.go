@@ -61,6 +61,9 @@ type PollConfig struct {
 	// is asked about every CIEvery.
 	CI      bool     `json:"ci"`
 	CIEvery Duration `json:"ci_every"`
+	// Index turns on the issue index (#69): each forge repository's open
+	// issues and requests are listed every Every.
+	Index bool `json:"index"`
 }
 
 // PollPayload is a poll of a source that changed something: it found

@@ -254,7 +254,8 @@ type EscalatePolicy struct {
 
 // Repository is a forge project agentd may deliver to. Allow lists the writes
 // the forge client may make for it: "push", "open", "comment" (a console
-// thread's outcome, #60) and "merge". A merge is
+// thread's outcome, #60), "issue" (an issue Go opens for work that names
+// none, #69) and "merge". A merge is
 // only ever a fast-forward of a gated tree (#1 D2), and only where the
 // repository's own policy on the target branch grants it too (merge.go).
 // Host (by default gitlab.com or github.com) and Project build the one URL

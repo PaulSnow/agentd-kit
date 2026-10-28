@@ -27,7 +27,8 @@
     "github": false,
     "gitlab": false,
     "ci": false,
-    "ci_every": "5m"
+    "ci_every": "5m",
+    "index": false
   },
   "usage": {
     "enabled": false,

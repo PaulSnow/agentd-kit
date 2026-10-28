@@ -460,6 +460,7 @@ func (s *Supervisor) runLoops(now time.Time) {
 			return
 		}
 		p := placeOf(s.cfg, s.st, q)
+		s.noteLoopSentence(q, p)
 		lp := LoopPayload{Repository: q.Repository, Ref: q.Ref, Case: q.Case, Head: p.Head, Step: p.Do, Session: p.Session, Round: p.Round}
 		switch p.Do {
 		case "end":
