@@ -118,7 +118,7 @@
     "ci-failing": function (a, b) { return (b.dataset.failing ? 1 : 0) - (a.dataset.failing ? 1 : 0); }
   };
   function matches(row, words) {
-    var hay = (row.textContent + " " + (row.dataset.label || "")).toLowerCase();
+    var hay = row.dataset.text || row.textContent.toLowerCase();
     var refs = (row.dataset.refs || row.dataset.ref || "").split(" ");
     for (var i = 0; i < words.length; i++) {
       var w = words[i];
@@ -136,7 +136,12 @@
     var select = section.querySelector(".box-sort");
     var filter = section.querySelector(".box-filter");
     if (select && state.sort && sorts[state.sort]) { select.value = state.sort; }
-    if (filter && typeof state.filter === "string" && document.activeElement !== filter) { filter.value = state.filter; }
+    if (filter && typeof state.filter === "string" && document.activeElement !== filter) {
+      // As the page's own value, so a refresh does not take the box for
+      // one the owner is typing in.
+      filter.value = state.filter;
+      filter.defaultValue = state.filter;
+    }
     var by = select ? select.value : "";
     var words = filter ? filter.value.toLowerCase().split(/\s+/).filter(Boolean) : [];
     var list = section.querySelector(".box-rows");
@@ -171,6 +176,7 @@
     var select = section.querySelector(".box-sort");
     var filter = section.querySelector(".box-filter");
     store(key, { sort: select ? select.value : "", filter: filter ? filter.value : "" });
+    if (filter) { filter.defaultValue = filter.value; }
     applyBox(section);
   }
   document.addEventListener("change", boxInput);

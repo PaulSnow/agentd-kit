@@ -131,6 +131,12 @@ type LevelIssue struct {
 	Working  bool           `json:"working,omitempty"`
 }
 
+// FilterText is what the filter's words are matched in: title,
+// sentence, labels, milestone and author, in lower case.
+func (i LevelIssue) FilterText() string {
+	return strings.ToLower(i.Title + " " + i.Sentence + " " + strings.Join(i.Labels, " ") + " " + i.Milestone + " " + i.Author)
+}
+
 // WordClass is the state word as a class name.
 func (i LevelIssue) WordClass() string { return strings.ReplaceAll(i.Word, " ", "-") }
 
@@ -168,6 +174,8 @@ type LevelRequest struct {
 // is asked, what came back, what Go checked by itself, and the options,
 // each with its consequence.
 type LevelDecision struct {
+	// Decision is a session's decision, whose own inputs the card shows.
+	Decision *Decision     `json:"-"`
 	Entry    string        `json:"entry"`
 	Session  string        `json:"session,omitempty"`
 	Asked    string        `json:"asked"`
@@ -225,9 +233,22 @@ var workConsequences = map[string]string{
 
 // levelDecisions are the decisions open on issue n of repo: a design that
 // waits on the owner's go (b:), an item that asks the owner or says it is
-// done under the owner's own check (w:), and the joined sessions' open
-// decisions (d:), from decisions.
-func levelDecisions(st *LogState, j IssueJoin, decisions []UIDecision) []LevelDecision {
+// done under the owner's own check (w:), and the open decisions (d:) of
+// the joined sessions whose own issue it is (a session's configured
+// issue, else its open item's), from decisions. A card whose words match
+// a confidential pattern is withheld, its options kept.
+func levelDecisions(cfg *Config, st *LogState, n int, j IssueJoin, decisions []UIDecision, secret func(...string) bool) []LevelDecision {
+	out := levelDecisionsOf(cfg, st, n, j, decisions)
+	for k := range out {
+		d := &out[k]
+		if secret(d.Asked, d.CameBack, d.Checked) {
+			d.Asked, d.CameBack, d.Checked = withheldSecret, "", ""
+		}
+	}
+	return out
+}
+
+func levelDecisionsOf(cfg *Config, st *LogState, n int, j IssueJoin, decisions []UIDecision) []LevelDecision {
 	var out []LevelDecision
 	for _, it := range j.Work {
 		if it.terminal() {
@@ -270,11 +291,16 @@ func levelDecisions(st *LogState, j IssueJoin, decisions []UIDecision) []LevelDe
 	for _, s := range j.Sessions {
 		in[s] = true
 	}
+	c := withRuntime(cfg, st.Runtime)
 	for _, d := range decisions {
 		if !in[d.Session] {
 			continue
 		}
-		ld := LevelDecision{Entry: decisionEntry(d.Session, d.ID), Session: d.Session, Asked: oneLine(d.Question, 400), CameBack: oneLine(d.Context, 400)}
+		if own := c.Sessions[d.Session].Issue; own > 0 && own != n {
+			continue // its decisions are its own issue's
+		}
+		dec := d.Decision
+		ld := LevelDecision{Decision: &dec, Entry: decisionEntry(d.Session, d.ID), Session: d.Session, Asked: oneLine(d.Question, 400), CameBack: oneLine(d.Context, 400)}
 		if d.Withheld != "" {
 			ld.Asked, ld.CameBack = d.Withheld, ""
 		}
@@ -291,7 +317,7 @@ func levelDecisions(st *LogState, j IssueJoin, decisions []UIDecision) []LevelDe
 
 // levelIssue is issue i of repo as a row: its sentence, its word, its
 // requests and its first open decision.
-func levelIssue(cfg *Config, st *LogState, repo string, i *IndexIssue, decisions []UIDecision, busy map[string]bool) (LevelIssue, IssueJoin, []LevelDecision) {
+func levelIssue(cfg *Config, st *LogState, repo string, i *IndexIssue, decisions []UIDecision, busy map[string]bool, secret func(...string) bool) (LevelIssue, IssueJoin, []LevelDecision) {
 	n := i.Number()
 	j := joinIssue(cfg, st, repo, n)
 	li := LevelIssue{Repository: repo, Ref: i.Ref, Number: n, Title: i.Title, Labels: i.Labels, Milestone: i.Milestone, Author: i.Author,
@@ -302,7 +328,7 @@ func levelIssue(cfg *Config, st *LogState, repo string, i *IndexIssue, decisions
 	if s := st.sentenceOf(repo, i.Ref); s != nil {
 		li.Sentence, li.Writer, li.SentenceAt = s.Text, s.Writer, s.At
 	}
-	ds := levelDecisions(st, j, decisions)
+	ds := levelDecisions(cfg, st, n, j, decisions, secret)
 	switch {
 	case len(ds) > 0:
 		li.Word, li.Decision = WordNeedsYou, &ds[0]
@@ -355,6 +381,7 @@ func BuildRepoLevel(cfg *Config, st *LogState, repo string, decisions []UIDecisi
 	v := RepoLevel{Repository: repo, Tracked: indexed(cfg.Repositories[repo]) && cfg.Poll.Index, Issues: []LevelIssue{}, Requests: []LevelRequest{}}
 	v.Read = st.IndexRead[repo]
 	busy := workingOn(cfg, st, repo)
+	secret := confidentialMatcher(cfg)
 	needs := map[string]bool{}
 	for _, ref := range sortedKeys(st.Index[repo]) {
 		i := st.Index[repo][ref]
@@ -362,7 +389,7 @@ func BuildRepoLevel(cfg *Config, st *LogState, repo string, decisions []UIDecisi
 			v.Requests = append(v.Requests, levelRequest(st, repo, i))
 			continue
 		}
-		li, j, _ := levelIssue(cfg, st, repo, i, decisions, busy)
+		li, j, _ := levelIssue(cfg, st, repo, i, decisions, busy, secret)
 		if li.Decision != nil {
 			needs[ref] = true
 		}
@@ -450,25 +477,20 @@ func wordRank(w string) int {
 // sortIssues sorts the issue box's rows by one of IssueSorts, as ui.js
 // does on the page; ties go to the latest change, then the number.
 func sortIssues(is []LevelIssue, by string) {
-	first := func(s []string) string {
-		if len(s) == 0 {
-			return "￿"
-		}
-		return s[0]
-	}
 	key := func(i LevelIssue) string {
+		v := ""
 		switch by {
 		case "label":
-			return first(i.Labels)
+			v = strings.Join(i.Labels, " ")
 		case "milestone":
-			if i.Milestone == "" {
-				return "￿"
-			}
-			return i.Milestone
+			v = i.Milestone
 		case "author":
-			return i.Author
+			v = i.Author
 		}
-		return ""
+		if v == "" {
+			return "\uffff" // none last, as on the page
+		}
+		return v
 	}
 	sort.SliceStable(is, func(a, b int) bool {
 		x, y := is[a], is[b]
@@ -548,7 +570,7 @@ func filterIssues(is []LevelIssue, filter string) []LevelIssue {
 	}
 	var out []LevelIssue
 	for _, i := range is {
-		hay := strings.ToLower(i.Title + " " + i.Sentence + " " + strings.Join(i.Labels, " ") + " " + i.Milestone + " " + i.Author)
+		hay := i.FilterText()
 		refs := append([]string{i.Ref}, i.Requests...)
 		ok := true
 		for _, w := range words {
@@ -574,16 +596,17 @@ const stepsShown = 12
 func BuildIssueLevel(cfg *Config, st *LogState, repo string, n int, decisions []UIDecision, all bool, now time.Time) IssueLevel {
 	ref := "#" + strconv.Itoa(n)
 	busy := workingOn(cfg, st, repo)
+	secret := confidentialMatcher(cfg)
 	i := st.Index[repo][ref]
 	known := i != nil
 	if i == nil {
 		i = &IndexIssue{IndexPayload: IndexPayload{Repository: repo, Ref: ref}}
 	}
-	li, j, ds := levelIssue(cfg, st, repo, i, decisions, busy)
+	li, j, ds := levelIssue(cfg, st, repo, i, decisions, busy, secret)
 	v := IssueLevel{LevelIssue: li, Known: known, Decisions: ds, Steps: []IssueStep{}, Refs: []LevelRef{}}
 	for _, it := range j.Work {
 		v.Refs = append(v.Refs, LevelRef{Kind: "item", Name: it.ID, Note: it.State})
-		if v.Title == "" {
+		if v.Title == "" && !secret(it.Title) {
 			v.Title = it.Title
 		}
 	}
@@ -602,12 +625,23 @@ func BuildIssueLevel(cfg *Config, st *LogState, repo string, n int, decisions []
 	if !known && len(v.Refs) == 0 && st.Sentences[sentenceKey(repo, ref)] == nil {
 		return v
 	}
-	if !known {
-		v.Known = len(v.Refs) > 0
-	}
+	v.Known = true
+	// The issue's steps and its requests', each once: a loop step is
+	// noted on the request and on its issue both.
 	var steps []IssueStep
+	seen := map[string]bool{}
 	for _, r := range append([]string{ref}, j.Requests...) {
-		steps = append(steps, st.Steps[sentenceKey(repo, r)]...)
+		for _, s := range st.Steps[sentenceKey(repo, r)] {
+			k := s.At.String() + "\n" + s.Text
+			if seen[k] {
+				continue
+			}
+			seen[k] = true
+			if secret(s.Text) {
+				s.Text = "(withheld: it matched a confidential pattern)"
+			}
+			steps = append(steps, s)
+		}
 	}
 	sort.SliceStable(steps, func(a, b int) bool { return steps[a].At.Before(steps[b].At) })
 	if !all && len(steps) > stepsShown {
@@ -620,6 +654,9 @@ func BuildIssueLevel(cfg *Config, st *LogState, repo string, n int, decisions []
 			continue
 		}
 		next := fmt.Sprintf("%s is done when %s.", it.ID, it.DoneWhen.String())
+		if secret(next) {
+			next = it.ID + "'s end is withheld: it matched a confidential pattern."
+		}
 		switch {
 		case it.State == WorkDesigning:
 			next += " Go waits on its designer."

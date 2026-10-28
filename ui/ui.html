@@ -242,7 +242,7 @@
 {{with .CameBack}}<p><strong>What came back:</strong> {{.}}</p>{{end}}
 {{with .Checked}}<p class="muted"><strong>What Go checked:</strong> {{.}}</p>{{end}}
 <form method="post" action="/respond" enctype="multipart/form-data"><input type="hidden" name="token" value="{{$p.Token}}"><input type="hidden" name="back" value="{{$p.Back}}"><input type="hidden" name="src" value="{{$p.Src}}"><input type="hidden" name="repository" value="{{$p.Repository}}"><input type="hidden" name="entry" value="{{.Entry}}">
-<ul class="options">{{range .Options}}<li><button type="submit" name="choice" value="{{.Key}}">{{.Label}}</button>{{with .Consequence}} <span class="muted">{{.}}</span>{{end}}</li>{{end}}</ul>
+{{if .Decision}}{{template "decision-inputs" .Decision}}{{else}}<ul class="options">{{range .Options}}<li><button type="submit" name="choice" value="{{.Key}}">{{.Label}}</button>{{with .Consequence}} <span class="muted">{{.}}</span>{{end}}</li>{{end}}</ul>{{end}}
 <div class="inline"><input type="text" name="text" maxlength="4000" placeholder="Or answer in your words" aria-label="Your answer"><button type="submit">Send</button></div></form>
 </article>{{end}}{{end}}
 
@@ -259,17 +259,17 @@
 <header class="box-head"><span class="box-count" data-total="{{.Counts.Open}}" data-need="{{.Counts.Waiting}}" data-working="{{.Counts.Working}}">{{.Counts.Open}} issues, {{.Counts.Waiting}} need you, {{.Counts.Working}} being worked, <span class="box-shown">{{.Shown}}</span> shown</span>
 <label>Sort <select class="box-sort" aria-label="Sort the issues">{{range .IssueSorts}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
 <input type="search" class="box-filter" placeholder="Filter: words, a label, #N or !N" aria-label="Filter the issues"></header>
-<ol class="box-rows">{{range $i := .Issues}}<li class="box-row word-{{.WordClass}}" data-ref="{{.Ref}}" data-number="{{.Number}}" data-word="{{.Word}}" data-working="{{if .Working}}1{{end}}" data-mr="{{len .Requests}}" data-opened="{{.Opened.Unix}}" data-changed="{{.Changed.Unix}}" data-label="{{range $i, $l := .Labels}}{{if $i}} {{end}}{{$l}}{{end}}" data-milestone="{{.Milestone}}" data-author="{{.Author}}" data-refs="{{.Ref}}{{range .Requests}} {{.}}{{end}}">
-<div class="row-head"><a href="/repo/{{.Repository}}/issue/{{.Number}}">{{.Ref}}</a> <strong class="row-title">{{.Title}}</strong> <span class="badge word">{{.Word}}</span>{{range .Labels}} <span class="badge label">{{.}}</span>{{end}}{{range .Requests}} <span class="badge mr">{{.}}</span>{{end}} <span class="muted">changed {{$.Ago .Changed}}</span></div>
+<ol class="box-rows">{{range $i := .Issues}}<li class="box-row word-{{.WordClass}}" data-ref="{{.Ref}}" data-number="{{.Number}}" data-word="{{.Word}}" data-working="{{if .Working}}1{{end}}" data-mr="{{len .Requests}}" data-opened="{{.Opened.Unix}}" data-changed="{{.Changed.Unix}}" data-label="{{range $i, $l := .Labels}}{{if $i}} {{end}}{{$l}}{{end}}" data-milestone="{{.Milestone}}" data-author="{{.Author}}" data-text="{{.FilterText}}" data-refs="{{.Ref}}{{range .Requests}} {{.}}{{end}}">
+<div class="row-head"><a href="/repo/{{path .Repository}}/issue/{{.Number}}">{{.Ref}}</a> <strong class="row-title">{{.Title}}</strong> <span class="badge word">{{.Word}}</span>{{range .Labels}} <span class="badge label">{{.}}</span>{{end}}{{range .Requests}} <span class="badge mr">{{.}}</span>{{end}} <span class="muted">changed {{$.Ago .Changed}}</span></div>
 <p class="row-sentence">{{if .Sentence}}{{.Sentence}} <span class="muted">({{.Writer}})</span>{{else}}<span class="muted">No sentence yet; the forge's title stands.</span>{{end}}</p>
-{{with .Decision}}<p class="row-options"><a href="/repo/{{$i.Repository}}/issue/{{$i.Number}}#{{.Anchor}}">{{.Asked}}</a>{{range .Options}} <span class="badge">{{.Label}}</span>{{end}}</p>{{end}}
+{{with .Decision}}<p class="row-options"><a href="/repo/{{path $i.Repository}}/issue/{{$i.Number}}#{{.Anchor}}">{{.Asked}}</a>{{range .Options}} <span class="badge">{{.Label}}</span>{{end}}</p>{{end}}
 </li>{{else}}<li class="empty">No open issues listed.</li>{{end}}</ol>
 </section>
 <section id="requests" class="level-box mr-box" data-refresh data-box="requests" data-key="{{.Repository}}" aria-label="Open requests">
 <header class="box-head"><span class="box-count">{{len .Requests}} open requests, <span class="box-shown">{{len .Requests}}</span> shown</span>
 <label>Sort <select class="box-sort" aria-label="Sort the requests">{{range .RequestSorts}}<option value="{{.}}">{{.}}</option>{{end}}</select></label></header>
 <ol class="box-rows">{{range .Requests}}<li class="box-row" data-ref="{{.Ref}}" data-number="{{.Number}}" data-rank="{{.Rank}}" data-failing="{{if .Failing}}1{{end}}" data-opened="{{.Opened.Unix}}" data-changed="{{.Changed.Unix}}">
-<div class="row-head">{{if .Issue}}<a href="/repo/{{$.Repository}}/issue/{{slice .Issue 1}}#mr-{{.Number}}">{{.Ref}}</a>{{else}}<span class="ref">{{.Ref}}</span>{{end}} <strong class="row-title">{{.Title}}</strong>{{with .Issue}} <span class="muted">for {{.}}</span>{{end}} <span class="badge ci-{{if .CI}}{{.CI}}{{else}}unwatched{{end}}">CI {{if .CI}}{{.CI}}{{else}}not watched{{end}}</span>{{if .Draft}} <span class="badge">draft</span>{{end}} <span class="muted">changed {{$.Ago .Changed}}</span></div>
+<div class="row-head">{{if .Issue}}<a href="/repo/{{path $.Repository}}/issue/{{slice .Issue 1}}#mr-{{.Number}}">{{.Ref}}</a>{{else}}<span class="ref">{{.Ref}}</span>{{end}} <strong class="row-title">{{.Title}}</strong>{{with .Issue}} <span class="muted">for {{.}}</span>{{end}} <span class="badge ci-{{if .CI}}{{.CI}}{{else}}unwatched{{end}}">CI {{if .CI}}{{.CI}}{{else}}not watched{{end}}</span>{{if .Draft}} <span class="badge">draft</span>{{end}} <span class="muted">changed {{$.Ago .Changed}}</span></div>
 <p class="row-sentence">{{if .Place}}{{.Place}}{{else}}<span class="muted">Outside the loop, or not yet placed.</span>{{end}}</p>
 </li>{{else}}<li class="empty">No open requests.</li>{{end}}</ol>
 </section>
@@ -277,9 +277,9 @@
 {{template "foot" .}}{{end}}
 
 {{define "issue"}}{{template "head" .}}
-<nav class="crumbs"><a href="/">Home</a> › <a href="/repo/{{.Repository}}">{{.Repository}}</a> › {{.Ref}} · <a href="/console/{{.Repository}}">history</a></nav>
+<nav class="crumbs"><a href="/">Home</a> › <a href="/repo/{{path .Repository}}">{{.Repository}}</a> › {{.Ref}} · <a href="/console/{{.Repository}}">history</a></nav>
 <section id="issue-head" data-refresh>
-<h2>{{.Ref}} {{.Title}} <span class="badge word">{{.Word}}</span></h2>
+<h2>{{.Ref}} {{.LevelIssue.Title}} <span class="badge word">{{.Word}}</span></h2>
 <p class="state-sentence">{{if .Sentence}}{{.Sentence}} <span class="muted">— {{.Writer}}, {{.Ago .SentenceAt}} ago</span>{{else}}<span class="muted">No sentence yet; the forge's title stands.</span>{{end}}</p>
 <p class="refs">{{range .Refs}}<span class="badge ref-{{.Kind}}">{{.Kind}} {{.Name}}{{with .Note}} · {{.}}{{end}}</span> {{end}}{{range .Labels}}<span class="badge label">{{.}}</span> {{end}}{{with .Milestone}}<span class="badge">milestone {{.}}</span> {{end}}{{with .Author}}<span class="muted">opened by {{.}} {{$.Ago $.Opened}} ago</span>{{end}}</p>
 </section>

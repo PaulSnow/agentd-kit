@@ -224,7 +224,7 @@ func TestIssueStepsEveryEntry(t *testing.T) {
 	if strings.Contains(body, "Step a") || !strings.Contains(body, "Step t") || !strings.Contains(body, `href="?steps=all">every entry`) {
 		t.Fatal("the latest steps, with every entry behind a link")
 	}
-	if body := owner(t, u, "/repo/widgets/issue/6?steps=all"); !strings.Contains(body, "Step a") || !strings.Contains(body, "Opened") && !strings.Contains(body, "Retitled on the forge: Typo in the help page") {
+	if body := owner(t, u, "/repo/widgets/issue/6?steps=all"); !strings.Contains(body, "Step a") || !strings.Contains(body, "Retitled on the forge: Typo in the help page") {
 		t.Fatal("every entry")
 	}
 }
@@ -240,5 +240,30 @@ func TestLevelPagesCallNoModel(t *testing.T) {
 	}
 	if n := claudeCalls(t, dir); n != 0 {
 		t.Fatalf("%d model calls from page loads", n)
+	}
+}
+
+// A card or a step whose words match a confidential pattern is withheld
+// on the issue page, as the console withholds it; a loop step shows once;
+// a repository's name may hold a slash.
+func TestIssueLevelScreensAndDedupes(t *testing.T) {
+	f := newLevelsFixture(t)
+	f.cfg.ConfidentialPatterns = []string{"(?i)256 MB"}
+	u, _ := testUI(t, UIConfig{}, f.src)
+	body := owner(t, u, "/repo/widgets/issue/5")
+	if strings.Contains(body, "256 MB") || !strings.Contains(body, "withheld") || !strings.Contains(body, `name="entry" value="w:wa1"`) {
+		t.Fatalf("not withheld:\n%s", body)
+	}
+	if n := strings.Count(owner(t, u, "/repo/widgets/issue/4"), "!9: review round 1 started."); n != 1 {
+		t.Fatalf("the loop step shows %d times", n)
+	}
+	for path, want := range map[string]struct {
+		repo string
+		n    int
+		ok   bool
+	}{"/repo/a/b": {"a/b", 0, true}, "/repo/a/b/issue/3": {"a/b", 3, true}, "/repo/w/issue/x": {"", 0, false}, "/repo/": {"", 0, false}, "/repo/w/": {"", 0, false}} {
+		if repo, n, ok := levelPath(path); repo != want.repo || n != want.n || ok != want.ok {
+			t.Errorf("%s: %q %d %v", path, repo, n, ok)
+		}
 	}
 }

@@ -54,22 +54,14 @@ func (p *uiIssuePage) ScopeNote() string {
 func (u *UI) levelSource(repo string, now time.Time, fn func(src *uiSource, cfg *Config, st *LogState, ds []UIDecision)) (bool, error) {
 	var pick *uiSource
 	for _, src := range u.sources {
-		if _, ok := src.cfg.Repositories[repo]; !ok || src.st.Mode != ModeLive && src.st.Mode != "" {
+		if _, ok := src.cfg.Repositories[repo]; !ok || src.st.Mode != ModeLive || src.echo {
 			continue
 		}
 		if pick == nil || looped(src.cfg.Repositories[repo]) && !looped(pick.cfg.Repositories[repo]) {
 			pick = src
 		}
 	}
-	if pick == nil {
-		for _, src := range u.sources {
-			if _, ok := src.cfg.Repositories[repo]; ok {
-				pick = src
-				break
-			}
-		}
-	}
-	if pick == nil {
+	if pick == nil { // only a live run's index is the forge's, and takes a form
 		return false, nil
 	}
 	pick.mu.Lock()
@@ -117,19 +109,18 @@ func (u *UI) issueView(repo string, n int, all bool, now time.Time) (*uiIssuePag
 
 // levelPath splits /repo/{repo}[/issue/{N}] into the repository and the
 // issue's number, 0 for the repository's page; ok is false for any other
-// path.
+// path. A repository's name may hold a slash, as the console's may.
 func levelPath(path string) (repo string, n int, ok bool) {
 	rest := strings.TrimPrefix(path, "/repo/")
-	parts := strings.Split(rest, "/")
-	switch {
-	case len(parts) == 1 && parts[0] != "":
-		return parts[0], 0, true
-	case len(parts) == 3 && parts[0] != "" && parts[1] == "issue":
-		n, err := strconv.Atoi(parts[2])
+	if i := strings.LastIndex(rest, "/issue/"); i > 0 {
+		n, err := strconv.Atoi(rest[i+len("/issue/"):])
 		if err != nil || n <= 0 {
 			return "", 0, false
 		}
-		return parts[0], n, true
+		return rest[:i], n, true
 	}
-	return "", 0, false
+	if rest == "" || strings.HasSuffix(rest, "/") {
+		return "", 0, false
+	}
+	return rest, 0, true
 }
