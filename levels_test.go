@@ -416,3 +416,43 @@ func TestLevelsCLI(t *testing.T) {
 		t.Errorf("a repository named ask: %v %v", ok, err)
 	}
 }
+
+// The CLI's flags may come anywhere a user writes them: --entry after
+// another flag, and agentd issue's flags after the issue; a flag written
+// after the text is refused, not taken as words; --now for a session that
+// works no issue is refused; the conversation is screened as the page's;
+// a view of a log that does not exist fails.
+func TestLevelsCLIFlags(t *testing.T) {
+	f := newLevelsFixture(t)
+	cfgPath := levelsCLI(t, f)
+	var out bytes.Buffer
+	if ok, err := levelConsoleCmd([]string{"--config", cfgPath, "reply", "--choice", "decline", "--entry", "w:wa1"}, &out); !ok || err != nil {
+		t.Fatalf("--entry second: %v %v", ok, err)
+	}
+	if ok, err := levelConsoleCmd([]string{"--config", cfgPath, "ask", "widgets#4", "Push", "it", "--now"}, io.Discard); !ok || err == nil || !strings.Contains(err.Error(), "put the flags first") {
+		t.Fatalf("a flag after the text: %v %v", ok, err)
+	}
+	if err := issueCmd([]string{"widgets", "6", "--config", cfgPath, "--all"}, &out); err != nil || !strings.Contains(out.String(), "#6 Typo in the help page") {
+		t.Fatalf("issue flags after the issue: %v\n%s", err, out.String())
+	}
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Sessions["w9"] = Session{Workdir: cfg.Sessions["w4"].Workdir, Cwd: cfg.Sessions["w4"].Cwd, Repository: "widgets"}
+	if err := consoleMessageCmd(cfg, []string{"--to", "w9", "--now", "hi"}, io.Discard); err == nil || !strings.Contains(err.Error(), "works no issue") {
+		t.Fatalf("--now with no issue: %v", err)
+	}
+	talk := screenTalk(&Config{ConfidentialPatterns: []string{"(?i)secret"}}, []ScopeEntry{{Text: "the secret plan", Answer: "a secret answer"}})
+	if talk[0].Text != withheldMessage || talk[0].Answer != withheldMessage {
+		t.Fatalf("talk %+v", talk)
+	}
+	missing := *cfg
+	missing.EventLog = filepath.Join(t.TempDir(), "none.jsonl")
+	if err := levelCmd(&missing, "widgets", nil, io.Discard); err == nil {
+		t.Fatal("a view of a missing log printed")
+	}
+	if _, err := os.Stat(missing.EventLog); err == nil {
+		t.Fatal("a view created a log")
+	}
+}

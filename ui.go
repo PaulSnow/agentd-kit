@@ -1018,7 +1018,7 @@ func (u *UI) serveReply(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("name home, a repository or REPO#N, and write at most %d bytes", maxReply), http.StatusBadRequest)
 			return
 		}
-		if err := src.scopeReply(c, text, r.PostForm.Get("now") != "", files); err != nil {
+		if _, err := src.scopeReply(c, text, r.PostForm.Get("now") != "", files); err != nil {
 			http.Error(w, "the message was not recorded: "+err.Error(), http.StatusBadRequest)
 			return
 		}

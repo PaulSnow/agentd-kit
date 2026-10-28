@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,7 +51,7 @@ func levelCmd(cfg *Config, repo string, args []string, out io.Writer) error {
 	if _, ok := cfg.Repositories[repo]; !ok {
 		return fmt.Errorf("no repository %q", repo)
 	}
-	log, _, err := openLoaded(cfg.EventLog)
+	log, err := openView(cfg)
 	if err != nil {
 		return err
 	}
@@ -74,7 +75,7 @@ func levelCmd(cfg *Config, repo string, args []string, out io.Writer) error {
 		printIssueBox(out, p, v, *sortBy, *filter)
 		fmt.Fprintln(out)
 		printRequestBox(out, p, v.Requests)
-		if talk := src.st.scopeConversation(repo, scopeShown); len(talk) > 0 {
+		if talk := screenTalk(c, src.st.scopeConversation(repo, scopeShown)); len(talk) > 0 {
 			fmt.Fprintln(out)
 			printTalk(out, p, talk)
 		}
@@ -132,6 +133,61 @@ func printRequestBox(w io.Writer, p uiPage, rs []LevelRequest) {
 	tw.Flush()
 }
 
+// openView opens the configuration's log as the UI does, for a view: one
+// that does not exist is an error, never a new empty log.
+func openView(cfg *Config) (*Log, error) {
+	if _, err := os.Stat(cfg.EventLog); err != nil {
+		return nil, fmt.Errorf("the event log: %w", err)
+	}
+	return OpenLog(cfg.EventLog)
+}
+
+// screenTalk screens a conversation as the page's console box does.
+func screenTalk(cfg *Config, talk []ScopeEntry) []ScopeEntry {
+	secret := confidentialMatcher(cfg)
+	for k := range talk {
+		if secret(talk[k].Text) {
+			talk[k].Text = withheldMessage
+		}
+		if secret(talk[k].Answer) {
+			talk[k].Answer = withheldMessage
+		}
+	}
+	return talk
+}
+
+// textFlags refuses a flag of fs written among the text, which flag
+// parsing would take as words.
+func textFlags(fs *flag.FlagSet) error {
+	for _, a := range fs.Args() {
+		name, _, _ := strings.Cut(strings.TrimLeft(a, "-"), "=")
+		if strings.HasPrefix(a, "-") && fs.Lookup(name) != nil {
+			return fmt.Errorf("%s comes after the text: put the flags first", a)
+		}
+	}
+	return nil
+}
+
+// flagsFirst moves the flags of args before the positional arguments, so
+// a flag after them is read as one; --config and --log take the argument
+// after them unless written with =.
+func flagsFirst(args []string) []string {
+	var flags, rest []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !strings.HasPrefix(a, "-") || a == "-" {
+			rest = append(rest, a)
+			continue
+		}
+		flags = append(flags, a)
+		if name := strings.TrimLeft(a, "-"); (name == "config" || name == "log") && i+1 < len(args) {
+			flags = append(flags, args[i+1])
+			i++
+		}
+	}
+	return append(flags, rest...)
+}
+
 // printTalk prints a scope's conversation, newest last.
 func printTalk(w io.Writer, p uiPage, talk []ScopeEntry) {
 	fmt.Fprintln(w, "Console")
@@ -173,17 +229,11 @@ func printHistory(w io.Writer, p uiPage, st *LogState, repo string) {
 func issueCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("issue", flag.ContinueOnError)
 	all := fs.Bool("all", false, "every step, not the latest only")
-	cfg, _, err := loadConfigFlag(fs, args)
+	cfg, _, err := loadConfigFlag(fs, flagsFirst(args))
 	if err != nil {
 		return err
 	}
 	rest := fs.Args()
-	if len(rest) == 3 && strings.HasPrefix(rest[2], "-") {
-		if err := fs.Parse(rest[2:]); err != nil {
-			return err
-		}
-		rest = rest[:2]
-	}
 	if len(rest) != 2 {
 		return errors.New("usage: agentd issue [--all] REPO N")
 	}
@@ -194,7 +244,7 @@ func issueCmd(args []string, out io.Writer) error {
 	if _, ok := cfg.Repositories[rest[0]]; !ok {
 		return fmt.Errorf("no repository %q", rest[0])
 	}
-	log, _, err := openLoaded(cfg.EventLog)
+	log, err := openView(cfg)
 	if err != nil {
 		return err
 	}
@@ -210,7 +260,7 @@ func issueCmd(args []string, out io.Writer) error {
 		return fmt.Errorf("agentd knows nothing of %s#%d", rest[0], n)
 	}
 	printIssueLevel(out, uiPage{Now: now, loc: time.Local}, v)
-	if talk := src.st.scopeConversation(Scope{Repository: rest[0], Issue: n}.String(), scopeShown); len(talk) > 0 {
+	if talk := screenTalk(c, src.st.scopeConversation(Scope{Repository: rest[0], Issue: n}.String(), scopeShown)); len(talk) > 0 {
 		fmt.Fprintln(out)
 		printTalk(out, uiPage{Now: now, loc: time.Local}, talk)
 	}
@@ -283,6 +333,9 @@ func consoleAskCmd(cfg *Config, args []string, out io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if err := textFlags(fs); err != nil {
+		return err
+	}
 	if fs.NArg() < 2 {
 		return errors.New("usage: agentd console ask [--now] home|REPO|REPO#N TEXT...")
 	}
@@ -295,10 +348,11 @@ func consoleAskCmd(cfg *Config, args []string, out io.Writer) error {
 		return err
 	}
 	defer log.Close()
-	if err := cliSource(cfg, log).scopeReply(c, strings.Join(fs.Args()[1:], " "), *now, nil); err != nil {
+	what, err := cliSource(cfg, log).scopeReply(c, strings.Join(fs.Args()[1:], " "), *now, nil)
+	if err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "recorded at %s\n", c)
+	fmt.Fprintf(out, "recorded at %s, %s\n", c, what)
 	return nil
 }
 
@@ -307,12 +361,15 @@ func consoleAskCmd(cfg *Config, args []string, out io.Writer) error {
 // words record it.
 func consoleEntryCmd(cfg *Config, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("console reply", flag.ContinueOnError)
-	entry := fs.String("entry", "", "the entry's id: b:ITEM, w:ITEM, x:ID, d:SESSION:ID, n:SESSION:KIND, i:ID or m:ID")
+	entry := fs.String("entry", "", "the entry's id: b:ITEM, w:ITEM, x:ID, d:SESSION:ID, n:SESSION:KIND or i:ID; any other (m:, f:, e:, p:, o:) with --repository")
 	choice := fs.String("choice", "", "the option chosen")
 	yes := fs.Bool("yes", false, "answer a yes/no decision yes")
 	no := fs.Bool("no", false, "answer a yes/no decision no")
 	repo := fs.String("repository", "", "the entry's repository, when Go cannot tell it from the entry")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := textFlags(fs); err != nil {
 		return err
 	}
 	if *entry == "" || *yes && *no || fs.NArg() == 0 && *choice == "" && !*yes && !*no {
@@ -386,6 +443,9 @@ func consoleMessageCmd(cfg *Config, args []string, out io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if err := textFlags(fs); err != nil {
+		return err
+	}
 	if *to == "" || fs.NArg() == 0 {
 		return errors.New("usage: agentd console message --to SESSION [--now] TEXT...")
 	}
@@ -417,11 +477,33 @@ func consoleMessageCmd(cfg *Config, args []string, out io.Writer) error {
 		fmt.Fprintf(out, "recorded for %s, %s#%d, %s\n", *to, sess.Repository, sess.Issue, when)
 		return nil
 	}
+	if *now {
+		return fmt.Errorf("%s works no issue, so its message goes as its own box sends it, when it can take a line: leave out --now", *to)
+	}
 	if err := UIInstruction(c, log, time.Now(), sess.Repository, *to, text, nil); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "recorded for %s\n", *to)
 	return nil
+}
+
+// entryFlag says whether args, after reply, hold --entry among the flags
+// before the text.
+func entryFlag(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !strings.HasPrefix(a, "-") {
+			return false
+		}
+		name, _, value := strings.Cut(strings.TrimLeft(a, "-"), "=")
+		switch {
+		case name == "entry":
+			return true
+		case (name == "choice" || name == "repository") && !value:
+			i++ // its value
+		}
+	}
+	return false
 }
 
 // levelConsoleCmd takes agentd console's level forms, and says whether
@@ -437,17 +519,15 @@ func levelConsoleCmd(args []string, out io.Writer) (bool, error) {
 	if len(rest) == 0 {
 		return false, nil
 	}
-	for _, sub := range consoleSubcommands {
-		if _, ok := cfg.Repositories[sub]; ok {
-			return true, fmt.Errorf("repository %q is named like agentd console's %s: rename it in the configuration", sub, sub)
-		}
+	if _, ok := cfg.Repositories[rest[0]]; ok && contains(consoleSubcommands, rest[0]) {
+		return true, fmt.Errorf("repository %q is named like agentd console's %s: rename it in the configuration", rest[0], rest[0])
 	}
 	switch {
 	case rest[0] == "ask":
 		return true, consoleAskCmd(cfg, rest[1:], out)
 	case rest[0] == "message":
 		return true, consoleMessageCmd(cfg, rest[1:], out)
-	case rest[0] == "reply" && len(rest) > 1 && strings.HasPrefix(strings.TrimLeft(rest[1], "-"), "entry"):
+	case rest[0] == "reply" && entryFlag(rest[1:]):
 		return true, consoleEntryCmd(cfg, rest[1:], out)
 	case !contains(consoleSubcommands, rest[0]):
 		if _, ok := cfg.Repositories[rest[0]]; ok {
