@@ -469,6 +469,12 @@ func (s *Supervisor) driveItems(now time.Time) {
 		if it.terminal() {
 			continue
 		}
+		// Once, even after a stop between the item's opening and this.
+		if in := s.st.Instructions[it.Instruction]; in != nil {
+			if s.toldHandTo(in, it); s.halt != nil {
+				return
+			}
+		}
 		if s.driveItem(it, now); s.halt != nil {
 			return
 		}
@@ -801,6 +807,30 @@ func (s *Supervisor) assignItem(it *WorkItem, now time.Time) {
 	holders := sessionsOf(s.st.Runtime, repo)
 	s.escalateItem(it, "start:"+shortHash(HashPane(digits.ReplaceAllString(why, "N")))[:8], fmt.Sprintf("agentd cannot start a session for %s: %s. Holding places: %s. End one, and agentd starts it.",
 		it.ID, why, strings.Join(holders, ", ")))
+}
+
+// toldHandTo tells the owner once, on the repository's console, that
+// the session in's agent handed it to is not running, and that Go opened
+// item it from the message instead (#68).
+func (s *Supervisor) toldHandTo(in *Instruction, it *WorkItem) {
+	a := in.AgentLast
+	if a == nil || a.HandToDropped == "" || it == nil {
+		return
+	}
+	did := "starts a session for it as soon as one can start"
+	switch {
+	case it.Designer:
+		did = "has it designed first: the design comes to you on its entry"
+	case in.Failed != "":
+		did = "could not start a session for it yet: " + oneLine(in.Failed, 300)
+	case in.Session != "":
+		did = "started " + in.Session + " for it"
+	}
+	which := "which is not running"
+	if s.doneAlive(a.HandToDropped) {
+		which = "which has finished and takes no new work"
+	}
+	s.escalateItem(it, "handto", fmt.Sprintf("The thread agent named %s, %s; agentd opened %s from your message and %s.", a.HandToDropped, which, it.ID, did))
 }
 
 // followItem sends the item's message, not yet delivered, to the

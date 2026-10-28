@@ -126,8 +126,8 @@ func TestThreadAgentContextIsItsThread(t *testing.T) {
 
 // The agent hands work that belongs to a running session over: the
 // owner's record goes to that session, with the entry, as any other. A
-// hand-over to no running session is refused; the agent is started
-// once more, and the response then fails, saying why.
+// hand-over to no running session is dropped: Go opens the message's
+// work itself, starts a session for it and tells the owner (#68).
 func TestThreadAgentHandsOverOrFails(t *testing.T) {
 	dir := fakeClaude(t)
 	h := sessionsHarness(t)
@@ -159,9 +159,10 @@ func TestThreadAgentHandsOverOrFails(t *testing.T) {
 	}
 	h2.ticks(4, time.Minute)
 	in = h2.instruction(t)
-	if n := claudeCalls(t, dir) - before; n != agentRuns || in.Failed == "" || !strings.Contains(in.Failed, "no running session") {
+	if n := claudeCalls(t, dir) - before; n != 1 || in.Failed != "" {
 		t.Fatalf("%d runs; instruction = %+v", n, in)
 	}
+	h2.handToTold(in, "nobody", false)
 }
 
 // A chat session an older agentd started is ended once nothing of the

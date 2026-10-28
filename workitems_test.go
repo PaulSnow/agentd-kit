@@ -663,6 +663,9 @@ func TestWorkHandedToFinishedSessionStartsOne(t *testing.T) {
 	if n := h.count(KindAction, ActReopen, w1); n != 0 {
 		t.Fatalf("%s reopened %d times", w1, n)
 	}
+	if told := h.messages("The thread agent named " + w1 + ", which has finished and takes no new work; agentd opened " + it.ID); len(told) != 1 {
+		t.Fatalf("told %q", told)
+	}
 }
 
 // At the repository's max, an item handed to a finished session waits,

@@ -207,10 +207,12 @@ func TestHandToDoneAliveReopens(t *testing.T) {
 	}
 }
 
-// A hand-over to a finished session whose tmux session is gone fails at
-// once, saying so, and the entry offers the next step: start a session
-// for it, or send it to a session that takes messages.
-func TestHandToDoneGoneFailsWithNextStep(t *testing.T) {
+// A hand-over to a finished session whose tmux session is gone drops no
+// message: Go opens its item from it, starts a session for it and tells
+// the owner on the console (#68). A message that failed otherwise still
+// offers the next step: end a session to start one for it, or send it to
+// a session that takes messages.
+func TestHandToDoneGoneOpensItem(t *testing.T) {
 	dir := fakeClaude(t)
 	h := sessionsHarness(t)
 	w1 := h.startSession("issue-1", KindWork, 1)
@@ -227,14 +229,29 @@ func TestHandToDoneGoneFailsWithNextStep(t *testing.T) {
 	}
 	h.ticks(4, time.Minute)
 	in := h.instruction(t)
-	if n := claudeCalls(t, dir) - before; n != 1 || !strings.Contains(in.Failed, "finished and whose tmux session is gone") {
+	if n := claudeCalls(t, dir) - before; n != 1 || in.Failed != "" {
 		t.Fatalf("%d runs; instruction = %+v", n, in)
 	}
 	if x := agentInput(t, dir, before+1); len(x.Finished) != 1 || x.Finished[0].Alive {
 		t.Fatalf("finished = %+v", x.Finished)
 	}
-	d := nextDecision(h.sup.cfg, h.sup.st, in, h.clock.Now())
-	if d == nil || !contains(decisionOptions(*d), nextStart) || !contains(decisionOptions(*d), nextSend+"a") || contains(decisionOptions(*d), nextSend+w1) {
+	h.handToTold(in, w1, false)
+
+	// Another message fails: its entry offers the next step.
+	if err := reply(h, "widgets", "Tag it too."); err != nil {
+		t.Fatal(err)
+	}
+	h.sup.ownerRecords()
+	var other *Instruction
+	for _, x := range h.sup.st.Instructions {
+		if x.Text == "Tag it too." {
+			other = x
+		}
+	}
+	h.sup.emit("", Event{Kind: KindRoute, Route: &RoutePayload{Instruction: other.ID, Step: RouteFail, Reason: "agentd could not start a session for it"}})
+	// The repository is at its max: a session is ended to start one.
+	d := nextDecision(h.sup.cfg, h.sup.st, other, h.clock.Now())
+	if d == nil || !contains(decisionOptions(*d), nextEnd+w1) || !contains(decisionOptions(*d), nextSend+"a") || contains(decisionOptions(*d), nextSend+w1) {
 		t.Fatalf("next step = %+v", d)
 	}
 	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
@@ -245,18 +262,80 @@ func TestHandToDoneGoneFailsWithNextStep(t *testing.T) {
 	}
 	shown := false
 	for _, e := range v.Entries {
-		shown = shown || e.Entry == entryNext+in.ID && e.Open && e.Decision != nil
+		shown = shown || e.Entry == entryNext+other.ID && e.Open && e.Decision != nil
 	}
 	if !shown {
 		t.Fatalf("the page offers no next step: %+v", v.Entries)
 	}
 	// The owner sends it to a: it goes there as a new message.
-	if err := src.respond("widgets", entryNext+in.ID, "", "", &AnswerPayload{Choice: nextSend + "a"}, nil); err != nil {
+	if err := src.respond("widgets", entryNext+other.ID, "", "", &AnswerPayload{Choice: nextSend + "a"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	h.ticks(2, time.Minute)
-	if in = h.sup.st.Instructions[in.ID]; in.Session != "a" || in.Failed != "" {
-		t.Fatalf("after the next step: %+v", in)
+	if other = h.sup.st.Instructions[other.ID]; other.Session != "a" || other.Failed != "" {
+		t.Fatalf("after the next step: %+v", other)
+	}
+}
+
+// An instruction whose thread agent hands it to a stopped session, with
+// no work named, is not lost: Go opens a work item from the
+// instruction's words, starts a session for it, or has it designed when
+// design is on, and says so once on the repository's console (#68).
+func TestHandToStoppedSessionOpensItemAndTellsOwner(t *testing.T) {
+	for _, design := range []bool{false, true} {
+		t.Run(map[bool]string{false: "start", true: "design"}[design], func(t *testing.T) {
+			dir := fakeClaude(t)
+			h := sessionsHarness(t)
+			if design {
+				h = designerHarness(t, false)
+			}
+			w1 := h.startSession("issue-1", KindWork, 1)
+			h.ticks(2, time.Minute)
+			h.alive(w1, "w1 works")
+			h.ticks(1, time.Minute)
+			tr := h.sup.track(w1)
+			tr.State, tr.Stopped = Stopped, "its spend cap"
+			h.tmux.alive[w1] = false
+			before := claudeCalls(t, dir)
+			claudeAnswers(t, dir, before+1, agentOut("Handed to "+w1+", which knows the step.", w1))
+			claudeAnswers(t, dir, before+2, designOut("Ship step 1b of the plan", false, 0))
+			if err := reply(h, "widgets", "Ship step 1b of the plan too."); err != nil {
+				t.Fatal(err)
+			}
+			h.ticks(5, time.Minute)
+			in := h.instruction(t)
+			if in.Failed != "" {
+				t.Fatalf("instruction = %+v", in)
+			}
+			h.handToTold(in, w1, design)
+		})
+	}
+}
+
+// handToTold checks that in, which its agent handed to the session that
+// does not run, has an open item from its words, a session started for
+// it, or its design under way, and one console message saying so.
+func (h *harness) handToTold(in *Instruction, gone string, design bool) {
+	h.t.Helper()
+	it := h.sup.st.Work[workID(in.ID)]
+	if it == nil || it.terminal() || !strings.Contains(in.Text, it.Title) {
+		h.t.Fatalf("no open item from the instruction: %+v", it)
+	}
+	if design {
+		if !it.Designer || it.Session != "" {
+			h.t.Fatalf("not designed: item = %+v", it)
+		}
+	} else if it.Session == "" || it.Session == gone || in.Session != it.Session || !in.Started {
+		h.t.Fatalf("no session started for it: item = %+v, instruction = %+v", it, in)
+	}
+	var told []*MessagePayload
+	for _, e := range h.events() {
+		if e.Kind == KindMessage && e.Message.Console == "widgets" && strings.Contains(e.Message.Text, gone) {
+			told = append(told, e.Message)
+		}
+	}
+	if len(told) != 1 || !strings.Contains(told[0].Text, it.ID) || !strings.Contains(told[0].Text, "not running") || told[0].Kind != "info" {
+		h.t.Fatalf("console messages naming %s: %+v", gone, told)
 	}
 }
 
@@ -306,5 +385,34 @@ func TestOldFailureOffersNoNextStep(t *testing.T) {
 	}
 	if nextDecision(h.sup.cfg, h.sup.st, in, h.clock.Now().Add(nextSpan+time.Hour)) != nil {
 		t.Fatal("an old failure offers a next step")
+	}
+}
+
+// A hand-over to a name that matches a confidential pattern, or runs over
+// lines, is logged and told as "a session", one line (#68).
+func TestHandToDroppedNameScreened(t *testing.T) {
+	dir := fakeClaude(t)
+	h := sessionsHarness(t)
+	h.cfg.ConfidentialPatterns = []string{`(?i)secret-project`}
+	if err := h.cfg.finish(h.dir); err != nil {
+		t.Fatal(err)
+	}
+	h.restart(false)
+	claudeAnswers(t, dir, 0, agentOut("Handed over.", "secret-project\nsession"))
+	if err := reply(h, "widgets", "Paint it red."); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(4, time.Minute)
+	in := h.instruction(t)
+	if in.Failed != "" || in.AgentLast == nil || in.AgentLast.HandToDropped != "a session" {
+		t.Fatalf("instruction = %+v, agent = %+v", in, in.AgentLast)
+	}
+	if told := h.messages("The thread agent named a session, which is not running"); len(told) != 1 {
+		t.Fatalf("told %q", told)
+	}
+	for _, e := range h.events() {
+		if b, _ := json.Marshal(e); strings.Contains(string(b), "secret-project") && e.Kind != KindInstruction {
+			t.Fatalf("logged: %s", b)
+		}
 	}
 }

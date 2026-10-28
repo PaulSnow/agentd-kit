@@ -164,6 +164,10 @@ type AgentPayload struct {
 	// By is "agentd" on the outcome of a change Go carried out on the ops
 	// console (#63), which no agent wrote.
 	By string `json:"by,omitempty"`
+	// HandToDropped is the session the agent handed it to that does not
+	// run, or finished while work was asked: Go opens the work itself
+	// and tells the owner (#68).
+	HandToDropped string `json:"hand_to_dropped,omitempty"`
 }
 
 // threadKey is the thread an instruction belongs to: the entry it
@@ -557,6 +561,18 @@ func (s *Supervisor) startThread(in *Instruction, repo, cwd string) {
 			if err == nil {
 				a, err = w.checkThreadAnswer(raw, running, finished, p)
 			}
+			// Handed to a session that is not running, with no work
+			// named: the work is the owner's message (#68).
+			if err == nil && p.HandToDropped != "" && p.Work == nil {
+				brief := "Do the owner's message here: the thread agent handed it to " + p.HandToDropped + ", which is not running, so agentd opened it as work."
+				if p.Answer != "" {
+					brief += " The agent's note, which may name that session: " + p.Answer
+				}
+				p.Work = &ThreadWork{Title: workTitleOf(in.Text), Brief: cutUTF8(brief, workBrief), DoneWhen: EndCheck{Kind: DoneOwner}}
+				if in.Withheld > 0 || w.confidentialMatch(p.Work.Title) > 0 {
+					p.Work.Title = "owner work"
+				}
+			}
 		}
 		// The facts the session started for the work is briefed with are
 		// those the agent was given.
@@ -626,12 +642,14 @@ func (s *Supervisor) checkThreadAnswer(raw json.RawMessage, running, finished ma
 	}
 	if a.HandTo = strings.TrimSpace(a.HandTo); a.HandTo != "" {
 		switch {
-		case a.Work != nil && finished[a.HandTo]:
-			// Work is an item's, which a finished session never takes:
-			// Go starts a session for it (#68).
-			a.HandTo = ""
-		case !running[a.HandTo]:
-			return a, handToError(a.HandTo, finished)
+		case a.Work != nil && finished[a.HandTo], !running[a.HandTo]:
+			// Work is an item's, which a finished session never takes;
+			// and no owner's message goes to a session that is not
+			// running: Go opens its work itself (#68).
+			p.HandToDropped, a.HandTo = oneLine(a.HandTo, 120), ""
+			if s.confidentialMatch(p.HandToDropped) > 0 {
+				p.HandToDropped = "a session"
+			}
 		default:
 			p.HandTo = a.HandTo
 		}
@@ -686,9 +704,8 @@ func (s *Supervisor) retryThread(in *Instruction, repo, cwd string, now time.Tim
 	case cwd == "":
 		s.routeStep(in, RouteFail, "", false, repo+" has no clone or session worktree here for a thread agent to read any more")
 		return
-	case strings.HasPrefix(in.AgentError, "the thread's input is"), strings.HasPrefix(in.AgentError, errHandToFinished):
-		// Too large to send, and as large the next time; or handed to a
-		// session that is gone, which the owner's next step can change.
+	case strings.HasPrefix(in.AgentError, "the thread's input is"):
+		// Too large to send, and as large the next time.
 		s.routeStep(in, RouteFail, "", false, "the thread agent failed: "+in.AgentError)
 		return
 	}
