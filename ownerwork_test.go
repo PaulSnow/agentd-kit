@@ -206,6 +206,21 @@ func TestNextStepDropSendsNothing(t *testing.T) {
 		src.st.nextAnswer(src.st.Instructions[in.ID]) == nil {
 		t.Fatal("the dropped next step is still open")
 	}
+	// Its work is dropped with it: no item drives it to a session once
+	// a place frees.
+	if it := h.sup.st.Work[workID(in.ID)]; it != nil && !it.terminal() {
+		t.Fatalf("the item of a dropped message is open: %+v", it)
+	}
+	h.sup.emit(w1, Event{Kind: KindSession, Mode: ModeShared, Runtime: &RuntimePayload{ID: newIntentID(), Action: SessionEnd, Repository: "widgets", By: "owner"}})
+	h.ticks(3, time.Minute)
+	for n, r := range h.sup.st.Runtime {
+		if r.Owner == in.ID {
+			t.Fatalf("%s was started for the dropped message", n)
+		}
+	}
+	if in = h.sup.st.Instructions[in.ID]; in.Session != "" || !in.Delivered.IsZero() {
+		t.Fatalf("the dropped message went on: %+v", in)
+	}
 }
 
 // A session that finished and whose tmux session still runs may be handed
