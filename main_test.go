@@ -150,10 +150,14 @@ func TestConfigAfterSubcommand(t *testing.T) {
 		"ask --log=L home hi -config P": "--log=L -config P ask home hi",
 		"post lanterns -- --config P":   "post lanterns -- --config P",
 		"post lanterns hi --config":     "post lanterns hi --config",
+		"reply lanterns try --log L":    "--log L reply lanterns try",
 	} {
 		if got := strings.Join(configFirst(strings.Fields(args)), " "); got != want {
 			t.Errorf("%q: %q, want %q", args, got, want)
 		}
+	}
+	if !strings.Contains(usageText, "quote it with the words around it") {
+		t.Error("the usage does not say how to write --config as text")
 	}
 	if _, err := runCommand("no-such-command", nil); err != nil {
 		t.Fatal(err)
