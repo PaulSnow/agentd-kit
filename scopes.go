@@ -40,14 +40,21 @@ func (c Scope) String() string {
 	return c.Repository
 }
 
+// check refuses a scope at a repository named home, in any case, which the
+// config refuses too: its String would be the home level's, or differ
+// from it only in case.
+func (c Scope) check() error {
+	if strings.EqualFold(c.Repository, ScopeHome) {
+		return fmt.Errorf("no repository may be named %s: it is the home level's scope", ScopeHome)
+	}
+	return nil
+}
+
 // ParseScope reads home, REPO or REPO#N, the repository one cfg holds.
 func ParseScope(cfg *Config, s string) (Scope, error) {
 	s = strings.TrimSpace(s)
-	if _, ok := cfg.Repositories[ScopeHome]; ok && s == ScopeHome {
-		return Scope{}, fmt.Errorf("a repository is named %s, so home is ambiguous: rename the repository", ScopeHome)
-	}
-	if s == "" || s == ScopeHome {
-		return Scope{}, nil
+	if s == "" || strings.EqualFold(s, ScopeHome) {
+		return Scope{}, nil // home, however it is written
 	}
 	repo, n := s, 0
 	if i := strings.LastIndex(s, "#"); i > 0 {
@@ -57,10 +64,14 @@ func ParseScope(cfg *Config, s string) (Scope, error) {
 		}
 		repo, n = s[:i], v
 	}
+	c := Scope{Repository: repo, Issue: n}
+	if err := c.check(); err != nil {
+		return Scope{}, err
+	}
 	if _, ok := cfg.Repositories[repo]; !ok {
 		return Scope{}, fmt.Errorf("no repository %q", repo)
 	}
-	return Scope{Repository: repo, Issue: n}, nil
+	return c, nil
 }
 
 // homeQuestion says whether p was written at home naming no repository:
@@ -166,6 +177,9 @@ func namedRepository(cfg *Config, text string) string {
 func ScopeInstruction(cfg *Config, log *Log, at time.Time, c Scope, to, text string, now bool, files []stagedAttachment) error {
 	if strings.TrimSpace(text) == "" && len(files) == 0 {
 		return errors.New("an empty instruction")
+	}
+	if err := c.check(); err != nil {
+		return err
 	}
 	repo := c.Repository
 	if c.Repository == "" {

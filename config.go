@@ -579,6 +579,9 @@ func (c *Config) finish(base string) error {
 		errs = append(errs, fmt.Errorf("policies.trust_prompt.pattern: %w", err))
 	}
 	for name, repo := range c.Repositories {
+		if strings.EqualFold(name, ScopeHome) {
+			errs = append(errs, fmt.Errorf("repositories.%s: %s is the home level's scope, so no repository may be named it: rename the repository", name, ScopeHome))
+		}
 		if repo.Forge != "gitlab" && repo.Forge != "github" {
 			errs = append(errs, fmt.Errorf("repositories.%s.forge must be gitlab or github", name))
 		}
