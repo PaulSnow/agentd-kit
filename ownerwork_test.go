@@ -157,6 +157,57 @@ func TestOwnerWorkAtMaxNamesHolders(t *testing.T) {
 	}
 }
 
+// A next step offers drop beside the others: the owner's choice sends
+// nothing, starts and ends nothing, says nothing was sent under the
+// answer, and closes the entry.
+func TestNextStepDropSendsNothing(t *testing.T) {
+	dir := fakeClaude(t)
+	h := sessionsHarness(t)
+	w1 := h.startSession("issue-1", KindWork, 1)
+	w2 := h.startSession("issue-2", KindWork, 2)
+	h.ticks(1, time.Minute)
+	claudeAnswers(t, dir, 1, agentWork("agentd starts a session for it.", "Oil the hinges", "Oil the gate hinges."))
+	if err := reply(h, "widgets", "Oil the gate hinges."); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(2, time.Minute)
+	in := h.instruction(t)
+	d := nextDecision(h.sup.cfg, h.sup.st, in, h.clock.Now())
+	if d == nil || !contains(decisionOptions(*d), nextEnd+w1) || !contains(decisionOptions(*d), nextDrop) {
+		t.Fatalf("next step = %+v", d)
+	}
+	for _, o := range d.Options {
+		if o.Key == nextDrop && (o.Label != "Drop it" || o.Consequence != "nothing is sent") {
+			t.Fatalf("drop = %+v", o)
+		}
+	}
+	sessions := len(h.sup.st.Runtime)
+	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	src.now = h.clock.Now
+	if err := src.respond("widgets", entryNext+in.ID, "", "", &AnswerPayload{Choice: nextDrop}, nil); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(2, time.Minute)
+	in = h.sup.st.Instructions[in.ID]
+	_, has2 := h.sup.st.Runtime[w2]
+	if _, ok := h.sup.st.Runtime[w1]; !ok || !has2 || len(h.sup.st.Runtime) != sessions || in.Started || in.Session != "" {
+		t.Fatalf("after drop: instruction = %+v, sessions %d of %d", in, len(h.sup.st.Runtime), sessions)
+	}
+	said := ""
+	for _, r := range h.sup.st.Instructions {
+		if r.Re != nil && r.Re.ID == entryNext+in.ID && r.AgentLast != nil {
+			said = r.AgentLast.Answer
+		}
+	}
+	if said != "dropped; nothing was sent" {
+		t.Fatalf("the thread says %q", said)
+	}
+	if src.catchUp(); len(src.nextEntries(h.sup.cfg, "widgets", func(...string) bool { return false }, h.clock.Now())) != 1 ||
+		src.st.nextAnswer(src.st.Instructions[in.ID]) == nil {
+		t.Fatal("the dropped next step is still open")
+	}
+}
+
 // A session that finished and whose tmux session still runs may be handed
 // work: the agent is told it is alive, and Go takes the DONE off its
 // STATUS.md and types the message as into a running one.
