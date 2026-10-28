@@ -458,6 +458,9 @@ func repoSentence(v RepoLevel, now time.Time) string {
 	if !c.Last.IsZero() {
 		s += " Last change " + uiPage{Now: now}.Ago(c.Last) + " ago."
 	}
+	if c.Backfill != nil {
+		s += fmt.Sprintf(" Sentences being written, %d of %d done.", c.Backfill.Done, c.Backfill.Of)
+	}
 	return s
 }
 
