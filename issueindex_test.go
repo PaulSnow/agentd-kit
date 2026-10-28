@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -71,14 +72,98 @@ func indexHarness(t *testing.T) (*harness, *fakeForgeAPI) {
 	return h, api
 }
 
+// indexEvents are the index events naming an issue or request; an empty
+// first listing's event names none.
 func (h *harness) indexEvents() []IndexPayload {
 	var out []IndexPayload
 	for _, e := range h.events() {
-		if e.Kind == KindIndex {
+		if e.Kind == KindIndex && e.Index.Ref != "" {
 			out = append(out, *e.Index)
 		}
 	}
 	return out
+}
+
+// slowListing blocks a repository's issue listing until released, as a
+// forge that takes longer than poll.every to answer.
+type slowListing struct {
+	*fakeForgeAPI
+	path    string
+	release chan struct{}
+	once    sync.Once
+}
+
+func (f *slowListing) GitLab(path string) (APIResponse, error) {
+	if strings.Contains(path, f.path) {
+		f.once.Do(func() { <-f.release })
+	}
+	return f.fakeForgeAPI.GitLab(path)
+}
+
+func (f *slowListing) At(string) ForgeAPI { return f }
+
+// A listing counts from when it started, once it is done: one that took
+// longer than poll.every is followed at the next pass, not an interval
+// later, and none starts while it runs.
+func TestIndexListingCountsWhenDone(t *testing.T) {
+	h, api := indexHarness(t)
+	slow := &slowListing{fakeForgeAPI: api, path: "widgets/issues", release: make(chan struct{})}
+	h.sup.api = slow
+	listings := func() int {
+		api.mu.Lock()
+		defer api.mu.Unlock()
+		n := 0
+		for _, c := range api.calls {
+			if strings.Contains(c, "widgets/issues") {
+				n++
+			}
+		}
+		return n
+	}
+	h.sup.Pass() // the listing starts and hangs
+	h.clock.advance(time.Minute)
+	h.sup.Pass() // due, but the listing still runs
+	h.clock.advance(30 * time.Second)
+	close(slow.release)
+	h.sup.Wait()
+	if n := listings(); n != 1 {
+		t.Fatalf("%d listings while one ran", n)
+	}
+	h.sup.Pass()
+	h.sup.Wait()
+	if n := listings(); n != 2 {
+		t.Fatalf("%d listings: the one after a slow listing waited another interval", n)
+	}
+}
+
+// A first listing that finds nothing open is logged, so a restart does not
+// take the next listing for the first: an issue opened while agentd was
+// down is new, not quiet, and gets its idle sentence.
+func TestIndexEmptyFirstListingIsLogged(t *testing.T) {
+	h, api := indexHarness(t)
+	api.gitlab["widgets/issues?state=opened"] = `[]`
+	api.gitlab["widgets/merge_requests?state=opened"] = `[]`
+	h.ticks(1, time.Minute)
+	h.restart(false)
+	h.sup.api = api
+	if _, ok := h.sup.st.IndexRead["widgets"]; !ok {
+		t.Fatal("an empty first listing left no mark in the log")
+	}
+	api.mu.Lock()
+	api.gitlab["widgets/issues?state=opened"] = `[{"iid":4,"title":"Slow page","author":{"username":"ann"},"created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-02T00:00:00Z"}]`
+	api.mu.Unlock()
+	h.ticks(1, time.Minute)
+	ev := h.indexEvents()
+	if len(ev) != 1 || ev[0].First {
+		t.Fatalf("after a restart: %+v", ev)
+	}
+	if i := h.sup.st.Index["widgets"]["#4"]; i == nil || !i.Quiet.IsZero() {
+		t.Fatalf("the issue opened while agentd was down is quiet: %+v", i)
+	}
+	h.cfg.Jobs.Sentences.Enabled = true
+	if due := idleDue(h.cfg, h.sup.st, "widgets", h.clock.Now()); len(due) != 1 || due[0] != "#4" {
+		t.Fatalf("idle due %v", due)
+	}
 }
 
 // The first listing logs every open issue, marked first; a listing with
