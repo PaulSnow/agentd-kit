@@ -579,6 +579,12 @@ func TestClaimRefusedWhenDoneOlderOrForOtherItem(t *testing.T) {
 			if it.Session != "a" {
 				t.Fatalf("item = %+v", it)
 			}
+			// The message and the item are typed into a.
+			h.alive("a", "a works\n"+idleScreen)
+			h.ticks(2, time.Minute)
+			if in := h.sup.st.Instructions[it.Instruction]; in.Delivered.IsZero() {
+				t.Fatalf("not delivered: %+v", in)
+			}
 			path := filepath.Join(h.dir, "a", "STATUS.md")
 			switch c {
 			case "older":

@@ -630,6 +630,12 @@ func (s *Supervisor) finishedItem(it *WorkItem, status string, now time.Time) {
 	case it.Claimed.Before(it.Assigned) || it.Claim == "":
 		claim := itemMarks(it.ID, status).done
 		if claim == "" {
+			// A DONE that names not this item is this assignment's only
+			// when written after it, and naming no other item (#68).
+			if why := s.foreignDone(it, status); why != "" {
+				s.reopenItem(it, it.Session+" wrote DONE, not for "+it.ID+": "+why, status)
+				return
+			}
 			claim = it.Session + " wrote DONE"
 		}
 		if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepClaim, Session: it.Session, Note: claim}); s.halt != nil {
@@ -652,6 +658,28 @@ func (s *Supervisor) finishedItem(it *WorkItem, status string, now time.Time) {
 	default:
 		s.checkItem(it, now, true)
 	}
+}
+
+// doneLine is a line of STATUS.md that says an item is done.
+var doneLine = regexp.MustCompile(`(?i)\b(W[0-9a-f]{8})[ *` + "`" + `]*done:`)
+
+// foreignDone is why the DONE of an item's session, in status, is not a
+// claim of the item: written before the item was assigned, or with done
+// lines that name other items only; "" when it may be its claim.
+func (s *Supervisor) foreignDone(it *WorkItem, status string) string {
+	if at := readSessionFiles(s.cfg.Sessions[it.Session].Workdir).StatusAt; !at.IsZero() && at.Before(it.Assigned) {
+		return "DONE predates the assignment"
+	}
+	var others []string
+	for _, m := range doneLine.FindAllStringSubmatch(status, -1) {
+		if !strings.EqualFold(m[1], it.ID) && !contains(others, m[1]) {
+			others = append(others, m[1])
+		}
+	}
+	if len(others) > 0 {
+		return "DONE names " + strings.Join(others, ", ") + ", not this item"
+	}
+	return ""
 }
 
 // reopenItem gives an item back to be assigned again, with why and the
@@ -709,14 +737,22 @@ func (s *Supervisor) assignItem(it *WorkItem, now time.Time) {
 		return
 	}
 	// The session its message went to: the one the agent handed it to,
-	// one finished whose tmux runs, which #65 reopens, or the one the
-	// owner's next step sent it to.
+	// or the one the owner's next step sent it to; else a running work
+	// session of the repository on its issue. One that finished or
+	// stopped takes no item (#68).
 	cands := []string{it.HandTo}
 	if in := s.st.Instructions[it.Instruction]; in != nil && in.Failed == "" {
 		cands = append(cands, in.Session)
 	}
+	if it.Issue > 0 {
+		for _, name := range sortedKeys(s.st.Runtime) {
+			if p := s.st.Runtime[name]; p.Kind == KindWork && p.Repository == it.Repository && p.Issue == it.Issue {
+				cands = append(cands, name)
+			}
+		}
+	}
 	for _, h := range cands {
-		if h != "" && !tried[h] && (s.takesInstructions(h) || s.doneAlive(h)) && s.reachable(h) {
+		if h != "" && !tried[h] && s.takesItem(h) {
 			s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepAssign, Session: h})
 			return
 		}
@@ -779,6 +815,12 @@ func lastNote(it *WorkItem) string {
 // reachable says whether Go can type into session name: one it
 // supervises here. A session on another machine, or one it does not run,
 // would receive nothing.
+// takesItem says whether session name may be given an item: it runs
+// here, takes instructions, and its STATUS.md does not end with DONE.
+func (s *Supervisor) takesItem(name string) bool {
+	return s.takesInstructions(name) && s.reachable(name) && !readSessionFiles(s.cfg.Sessions[name].Workdir).Done
+}
+
 func (s *Supervisor) reachable(name string) bool {
 	_, ok := s.cfg.Sessions[name]
 	return ok
