@@ -159,8 +159,14 @@ func parseQuestions(text string, fences bool) (questions string, closed bool) {
 		// line within a question too, such as an option "- none", which
 		// leaves the question asked. A parenthesised reason wrapped onto
 		// the lines after it is judged as the one line it is.
-		var kept, lead []string
+		var kept []string
+		if len(section) > 0 && noneFirst.MatchString(section[0]) {
+			section = noneSection(section)
+		}
 		for i := 0; i < len(section); i++ {
+			if section[i] == "" {
+				continue
+			}
 			t, j := strings.TrimSpace(section[i]), i
 			if strings.HasPrefix(strings.TrimLeft(t, "-* "), "(") && !strings.Contains(t, ")") {
 				// Only up to a closing parenthesis, over plain lines: one
@@ -172,8 +178,9 @@ func parseQuestions(text string, fences bool) (questions string, closed bool) {
 					}
 					if strings.Contains(section[k], ")") {
 						for j < k {
-							j++
-							t += " " + strings.TrimSpace(section[j])
+							if j++; section[j] != "" {
+								t += " " + strings.TrimSpace(section[j])
+							}
 						}
 						break
 					}
@@ -183,25 +190,7 @@ func parseQuestions(text string, fences bool) (questions string, closed bool) {
 				i = j
 				continue
 			}
-			// A section whose first word is none: its paragraph, the plain
-			// lines up to a list item, a fence or a line asking a question,
-			// asks nothing unless it asks the owner something (#69). It is
-			// kept as the lead-in of a question after it.
-			if i == 0 && noneFirst.MatchString(t) {
-				k := j + 1
-				for ; k < len(section) && !listOrFence.MatchString(section[k]) && !strings.HasSuffix(strings.TrimRight(section[k], ")*_ "), "?"); k++ {
-					t += " " + section[k]
-				}
-				if !noneParagraphAsks.MatchString(t) {
-					lead = section[:k]
-					i = k - 1
-					continue
-				}
-			}
 			kept = append(kept, section[i])
-		}
-		if len(kept) > 0 {
-			kept = append(lead, kept...)
 		}
 		if joined := strings.Join(kept, "\n"); joined != "" {
 			found = append(found, joined)
@@ -229,13 +218,51 @@ func parseQuestions(text string, fences bool) (questions string, closed bool) {
 			}
 		}
 		l := strings.TrimSpace(line)
-		if level == 0 || l == "" || thematicBreak.MatchString(strings.ReplaceAll(l, " ", "")) {
+		if level == 0 {
+			continue
+		}
+		// A blank line or a break ends a paragraph: "" marks it.
+		if l == "" || thematicBreak.MatchString(strings.ReplaceAll(l, " ", "")) {
+			if len(section) > 0 && section[len(section)-1] != "" {
+				section = append(section, "")
+			}
 			continue
 		}
 		section = append(section, l)
 	}
 	flush()
 	return strings.Join(found, "\n"), fence == ""
+}
+
+// noneSection is what is left to judge of a Questions section whose first
+// word is none (#69). It is read in paragraphs, which a blank line or a
+// list item starts. The first, the none paragraph, asks nothing unless it
+// asks the owner something (noneParagraphAsks); after it, a list item
+// counts, and a plain paragraph only when it asks. The none paragraph is
+// kept as the lead-in of what counts after it.
+func noneSection(section []string) []string {
+	var paras [][]string
+	open := false
+	for _, l := range section {
+		if l == "" {
+			open = false
+			continue
+		}
+		if !open || listOrFence.MatchString(l) {
+			paras, open = append(paras, nil), true
+		}
+		paras[len(paras)-1] = append(paras[len(paras)-1], l)
+	}
+	var out []string
+	for k, p := range paras {
+		if k > 0 && listOrFence.MatchString(p[0]) || noneParagraphAsks.MatchString(strings.Join(p, " ")) {
+			if k > 0 && len(out) == 0 {
+				out = append(out, paras[0]...)
+			}
+			out = append(out, p...)
+		}
+	}
+	return out
 }
 
 // fenceOf returns the code fence a line starts with, a run of three or more
