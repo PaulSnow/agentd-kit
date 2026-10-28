@@ -76,7 +76,9 @@
       .then(function (html) {
         var doc = new DOMParser().parseFromString(html, "text/html");
         var sections = document.querySelectorAll("[data-refresh][id]");
-        var scrolled = {}; // a box's scroll position, by its id
+        // Each swapped section's scroll position, and that of the
+        // scrolling list inside it, by the section's id.
+        var scrolled = {};
         for (var i = 0; i < sections.length; i++) {
           var old = sections[i];
           var next = doc.getElementById(old.id);
@@ -84,14 +86,18 @@
             continue;
           }
           reopen(old, next);
-          scrolled[old.id] = old.scrollTop;
+          var inner = old.querySelector(".talk");
+          scrolled[old.id] = { top: old.scrollTop, inner: inner ? inner.scrollTop : 0 };
           old.replaceWith(document.importNode(next, true));
         }
         levelBoxes();
         // After the sort, so the box shows the rows the owner scrolled to.
         Object.keys(scrolled).forEach(function (id) {
           var el = document.getElementById(id);
-          if (el && scrolled[id] > 0) { el.scrollTop = scrolled[id]; }
+          if (!el) { return; }
+          if (scrolled[id].top > 0) { el.scrollTop = scrolled[id].top; }
+          var inner = el.querySelector(".talk");
+          if (inner && scrolled[id].inner > 0) { inner.scrollTop = scrolled[id].inner; }
         });
       })
       .catch(function () {});

@@ -566,7 +566,10 @@ func TestRefreshKeepsTheBoxScroll(t *testing.T) {
 		t.Fatal("no refresh in ui.js")
 	}
 	body := s[start : start+end]
-	read, swap, sorted, restore := strings.Index(body, "= old.scrollTop"), strings.Index(body, "old.replaceWith"), strings.Index(body, "levelBoxes()"), strings.LastIndex(body, ".scrollTop =")
+	read, swap, sorted, restore := strings.Index(body, "top: old.scrollTop"), strings.Index(body, "old.replaceWith"), strings.Index(body, "levelBoxes()"), strings.LastIndex(body, "el.scrollTop =")
+	if !strings.Contains(body, `inner: inner ? inner.scrollTop`) || !strings.Contains(body, "inner.scrollTop = scrolled[id].inner") {
+		t.Fatalf("refresh does not keep the scroll of the list inside a section:\n%s", body)
+	}
 	if read < 0 || swap < 0 || sorted < 0 || restore < 0 || !(read < swap && swap < sorted && sorted < restore) {
 		t.Fatalf("refresh does not keep a box's scroll across the swap and the sort:\n%s", body)
 	}
