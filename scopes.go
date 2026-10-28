@@ -53,8 +53,8 @@ func (c Scope) check() error {
 // ParseScope reads home, REPO or REPO#N, the repository one cfg holds.
 func ParseScope(cfg *Config, s string) (Scope, error) {
 	s = strings.TrimSpace(s)
-	if s == "" || s == ScopeHome {
-		return Scope{}, nil
+	if s == "" || strings.EqualFold(s, ScopeHome) {
+		return Scope{}, nil // home, however it is written
 	}
 	repo, n := s, 0
 	if i := strings.LastIndex(s, "#"); i > 0 {

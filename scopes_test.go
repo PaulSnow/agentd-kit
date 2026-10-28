@@ -292,3 +292,12 @@ func (h *harness) instructionText(t *testing.T, text string) *Instruction {
 	t.Fatalf("no instruction %q", text)
 	return nil
 }
+
+// Home is home however it is written.
+func TestHomeScopeIgnoresCase(t *testing.T) {
+	for _, s := range []string{"home", "Home", "HOME"} {
+		if c, err := ParseScope(&Config{}, s); err != nil || c != (Scope{}) {
+			t.Errorf("%s: %+v %v", s, c, err)
+		}
+	}
+}
