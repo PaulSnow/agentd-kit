@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -472,5 +473,96 @@ func TestBackfillWithheldSettles(t *testing.T) {
 	}
 	if p := backfillProgress(h.cfg, h.sup.st, "widgets"); p != nil {
 		t.Fatalf("progress %v with every sentence withheld", p)
+	}
+}
+
+// An issue Go opened for a work item is remembered: the item asks again
+// and gets the same number, from the log, after a restart too. When agentd
+// stops between the forge's open and the log's record of it, the next try
+// finds the issue by the line its body carries and opens no second one.
+func TestIssueForWorkOpensOnce(t *testing.T) {
+	h, api := indexHarness(t)
+	r := h.cfg.Repositories["widgets"]
+	r.Policy.Delivery.Allow = append(r.Policy.Delivery.Allow, ActIssue)
+	h.cfg.Repositories["widgets"] = r
+	h.restart(false)
+	h.sup.api = api
+	w := ThreadWork{Title: "Add a dark mode"}
+	h.sup.issueForWork("w1", "widgets", &w)
+	again := ThreadWork{Title: "Add a dark mode"}
+	h.sup.issueForWork("w1", "widgets", &again)
+	h.restart(false)
+	h.sup.api = api
+	after := ThreadWork{Title: "Add a dark mode"}
+	h.sup.issueForWork("w1", "widgets", &after)
+	if len(h.forge.issues) != 1 || w.Issue != 101 || again.Issue != 101 || after.Issue != 101 {
+		t.Fatalf("opened %d: %d %d %d", len(h.forge.issues), w.Issue, again.Issue, after.Issue)
+	}
+
+	// w2's open reaches the forge; the record of it does not reach the log.
+	h.sup.issueForWork("w2", "widgets", &ThreadWork{Title: "Fix the crash"})
+	lines := strings.SplitAfter(h.buf.String(), "\n")
+	cut := ""
+	for _, l := range lines {
+		if strings.Contains(l, `"kind":"action"`) && strings.Contains(l, `"issue:w2"`) {
+			continue
+		}
+		cut += l
+	}
+	h.buf.Reset()
+	h.buf.WriteString(cut)
+	body := strings.SplitN(h.forge.issues[1], "\n", 2)[1]
+	api.set(func() {
+		api.gitlab["widgets/issues?state=all"] = `[{"iid":102,"title":"Fix the crash","description":` + strconv.Quote(body) + `}]`
+	})
+	h.restart(false)
+	h.sup.api = api
+	h.sup.surfaceCutShort()
+	found := ThreadWork{Title: "Fix the crash"}
+	h.sup.issueForWork("w2", "widgets", &found)
+	if len(h.forge.issues) != 2 || found.Issue != 102 {
+		t.Fatalf("after the cut: opened %d, issue %d", len(h.forge.issues), found.Issue)
+	}
+	h.restart(false)
+	h.sup.api = api
+	again = ThreadWork{Title: "Fix the crash"}
+	if h.sup.issueForWork("w2", "widgets", &again); again.Issue != 102 || len(h.forge.issues) != 2 {
+		t.Fatalf("the found issue is not remembered: %d, opened %d", again.Issue, len(h.forge.issues))
+	}
+
+	// One cut short whose issue the forge does not show is opened again,
+	// once; a listing that fails opens none.
+	h.sup.emit("", Event{Kind: KindIntent, Act: &ActPayload{Action: ActIssue, Key: "issue:w3", Repository: "widgets", Message: "Speed it up", Intent: "i3"}})
+	h.restart(false)
+	h.sup.api = api
+	h.sup.surfaceCutShort()
+	api.set(func() { api.gitlabErr = errors.New("the forge is down") })
+	none := ThreadWork{Title: "Speed it up"}
+	if h.sup.issueForWork("w3", "widgets", &none); none.Issue != 0 || len(h.forge.issues) != 2 {
+		t.Fatalf("opened with the listing failing: %d", len(h.forge.issues))
+	}
+	api.set(func() { api.gitlabErr = nil })
+	if h.sup.issueForWork("w3", "widgets", &none); none.Issue != 103 || len(h.forge.issues) != 3 {
+		t.Fatalf("not found and not opened: %d, %d", none.Issue, len(h.forge.issues))
+	}
+}
+
+// On GitHub the issue is found by its body among issues and requests; a
+// listing too long to look through to its end finds none and is an error.
+func TestFindOpenedIssue(t *testing.T) {
+	r := Repository{Forge: "github", Project: "example-org/widgets"}
+	line := fmt.Sprintf(issueBodyLine, "w7")
+	api := &fakeForgeAPI{github: map[string]string{
+		fmt.Sprintf("repos/example-org/widgets/issues?state=all&sort=created&direction=desc&per_page=%d&page=1", indexPerPage): `[{"number":12,"body":null,"pull_request":{}},{"number":11,"body":"x\n` + line + `"}]`,
+	}}
+	if n, err := findOpenedIssue(api, r, line); err != nil || n != 11 {
+		t.Fatalf("found %d, %v", n, err)
+	}
+	full := "[" + strings.TrimSuffix(strings.Repeat(`{"number":1,"body":""},`, indexPerPage), ",") + "]"
+	for p := 1; p <= indexPages; p++ {
+		api.github[fmt.Sprintf("repos/example-org/widgets/issues?state=all&sort=created&direction=desc&per_page=%d&page=%d", indexPerPage, p)] = full
+	}
+	if n, err := findOpenedIssue(api, r, line); err == nil || n != 0 {
+		t.Fatalf("a listing past its end: %d, %v", n, err)
 	}
 }

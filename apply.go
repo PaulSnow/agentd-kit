@@ -68,6 +68,9 @@ type LogState struct {
 	// Commented are the thread outcomes agentd posted on issues, by key
 	// (#60), so none is posted twice.
 	Commented map[string]time.Time
+	// IssuesOpened are the issues Go opened for work items, by the act's
+	// key "issue:"+id (#69), so an item never has a second one opened.
+	IssuesOpened map[string]OpenedIssue
 	// Facts are what the latest fact of each session's run, brief and Now,
 	// and of each issue's state, said (#62), so a change is logged once.
 	Facts map[string]string
@@ -157,6 +160,7 @@ func (st *LogState) apply(e Event) {
 	// After the fold, so a placement is the ledger's only once it holds.
 	defer st.applyLedger(e)
 	defer st.noteSteps(e)
+	st.noteOpenedIssue(e)
 	if e.Kind == KindCase {
 		st.applyCase(e)
 		return
