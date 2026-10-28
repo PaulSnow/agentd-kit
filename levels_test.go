@@ -414,7 +414,7 @@ func TestLevelsCLI(t *testing.T) {
 	for _, want := range []string{
 		"widgets has 4 issues and 2 requests open: 1 needs you, 1 being worked.",
 		"4 issues, 1 need you, 1 being worked, 4 shown", "Profiling the settings page; the cache is next. (status)",
-		"Asks you (w:wa1): w4 asks: Which cache size, 64 or 256 MB? [done, reassign, decline]",
+		"Asks you (w:wa1): w4 asks: Which cache size, 64 or 256 MB? [decline]",
 		"2 open requests", "!9 is reviewing: round 1",
 	} {
 		if !strings.Contains(page, want) {
@@ -431,7 +431,7 @@ func TestLevelsCLI(t *testing.T) {
 	if err := issueCmd([]string{"--config", cfgPath, "widgets", "5"}, &out); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"#5 Choose a cache (needs you)", "Asks you (w:wa1): w4 asks: Which cache size", "decline: the item closes and nothing more is done on it",
+	for _, want := range []string{"#5 Choose a cache (needs you)", "Asks you (w:wa1): w4 asks: Which cache size", "decline: the item closes and nothing more is done on it", "Answer: agentd console reply --entry w:wa1 YOUR ANSWER, or --choice decline",
 		"The item to pick the cache was opened. [item wa1]", "wa1 is done when the owner says so. Go waits on your answer."} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("issue widgets 5 lacks %q:\n%s", want, out.String())
@@ -698,5 +698,30 @@ func TestNowOnlyWithASession(t *testing.T) {
 	}
 	if w := ownerPost(u, "/reply", url.Values{"src": {"live"}, "repository": {"widgets"}, "scope": {"widgets#6"}, "text": {"Look at the typo."}, "back": {"/repo/widgets/issue/6"}}); w.Code != http.StatusSeeOther {
 		t.Fatalf("without now: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// A blocked item's question gets an answer card: the owner's words go to
+// its session as the answer, and decline stays; done and reassign are not
+// offered to a question.
+func TestBlockedItemTakesAnAnswer(t *testing.T) {
+	f := newLevelsFixture(t)
+	u, _ := testUI(t, UIConfig{}, f.src)
+	body := owner(t, u, "/repo/widgets/issue/5")
+	start := strings.Index(body, `id="decision-w-wa1"`)
+	end := strings.Index(body[start:], "</article>")
+	if start < 0 || end < 0 {
+		t.Fatalf("no card:\n%s", body)
+	}
+	card := body[start : start+end]
+	if strings.Contains(card, `value="done"`) || strings.Contains(card, `value="reassign"`) || !strings.Contains(card, `value="decline"`) || !strings.Contains(card, `placeholder="Your answer"`) {
+		t.Fatalf("the card:\n%s", card)
+	}
+	w := ownerPost(u, "/respond", url.Values{"src": {"live"}, "repository": {"widgets"}, "entry": {"w:wa1"}, "choice": {"done"}, "back": {"/repo/widgets/issue/5"}})
+	if w.Code == http.StatusSeeOther {
+		t.Fatal("done was taken as the answer to a question")
+	}
+	if w := ownerPost(u, "/respond", url.Values{"src": {"live"}, "repository": {"widgets"}, "entry": {"w:wa1"}, "text": {"256 MB."}, "back": {"/repo/widgets/issue/5"}}); w.Code != http.StatusSeeOther {
+		t.Fatalf("the answer: %d %s", w.Code, w.Body.String())
 	}
 }

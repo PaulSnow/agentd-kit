@@ -344,6 +344,9 @@ type LevelDecision struct {
 	CameBack string        `json:"came_back,omitempty"`
 	Checked  string        `json:"checked,omitempty"`
 	Options  []LevelOption `json:"options,omitempty"`
+	// Prompt is what the card's words field asks for: the answer itself,
+	// for a question the owner answers in words.
+	Prompt string `json:"prompt,omitempty"`
 	// Command answers it on the command line, KEY one of the options';
 	// "" for agentd console reply --entry.
 	Command string `json:"command,omitempty"`
@@ -469,6 +472,9 @@ func workDecision(it *WorkItem) (LevelDecision, bool) {
 		return LevelDecision{}, false
 	}
 	ld := LevelDecision{Entry: entryWork + it.ID, Session: it.Session}
+	if it.State == WorkBlocked {
+		ld.Prompt = "Your answer"
+	}
 	if it.Question != "" {
 		ld.Asked = fmt.Sprintf("%s asks: %s", it.Session, oneLine(it.Question, 400))
 	} else {

@@ -1237,8 +1237,10 @@ func (it *WorkItem) workOptions() []string {
 	if it.terminal() {
 		return nil
 	}
-	// Being designed, it takes its design's answers on its design entry.
-	if it.State == WorkDesigning || it.State == WorkDesigned {
+	// Being designed, it takes its design's answers on its design entry;
+	// asking a question, it takes the owner's words as the answer, which
+	// go to its session, or decline.
+	if it.State == WorkDesigning || it.State == WorkDesigned || it.State == WorkBlocked {
 		return []string{WorkAnswerDecline}
 	}
 	opts := []string{WorkAnswerDone}
@@ -1271,7 +1273,7 @@ func (s *Supervisor) routeWork(in *Instruction) bool {
 			s.routeStep(in, RouteTo, it.Session, false, "")
 			return true
 		}
-		s.routeStep(in, RouteFail, "", false, it.ID+" has no session to take your words now; answer re-assign, done or decline on it")
+		s.routeStep(in, RouteFail, "", false, it.ID+" has no session to take your words now; answer "+strings.Join(it.workOptions(), " or ")+" on it")
 		return true
 	case it.terminal():
 		answer(it.ID + " is " + it.State + " already; nothing was changed.")

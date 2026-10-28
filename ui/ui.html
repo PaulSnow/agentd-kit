@@ -258,7 +258,7 @@
 {{with .Checked}}<p class="muted"><strong>What Go checked:</strong> {{.}}</p>{{end}}
 <form method="post" action="/respond" enctype="multipart/form-data"><input type="hidden" name="token" value="{{$p.Token}}"><input type="hidden" name="back" value="{{$p.Back}}"><input type="hidden" name="src" value="{{$p.Src}}"><input type="hidden" name="repository" value="{{$p.Repository}}"><input type="hidden" name="entry" value="{{.Entry}}">
 {{if .Decision}}{{template "decision-inputs" .Decision}}{{else}}<ul class="options">{{range .Options}}<li><button type="submit" name="choice" value="{{.Key}}">{{.Label}}</button>{{with .Consequence}} <span class="muted">{{.}}</span>{{end}}</li>{{end}}</ul>{{end}}
-<div class="inline"><input type="text" name="text" maxlength="4000" placeholder="Or answer in your words" aria-label="Your answer"><button type="submit">Send</button></div></form>
+<div class="inline"><input type="text" name="text" maxlength="4000" placeholder="{{if .Prompt}}{{.Prompt}}{{else}}Or answer in your words{{end}}" aria-label="Your answer"><button type="submit">Send</button></div></form>
 </article>{{end}}{{end}}
 
 {{define "console-box"}}<section class="console-box" id="console-box" data-refresh aria-labelledby="console-h"><h2 id="console-h">Console</h2>

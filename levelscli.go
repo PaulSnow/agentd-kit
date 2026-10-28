@@ -142,6 +142,14 @@ func printDecisions(w io.Writer, ds []LevelDecision) {
 			fmt.Fprintf(w, "  Answer: %s\n", d.Command)
 			continue
 		}
+		if d.Prompt != "" {
+			var keys []string
+			for _, o := range d.Options {
+				keys = append(keys, "--choice "+o.Key)
+			}
+			fmt.Fprintf(w, "  Answer: agentd console reply --entry %s YOUR ANSWER, or %s\n", d.Entry, strings.Join(keys, " or "))
+			continue
+		}
 		fmt.Fprintf(w, "  Answer: agentd console reply --entry %s --choice KEY [WORDS]\n", d.Entry)
 	}
 }
