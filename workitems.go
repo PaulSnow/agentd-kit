@@ -673,14 +673,17 @@ func (s *Supervisor) foreignDone(it *WorkItem, status string) string {
 	// An item closed before is history; one open, or unknown, is not.
 	var others []string
 	for _, m := range doneLine.FindAllStringSubmatch(status, -1) {
-		if o := s.st.Work[m[1]]; !strings.EqualFold(m[1], it.ID) && !contains(others, m[1]) && (o == nil || !o.terminal()) {
-			others = append(others, m[1])
+		id := "W" + strings.ToLower(m[1][1:])
+		if o := s.st.Work[id]; id != it.ID && !contains(others, id) && (o == nil || !o.terminal()) {
+			others = append(others, id)
 		}
 	}
 	switch {
 	case len(others) > 0:
 		return "DONE names " + strings.Join(others, ", ") + ", not this item"
-	case !it.Started && it.Acked.IsZero() && !itemMarks(it.ID, status).named:
+	case it.DoneWhen.Kind == DoneOwner && !it.Started && it.Acked.IsZero() && !itemMarks(it.ID, status).named:
+		// Only the owner could settle it: no check tells a bare DONE of
+		// other work from the item's.
 		return "DONE written without ever naming the item"
 	}
 	return ""
@@ -802,9 +805,14 @@ func (s *Supervisor) assignItem(it *WorkItem, now time.Time) {
 func (s *Supervisor) followItem(it *WorkItem, name string, started bool) {
 	in := s.st.Instructions[it.Instruction]
 	switch {
-	case in == nil || in.Session == name || in.Failed != "" || !in.Delivered.IsZero():
+	case in == nil || in.Session == name || in.Failed != "":
 		return
-	case in.Session == "" && (!it.Designer || !in.Replied.IsZero()):
+	case in.Session == "":
+		// The designer took it: the session started answers it.
+		if !it.Designer || !in.Replied.IsZero() {
+			return
+		}
+	case !in.Delivered.IsZero():
 		return
 	}
 	reason := "assigned " + it.ID

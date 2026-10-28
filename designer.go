@@ -292,8 +292,8 @@ func (s *Supervisor) designWait(in *Instruction, it *WorkItem) {
 	default:
 		// Assigned: the message goes to the session started for it, even
 		// when agentd stopped between the two.
-		if it.Session != "" && it.Started && s.st.Runtime[it.Session].Item == it.ID {
-			s.routeStep(in, RouteTo, it.Session, true, "started "+it.Session)
+		if it.Session != "" {
+			s.followItem(it, it.Session, it.Started)
 		}
 		return
 	}

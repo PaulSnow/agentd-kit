@@ -664,3 +664,35 @@ func TestWorkHandedToFinishedSessionStartsOne(t *testing.T) {
 		t.Fatalf("%s reopened %d times", w1, n)
 	}
 }
+
+// At the repository's max, an item handed to a finished session waits,
+// saying so: the finished session is not reopened with its message, nor
+// given the item; the owner's next step offers no finished session
+// either (#68).
+func TestWorkMessageAtMaxNotReopened(t *testing.T) {
+	h := sessionsHarness(t)
+	w1 := h.startSession("issue-1", KindWork, 1)
+	w2 := h.startSession("issue-2", KindWork, 2)
+	h.ticks(2, time.Minute)
+	h.alive(w1, "w1 works")
+	h.alive(w2, "w2 works")
+	h.ticks(1, time.Minute)
+	h.finish(w1)
+	h.alive(w1, "w1 is done")
+	h.ticks(1, time.Minute)
+	it := h.askWork("Ship the follow-up.", ThreadWork{Title: "Ship the follow-up", Brief: "Ship it.", DoneWhen: EndCheck{Kind: DoneOwner}}, w1)
+	h.alive(w1, "w1 pane\n"+idleScreen)
+	h.ticks(3, time.Minute)
+	it = h.item(it.ID)
+	in := h.sup.st.Instructions[it.Instruction]
+	if n := h.count(KindAction, ActReopen, w1) + h.count(KindAction, ActInstruct, w1); n != 0 || contains(h.workItemAssigns(it.ID), w1) {
+		t.Fatalf("%s reopened or instructed %d times; assigns %v", w1, n, h.workItemAssigns(it.ID))
+	}
+	if !strings.Contains(in.Waiting, it.ID) {
+		t.Fatalf("instruction = %+v", in)
+	}
+	h.sup.emit("", Event{Kind: KindRoute, Route: &RoutePayload{Instruction: in.ID, Step: RouteFail, Reason: "a failure"}})
+	if d := nextDecision(h.sup.cfg, h.sup.st, h.sup.st.Instructions[in.ID], h.clock.Now()); d != nil && contains(decisionOptions(*d), nextSend+w1) {
+		t.Fatalf("next step offers %s: %+v", w1, d)
+	}
+}

@@ -429,7 +429,19 @@ func (s *Supervisor) routeInstructions(now time.Time) {
 		}
 		// Work held as an item whose session is gone: the item is
 		// assigned anew, and the message goes with it (#66).
-		if in.Agent && s.st.Work[workID(in.ID)] != nil {
+		if it := s.st.Work[workID(in.ID)]; in.Agent && it != nil {
+			// Not yet with the session holding its item (#68): it says
+			// what it waits on, or, its item closed, that it went nowhere.
+			switch {
+			case !in.Delivered.IsZero() || in.Session == it.Session && it.Session != "":
+			case it.terminal():
+				s.routeStep(in, RouteFail, "", false, "its work item "+it.ID+" is "+it.State+" before any session took your message")
+			case !it.Designer:
+				s.routeStep(in, RouteWait, "", false, "its work item "+it.ID+" waits on a session that takes it, and your message goes with it")
+			}
+			if s.halt != nil {
+				return
+			}
 			continue
 		}
 		// One agentd routed to a chat session, which no build starts any
@@ -547,7 +559,7 @@ func (s *Supervisor) routeOne(in *Instruction, now time.Time) {
 		return
 	}
 	repo := in.Repositories[0]
-	if a := in.AgentLast; in.Agent && in.Session != "" && a != nil && a.Work != nil {
+	if in.Agent && in.Session != "" && in.carriesWork() {
 		// Its work is an item's, which goes to a session that takes it,
 		// and the message with it (#68).
 		s.routeStep(in, RouteWait, "", false, "its work item "+workID(in.ID)+" goes to a session that takes it, and your message with it")
