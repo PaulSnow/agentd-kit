@@ -576,6 +576,13 @@ func (s *Supervisor) driveItems(now time.Time) {
 		if r := s.st.nextAnswer(in); r != nil && r.Answer.Choice == nextDrop {
 			continue
 		}
+		opened := true
+		for k := range in.Works {
+			opened = opened && s.st.Work[workIDOf(in.ID, k)] != nil
+		}
+		if opened {
+			continue
+		}
 		// The loop carries an answer to a judge's deferred finding.
 		why, limit := s.loopCarries(in)
 		if s.halt != nil {
