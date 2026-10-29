@@ -101,6 +101,9 @@ type Decision struct {
 	// Supersedes is the open decision a raise replaces, one the owner
 	// answered in their own words.
 	Supersedes string `json:"supersedes,omitempty"`
+	// Finding is the review finding a judge defers to the owner with
+	// this decision, a choose_one of the finding keys (rounds.go).
+	Finding string `json:"finding,omitempty"`
 	// Withheld is set by agentd, never read from the file: the texts
 	// matched a confidential pattern and were left out of the log.
 	Withheld bool `json:"withheld,omitempty"`
@@ -202,6 +205,8 @@ func checkDecisions(ds []Decision) error {
 			return fmt.Errorf("decision %s is raised twice", d.ID)
 		case d.Supersedes != "":
 			return fmt.Errorf("decision %s: supersedes is for a decision raised through raise_decision", d.ID)
+		case d.Finding != "":
+			return fmt.Errorf("decision %s: finding is for a judge's decision raised through raise_decision", d.ID)
 		}
 		seen[d.ID] = true
 		if err := checkDecision(d); err != nil {
@@ -416,7 +421,9 @@ func checkOptions(d Decision) error {
 	yesNo := 0
 	for _, o := range d.Options {
 		switch {
-		case len(o.Key) != 1 || o.Key[0] < 'a' || o.Key[0] > 'z' || keys[o.Key]:
+		case d.Finding != "" && (!contains(findingKeys, o.Key) || keys[o.Key] || len(d.Options) != len(findingKeys)):
+			return fmt.Errorf("decision %s: a decision for finding %s has the option keys %s, once each and no others", d.ID, cutUTF8(d.Finding, 40), findingKeysText)
+		case d.Finding == "" && (len(o.Key) != 1 || o.Key[0] < 'a' || o.Key[0] > 'z' || keys[o.Key]):
 			return fmt.Errorf("decision %s: option keys are distinct single letters a to z", d.ID)
 		case strings.TrimSpace(o.Label) == "" || strings.TrimSpace(o.Consequence) == "":
 			return fmt.Errorf("decision %s: option %s needs a label and a consequence", d.ID, o.Key)

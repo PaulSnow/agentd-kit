@@ -153,6 +153,7 @@ type raiseArgs struct {
 	Deadline       string           `json:"deadline"`
 	Blocking       bool             `json:"blocking"`
 	Supersedes     string           `json:"supersedes"`
+	Finding        string           `json:"finding"`
 }
 
 // sameQuestion is a question as two raises are compared: case, spacing
@@ -163,9 +164,12 @@ func sameQuestion(q string) string {
 
 // checkRaise checks a raise_decision: a decision of the narrowest type
 // with its whole form, not the same as one the session has open, and
-// superseding only an open decision it raised. It returns the decision to
-// record, its words screened, and whether they were withheld.
-func (srv *MCPServer) checkRaise(args json.RawMessage, t *Track) (*Decision, bool, []problem) {
+// superseding only an open decision it raised. A decision for a finding
+// is the judge's, for a finding of c's latest undisposed round, a
+// choose_one of the finding keys; one superseding it is for its finding
+// too. It returns the decision to record, its words screened, and whether
+// they were withheld.
+func (srv *MCPServer) checkRaise(args json.RawMessage, t *Track, c *Case) (*Decision, bool, []problem) {
 	var a raiseArgs
 	if p := srv.decodeArgs(args, &a); p != nil {
 		return nil, false, p
@@ -173,8 +177,28 @@ func (srv *MCPServer) checkRaise(args json.RawMessage, t *Track) (*Decision, boo
 	if t == nil {
 		t = newTrack()
 	}
-	d := Decision{ID: fmt.Sprintf("D%d", t.RaisedCount+1), Type: a.Type, Question: a.Question, Context: a.Context, Why: a.Why, IfWrong: a.IfWrong,
-		Recommendation: a.Recommendation, Options: a.Options, Limits: a.Limits, Default: a.Default, Deadline: a.Deadline, Blocking: a.Blocking, Supersedes: a.Supersedes}
+	if c == nil {
+		c = &Case{}
+	}
+	// An earlier judge of the name raised its own D numbers on the case,
+	// which the case keeps: a new one never takes theirs.
+	n := t.RaisedCount + 1
+	for c.raisedBy(srv.name, fmt.Sprintf("D%d", n)) || t.hasRaised(fmt.Sprintf("D%d", n)) {
+		n++
+	}
+	d := Decision{ID: fmt.Sprintf("D%d", n), Type: a.Type, Question: a.Question, Context: a.Context, Why: a.Why, IfWrong: a.IfWrong,
+		Recommendation: a.Recommendation, Options: a.Options, Limits: a.Limits, Default: a.Default, Deadline: a.Deadline, Blocking: a.Blocking, Supersedes: a.Supersedes,
+		Finding: a.Finding}
+	if d.Finding == "" && d.Supersedes != "" {
+		if o, ok := t.decision(d.Supersedes); ok {
+			d.Finding = o.Finding
+		}
+	}
+	if d.Finding != "" {
+		if p := srv.checkFindingDecision(d, c); p != nil {
+			return nil, false, p
+		}
+	}
 	if err := checkDecision(d); err != nil {
 		return nil, false, []problem{srv.refusal(err, d)}
 	}
@@ -208,6 +232,40 @@ func (srv *MCPServer) checkRaise(args json.RawMessage, t *Track) (*Decision, boo
 		}
 	}
 	return &d, false, nil
+}
+
+// checkFindingDecision checks that d, a decision for a finding, is the
+// judge's, for a finding of c's latest round with no dispositions yet, and
+// a choose_one.
+func (srv *MCPServer) checkFindingDecision(d Decision, c *Case) []problem {
+	id := cutUTF8(d.Finding, 40)
+	var r *RoundRecord
+	if n := len(c.Rounds); n > 0 {
+		r = &c.Rounds[n-1]
+	}
+	switch {
+	case srv.sess.Role != RoleJudge:
+		return []problem{{format: "a decision for finding %s is the judge's to raise", args: []any{id}}}
+	case r == nil || !hasFinding(r.Findings, d.Finding):
+		return []problem{{format: "finding %s is not a finding of the latest undisposed round", args: []any{id}}}
+	case r.Dispositions != nil && d.Supersedes == "":
+		// Once the round is disposed, only the decision the owner answered
+		// in their own words is raised again.
+		return []problem{{format: "finding %s is not a finding of the latest undisposed round; round %d is disposed", args: []any{id, r.N}}}
+	case d.Type != DecisionChooseOne:
+		return []problem{{format: "a decision for finding %s is a choose_one with the option keys %s", args: []any{id, findingKeysText}}}
+	}
+	return nil
+}
+
+// raisedBy says whether the case holds decision id raised by session.
+func (c *Case) raisedBy(session, id string) bool {
+	for _, r := range c.Decisions {
+		if r.Session == session && r.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // refusal is a check's error as a problem: the session is told it whole,

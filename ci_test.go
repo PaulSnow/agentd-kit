@@ -479,7 +479,7 @@ func TestCIDecisionCannotBeSuperseded(t *testing.T) {
 	tr := newTrack()
 	tr.Raised = []Decision{{ID: "C1", Type: DecisionChooseOne, Question: "Start one more fix session?"}}
 	srv := &MCPServer{}
-	_, ok, problems := srv.checkRaise([]byte(`{"type":"text","question":"Which fix?","context":"c","why":"w","if_wrong":"i","recommendation":"r","supersedes":"C1"}`), tr)
+	_, ok, problems := srv.checkRaise([]byte(`{"type":"text","question":"Which fix?","context":"c","why":"w","if_wrong":"i","recommendation":"r","supersedes":"C1"}`), tr, nil)
 	if ok || len(problems) == 0 || !strings.Contains(fmt.Sprint(problems), "supersedes") {
 		t.Fatalf("superseding C1 was accepted: %v", problems)
 	}

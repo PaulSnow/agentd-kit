@@ -49,6 +49,20 @@ const (
 	RoundsBackstop  = "backstop"  // the rounds since the owner's reset reached the count
 )
 
+// The option keys of a judge's decision for a finding it defers, each
+// with its fixed meaning: a fix round, then review of the new head; the
+// finding accepted as it is, so the round converges; or converge and file
+// a follow-up issue on the forge.
+const (
+	FindingFix   = "fix"
+	FindingMerge = "merge"
+	FindingIssue = "issue"
+)
+
+var findingKeys = []string{FindingFix, FindingMerge, FindingIssue}
+
+const findingKeysText = "fix, merge and issue"
+
 // Finding severities.
 var severities = []string{"high", "medium", "low"}
 
@@ -216,6 +230,19 @@ func (c *Case) applyDispositions(e Event, d *CaseDispositions) {
 	r.Judge, r.JudgeCall, r.JudgedAt, r.Dispositions, r.Plan, r.Lessons = e.Session, e.Case.Call.Hash, e.Time, d.Dispositions, d.Plan, d.Lessons
 	rounds[i] = r
 	c.Rounds = rounds
+}
+
+// findingDecision is the live decision session raised for finding id of
+// round r, following the decisions that superseded it, or nil.
+func (c *Case) findingDecision(session string, r *RoundRecord, id string) *RaisedRecord {
+	var live *RaisedRecord
+	for i := range c.Decisions {
+		d := &c.Decisions[i]
+		if d.Session == session && d.Finding == id && d.SupersededBy == "" && !d.At.Before(r.At) {
+			live = d
+		}
+	}
+	return live
 }
 
 func hasFinding(fs []Finding, id string) bool {
@@ -574,6 +601,9 @@ func (srv *MCPServer) checkDispositions(args json.RawMessage, c *Case) (*CaseDis
 			bad("finding %s needs a reason of at most %d characters", id, maxReason)
 		case d.Disposition == DispositionAdopt && f.WidensScope:
 			bad("finding %s widens the scope and cannot be adopted: defer it and ask the owner with raise_decision", id)
+		case d.Disposition == DispositionDefer && c.findingDecision(srv.name, &r, d.FindingID) == nil:
+			bad("finding %s is deferred but has no decision: raise it first with raise_decision (finding %s, choose_one with the option keys %s); "+
+				"the question is at most %d characters, context, why, if_wrong and recommendation at most %d characters each", id, id, findingKeysText, maxQuestion, maxDecisionField)
 		}
 		out.Dispositions = append(out.Dispositions, Disposition{FindingID: d.FindingID, Disposition: d.Disposition, Reason: srv.withheld(reason)})
 	}
