@@ -247,12 +247,14 @@ func (c *Case) findingDecision(session string, r *RoundRecord, id string) *Raise
 
 // deferral is a finding a round deferred to the owner: its decision,
 // nil in a log from before a defer needed one, the decision's console
-// entry, and the owner's answer, a finding key, or "" while it waits.
+// entry, and the owner's answer, a finding key, or "" while it waits,
+// with the owner's words on it.
 type deferral struct {
 	Finding  Finding
 	Decision *RaisedRecord
 	Entry    string
 	Answer   string
+	Words    string
 }
 
 // deferred is round r's deferrals, read from the log's folds alone, so a
@@ -279,7 +281,7 @@ func (c *Case) deferred(st *LogState, r *RoundRecord) []deferral {
 			x.Entry = decisionEntry(x.Decision.Session, x.Decision.ID)
 			if t := st.Tracks[x.Decision.Session]; t != nil {
 				if a, ok := t.answerTo(x.Decision.Decision); ok && contains(findingKeys, a.Choice) {
-					x.Answer = a.Choice
+					x.Answer, x.Words = a.Choice, a.Note
 				}
 			}
 		}
@@ -786,12 +788,15 @@ type RoundsFact struct {
 }
 
 // FindingFact is a finding, its latest disposition and, for one deferred
-// to the owner, the owner's answer: fix, merge or issue.
+// to the owner, the owner's answer: fix, merge or issue, with the
+// decision's question and the owner's words on it (#76).
 type FindingFact struct {
 	Finding
 	Disposition string `json:"disposition,omitempty"`
 	Reason      string `json:"reason,omitempty"`
 	Owner       string `json:"owner,omitempty"`
+	Question    string `json:"question,omitempty"`
+	Words       string `json:"words,omitempty"`
 }
 
 func roundsFact(c *Case, st *LogState) *RoundsFact {
@@ -799,18 +804,21 @@ func roundsFact(c *Case, st *LogState) *RoundsFact {
 		return nil
 	}
 	f := &RoundsFact{Round: len(c.Rounds)}
-	owner := map[string]string{}
+	owner := map[string]deferral{}
 	for i := range c.Rounds {
 		for _, d := range c.deferred(st, &c.Rounds[i]) {
-			owner[d.Finding.ID] = d.Answer
+			owner[d.Finding.ID] = d
 		}
 	}
 	for _, x := range c.findings() {
 		ff := FindingFact{Finding: x}
 		if d := c.Disposition(x.ID); d != nil {
 			ff.Disposition, ff.Reason = d.Disposition, d.Reason
-			if d.Disposition == DispositionDefer {
-				ff.Owner = owner[x.ID]
+			if o, ok := owner[x.ID]; ok && d.Disposition == DispositionDefer {
+				ff.Owner = o.Answer
+				if o.Answer != "" && o.Decision != nil {
+					ff.Question, ff.Words = o.Decision.Question, o.Words
+				}
 			}
 		}
 		f.Findings = append(f.Findings, ff)
