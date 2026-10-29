@@ -275,7 +275,10 @@ func (s *Supervisor) openDesigns(in *Instruction, repo string) {
 		if s.st.Work[id] != nil {
 			continue
 		}
-		scopedIssue(in, &w)
+		if k == 0 {
+			// The page's issue is the first item's; the others name their own.
+			scopedIssue(in, &w)
+		}
 		if s.issueForWork(id, repo, &w); s.halt != nil {
 			return
 		}

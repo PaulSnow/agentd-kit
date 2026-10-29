@@ -591,8 +591,8 @@ func (s *Supervisor) routeNext(in *Instruction) {
 		return
 	}
 	work := ThreadWork{Title: workTitleOf(orig.Text)}
-	if a := orig.AgentLast; a != nil && a.Work != nil {
-		work = *a.Work
+	if len(orig.Works) > 0 {
+		work = orig.Works[0]
 	}
 	switch {
 	case choice == nextDrop:

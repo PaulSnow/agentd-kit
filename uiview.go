@@ -728,7 +728,7 @@ func instructionSteps(st *LogState, in *Instruction) []uiStep {
 		switch {
 		case a != nil && a.HandTo != "":
 			steps = append(steps, uiStep{Text: "the agent handed it to " + a.HandTo + ": " + cutUTF8(a.Answer, 300)})
-		case a != nil && a.Work != nil && a.Error == "":
+		case len(in.Works) > 0 && (a == nil || a.By == ""):
 			// Work no running session covered: a session started for it.
 			steps = append(steps, uiStep{Text: "the agent asked for a work session: " + cutUTF8(a.Answer, 300)})
 			if in.Session == "" && in.Failed == "" && in.Replied.IsZero() {

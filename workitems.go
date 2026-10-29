@@ -498,8 +498,8 @@ func (s *Supervisor) driveItems(now time.Time) {
 			}
 			if k == 0 {
 				handTo = in.Session
+				scopedIssue(in, &w)
 			}
-			scopedIssue(in, &w)
 			if s.issueForWork(id, in.Repositories[0], &w); s.halt != nil {
 				return
 			}
@@ -823,9 +823,7 @@ func (s *Supervisor) assignItem(it *WorkItem, now time.Time) {
 	// session of the repository on its issue. One that finished or
 	// stopped takes no item (#68).
 	cands := []string{it.HandTo}
-	// The message's session is its first item's: another item of it
-	// takes a session of its own.
-	if in := s.st.Instructions[it.Instruction]; in != nil && in.Failed == "" && it.ID == workID(in.ID) {
+	if in := s.st.Instructions[it.Instruction]; in != nil && in.Failed == "" {
 		cands = append(cands, in.Session)
 	}
 	if it.Issue > 0 {
@@ -836,7 +834,7 @@ func (s *Supervisor) assignItem(it *WorkItem, now time.Time) {
 		}
 	}
 	for _, h := range cands {
-		if h != "" && !tried[h] && s.takesItem(h) {
+		if h != "" && !tried[h] && s.takesItem(h) && !s.holdsSibling(h, it) {
 			if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepAssign, Session: h}); s.halt == nil {
 				s.followItem(it, h, false)
 			}
@@ -869,6 +867,21 @@ func (s *Supervisor) assignItem(it *WorkItem, now time.Time) {
 	holders := sessionsOf(s.st.Runtime, repo)
 	s.escalateItem(it, "start:"+shortHash(HashPane(digits.ReplaceAllString(why, "N")))[:8], fmt.Sprintf("agentd cannot start a session for %s: %s. Holding places: %s. End one, and agentd starts it.",
 		it.ID, why, strings.Join(holders, ", ")))
+}
+
+// holdsSibling says whether session name holds, or was started for,
+// another item of it's message: each item of a message that asked for
+// several takes a session of its own (#68).
+func (s *Supervisor) holdsSibling(name string, it *WorkItem) bool {
+	if p, ok := s.st.Runtime[name]; ok && p.Item != "" && p.Item != it.ID && s.st.Work[p.Item] != nil && s.st.Work[p.Item].Instruction == it.Instruction {
+		return true
+	}
+	for _, o := range s.st.itemsOf(name) {
+		if o.ID != it.ID && o.Instruction == it.Instruction {
+			return true
+		}
+	}
+	return false
 }
 
 // toldHandTo tells the owner once, on the repository's console, that

@@ -641,6 +641,9 @@ func (s *Supervisor) startThread(in *Instruction, repo, cwd string) {
 		}
 		// The facts the session started for the work is briefed with are
 		// those the agent was given.
+		if w.runCtx.Err() != nil {
+			return // agentd is stopping: the next start runs it again
+		}
 		for k, wk := range p.works() {
 			if err != nil {
 				break
@@ -738,6 +741,8 @@ func (s *Supervisor) checkThreadAnswer(raw json.RawMessage, running, finished ma
 	var kept []ThreadWork
 	for _, w := range works {
 		w.Title, w.Brief = oneLine(w.Title, workTitle), strings.TrimSpace(w.Brief)
+		// Told apart by the agent's own title: a withheld one reads alike.
+		raw := w.key()
 		if w.Title == "" {
 			return a, errors.New("the agent asked for work with no title")
 		}
@@ -755,10 +760,10 @@ func (s *Supervisor) checkThreadAnswer(raw json.RawMessage, running, finished ma
 		}
 		w = ThreadWork{Title: w.Title, Brief: cutUTF8(w.Brief, workBrief), Issue: w.Issue, Withheld: w.Withheld, DoneWhen: w.DoneWhen}
 		// An item named twice, or opened already, is one item.
-		if seen[w.key()] || len(opened)+len(kept) >= workItemsMax {
+		if seen[w.key()] && (w.Issue > 0 || !strings.EqualFold(w.Title, "owner work")) || seen["raw:"+raw] || len(opened)+len(kept) >= workItemsMax {
 			continue
 		}
-		seen[w.key()] = true
+		seen[w.key()], seen["raw:"+raw] = true, true
 		kept = append(kept, w)
 	}
 	if len(kept) > 0 {
