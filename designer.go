@@ -274,9 +274,10 @@ func (s *Supervisor) designs(repo string) bool {
 // openDesigns opens the items of work the agent read in in, each to be
 // designed before any session starts; the message waits on them.
 func (s *Supervisor) openDesigns(in *Instruction, repo string) {
+	_, limit := s.loopCarries(in)
 	for k, w := range in.Works {
 		id := workIDOf(in.ID, k)
-		if s.st.Work[id] != nil {
+		if s.st.Work[id] != nil || limit >= 0 && k >= limit {
 			continue
 		}
 		if k == 0 {

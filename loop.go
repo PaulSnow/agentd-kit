@@ -358,6 +358,28 @@ func openLoopRequests(cfg *Config, st *LogState, now time.Time) []loopRequest {
 	return out
 }
 
+// loopDeferral is the request of in's repository, and the deferred
+// finding of its latest round, whose decision in, the owner's response
+// on a judge's d: entry, answers with a finding key, read from the log's
+// folds; ok is false for any other instruction (#76).
+func loopDeferral(cfg *Config, st *LogState, in *Instruction, now time.Time) (q loopRequest, d deferral, ok bool) {
+	if in.Re == nil || !strings.HasPrefix(in.Re.ID, entryDecision) || len(in.Repositories) == 0 {
+		return q, d, false
+	}
+	for _, q := range openLoopRequests(cfg, st, now) {
+		c := st.Cases[q.Case]
+		if q.Repository != in.Repositories[0] || c == nil || len(c.Rounds) == 0 {
+			continue
+		}
+		for _, d := range c.deferred(st, &c.Rounds[len(c.Rounds)-1]) {
+			if d.Entry == in.Re.ID && d.Answer != "" {
+				return q, d, true
+			}
+		}
+	}
+	return q, d, false
+}
+
 // loopPlace is where a request stands, and the step due, if any: Do is a
 // loop step, or "end" for a judgment session whose part is over.
 type loopPlace struct {
@@ -797,6 +819,9 @@ func (s *Supervisor) runLoops(now time.Time) {
 		if s.followUpIssues(q); s.halt != nil {
 			return
 		}
+		if s.askAuthor(q); s.halt != nil {
+			return
+		}
 		p := placeOf(s.cfg, s.st, q, now)
 		s.noteLoopSentence(q, p)
 		lp := LoopPayload{Repository: q.Repository, Ref: q.Ref, Case: q.Case, Head: p.Head, Step: p.Do, Session: p.Session, Round: p.Round}
@@ -863,7 +888,13 @@ func (s *Supervisor) followUpIssues(q loopRequest) {
 	r := &c.Rounds[len(c.Rounds)-1]
 	for _, d := range c.deferred(s.st, r) {
 		key := fmt.Sprintf("finding:%s:%s", q.Case, d.Finding.ID)
-		if o := s.st.IssuesOpened[key]; d.Answer != FindingIssue || o.Number > 0 {
+		if d.Answer != FindingIssue {
+			continue
+		}
+		if n := s.st.IssuesOpened[key].Number; n > 0 {
+			if s.noteFollowUp(q, d, n); s.halt != nil {
+				return
+			}
 			continue
 		}
 		title := cutUTF8(oneLine(fmt.Sprintf("Follow-up of %s: %s", q.Ref, d.Finding.Title), workTitle), workTitle)
@@ -876,7 +907,6 @@ func (s *Supervisor) followUpIssues(q loopRequest) {
 		if d.Finding.Suggestion != "" {
 			body += "\n\nSuggested: " + d.Finding.Suggestion
 		}
-		t := s.track(requestsTrack(q.Repository))
 		why := ""
 		switch err := s.forge.allowed(q.Repository, ActIssue); {
 		case err != nil:
@@ -900,24 +930,115 @@ func (s *Supervisor) followUpIssues(q loopRequest) {
 			if s.halt != nil {
 				return
 			}
-			continue
-		}
-		if t.Skipped[key] {
+			if n := s.st.IssuesOpened[key].Number; n > 0 {
+				if s.noteFollowUp(q, d, n); s.halt != nil {
+					return
+				}
+			}
 			continue
 		}
 		text := fmt.Sprintf("%s in %s: you answered issue on finding %s of round %d, but agentd opened no issue: %s. File it yourself: %q, with: %s",
 			q.Ref, q.Repository, d.Finding.ID, r.N, why, title, strings.ReplaceAll(body, "\n\n", " "))
-		if s.skipOnce(requestsTrack(q.Repository), key, cutUTF8(text, 2000), t, &SkipPayload{Action: ActIssue, Repository: q.Repository}); s.halt != nil {
-			return
-		}
-		m := &MessagePayload{ID: "F" + shortHash(HashPane(key))[:8], Console: s.cfg.RepositoryConsole(q.Repository), Kind: "info", From: "agentd", Text: text}
-		if i := s.confidentialMatch(text); i > 0 {
-			m.Text, m.Withheld = "", i
-		}
-		if s.emit("", Event{Kind: KindMessage, Mode: ModeShared, Message: m}); s.halt != nil {
+		if s.tellRequests(q, key, text, ActIssue); s.halt != nil {
 			return
 		}
 	}
+}
+
+// tellRequests tells the owner text on q's repository's console, once by
+// key, and skips the action under key on the requests track.
+func (s *Supervisor) tellRequests(q loopRequest, key, text, action string) {
+	t := s.track(requestsTrack(q.Repository))
+	if t.Skipped[key] {
+		return
+	}
+	if s.skipOnce(requestsTrack(q.Repository), key, cutUTF8(text, 2000), t, &SkipPayload{Action: action, Repository: q.Repository}); s.halt != nil {
+		return
+	}
+	m := &MessagePayload{ID: "F" + shortHash(HashPane(key))[:8], Console: s.cfg.RepositoryConsole(q.Repository), Kind: "info", From: "agentd", Text: text}
+	if i := s.confidentialMatch(text); i > 0 {
+		m.Text, m.Withheld = "", i
+	}
+	s.emit("", Event{Kind: KindMessage, Mode: ModeShared, Message: m})
+}
+
+// noteFollowUp names on q, once, the follow-up issue n agentd opened for
+// its deferred finding d, where delivery.allow has comment (#76).
+func (s *Supervisor) noteFollowUp(q loopRequest, d deferral, n int) {
+	key := fmt.Sprintf("followup-note:%s:%s", q.Case, d.Finding.ID)
+	t := s.track(requestsTrack(q.Repository))
+	if _, done := s.st.Commented[key]; done || t.Skipped[key] || s.forge.allowed(q.Repository, ActComment) != nil {
+		return
+	}
+	body := noMentions(fmt.Sprintf("_Posted by agentd:_ the owner answered issue on finding %s, %q, which its judge deferred: agentd opened #%d to follow it up, and %s goes on without it.",
+		d.Finding.ID, d.Finding.Title, n, q.Ref))
+	if s.confidentialMatch(body) > 0 {
+		return
+	}
+	a := &ActPayload{Repository: q.Repository, Ref: q.Ref, Key: key, Message: body}
+	if err := s.act("", ActComment, a, func() error { return s.forge.CommentAllowed(q.Repository, q.Ref, body) }); err != nil && s.halt == nil {
+		s.skipOnce(requestsTrack(q.Repository), key, fmt.Sprintf("not naming follow-up #%d on %s: %v", n, q.Ref, err), t, &SkipPayload{Action: ActComment, Repository: q.Repository})
+	}
+}
+
+// askAuthor asks the author of q, a request no session delivered or
+// continues, on q, once a round, to fix each finding of its latest round
+// the owner answered fix on, with the decision's question and the owner's
+// words, and push, while its head is the one reviewed, where
+// delivery.allow has comment; elsewhere, or when the text may not go to
+// the forge, it tells the owner on the repository's console, once (#76).
+func (s *Supervisor) askAuthor(q loopRequest) {
+	c := s.st.Cases[q.Case]
+	if q.worker() != "" || c == nil || len(c.Rounds) == 0 {
+		return
+	}
+	r := &c.Rounds[len(c.Rounds)-1]
+	ci, L := s.st.CI[ciKey(q.Repository, q.Ref)], s.st.Loops[ciKey(q.Repository, q.Ref)]
+	if ci.Head == "" || ci.Head != L.ReviewHead {
+		return
+	}
+	var asks []string
+	for _, d := range c.deferred(s.st, r) {
+		if d.Answer != FindingFix {
+			continue
+		}
+		line := fmt.Sprintf("- %s, %s: %s", d.Finding.ID, d.Finding.Title, d.Finding.Consequence)
+		if d.Decision != nil {
+			line += " Asked: " + d.Decision.Question
+		}
+		if d.Words != "" {
+			line += " The owner: " + d.Words
+		}
+		asks = append(asks, oneLine(line, 2000))
+	}
+	key := fmt.Sprintf("author-fix:%s:%d", q.Case, r.N)
+	t := s.track(requestsTrack(q.Repository))
+	if _, done := s.st.Commented[key]; len(asks) == 0 || done || t.Skipped[key] {
+		return
+	}
+	author := ci.Author
+	if author == "" {
+		author = "author"
+	}
+	body := noMentions(fmt.Sprintf("@%s: _posted by agentd:_ the owner asks you to fix these findings of review round %d of %s and push the fix; agentd reviews the new head.\n\n%s",
+		author, r.N, q.Ref, strings.Join(asks, "\n")))
+	why := ""
+	switch err := s.forge.allowed(q.Repository, ActComment); {
+	case err != nil:
+		why = err.Error() + " (delivery.allow lacks comment)"
+	case s.confidentialMatch(body) > 0:
+		why = "its text matches a confidential pattern"
+	}
+	if why == "" {
+		a := &ActPayload{Repository: q.Repository, Ref: q.Ref, Key: key, Message: body}
+		err := s.act("", ActComment, a, func() error { return s.forge.CommentAllowed(q.Repository, q.Ref, body) })
+		if err == nil || s.halt != nil {
+			return
+		}
+		why = err.Error()
+	}
+	s.tellRequests(q, key, fmt.Sprintf("%s in %s: you answered fix on round %d, but agentd did not ask its author %s to push the fix: %s. Ask them yourself: %s",
+		q.Ref, q.Repository, r.N, author, why, strings.ReplaceAll(body, "\n", " ")), ActComment)
 }
 
 // yieldPlace ends the oldest holder of the place step p of q waits for

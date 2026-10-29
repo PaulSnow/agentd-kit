@@ -865,6 +865,16 @@ func (s *Supervisor) packFactsWith(name string, sess Session, t *Track, why stri
 			f.Rulings, f.Acknowledge = f.Acknowledge, nil
 		}
 		f.Rounds = roundsFact(s.st.Cases[id], s.st)
+		if f.Rounds != nil {
+			// The owner's words and the question were screened as they
+			// were logged; once more here, so none goes out that matches
+			// now.
+			for i := range f.Rounds.Findings {
+				if ff := &f.Rounds.Findings[i]; s.confidentialMatch(ff.Question, ff.Words) > 0 {
+					ff.Question, ff.Words = "", ""
+				}
+			}
+		}
 	}
 	if sess.Runtime && (sess.Role == RoleReviewer || sess.Role == RoleJudge) {
 		f.Review = s.reviewFact(name)

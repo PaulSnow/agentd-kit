@@ -404,6 +404,18 @@ func (s *Supervisor) routeInstructions(now time.Time) {
 		// that fails leaves those named.
 		if in.Route && in.Agent && in.Session == "" && in.Replied.IsZero() && in.Failed == "" && len(in.Works) > 0 && !s.work.busy("thread:"+in.ID) && len(in.Repositories) > 0 {
 			repo := in.Repositories[0]
+			// An answer to a judge's deferred finding the loop carries
+			// opens no item: Go answers that it does (#76).
+			if why, _ := s.loopCarries(in); why != "" {
+				if s.halt == nil && !s.shadow {
+					s.emit("", Event{Kind: KindRoute, Route: &RoutePayload{Instruction: in.ID, Step: RouteAnswered,
+						Agent: &AgentPayload{Answer: "agentd opened no work item for your answer: " + why + ".", By: "agentd"}}})
+				}
+				if s.halt != nil {
+					return
+				}
+				continue
+			}
 			if in.AgentError == "" && in.handsBack() && !s.shadow {
 				if cwd := s.threadCwd(repo); cwd != "" {
 					s.startThread(in, repo, cwd)

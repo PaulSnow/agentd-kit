@@ -498,6 +498,60 @@ func (s *Supervisor) loopCanMerge(repo, ref string) bool {
 	return false
 }
 
+// loopCarries is why no item opens for the work in, the owner's answer
+// to a judge's deferred finding, asks for, because the loop carries the
+// answer, or "" (#76): a fix is the round's fix round on the session that
+// delivered or continues the request, or the author's push; a merge
+// converges; an issue is the follow-up agentd opens where delivery.allow
+// has issue. Elsewhere a round's issue answers open one item between
+// them: limit is how many of in's items open, -1 for all. Once carried,
+// in stays carried, though the round moves on.
+func (s *Supervisor) loopCarries(in *Instruction) (why string, limit int) {
+	if len(in.Repositories) == 0 {
+		return "", -1
+	}
+	repo := in.Repositories[0]
+	key := "loop-carries:" + in.ID
+	t := s.track(requestsTrack(repo))
+	if t.Skipped[key] {
+		return "the loop carries it", 0
+	}
+	q, d, ok := loopDeferral(s.cfg, s.st, in, s.clock.Now())
+	if !ok {
+		return "", -1
+	}
+	switch {
+	case d.Answer == FindingFix && q.worker() != "":
+		why = fmt.Sprintf("the fix round of %s on %s carries it", q.Ref, q.worker())
+	case d.Answer == FindingFix:
+		why = fmt.Sprintf("no session delivered or continues %s, so agentd waits for its author to push, and reviews the new head", q.Ref)
+	case d.Answer == FindingMerge:
+		why = fmt.Sprintf("the loop converges on %s", q.Ref)
+	case s.forge.allowed(repo, ActIssue) == nil:
+		why = fmt.Sprintf("agentd opens the follow-up issue of finding %s itself", d.Finding.ID)
+	default:
+		// The round's first issue answer opens one item; the others go
+		// with it.
+		c := s.st.Cases[q.Case]
+		entries := map[string]bool{}
+		for _, x := range c.deferred(s.st, &c.Rounds[len(c.Rounds)-1]) {
+			entries[x.Entry] = x.Answer == FindingIssue
+		}
+		for _, id := range s.st.sortedWork() {
+			it := s.st.Work[id]
+			if o := s.st.Instructions[it.Instruction]; o != nil && o.ID != in.ID && o.Re != nil && entries[o.Re.ID] {
+				why = fmt.Sprintf("%s carries the round's follow-up issues", it.ID)
+				break
+			}
+		}
+		if why == "" {
+			return "", 1
+		}
+	}
+	s.skipOnce(requestsTrack(repo), key, fmt.Sprintf("no work item for %s, the owner's %s on %s of %s: %s", in.ID, d.Answer, d.Finding.ID, q.Ref, why), t, nil)
+	return why, 0
+}
+
 // workEmit logs a step of an item.
 func (s *Supervisor) workEmit(p WorkPayload) {
 	p.Note = s.withheld(p.Note)
@@ -522,11 +576,26 @@ func (s *Supervisor) driveItems(now time.Time) {
 		if r := s.st.nextAnswer(in); r != nil && r.Answer.Choice == nextDrop {
 			continue
 		}
+		opened := true
+		for k := range in.Works {
+			opened = opened && s.st.Work[workIDOf(in.ID, k)] != nil
+		}
+		if opened {
+			continue
+		}
+		// The loop carries an answer to a judge's deferred finding.
+		why, limit := s.loopCarries(in)
+		if s.halt != nil {
+			return
+		}
+		if why != "" {
+			continue
+		}
 		// Each item the agent named; the message, and the session it
 		// went to, are the first's.
 		for k, w := range in.Works {
 			id, handTo := workIDOf(in.ID, k), ""
-			if s.st.Work[id] != nil {
+			if s.st.Work[id] != nil || limit >= 0 && k >= limit {
 				continue
 			}
 			if k == 0 {
