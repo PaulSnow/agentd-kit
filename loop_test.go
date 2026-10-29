@@ -1289,11 +1289,11 @@ func TestLoopDeferredAnswerFix(t *testing.T) {
 func TestLoopDeferredAnswerMerge(t *testing.T) {
 	h, _ := loopHarness(t)
 	deferBoth(t, h)
-	if err := h.answerCard(h.deferredCard().Entry, FindingMerge, ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.answerCard(h.deferredCard().Entry, FindingIssue, ""); err != nil {
-		t.Fatal(err)
+	for _, k := range []string{FindingMerge, FindingIssue} {
+		if err := h.answerCard(h.deferredCard().Entry, k, ""); err != nil {
+			t.Fatal(err)
+		}
+		h.ticks(1, 5*time.Minute)
 	}
 	h.ticks(6, 5*time.Minute)
 	if len(h.forge.merges) != 1 || h.forge.merges[0].ref != "!1" || h.forge.merges[0].head != "c0ffee" {
@@ -1330,6 +1330,7 @@ func TestLoopDeferredAnswerIssueOpens(t *testing.T) {
 		if err := h.answerCard(h.deferredCard().Entry, k, ""); err != nil {
 			t.Fatal(err)
 		}
+		h.ticks(1, 5*time.Minute)
 	}
 	h.ticks(4, 5*time.Minute)
 	h.restart(false)

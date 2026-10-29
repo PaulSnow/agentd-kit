@@ -245,6 +245,72 @@ func (c *Case) findingDecision(session string, r *RoundRecord, id string) *Raise
 	return live
 }
 
+// deferral is a finding a round deferred to the owner: its decision,
+// nil in a log from before a defer needed one, the decision's console
+// entry, and the owner's answer, a finding key, or "" while it waits.
+type deferral struct {
+	Finding  Finding
+	Decision *RaisedRecord
+	Entry    string
+	Answer   string
+}
+
+// deferred is round r's deferrals, read from the log's folds alone, so a
+// restart reads the same: an answer stands when it is a finding key the
+// owner chose for the decision as it is; one in the owner's own words
+// waits. A round at or before the owner's reset defers nothing more: the
+// owner took the rounds up.
+func (c *Case) deferred(st *LogState, r *RoundRecord) []deferral {
+	if r == nil || r.Dispositions == nil || r.N <= c.RoundBase {
+		return nil
+	}
+	var out []deferral
+	for _, d := range r.Dispositions {
+		if d.Disposition != DispositionDefer {
+			continue
+		}
+		x := deferral{}
+		for _, f := range r.Findings {
+			if f.ID == d.FindingID {
+				x.Finding = f
+			}
+		}
+		if x.Decision = c.findingDecision(r.Judge, r, d.FindingID); x.Decision != nil {
+			x.Entry = decisionEntry(x.Decision.Session, x.Decision.ID)
+			if t := st.Tracks[x.Decision.Session]; t != nil {
+				if a, ok := t.answerTo(x.Decision.Decision); ok && contains(findingKeys, a.Choice) {
+					x.Answer = a.Choice
+				}
+			}
+		}
+		out = append(out, x)
+	}
+	return out
+}
+
+// ownerConverged says whether the owner settled every finding of the
+// case's latest round that was not declined: each deferred, and answered
+// merge or issue.
+func (c *Case) ownerConverged(st *LogState) bool {
+	n := len(c.Rounds)
+	if n == 0 || adopts(&c.Rounds[n-1]) {
+		return false
+	}
+	ds := c.deferred(st, &c.Rounds[n-1])
+	for _, d := range ds {
+		if d.Answer != FindingMerge && d.Answer != FindingIssue {
+			return false
+		}
+	}
+	return len(ds) > 0
+}
+
+// reviewConverged says whether the case's rounds converged: a round
+// brought no findings, or the owner settled the latest one.
+func (c *Case) reviewConverged(st *LogState) bool {
+	return c != nil && (c.RoundStop != nil && c.RoundStop.Reason == RoundsConverged || c.RoundStop == nil && !c.Closed && c.ownerConverged(st))
+}
+
 func hasFinding(fs []Finding, id string) bool {
 	for _, f := range fs {
 		if f.ID == id {
@@ -719,22 +785,33 @@ type RoundsFact struct {
 	Stopped  string        `json:"stopped,omitempty"`
 }
 
-// FindingFact is a finding and its latest disposition.
+// FindingFact is a finding, its latest disposition and, for one deferred
+// to the owner, the owner's answer: fix, merge or issue.
 type FindingFact struct {
 	Finding
 	Disposition string `json:"disposition,omitempty"`
 	Reason      string `json:"reason,omitempty"`
+	Owner       string `json:"owner,omitempty"`
 }
 
-func roundsFact(c *Case) *RoundsFact {
+func roundsFact(c *Case, st *LogState) *RoundsFact {
 	if c == nil || len(c.Rounds) == 0 {
 		return nil
 	}
 	f := &RoundsFact{Round: len(c.Rounds)}
+	owner := map[string]string{}
+	for i := range c.Rounds {
+		for _, d := range c.deferred(st, &c.Rounds[i]) {
+			owner[d.Finding.ID] = d.Answer
+		}
+	}
 	for _, x := range c.findings() {
 		ff := FindingFact{Finding: x}
 		if d := c.Disposition(x.ID); d != nil {
 			ff.Disposition, ff.Reason = d.Disposition, d.Reason
+			if d.Disposition == DispositionDefer {
+				ff.Owner = owner[x.ID]
+			}
 		}
 		f.Findings = append(f.Findings, ff)
 	}

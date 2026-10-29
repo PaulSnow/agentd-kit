@@ -112,10 +112,9 @@ func requireOf(pol RepoPolicy, require []string, outside bool) []string {
 }
 
 // reviewConverged says whether the case the session works stopped its
-// review rounds converged.
+// review rounds converged, or the owner settled its latest round.
 func (s *Supervisor) reviewConverged(name string) bool {
-	c := s.st.Cases[s.cfg.caseOf(s.cfg.Sessions[name])]
-	return c != nil && c.RoundStop != nil && c.RoundStop.Reason == RoundsConverged
+	return s.st.Cases[s.cfg.caseOf(s.cfg.Sessions[name])].reviewConverged(s.st)
 }
 
 // reviewSkipped says whether the owner's skip of a failed review stands

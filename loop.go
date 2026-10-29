@@ -131,7 +131,7 @@ func requestsTrack(repo string) string { return requestsTrackPrefix + repo }
 
 // FixRoundPointer is what a work session relaunched for a fix round reads
 // before its facts.
-const FixRoundPointer = "agentd: the judge adopted review findings on your request. The rounds in your facts list them with their dispositions and the plan; fix the adopted ones on the same branch, then mark STATUS.md DONE so agentd delivers and reviews again."
+const FixRoundPointer = "agentd: review findings on your request are to fix: those the judge adopted, and those deferred to the owner that the owner answered fix (owner \"fix\"). The rounds in your facts list them with their dispositions, the answers of the owner and the plan; fix those on the same branch, then mark STATUS.md DONE so agentd delivers and reviews again."
 
 // applyLoop folds a loop event, copying the record it changes.
 func (st *LogState) applyLoop(e Event) {
@@ -315,6 +315,9 @@ type loopPlace struct {
 	// whole reason does not fit.
 	Holders []string
 	Brief   string
+	// Entry is the console entry of the decision the owner is waited on
+	// for, "d:…", when the wait is one.
+	Entry string
 }
 
 // judgment is the name of the request's reviewer or judge session.
@@ -370,21 +373,8 @@ func placeOf(cfg *Config, st *LogState, q loopRequest, now time.Time) loopPlace 
 			return loopPlace{Phase: PlaceJudging, Reason: "round disposed", Do: "end", Session: judge}
 		case stop.Reason != RoundsConverged:
 			return owner("review rounds stopped at round %d, %s; agentd cases rounds %s N resets them", stop.Round, stop.Reason, q.Case)
-		case L.ReviewHead != r.Head && (!q.Outside || st.approvedAt(q.Repository, q.Ref) != r.Head):
-			// A head no round reviewed, pushed by a CI fix or the
-			// request's author, merges only after the owner resets the
-			// rounds, which reviews it.
-			return owner("its head moved to %s after review converged at %s; agentd cases rounds %s N reviews it", shortHash(r.Head), shortHash(L.ReviewHead), q.Case)
-		case q.Outside && st.approvedAt(q.Repository, q.Ref) != r.Head:
-			return loopPlace{Phase: PlaceMerging, Reason: "review converged", Do: LoopApprove, Head: r.Head}
-		case r.State == CIPending || r.State == CIUnknown:
-			return loopPlace{Phase: PlaceCI, Reason: fmt.Sprintf("CI on %s is %s", shortHash(r.Head), r.State)}
-		case r.State != CISuccess:
-			return loopPlace{Phase: PlaceCI, Reason: fmt.Sprintf("CI on %s %s; review converged", shortHash(r.Head), r.State)}
-		case !cfg.Repositories[q.Repository].Policy.Merge.Enabled:
-			return owner("review converged and CI is green; %s's policy does not merge, so the owner does", q.Repository)
 		}
-		return loopPlace{Phase: PlaceMerging, Reason: "review converged and CI is green; merging by policy"}
+		return convergedPlace(cfg, st, q, L, r)
 	}
 	if last != nil && len(last.Findings) > 0 && last.Dispositions == nil {
 		switch {
@@ -412,12 +402,34 @@ func placeOf(cfg *Config, st *LogState, q loopRequest, now time.Time) loopPlace 
 	if judging {
 		return loopPlace{Phase: PlaceJudging, Reason: "round disposed", Do: "end", Session: judge}
 	}
-	if last != nil && adopts(last) {
+	// A finding deferred to the owner holds the round until the owner
+	// answers its decision, read from the case and the judge's track as
+	// the log has them, so a restart neither reviews it again nor counts
+	// it converged.
+	fix := last != nil && adopts(last)
+	for _, d := range c.deferred(st, last) {
+		switch {
+		case d.Decision == nil:
+			return owner("finding %s of round %d is deferred to you, but its judge raised no decision for it; agentd cases rounds %s N reviews the request again", d.Finding.ID, last.N, q.Case)
+		case d.Answer == "":
+			p := owner("finding %s of round %d is deferred to you (entry %s)", d.Finding.ID, last.N, d.Entry)
+			p.Entry = d.Entry
+			return p
+		}
+		fix = fix || d.Answer == FindingFix
+	}
+	if !fix && c.ownerConverged(st) {
+		if reviewing {
+			return loopPlace{Phase: PlaceReviewing, Reason: "round settled", Do: "end", Session: reviewer}
+		}
+		return convergedPlace(cfg, st, q, L, r)
+	}
+	if fix {
 		switch {
 		case q.Outside:
-			return owner("round %d adopted findings on a request no session delivered; its author fixes them", last.N)
+			return owner("round %d has findings to fix on a request no session delivered; its author fixes them", last.N)
 		case L.FixRound < last.N:
-			return loopPlace{Phase: PlaceFixing, Reason: fmt.Sprintf("round %d adopted findings; the work session is relaunched once it is done", last.N),
+			return loopPlace{Phase: PlaceFixing, Reason: fmt.Sprintf("round %d has findings to fix; the work session is relaunched once it is done", last.N),
 				Do: LoopFix, Session: q.Session, Round: last.N, Head: r.Head}
 		case r.Head == L.FixHead:
 			if f, ok := lastFixRound(st.Tracks[q.Session], q); ok && f.Redelivered && f.Pushed == L.FixHead {
@@ -447,6 +459,30 @@ func placeOf(cfg *Config, st *LogState, q loopRequest, now time.Time) loopPlace 
 		return loopPlace{Phase: PlaceReviewing, Do: LoopFailed, Failed: LoopReview, Session: reviewer, Round: next, Reason: fmt.Sprintf("the reviewer of round %d %s", next, why)}
 	}
 	return loopPlace{Phase: PlaceReviewing, Reason: fmt.Sprintf("round %d at %s", next, shortHash(L.ReviewHead))}
+}
+
+// convergedPlace is where q stands once its review converged at the head
+// round L.ReviewHead reviewed.
+func convergedPlace(cfg *Config, st *LogState, q loopRequest, L LoopRecord, r CIRecord) loopPlace {
+	owner := func(format string, a ...any) loopPlace {
+		return loopPlace{Phase: PlaceOwner, Reason: fmt.Sprintf(format, a...)}
+	}
+	switch {
+	case L.ReviewHead != r.Head && (!q.Outside || st.approvedAt(q.Repository, q.Ref) != r.Head):
+		// A head no round reviewed, pushed by a CI fix or the
+		// request's author, merges only after the owner resets the
+		// rounds, which reviews it.
+		return owner("its head moved to %s after review converged at %s; agentd cases rounds %s N reviews it", shortHash(r.Head), shortHash(L.ReviewHead), q.Case)
+	case q.Outside && st.approvedAt(q.Repository, q.Ref) != r.Head:
+		return loopPlace{Phase: PlaceMerging, Reason: "review converged", Do: LoopApprove, Head: r.Head}
+	case r.State == CIPending || r.State == CIUnknown:
+		return loopPlace{Phase: PlaceCI, Reason: fmt.Sprintf("CI on %s is %s", shortHash(r.Head), r.State)}
+	case r.State != CISuccess:
+		return loopPlace{Phase: PlaceCI, Reason: fmt.Sprintf("CI on %s %s; review converged", shortHash(r.Head), r.State)}
+	case !cfg.Repositories[q.Repository].Policy.Merge.Enabled:
+		return owner("review converged and CI is green; %s's policy does not merge, so the owner does", q.Repository)
+	}
+	return loopPlace{Phase: PlaceMerging, Reason: "review converged and CI is green; merging by policy"}
 }
 
 // waitingFor is p, a reviewer or judge due in repo, or, when every place
@@ -699,6 +735,9 @@ func (s *Supervisor) runLoops(now time.Time) {
 		if s.halt != nil {
 			return
 		}
+		if s.followUpIssues(q); s.halt != nil {
+			return
+		}
 		p := placeOf(s.cfg, s.st, q, now)
 		s.noteLoopSentence(q, p)
 		lp := LoopPayload{Repository: q.Repository, Ref: q.Ref, Case: q.Case, Head: p.Head, Step: p.Do, Session: p.Session, Round: p.Round}
@@ -750,6 +789,76 @@ func (s *Supervisor) runLoops(now time.Time) {
 	}
 	s.endFinished(now)
 	s.startNext(now)
+}
+
+// followUpIssues opens, once each, the follow-up issue of every finding
+// of q's latest round the owner answered issue on, naming the request,
+// the finding and its paths, where the repository's delivery.allow holds
+// issue; elsewhere, or when the text may not go to the forge, it tells
+// the owner on the repository's console the issue to file, once.
+func (s *Supervisor) followUpIssues(q loopRequest) {
+	c := s.st.Cases[q.Case]
+	if c == nil || len(c.Rounds) == 0 {
+		return
+	}
+	r := &c.Rounds[len(c.Rounds)-1]
+	for _, d := range c.deferred(s.st, r) {
+		key := fmt.Sprintf("finding:%s:%s", q.Case, d.Finding.ID)
+		if o := s.st.IssuesOpened[key]; d.Answer != FindingIssue || o.Number > 0 {
+			continue
+		}
+		title := cutUTF8(oneLine(fmt.Sprintf("Follow-up of %s: %s", q.Ref, d.Finding.Title), workTitle), workTitle)
+		paths := "none named"
+		if len(d.Finding.Paths) > 0 {
+			paths = strings.Join(d.Finding.Paths, ", ")
+		}
+		body := fmt.Sprintf("_Opened by agentd: the owner answered issue on finding %s of round %d of %s, which its judge deferred, so %s merges without it._\n\n%s\n\nPaths: %s",
+			d.Finding.ID, r.N, q.Ref, q.Ref, d.Finding.Consequence, paths)
+		if d.Finding.Suggestion != "" {
+			body += "\n\nSuggested: " + d.Finding.Suggestion
+		}
+		t := s.track(requestsTrack(q.Repository))
+		why := ""
+		switch err := s.forge.allowed(q.Repository, ActIssue); {
+		case err != nil:
+			why = err.Error() + " (delivery.allow lacks issue)"
+		case s.st.IssuesOpened[key].Unsure:
+			why = "an earlier open of it has no recorded outcome, and agentd never opens it twice"
+		case s.confidentialMatch(title, body) > 0:
+			why = "its text matches a confidential pattern"
+		case s.namedInTitle(q.Repository, title) != "":
+			why = fmt.Sprintf("its title names %q, a session or another repository", s.namedInTitle(q.Repository, title))
+		}
+		if why == "" {
+			a := &ActPayload{Repository: q.Repository, Key: key, Message: title}
+			s.act("", ActIssue, a, func() error {
+				n, err := s.forge.OpenIssue(q.Repository, title, body)
+				if err == nil {
+					a.Ref = "#" + strconv.Itoa(n)
+				}
+				return err
+			})
+			if s.halt != nil {
+				return
+			}
+			continue
+		}
+		if t.Skipped[key] {
+			continue
+		}
+		text := fmt.Sprintf("%s in %s: you answered issue on finding %s of round %d, but agentd opened no issue: %s. File it yourself: %q, with: %s",
+			q.Ref, q.Repository, d.Finding.ID, r.N, why, title, strings.ReplaceAll(body, "\n\n", " "))
+		if s.skipOnce(requestsTrack(q.Repository), key, cutUTF8(text, 2000), t, &SkipPayload{Action: ActIssue, Repository: q.Repository}); s.halt != nil {
+			return
+		}
+		m := &MessagePayload{ID: "F" + shortHash(HashPane(key))[:8], Console: s.cfg.RepositoryConsole(q.Repository), Kind: "info", From: "agentd", Text: text}
+		if i := s.confidentialMatch(text); i > 0 {
+			m.Text, m.Withheld = "", i
+		}
+		if s.emit("", Event{Kind: KindMessage, Mode: ModeShared, Message: m}); s.halt != nil {
+			return
+		}
+	}
 }
 
 // yieldPlace ends the oldest holder of the place step p of q waits for

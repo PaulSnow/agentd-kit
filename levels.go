@@ -562,12 +562,22 @@ func repoNeeds(cfg *Config, st *LogState, repo string, decisions []UIDecision, n
 			out = append(out, repoNeed{LevelDecision: ld, Issue: number(it.Issue)})
 		}
 	}
+	seen := map[string]bool{}
 	for _, d := range decisions {
 		if d.Repository == repo {
-			out = append(out, repoNeed{LevelDecision: sessionDecision(d), Issue: number(c.Sessions[d.Session].Issue)})
+			n := repoNeed{LevelDecision: sessionDecision(d), Issue: number(c.Sessions[d.Session].Issue)}
+			seen[n.Entry] = true
+			out = append(out, n)
 		}
 	}
-	return append(out, requestNeeds(cfg, st, repo, now)...)
+	for _, n := range requestNeeds(cfg, st, repo, now) {
+		// A deferred finding's decision its judge still lists is its card
+		// once.
+		if !seen[n.Entry] || !strings.HasPrefix(n.Entry, entryDecision) {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // requestNeeds are the cards of repo's requests the loop waits on the
@@ -589,21 +599,62 @@ func requestNeeds(cfg *Config, st *LogState, repo string, now time.Time) []repoN
 		if p.Phase != PlaceOwner || p.Do != "" {
 			continue // moving, or a step of the loop's own is due
 		}
+		if d, ok := deferredDecision(cfg, st, q, p.Entry); ok {
+			// A finding deferred to the owner: its judge's decision, which
+			// the card answers, even once the judge was ended.
+			n := repoNeed{Request: true, LevelDecision: sessionDecision(d)}
+			n.Asked = fmt.Sprintf("%s is %s: %s. %s", q.Ref, PlaceOwner, p.Reason, n.Asked)
+			if d.Withheld != "" {
+				n.Asked = fmt.Sprintf("%s is %s: a finding is deferred to you. %s", q.Ref, PlaceOwner, d.Withheld)
+			}
+			n.Issue = requestIssueOf(st, c, q)
+			out = append(out, n)
+			continue
+		}
 		n := repoNeed{Request: true, LevelDecision: LevelDecision{Entry: entryLoop + q.Ref, Asked: fmt.Sprintf("%s is %s: %s.", q.Ref, PlaceOwner, p.Reason),
 			Options: loopOptions(st.Loops[ciKey(repo, q.Ref)]), Command: fmt.Sprintf("agentd loop KEY %s %s", repo, q.Ref)}}
 		if secret(n.Asked) {
 			n.Asked = fmt.Sprintf("%s is %s; the reason was withheld, as it matched a confidential pattern.", q.Ref, PlaceOwner)
 		}
-		if k := c.Sessions[q.Session].Issue; k > 0 && !q.Outside {
-			n.Issue = "#" + strconv.Itoa(k)
-		} else if i := st.Index[repo][q.Ref]; i != nil {
-			if k := requestIssue(i.Title); k > 0 {
-				n.Issue = "#" + strconv.Itoa(k)
-			}
-		}
+		n.Issue = requestIssueOf(st, c, q)
 		out = append(out, n)
 	}
 	return out
+}
+
+// requestIssueOf is the issue q is of, "#N", or "".
+func requestIssueOf(st *LogState, c *Config, q loopRequest) string {
+	if k := c.Sessions[q.Session].Issue; k > 0 && !q.Outside {
+		return "#" + strconv.Itoa(k)
+	} else if i := st.Index[q.Repository][q.Ref]; i != nil {
+		if k := requestIssue(i.Title); k > 0 {
+			return "#" + strconv.Itoa(k)
+		}
+	}
+	return ""
+}
+
+// deferredDecision is the decision of q's case whose console entry is
+// entry, a judge's for a finding it deferred, as the owner answers it:
+// its words left out when they were withheld or match a confidential
+// pattern, its keys kept.
+func deferredDecision(cfg *Config, st *LogState, q loopRequest, entry string) (UIDecision, bool) {
+	c := st.Cases[q.Case]
+	if c == nil || !strings.HasPrefix(entry, entryDecision) {
+		return UIDecision{}, false
+	}
+	for _, r := range c.Decisions {
+		if decisionEntry(r.Session, r.ID) != entry || r.Finding == "" {
+			continue
+		}
+		d := UIDecision{Session: r.Session, Repository: q.Repository, Decision: r.Decision}
+		if r.Withheld || confidentialMatcher(cfg)(decisionTexts(r.Decision)...) {
+			d.Withheld, d.Decision = withheldSecret, withholdDecision(r.Decision)
+			d.Decision.Finding = r.Finding
+		}
+		return d, true
+	}
+	return UIDecision{}, false
 }
 
 // waitNeed is the card of q's step p, waiting for a place (#71): end one
@@ -625,13 +676,7 @@ func waitNeed(cfg *Config, st *LogState, c *Config, q loopRequest, p loopPlace, 
 	if confidentialMatcher(cfg)(n.Asked) {
 		n.Asked = fmt.Sprintf("%s is %s; the reason was withheld, as it matched a confidential pattern.", q.Ref, PlaceWaitPlace)
 	}
-	if k := c.Sessions[q.Session].Issue; k > 0 && !q.Outside {
-		n.Issue = "#" + strconv.Itoa(k)
-	} else if i := st.Index[q.Repository][q.Ref]; i != nil {
-		if k := requestIssue(i.Title); k > 0 {
-			n.Issue = "#" + strconv.Itoa(k)
-		}
-	}
+	n.Issue = requestIssueOf(st, c, q)
 	return n
 }
 

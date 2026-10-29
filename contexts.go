@@ -864,7 +864,7 @@ func (s *Supervisor) packFactsWith(name string, sess Session, t *Track, why stri
 			// rulings without one.
 			f.Rulings, f.Acknowledge = f.Acknowledge, nil
 		}
-		f.Rounds = roundsFact(s.st.Cases[id])
+		f.Rounds = roundsFact(s.st.Cases[id], s.st)
 	}
 	if sess.Runtime && (sess.Role == RoleReviewer || sess.Role == RoleJudge) {
 		f.Review = s.reviewFact(name)
