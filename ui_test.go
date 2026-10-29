@@ -982,3 +982,57 @@ func TestUIDialogBesideNonBlockingDecision(t *testing.T) {
 		t.Fatalf("needs %s", got)
 	}
 }
+
+// A forge poll failing for more than two intervals is a card in the home
+// page's visible part (#75): the source, since when, the error and what
+// still works. One interval of failure is no card, and a poll that works
+// again takes it away.
+func TestHomeShowsFailingPollCard(t *testing.T) {
+	home := func(polls ...Event) string {
+		t.Helper()
+		cfg := DefaultConfig()
+		cfg.Repositories = map[string]Repository{"widgets": {Forge: "gitlab", Project: "example-org/widgets"}}
+		cfg.Poll.GitHub, cfg.Poll.GitLab, cfg.Poll.Index = true, true, true
+		cfg.Poll.Every = Duration{15 * time.Minute}
+		buf := &bytes.Buffer{}
+		start := Event{V: EventVersion, Time: pageAt.Add(-6 * time.Hour), Kind: KindStart, Mode: ModeLive, Start: &StartPayload{}}
+		for _, e := range append([]Event{start}, polls...) {
+			if err := NewLogWriter(buf).Append(e); err != nil {
+				t.Fatal(err)
+			}
+		}
+		u, _ := testUI(t, UIConfig{}, newUISource("coord", &cfg, NewLogWriter(buf), ModeLive, "host-a"))
+		body := owner(t, u, "/")
+		i := strings.Index(body, `<section id="home"`)
+		if i < 0 {
+			t.Fatalf("no home section:\n%s", body)
+		}
+		body = body[i:]
+		return body[:strings.Index(body, "</section>")]
+	}
+	poll := func(ago time.Duration, src string, ok bool, why string) Event {
+		return Event{V: EventVersion, Time: pageAt.Add(-ago), Kind: KindPoll, Mode: ModeLive, Poll: &PollPayload{Source: src, OK: ok, Error: why, Polls: 1}}
+	}
+	github := poll(5*time.Minute, SourceGitHub, true, "")
+	bad := `tracking snapshot /srv/snapshot.json: unknown shape: json: unknown field "Behind"`
+	if h := home(github, poll(20*time.Minute, SourceGitLab, false, bad)); strings.Contains(h, "need-poll") {
+		t.Fatalf("a card after one interval:\n%s", h)
+	}
+	h := home(poll(50*time.Minute, SourceGitLab, false, "glab: timed out"), github, poll(10*time.Minute, SourceGitLab, false, bad))
+	if !strings.Contains(h, `class="card need need-poll"`) {
+		t.Fatalf("no card after more than two intervals:\n%s", h)
+	}
+	card := h[strings.Index(h, "need-poll"):]
+	card = card[:strings.Index(card, "</article>")]
+	for _, want := range []string{"gitlab", "50m", "unknown field &#34;Behind&#34;", "github poll", "issue index", "sessions", "no new items from gitlab"} {
+		if !strings.Contains(card, want) {
+			t.Fatalf("the card does not say %q:\n%s", want, card)
+		}
+	}
+	if strings.Contains(card, "timed out") {
+		t.Fatalf("the card shows the older error:\n%s", card)
+	}
+	if h := home(poll(50*time.Minute, SourceGitLab, false, bad), github, poll(2*time.Minute, SourceGitLab, true, "")); strings.Contains(h, "need-poll") {
+		t.Fatalf("a card after the poll worked again:\n%s", h)
+	}
+}

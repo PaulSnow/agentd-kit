@@ -100,11 +100,9 @@ func TestInventoryRefusesBadFiles(t *testing.T) {
 		{name: "malformed manifest", file: "manifest", text: `[{"name": "widgets",`, want: "not valid JSON"},
 		{name: "malformed snapshot", file: "snapshot", text: `{"AsOf": `, want: "not valid JSON"},
 		{name: "manifest is an object", file: "manifest", text: `{"repositories": []}`, want: "unknown shape"},
-		{name: "manifest unknown field", file: "manifest", text: `[{"name": "w", "platform": "gitlab", "path": "o/w", "active": true, "audience": "a", "owner": "x"}]`, want: `unknown field "owner"`},
 		{name: "manifest unknown platform", file: "manifest", text: `[{"name": "w", "platform": "bitbucket", "path": "o/w", "active": true, "audience": "a"}]`, want: `platform "bitbucket" is not github or gitlab`},
 		{name: "manifest entry without path", file: "manifest", text: `[{"name": "w", "platform": "gitlab", "active": true, "audience": "a"}]`, want: "name and path must be set"},
 		{name: "manifest duplicate", file: "manifest", text: `[{"name": "w", "platform": "gitlab", "path": "o/w", "active": true, "audience": "a"}, {"name": "w2", "platform": "gitlab", "path": "O/W", "active": true, "audience": "a"}]`, want: "twice"},
-		{name: "snapshot unknown field", file: "snapshot", text: `{"AsOf": "2026-10-23T21:23:04Z", "Host": "host-a", "Repos": [], "Version": 2}`, want: `unknown field "Version"`},
 		{name: "snapshot without AsOf", file: "snapshot", text: `{"Host": "host-a", "Repos": []}`, want: "AsOf and Repos must be present"},
 		{name: "snapshot repos not a list", file: "snapshot", text: `{"AsOf": "2026-10-23T21:23:04Z", "Host": "host-a", "Repos": {}}`, want: "unknown shape"},
 		{name: "snapshot trailing data", file: "snapshot", text: `{"AsOf": "2026-10-23T21:23:04Z", "Host": "host-a", "Repos": []} {}`, want: "trailing data"},
@@ -144,6 +142,63 @@ func TestInventoryRefusesBadFiles(t *testing.T) {
 				t.Fatalf("error %q does not name %s", err, path)
 			}
 		})
+	}
+}
+
+// tolerantFixture is trackingFixture with fields agentd does not know: the
+// tracking system's "Behind" at the snapshot's top level and in its first
+// repository, and an "owner" in the manifest's first entry.
+func tolerantFixture(t *testing.T) Tracking {
+	tr := trackingFixture(t)
+	for path, edits := range map[string][][2]string{
+		tr.Snapshot: {{`"Host": "host-a",`, `"Host": "host-a", "Behind": 3,`}, {`"Info": {"Name": "widgets"`, `"Behind": 2, "Info": {"Name": "widgets"`}},
+		tr.Manifest: {{`"audience": "team-a"}`, `"audience": "team-a", "owner": "user-a"}`}},
+	} {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(b)
+		for _, e := range edits {
+			if !strings.Contains(s, e[0]) {
+				t.Fatalf("%s has no %s", path, e[0])
+			}
+			s = strings.Replace(s, e[0], e[1], 1)
+		}
+		writeFile(t, path, s)
+	}
+	return tr
+}
+
+// The tracking files are the tracking system's, not agentd's: a field
+// agentd does not know is ignored, and named, never a refusal (#75).
+func TestInventoryToleratesUnknownFields(t *testing.T) {
+	want, err := LoadInventory(trackingFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := tolerantFixture(t)
+	inv, err := LoadInventory(tr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inv.Repos) != len(want.Repos) {
+		t.Fatalf("got %d repositories, want %d", len(inv.Repos), len(want.Repos))
+	}
+	for i, r := range inv.Repos {
+		w := want.Repos[i]
+		if r.Key != w.Key || r.Tracked != w.Tracked || len(r.OpenIssues) != len(w.OpenIssues) || len(r.OpenMRs) != len(w.OpenMRs) || len(r.Clones) != len(w.Clones) {
+			t.Fatalf("record %d = %+v, want %+v", i, r, w)
+		}
+	}
+	if len(want.Unknown) != 0 {
+		t.Fatalf("the plain fixture has unknown fields %v", want.Unknown)
+	}
+	if got := strings.Join(inv.Unknown[tr.Snapshot], ","); got != "Behind,Repos[].Behind" {
+		t.Fatalf("snapshot unknown fields = %q", got)
+	}
+	if got := strings.Join(inv.Unknown[tr.Manifest], ","); got != "[].owner" {
+		t.Fatalf("manifest unknown fields = %q", got)
 	}
 }
 

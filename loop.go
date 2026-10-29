@@ -1135,7 +1135,7 @@ func (s *Supervisor) startNext(now time.Time) {
 	if len(room) == 0 && len(full) == 0 || s.shadow {
 		return
 	}
-	pr, err := LoadPriorities(s.cfg.Tracking.Priorities)
+	pr, err := LoadPriorities(s.cfg.Tracking.Priorities, s.work.ignored)
 	if err != nil {
 		name := room[sortedKeys(room)[0]]
 		s.skipOnce(requestsTrack(name), "loop-priorities:"+err.Error(), "not starting queued cases: "+err.Error(), s.track(requestsTrack(name)), nil)

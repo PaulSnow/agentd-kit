@@ -571,8 +571,9 @@ type RepoPriority struct {
 
 // LoadPriorities reads the weekly priorities file. None configured, or none
 // written yet this week, is no priorities; a file of a shape agentd does
-// not know is an error naming it.
-func LoadPriorities(path string) (*Priorities, error) {
+// not know is an error naming it. The file is written outside agentd, so
+// a field agentd does not know is ignored and told to ignored (#75).
+func LoadPriorities(path string, ignored *ignoredFields) (*Priorities, error) {
 	if path == "" {
 		return nil, nil
 	}
@@ -584,11 +585,11 @@ func LoadPriorities(path string) (*Priorities, error) {
 		return nil, err
 	}
 	var pr Priorities
-	dec := json.NewDecoder(strings.NewReader(string(b)))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&pr); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+	unknown, err := decodeTolerant(path, b, &pr)
+	if err != nil {
+		return nil, err
 	}
+	ignored.note("tracking priorities", path, unknown)
 	for _, r := range pr.Repositories {
 		if r.Repository == "" || r.Priority < 1 {
 			return nil, fmt.Errorf("%s: repository %q needs a priority of 1 or more", path, r.Repository)
@@ -725,7 +726,7 @@ func casesCmd(args []string, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	pr, err := LoadPriorities(cfg.Tracking.Priorities)
+	pr, err := LoadPriorities(cfg.Tracking.Priorities, newIgnoredFields(os.Stderr))
 	if err != nil {
 		return err
 	}

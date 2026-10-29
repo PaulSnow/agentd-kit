@@ -395,8 +395,55 @@ type uiIndex struct {
 	Accounts []uiAccount
 	Jobs     []uiJob
 	Needs    []uiNeed
-	Repos    []*uiRepo
-	Consoles []*uiOtherConsole // listed after the repositories, by name
+	// PollAlerts are the forge polls failing for more than two intervals
+	// (#75), shown on the home level.
+	PollAlerts []uiPollAlert
+	Repos      []*uiRepo
+	Consoles   []*uiOtherConsole // listed after the repositories, by name
+}
+
+// uiPollAlert is a forge poll that has failed for more than two poll
+// intervals: its source, the error, since when, and what still works.
+type uiPollAlert struct {
+	Src    string
+	Source string
+	Error  string
+	Since  time.Time
+	Works  []string
+}
+
+// pollAlerts lists src's enabled forge polls whose failures began more
+// than two intervals before now, while its run is not stopped.
+func (src *uiSource) pollAlerts(cfg *Config, now time.Time) []uiPollAlert {
+	if !src.st.Stopped.IsZero() || src.echo {
+		return nil
+	}
+	enabled := map[string]bool{SourceGitHub: cfg.Poll.GitHub, SourceGitLab: cfg.Poll.GitLab}
+	secret := confidentialMatcher(cfg)
+	var out []uiPollAlert
+	for _, s := range []string{SourceGitHub, SourceGitLab} {
+		p, ok := src.st.Polls[s]
+		if !enabled[s] || !ok || p.OK || p.Since.IsZero() || now.Sub(p.Since) <= 2*cfg.Poll.Every.Duration {
+			continue
+		}
+		a := uiPollAlert{Src: src.Name, Source: s, Error: p.Error, Since: p.Since, Works: []string{"sessions and consoles", "items already held"}}
+		if secret(a.Error) {
+			a.Error = "The error was withheld because it matched a confidential pattern."
+		}
+		if cfg.Poll.CI {
+			a.Works = append(a.Works, "the CI watcher")
+		}
+		if cfg.Poll.Index {
+			a.Works = append(a.Works, "the issue index")
+		}
+		for _, o := range []string{SourceGitHub, SourceGitLab} {
+			if q, ok := src.st.Polls[o]; o != s && enabled[o] && ok && q.OK {
+				a.Works = append(a.Works, "the "+o+" poll")
+			}
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 // view brings src up to date and reads what every view needs from it:
@@ -539,6 +586,7 @@ func (src *uiSource) addIndex(v *uiIndex, get func(string) *uiRepo, now time.Tim
 	src.addAccounts(v, cfg, now)
 	src.addJobs(v, cfg)
 	v.Needs = append(v.Needs, src.needs(cfg, rep, src.askedAt)...)
+	v.PollAlerts = append(v.PollAlerts, src.pollAlerts(cfg, now)...)
 	for _, rr := range rep.Repositories {
 		r := get(uiRepoName(rr))
 		if _, ok := cfg.Repositories[rr.Name]; ok {

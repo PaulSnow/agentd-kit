@@ -554,3 +554,58 @@ func TestConfidentialPollErrorIsWithheld(t *testing.T) {
 		t.Fatalf("%d poll records for one repeating error", n)
 	}
 }
+
+// A snapshot carrying fields agentd does not know, at its top level and in
+// a repository, is polled as before (#75), and the fields are named once,
+// at info, however many polls read them.
+func TestPollToleratesUnknownSnapshotFields(t *testing.T) {
+	h, _ := pollHarness(t, true, true)
+	h.cfg.Tracking = tolerantFixture(t)
+	var logged strings.Builder
+	h.sup.work.ignored.w = &logged
+	h.ticks(4, 15*time.Minute)
+	for _, src := range []string{SourceGitHub, SourceGitLab} {
+		if p := h.sup.st.Polls[src]; !p.OK {
+			t.Fatalf("%s poll = %+v", src, p)
+		}
+	}
+	want := "agentd: info: tracking snapshot " + h.cfg.Tracking.Snapshot + ": ignored unknown fields Behind, Repos[].Behind\n"
+	if n := strings.Count(logged.String(), want); n != 1 {
+		t.Fatalf("logged %d times, want once:\n%s", n, logged.String())
+	}
+	if n := strings.Count(logged.String(), "Behind"); n != 2 {
+		t.Fatalf("Behind named %d times, want in the one line:\n%s", n, logged.String())
+	}
+	if !strings.Contains(logged.String(), "tracking manifest "+h.cfg.Tracking.Manifest+": ignored unknown fields [].owner\n") {
+		t.Fatalf("the manifest's field is not named:\n%s", logged.String())
+	}
+}
+
+// A failing source's record keeps when it began failing through the
+// heartbeat and a change of the error's text, and loses it once it works.
+func TestPollFailingSinceSurvivesHeartbeat(t *testing.T) {
+	h, api := pollHarness(t, false, true)
+	h.ticks(1, 15*time.Minute)
+	api.set(func() { api.gitlabErr = errors.New("glab: not logged in") })
+	first := h.clock.Now()
+	h.ticks(1, 15*time.Minute)
+	if p := h.sup.st.Polls[SourceGitLab]; p.OK || !p.Since.Equal(first) {
+		t.Fatalf("first failure: %+v, want since %v", p, first)
+	}
+	h.ticks(int(pollHeartbeat/(15*time.Minute))+2, 15*time.Minute) // past a heartbeat record
+	api.set(func() { api.gitlabErr = errors.New("glab: timed out") })
+	h.ticks(1, 15*time.Minute)
+	p := h.sup.st.Polls[SourceGitLab]
+	if p.OK || !strings.Contains(p.Error, "timed out") || !p.Since.Equal(first) {
+		t.Fatalf("after a heartbeat and a new error: %+v, want since %v", p, first)
+	}
+	// The log, replayed, says the same.
+	if r := NewLogState(h.cfg, ModeLive).Fold(h.events()).Polls[SourceGitLab]; !r.Since.Equal(first) {
+		t.Fatalf("replayed since = %v, want %v", r.Since, first)
+	}
+	api.set(func() { api.gitlabErr = nil })
+	h.ticks(1, 15*time.Minute)
+	if p := h.sup.st.Polls[SourceGitLab]; !p.OK || !p.Since.IsZero() {
+		t.Fatalf("after recovery: %+v", p)
+	}
+}
