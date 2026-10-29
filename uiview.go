@@ -399,7 +399,7 @@ type uiIndex struct {
 	// (#75), shown on the home level.
 	PollAlerts []uiPollAlert
 	Repos      []*uiRepo
-	Consoles []*uiOtherConsole // listed after the repositories, by name
+	Consoles   []*uiOtherConsole // listed after the repositories, by name
 }
 
 // uiPollAlert is a forge poll that has failed for more than two poll
