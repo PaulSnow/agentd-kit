@@ -1067,3 +1067,278 @@ func TestLoopNeverYieldsAnItemsHolder(t *testing.T) {
 		t.Fatalf("place = %+v", p)
 	}
 }
+
+// wideFinding is a review finding that widens the scope, at path.
+func wideFinding(title, path string) map[string]any {
+	return map[string]any{"title": title, "severity": "low", "widens_scope": true, "items": []any{}, "paths": []any{path},
+		"consequence": "None for spinning.", "suggestion": "File it."}
+}
+
+// deferBoth runs !1 through a review with two findings that widen the
+// scope, F1 and F2, and a judge that raises a decision for each and
+// defers both, then writes DONE.
+func deferBoth(t *testing.T, h *harness) string {
+	t.Helper()
+	h.ticks(5, 5*time.Minute)
+	if text, refused := h.callAs(judgmentName("!1", KindReviewer), ToolReviewFindings, map[string]any{"findings": []any{
+		wideFinding("Add a widget catalogue", "catalogue.go"), wideFinding("Log every spin", "log.go")}}); refused {
+		t.Fatalf("review refused: %s", text)
+	}
+	h.ticks(3, 5*time.Minute)
+	judge := judgmentName("!1", KindJudge)
+	if _, ok := h.sup.st.Runtime[judge]; !ok {
+		t.Fatalf("no judge started: %v", h.loopSteps("!1"))
+	}
+	for _, id := range []string{"F1", "F2"} {
+		if text, refused := h.callAs(judge, ToolRaiseDecision, deferDecision(id)); refused {
+			t.Fatalf("raise for %s refused: %s", id, text)
+		}
+	}
+	if text, refused := h.callAs(judge, ToolJudgeDispositions, deferBothArgs()); refused {
+		t.Fatalf("judge refused: %s", text)
+	}
+	h.sup.track(judge).State = Done
+	h.ticks(3, 5*time.Minute)
+	return judge
+}
+
+func deferBothArgs() map[string]any {
+	return map[string]any{"dispositions": []any{
+		map[string]any{"finding_id": "F1", "disposition": DispositionDefer, "reason": "It widens the scope; the owner decides."},
+		map[string]any{"finding_id": "F2", "disposition": DispositionDefer, "reason": "It widens the scope; the owner decides."}},
+		"plan": []any{}}
+}
+
+// deferredCard is the request card of !1 for the decision of a deferred
+// finding, "d:…", or fails.
+func (h *harness) deferredCard() repoNeed {
+	h.t.Helper()
+	for _, n := range requestNeeds(h.sup.cfg, h.sup.st, "widgets", h.clock.Now()) {
+		if n.Request && strings.HasPrefix(n.Entry, entryDecision) {
+			return n
+		}
+	}
+	h.t.Fatalf("no d: card for !1: %+v; place %+v", requestNeeds(h.sup.cfg, h.sup.st, "widgets", h.clock.Now()), h.place("!1"))
+	return repoNeed{}
+}
+
+// answerCard answers !1's deferred card through the page, with choice
+// or, when choice is "", in the owner's own words.
+func (h *harness) answerCard(entry, choice, text string) error {
+	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	src.now = h.clock.Now
+	return src.respond("widgets", entry, "", text, &AnswerPayload{Choice: choice}, nil)
+}
+
+// countSteps counts ref's loop steps of a kind.
+func (h *harness) countSteps(ref, step string) int {
+	n := 0
+	for _, s := range h.loopSteps(ref) {
+		if s == step {
+			n++
+		}
+	}
+	return n
+}
+
+// A judge's defer needs its decision, and a round with a deferred finding
+// whose decision is unanswered waits for the owner, read from the log:
+// a restart neither reviews it again nor counts it converged (!1280).
+func TestLoopDeferredFindingWaitsAcrossRestart(t *testing.T) {
+	h, api := loopHarness(t)
+	h.ticks(5, 5*time.Minute)
+	if text, refused := h.callAs(judgmentName("!1", KindReviewer), ToolReviewFindings, map[string]any{"findings": []any{
+		wideFinding("Add a widget catalogue", "catalogue.go"), wideFinding("Log every spin", "log.go")}}); refused {
+		t.Fatalf("review refused: %s", text)
+	}
+	h.ticks(3, 5*time.Minute)
+	judge := judgmentName("!1", KindJudge)
+	long := deferDecision("F1")
+	long["context"] = strings.Repeat("x", maxDecisionField+1)
+	if text, refused := h.callAs(judge, ToolRaiseDecision, long); !refused || !strings.Contains(text, "1000 characters") {
+		t.Fatalf("a long context was raised: %s", text)
+	}
+	if text, refused := h.callAs(judge, ToolJudgeDispositions, deferBothArgs()); !refused || !strings.Contains(text, "raise_decision") {
+		t.Fatalf("a defer with no decision was accepted: %s", text)
+	}
+	for _, id := range []string{"F1", "F2"} {
+		if text, refused := h.callAs(judge, ToolRaiseDecision, deferDecision(id)); refused {
+			t.Fatalf("raise for %s refused: %s", id, text)
+		}
+	}
+	if text, refused := h.callAs(judge, ToolJudgeDispositions, deferBothArgs()); refused {
+		t.Fatalf("judge refused: %s", text)
+	}
+	h.sup.track(judge).State = Done
+	h.ticks(3, 5*time.Minute)
+	check := func(when string) {
+		t.Helper()
+		if p := h.place("!1"); p.Phase != PlaceOwner || !strings.Contains(p.Reason, "finding F1 of round 1 is deferred to you (entry d:") {
+			t.Fatalf("%s: place = %+v", when, p)
+		}
+		if n, a := h.countSteps("!1", LoopReview), h.countSteps("!1", LoopApprove); n != 1 || a != 0 {
+			t.Fatalf("%s: steps %v", when, h.loopSteps("!1"))
+		}
+		if c := h.deferredCard(); !strings.Contains(c.Entry, judge) || c.Decision == nil || c.Decision.Finding != "F1" || len(c.Options) != 3 {
+			t.Fatalf("%s: card %+v", when, c)
+		}
+	}
+	check("before the restart")
+	h.restart(false)
+	h.sup.api = api
+	h.sup.refreshRuntime()
+	h.ticks(3, 5*time.Minute)
+	check("after the restart")
+	if len(h.forge.merges) != 0 {
+		t.Fatalf("merged with findings deferred: %+v", h.forge.merges)
+	}
+}
+
+// The log of !1280 as the old build wrote it: a judge that deferred two
+// findings with no decision raised. Its round waits for the owner before
+// and after a restart, and is neither reviewed again nor approved.
+func TestLoopReplayed1280Waits(t *testing.T) {
+	h, api := loopHarness(t)
+	h.ticks(5, 5*time.Minute)
+	if text, refused := h.callAs(judgmentName("!1", KindReviewer), ToolReviewFindings, map[string]any{"findings": []any{
+		wideFinding("Add a widget catalogue", "catalogue.go"), wideFinding("Log every spin", "log.go")}}); refused {
+		t.Fatalf("review refused: %s", text)
+	}
+	h.ticks(3, 5*time.Minute)
+	judge := judgmentName("!1", KindJudge)
+	NewLogWriter(h.buf).Append(Event{V: EventVersion, Time: h.clock.Now(), Session: judge, Kind: KindCase, Mode: ModeShared,
+		Case: &CasePayload{Case: widgetsCase, Call: &CaseCall{Tool: ToolJudgeDispositions, Hash: "old1280", Dispositions: &CaseDispositions{Round: 1, Dispositions: []Disposition{
+			{FindingID: "F1", Disposition: DispositionDefer, Reason: "Out of scope."}, {FindingID: "F2", Disposition: DispositionDefer, Reason: "Out of scope."}}}}}})
+	h.restart(false)
+	h.sup.api = api
+	h.sup.refreshRuntime()
+	check := func(when string) {
+		t.Helper()
+		if p := h.place("!1"); p.Phase != PlaceOwner || !strings.Contains(p.Reason, "finding F1 of round 1 is deferred to you") || !strings.Contains(p.Reason, "no decision") {
+			t.Fatalf("%s: place = %+v", when, p)
+		}
+		if n, a := h.countSteps("!1", LoopReview), h.countSteps("!1", LoopApprove); n != 1 || a != 0 {
+			t.Fatalf("%s: steps %v", when, h.loopSteps("!1"))
+		}
+	}
+	h.ticks(3, 5*time.Minute)
+	check("before the restart")
+	h.restart(false)
+	h.sup.api = api
+	h.sup.refreshRuntime()
+	h.ticks(3, 5*time.Minute)
+	check("after the restart")
+}
+
+// The owner's fix on a deferred finding's decision is a fix round for
+// the work session, as an adopted finding is, and only the new head is
+// reviewed (!1281); an answer in the owner's own words leaves the round
+// waiting.
+func TestLoopDeferredAnswerFix(t *testing.T) {
+	h, api := loopHarness(t)
+	deferBoth(t, h)
+	c := h.deferredCard()
+	if err := h.answerCard(c.Entry, "", "Hmm, not sure."); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(2, 5*time.Minute)
+	if p := h.place("!1"); p.Phase != PlaceOwner || !strings.Contains(p.Reason, "finding F1 of round 1 is deferred to you") {
+		t.Fatalf("own words: place = %+v", p)
+	}
+	if err := h.answerCard(h.deferredCard().Entry, FindingFix, "extend the test in this MR"); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(2, 5*time.Minute)
+	if p := h.place("!1"); p.Phase != PlaceOwner || !strings.Contains(p.Reason, "finding F2 of round 1 is deferred to you") {
+		t.Fatalf("one answered: place = %+v", p)
+	}
+	if err := h.answerCard(h.deferredCard().Entry, FindingMerge, ""); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(3, 5*time.Minute)
+	if n := h.count(KindAction, ActFixRound, "d"); n != 1 {
+		t.Fatalf("fix rounds = %d; steps %v; place %+v", n, h.loopSteps("!1"), h.place("!1"))
+	}
+	if cmd := h.lastLaunch("d"); !strings.Contains(cmd, `"owner":"fix"`) || !strings.Contains(cmd, "Add a widget catalogue") {
+		t.Fatalf("fix round facts: %s", cmd)
+	}
+	h.ticks(3, 5*time.Minute)
+	if got := strings.Join(h.loopSteps("!1"), ","); got != "review,judge,fix" {
+		t.Fatalf("reviewed before the fix was delivered: %s", got)
+	}
+	if p := h.place("!1"); p.Phase != PlaceFixing {
+		t.Fatalf("place = %+v", p)
+	}
+	h.git.head = "c0ffe2"
+	h.status("d", "# Fixed\n\nDONE\n")
+	api.pipelines("c0ffe2", "success", nil, "success", nil)
+	h.ticks(12, 5*time.Minute)
+	reviewer := judgmentName("!1", KindReviewer)
+	if _, ok := h.sup.st.Runtime[reviewer]; !ok || !strings.Contains(h.lastLaunch(reviewer), `"head":"c0ffe2"`) {
+		t.Fatalf("no review of the new head: steps %v, place %+v", h.loopSteps("!1"), h.place("!1"))
+	}
+	if got := strings.Join(h.loopSteps("!1"), ","); got != "review,judge,fix,review" {
+		t.Fatalf("steps = %s", got)
+	}
+}
+
+// The owner's merge on every deferred finding converges the round at the
+// head reviewed, with no further review; an issue answer converges too
+// and, where delivery.allow lacks issue, tells the owner the issue to
+// file.
+func TestLoopDeferredAnswerMerge(t *testing.T) {
+	h, _ := loopHarness(t)
+	deferBoth(t, h)
+	if err := h.answerCard(h.deferredCard().Entry, FindingMerge, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.answerCard(h.deferredCard().Entry, FindingIssue, ""); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(6, 5*time.Minute)
+	if len(h.forge.merges) != 1 || h.forge.merges[0].ref != "!1" || h.forge.merges[0].head != "c0ffee" {
+		t.Fatalf("merges = %+v; skips %v; place %+v", h.forge.merges, h.mergeSkips(), h.place("!1"))
+	}
+	if got := strings.Join(h.loopSteps("!1"), ","); got != "review,judge" {
+		t.Fatalf("steps = %s", got)
+	}
+	if len(h.forge.issues) != 0 {
+		t.Fatalf("opened an issue delivery.allow does not permit: %v", h.forge.issues)
+	}
+	told := 0
+	for _, e := range h.events() {
+		if e.Kind == KindMessage && strings.Contains(e.Message.Text, "F2") && strings.Contains(e.Message.Text, "Log every spin") && strings.Contains(e.Message.Text, "log.go") {
+			told++
+		}
+	}
+	if told != 1 {
+		t.Fatalf("the owner was told the issue to file %d times", told)
+	}
+}
+
+// An issue answer opens the follow-up issue where delivery.allow permits
+// it, naming the request, the finding and its paths, once.
+func TestLoopDeferredAnswerIssueOpens(t *testing.T) {
+	h, api := loopHarness(t)
+	w := h.cfg.Repositories["widgets"]
+	w.Policy.Delivery.Allow = append(w.Policy.Delivery.Allow, ActIssue)
+	h.cfg.Repositories["widgets"] = w
+	h.restart(false)
+	h.sup.api = api
+	deferBoth(t, h)
+	for _, k := range []string{FindingIssue, FindingMerge} {
+		if err := h.answerCard(h.deferredCard().Entry, k, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.ticks(4, 5*time.Minute)
+	h.restart(false)
+	h.sup.api = api
+	h.ticks(4, 5*time.Minute)
+	if len(h.forge.issues) != 1 || !strings.Contains(h.forge.issues[0], "!1") || !strings.Contains(h.forge.issues[0], "F1") || !strings.Contains(h.forge.issues[0], "catalogue.go") {
+		t.Fatalf("issues = %q", h.forge.issues)
+	}
+	if len(h.forge.merges) != 1 {
+		t.Fatalf("merges = %+v; place %+v", h.forge.merges, h.place("!1"))
+	}
+}
