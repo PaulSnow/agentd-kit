@@ -818,19 +818,19 @@ func (s *Supervisor) deliverInstructions(name string, sess Session, t *Track, ev
 		}
 		return nil
 	})
-	// A pane that is not Claude's, a parked session, or one tmux cannot
-	// reach or type into tells the owner on the item the answer is for;
-	// a screen that moved, or the trust prompt, is tried again.
-	if err != nil && s.halt == nil && !errors.Is(err, errScreenChanged) && !errors.Is(err, errTrustPrompt) && !errors.Is(err, errWrite) {
+	// The owner's answer on an item's entry that cannot be typed, its
+	// pane not Claude's, or tmux failing on a session blocked on the
+	// owner, which nothing restarts, tells the owner on the item at once.
+	// A screen that moved, the trust prompt, or a working session's tmux
+	// failing, which a restart hands its messages again, is tried again;
+	// a parked session's item is reassigned (#70).
+	if err != nil && s.halt == nil && (errors.Is(err, errNotClaude) || blocked && !errors.Is(err, errScreenChanged) && !errors.Is(err, errTrustPrompt) && !errors.Is(err, errWrite) && !errors.Is(err, errParked)) {
 		why := "tmux: " + err.Error()
-		switch {
-		case errors.Is(err, errNotClaude):
+		if errors.Is(err, errNotClaude) {
 			why = "its pane does not run claude"
-		case errors.Is(err, errParked):
-			why = "it is parked"
 		}
 		for _, id := range ids {
-			if in := s.st.Instructions[id]; in != nil {
+			if in := s.st.Instructions[id]; in != nil && itemEntry(in) != "" {
 				if it := s.answerItem(in); it != nil {
 					s.undelivered(in, it, name, why)
 				}
@@ -860,13 +860,12 @@ func answeredLine(entry, id string) string {
 	return "The owner answered on " + entry + " (instruction " + id + "): read " + InstructionsFile + " now, act on it, and answer in the text you end your turn with."
 }
 
-// answerItem is the item the owner's words in are about: the item whose
-// entry they answer, else the item in opened that holds it.
+// answerItem is the item whose entry the owner's words in answer, or nil.
 func (s *Supervisor) answerItem(in *Instruction) *WorkItem {
 	if e := itemEntry(in); e != "" {
 		return s.st.Work[e[len(entryWork):]]
 	}
-	return in.heldBy(s.st)
+	return nil
 }
 
 // settleQuestions records the owner's answer to STATUS.md's Questions

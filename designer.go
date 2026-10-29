@@ -861,7 +861,7 @@ func (s *Supervisor) routeDesign(in *Instruction) bool {
 	case it.Session != "" && !it.terminal() && s.takesInstructions(it.Session) && s.reachable(it.Session):
 		// After the go, words on the design are for the session doing it.
 		if why := s.untypeable(it.Session); why != "" && s.noRestart(it.Session) != "" {
-			s.undelivered(in, it, it.Session, why)
+			s.reassigning(in, it, why)
 			return true
 		}
 		s.routeStep(in, RouteTo, it.Session, false, "")
