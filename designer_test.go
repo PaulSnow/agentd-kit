@@ -560,10 +560,13 @@ func TestDesignWithheldAsksOwnerAtOnce(t *testing.T) {
 	}
 
 	if err := h.respondDesign(it.ID, DesignGo, ""); err == nil {
-		h.ticks(1, time.Minute)
-		if it = h.item(it.ID); it.State != WorkDesigned {
-			t.Fatalf("go on a withheld design went on: %+v", it)
-		}
+		t.Fatal("the page took go on a withheld design")
+	}
+	if q := des[0].Decision.Question; strings.Contains(q, "go,") || !strings.Contains(q, "change or decline") {
+		t.Fatalf("question = %q", q)
+	}
+	if v := WorkViews(h.sup.cfg, h.sup.st, "widgets", true, h.clock.Now(), func(...string) bool { return false }); len(v) != 1 || strings.Contains(v[0].Progress, "go,") {
+		t.Fatalf("work views = %+v", v)
 	}
 	claudeAnswers(t, dir, 3, designOut("Mix the teal from blue and green", false, 0))
 	if err := h.respondDesign(it.ID, DesignChange, "Teal from blue and green, no plans needed."); err != nil {
@@ -639,5 +642,47 @@ func TestDesignWithheldRoundsDoNotCount(t *testing.T) {
 	it.DesignWithheld, it.WithheldRounds, it.Round = true, 2, designRounds+1
 	if got := it.designOptions(); strings.Join(got, ",") != "change,decline" {
 		t.Fatalf("a withheld round: %v", got)
+	}
+}
+
+// A round withheld after a contained round 1 starts nothing from round
+// 1's design, even with design.auto on, and its card shows neither that
+// design nor the owner's change; the card is as new as the round.
+func TestDesignWithheldAfterGoodRound(t *testing.T) {
+	dir := fakeClaude(t)
+	h := designerHarness(t, false)
+	h.cfg.ConfidentialPatterns = []string{`(?i)blueprint-[0-9]+`}
+	h.restart(false)
+	h.ticks(1, time.Minute)
+	claudeAnswers(t, dir, 2, designOut("Add PaintAll to paint.go", false, 0))
+	it := h.askDesigned(dir, "Paint the shed teal.")
+	h.ticks(2, time.Minute)
+	if it = h.item(it.ID); it.State != WorkDesigned || it.Design == nil {
+		t.Fatalf("round 1: %+v", it)
+	}
+	w := h.cfg.Repositories["widgets"]
+	w.Policy.Design.Auto = true
+	h.cfg.Repositories["widgets"] = w
+	h.restart(false)
+	h.sup.workEmit(WorkPayload{ID: it.ID, Step: WorkStepChange, Note: "Use the garden's teal.", By: "owner"})
+	h.sup.workEmit(WorkPayload{ID: it.ID, Step: WorkStepDesign, Design: &WorkDesign{Round: 2, Error: errDesignWithheld.Error(), Withheld: true}})
+	h.ticks(3, time.Minute)
+	it = h.item(it.ID)
+	if it.State != WorkDesigned || !it.DesignWithheld || !it.Approved.IsZero() {
+		t.Fatalf("after a withheld round 2: %+v", it)
+	}
+	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	src.catchUp()
+	des := src.designEntries(h.sup.cfg, "widgets", func(...string) bool { return false })
+	if len(des) != 1 || !des[0].open || !des[0].At.Equal(it.Progress) {
+		t.Fatalf("design entries = %+v, progress %v", des, it.Progress)
+	}
+	for _, not := range []string{"PaintAll", "garden", "Paint the shed teal."} {
+		if strings.Contains(des[0].Decision.Context, not) {
+			t.Fatalf("the card holds %q:\n%s", not, des[0].Decision.Context)
+		}
+	}
+	if !strings.Contains(des[0].Decision.Context, "round 2") {
+		t.Fatalf("the card:\n%s", des[0].Decision.Context)
 	}
 }
