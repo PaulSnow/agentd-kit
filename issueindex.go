@@ -1104,6 +1104,9 @@ func loopSentence(ref string, p loopPlace) string {
 	if p.Reason != "" {
 		text += ": " + p.Reason
 	}
+	if p.Brief != "" && len(text) > sentenceMax {
+		text = ref + " is " + p.Phase + ": " + p.Brief
+	}
 	return cutUTF8(oneLine(text, sentenceMax), sentenceMax)
 }
 

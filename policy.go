@@ -160,6 +160,11 @@ type SessionRules struct {
 	Budget    BudgetRules `json:"budget"`
 	Fallback  []string    `json:"fallback"`
 	WorkModel string      `json:"work_model"`
+	// YieldAfter is how long a reviewer or judge the loop has due waits
+	// for a place before agentd ends a work session that holds one, is
+	// idle past its nudges and holds no owner item (#71); 0, the default,
+	// ends none.
+	YieldAfter Duration `json:"yield_after"`
 }
 
 // BudgetRules caps a repository's sessions' spend: each one's, and all of
@@ -272,8 +277,8 @@ func (c *Config) checkPolicy(name string, repo *Repository, errs *[]error) {
 		def("review.others_max_age")
 	}
 	s := &p.Sessions
-	if s.Max < 0 || s.Budget.SessionTokens < 0 || s.Budget.RunTokens < 0 {
-		bad("sessions: max and budget must not be negative")
+	if s.Max < 0 || s.Budget.SessionTokens < 0 || s.Budget.RunTokens < 0 || s.YieldAfter.Duration < 0 {
+		bad("sessions: max, budget and yield_after must not be negative")
 	}
 	// A started session runs one of the models it may use.
 	if len(s.Models) > 0 {

@@ -471,8 +471,14 @@ func EndSession(cfg *Config, log *Log, events []Event, now time.Time, name strin
 	if !ok {
 		return fmt.Errorf("no started session %q is running", name)
 	}
-	return log.Append(Event{V: EventVersion, Time: now, Session: name, Kind: KindSession, Mode: ModeOwner,
-		Runtime: &RuntimePayload{ID: newIntentID(), Action: SessionEnd, Repository: p.Repository, By: "owner"}})
+	return log.Append(ownerEnd(now, name, p.Repository))
+}
+
+// ownerEnd is the owner's end of started session name of repo, as agentd
+// sessions end, and a loop card's end option (#71), write it.
+func ownerEnd(now time.Time, name, repo string) Event {
+	return Event{V: EventVersion, Time: now, Session: name, Kind: KindSession, Mode: ModeOwner,
+		Runtime: &RuntimePayload{ID: newIntentID(), Action: SessionEnd, Repository: repo, By: "owner"}}
 }
 
 // projectedRuntime is the started sessions the events leave running.

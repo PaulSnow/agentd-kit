@@ -320,6 +320,15 @@ func (src *uiSource) respond(repo, id, to, text string, a *AnswerPayload, files 
 		case !contains(decisionOptions(*dec), a.Choice):
 			return fmt.Errorf("%q is not one of the steps offered", a.Choice)
 		}
+		if end := strings.TrimPrefix(a.Choice, nextEnd); end != a.Choice {
+			// A step waiting for a place: the holder ends as agentd
+			// sessions end ends it, and the step starts in the place.
+			p, ok := src.st.Runtime[end]
+			if !ok {
+				return fmt.Errorf("no started session %q is running", end)
+			}
+			return src.log.Append(ownerEnd(now, end, p.Repository))
+		}
 		return ownerLoop(cfg, src.st, src.log, now, repo, strings.TrimPrefix(id, entryLoop), a.Choice)
 	}
 	if a != nil && dec == nil && (a.Binding() || a.Other != "") {

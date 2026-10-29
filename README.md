@@ -171,7 +171,7 @@ Each repository's rules that `agentd` checks mechanically are one typed `policy`
   "review": {"reviewer_model": "", "judge_model": "", "rounds": {"max": 3}, "others": "review-only", "others_max_age": "14d"},
   "ci": {"required": true, "retest_on_base_move": false},
   "scope": {"reserved": {"numbers": [7], "labels": ["owner-only"]}},
-  "sessions": {"accounts": ["work"], "max": 4, "models": [], "budget": {"session_tokens": 2000000, "run_tokens": 0}, "fallback": [], "work_model": ""},
+  "sessions": {"accounts": ["work"], "max": 4, "models": [], "budget": {"session_tokens": 2000000, "run_tokens": 0}, "fallback": [], "work_model": "", "yield_after": "0s"},
   "confidential_patterns": ["widgets-internal-[0-9]+"]
 }
 ```
@@ -378,6 +378,8 @@ The owner: "Why do I have to use this session to make the go infrastructure work
 Work handed to a running session is that session's to design, and goes to it as before.
 
 **Go keeps its own room.** A start that finds its repository at `sessions.max` (a work session for the owner's work or an item, the loop's next case, a reviewer or judge) ends a finished session agentd started there, the oldest first: a work session that wrote DONE, its deliveries made (or refused, with the reason), or that stopped, crash-looped or was parked with at least one request delivered, and every request it delivered merged or closed; with no open work item and no message routed to it and not yet delivered. The loop's next case, one place short of the place it keeps for judgment sessions, makes room the same way. The end carries why, and the console is told which session went and for what. A session at work, one whose request is still open (its fix rounds are its own), a reviewer or judge, and a chat session are never ended for room; when every place is held so, the start is refused and the owner told, as before.
+
+**A loop step waits for a place in words (#71).** A reviewer or judge the loop has due while every place under `sessions.max` is held so is *waiting for a place*: the status line, the request's sentence and a card on the issue and repository pages say `REPO runs N started sessions, its max M; the places are held by S1, S2 (S1 waits on you, S2 is idle past its nudges); end one (agentd sessions end NAME) or raise sessions.max` (the sentence counts the holders when naming them would not fit). The card offers ending each holder, which writes the end `agentd sessions end` writes; the start is tried every pass, so the step starts on the pass after a place frees, with one loop event. The wait is a loop event (`wait`), once a step and round, and its skip is logged once for each set of holders. `sessions.yield_after` (a duration; 0, the default, is off) bounds the wait: once the step has waited that long, agentd ends the oldest holder that is a work session idle past `nudge.max`, with no owner item, no message waiting on it and no question for the owner, tells the console which and why (its workdir and worktree stay), and starts the step in its place. A reviewer, judge or chat session, and a session that waits on the owner or holds an owner item, is never ended so; the card names them and why.
 
 ## The operations console (#63)
 
