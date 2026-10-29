@@ -753,8 +753,11 @@ func (st *LogState) freshInstructions(name string, unanswered bool, now time.Tim
 
 // deliverInstructions hands the owner's new instructions to a live
 // session as deliverAnswers hands answers: every instruction routed to it
-// written to instructions.json, then the fixed pointer line typed, only
-// into a session that can take a line. It says whether it tried to type.
+// written to instructions.json, then a fixed line typed, only into a
+// session that can take a line: one blocked on the owner too, which the
+// owner's answer on its item's entry is for. The line names the entry and
+// the instruction when the newest is an answer on an item's entry, never
+// the owner's words. It says whether it tried to type.
 func (s *Supervisor) deliverInstructions(name string, sess Session, t *Track, ev Evidence, state State) bool {
 	ids := s.st.freshInstructions(name, false, s.clock.Now())
 	// A scoped message waits for the session's turn to end, unless the
@@ -771,9 +774,8 @@ func (s *Supervisor) deliverInstructions(name string, sess Session, t *Track, ev
 		}
 		ids = due
 	}
-	// Only a session that can take a line: never one waiting on the
-	// owner, whose answers reach it through deliverAnswers.
-	if len(ids) == 0 || !ev.Alive || t.Limited || ev.Dialog != "" || ev.TrustPrompt || state != Working && state != Idle {
+	blocked := state == BlockedOnOwner && ev.Status.Questions != ""
+	if len(ids) == 0 || !ev.Alive || t.Limited || ev.Dialog != "" || ev.TrustPrompt || state != Working && state != Idle && !blocked {
 		return false
 	}
 	key := "instruct:" + name
@@ -786,14 +788,104 @@ func (s *Supervisor) deliverInstructions(name string, sess Session, t *Track, ev
 			ins = append(ins, in)
 		}
 	}
-	pointer := s.cfg.Policies.Instructions.Pointer
-	s.typeInto(name, ActInstruct, &ActPayload{Key: key, Instructions: ids, Message: pointer}, t, ev.PaneHash, func() error {
+	newest := s.st.Instructions[ids[len(ids)-1]]
+	line := s.cfg.Policies.Instructions.Pointer
+	if newest != nil && itemEntry(newest) != "" {
+		line = answeredLine(itemEntry(newest), newest.ID)
+	}
+	// Delivered, the owner's answer on the item's entry, or words in the
+	// session's own box, answer STATUS.md's Questions as they stand: the
+	// session is no longer blocked on the owner, and the act marks the
+	// answer delivered, so no second line is typed for it. The work a
+	// thread agent handed over answers nothing it asks.
+	settle := ""
+	if blocked && ev.StatusQuestions != "" && t.waits(statusDecisionFor(ev.StatusQuestions)) && newest != nil && (itemEntry(newest) != "" || newest.To == name) {
+		settle = ev.StatusQuestions
+	}
+	a := &ActPayload{Key: key, Instructions: ids, Message: line}
+	err := s.typeInto(name, ActInstruct, a, t, ev.PaneHash, func() error {
 		if err := writeInstructions(s.cfg, sess.Workdir, ins, s.clock.Now()); err != nil {
+			return fmt.Errorf("%w: %v", errWrite, err)
+		}
+		if err := s.tmux.Type(name, line); err != nil {
 			return err
 		}
-		return s.tmux.Type(name, pointer)
+		if settle != "" {
+			at := s.settleQuestions(name, settle, newest)
+			if !at.IsZero() {
+				a.Answers, a.AnswersAt = []string{statusDecision + settle}, []time.Time{at}
+			}
+		}
+		return nil
 	})
+	// The owner's answer on an item's entry that cannot be typed, its
+	// pane not Claude's, or tmux failing on a session blocked on the
+	// owner, which nothing restarts, tells the owner on the item at once.
+	// A screen that moved, the trust prompt, or a working session's tmux
+	// failing, which a restart hands its messages again, is tried again;
+	// a parked session's item is reassigned (#70).
+	if err != nil && s.halt == nil && (errors.Is(err, errNotClaude) || blocked && !errors.Is(err, errScreenChanged) && !errors.Is(err, errTrustPrompt) && !errors.Is(err, errWrite) && !errors.Is(err, errParked)) {
+		why := "tmux: " + err.Error()
+		if errors.Is(err, errNotClaude) {
+			why = "its pane does not run claude"
+		}
+		for _, id := range ids {
+			if in := s.st.Instructions[id]; in != nil && itemEntry(in) != "" {
+				if it := s.answerItem(in); it != nil {
+					s.undelivered(in, it, name, why)
+				}
+			}
+		}
+	}
 	return true
+}
+
+// errWrite marks instructions.json not written: tried again on the
+// restart backoff, which the session's pane is no cause of.
+var errWrite = errors.New("instructions.json not written")
+
+// itemEntry is the item entry in responds on (w:ID, or b:ID after the
+// go), or "".
+func itemEntry(in *Instruction) string {
+	if in.Re != nil && (strings.HasPrefix(in.Re.ID, entryWork) || strings.HasPrefix(in.Re.ID, entryDesign)) {
+		return in.Re.ID
+	}
+	return ""
+}
+
+// answeredLine is the fixed line typed for the owner's answer on an item's
+// entry: it names the entry and the instruction and says what to do,
+// never the owner's words, which instructions.json holds.
+func answeredLine(entry, id string) string {
+	return "The owner answered on " + entry + " (instruction " + id + "): read " + InstructionsFile + " now, act on it, and answer in the text you end your turn with."
+}
+
+// answerItem is the item whose entry the owner's words in answer, or nil.
+func (s *Supervisor) answerItem(in *Instruction) *WorkItem {
+	if e := itemEntry(in); e != "" {
+		return s.st.Work[e[len(entryWork):]]
+	}
+	return nil
+}
+
+// settleQuestions records the owner's answer to STATUS.md's Questions
+// with hash, as session name received them in in: the owner's, as an
+// answer on the page is. It returns when it was given, as the track holds
+// it, or zero when the log took nothing.
+func (s *Supervisor) settleQuestions(name, hash string, in *Instruction) time.Time {
+	d := statusDecisionFor(hash)
+	text := "answered by the owner"
+	if in != nil {
+		if e := itemEntry(in); e != "" {
+			text += " on " + e + ","
+		}
+		text += " instruction " + in.ID + "; the answer is in " + InstructionsFile
+	}
+	a := AnswerPayload{ID: d.ID, Text: text, Asked: decisionHash(d)}
+	if s.emit(name, Event{Kind: KindAnswer, Mode: ModeOwner, Answer: &a}); s.halt != nil {
+		return time.Time{}
+	}
+	return s.st.Tracks[name].Answers[d.ID].At
 }
 
 // applyRoute folds a route step.

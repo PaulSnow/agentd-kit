@@ -378,6 +378,12 @@ func (st *LogState) apply(e Event) {
 		if prev, ok := t.Answers[e.Answer.ID]; e.Answer.ByDefault && ok && prev.Asked == e.Answer.Asked {
 			break
 		}
+		// The owner's answer a run logged as it delivered the owner's
+		// words (#56) is read back from the log as the owner's: it is the
+		// same answer, delivered already.
+		if prev, ok := t.Answers[e.Answer.ID]; ok && prev.At.Equal(e.Time) && prev.Asked == e.Answer.Asked && prev.Text == e.Answer.Text {
+			break
+		}
 		t.Answers[e.Answer.ID] = AnswerRecord{AnswerPayload: *e.Answer, At: e.Time}
 	case KindDeadline:
 		t.Deadlines[e.Deadline.ID] = DeadlineRecord{DeadlinePayload: *e.Deadline, Set: e.Time}
