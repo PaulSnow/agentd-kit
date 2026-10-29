@@ -837,3 +837,229 @@ func mergedRef(h *harness, ref string) bool {
 	}
 	return false
 }
+
+// loopAtMax is a loop whose request !1 has round 1's findings due for a
+// judge while widgets, at sessions.max 2, runs two started work sessions
+// the loop may not end for room: the first waits on the owner, with an
+// open question in its STATUS.md; the second is idle past its nudges.
+// It returns the two.
+func loopAtMax(t *testing.T) (*harness, string, string) {
+	t.Helper()
+	h, _ := loopHarness(t)
+	setMax := func(n int) {
+		w := h.cfg.Repositories["widgets"]
+		w.Policy.Sessions.Max = n
+		h.cfg.Repositories["widgets"] = w
+	}
+	setMax(3)
+	h.ticks(5, 5*time.Minute)
+	reviewer := judgmentName("!1", KindReviewer)
+	if _, ok := h.sup.st.Runtime[reviewer]; !ok {
+		t.Fatalf("no reviewer started: %v", h.sup.st.Runtime)
+	}
+	asks := h.startSession("issue-10", KindWork, 10)
+	idle := h.startSession("issue-11", KindWork, 11)
+	h.ticks(1, time.Minute)
+	h.alive(asks, "Which colour, red or blue?\n"+idleScreen)
+	h.alive(idle, idleScreen)
+	h.status(asks, "# Status\n\n## Questions\n- Q1. Red or blue?\n")
+	h.status(idle, "# Status\n\nPainting.\n")
+	setMax(2)
+	if text, refused := h.callAs(reviewer, ToolReviewFindings, map[string]any{"findings": []any{finding("Spin is untested")}}); refused {
+		t.Fatalf("review refused: %s", text)
+	}
+	h.ticks(1, time.Minute)
+	h.sup.track(idle).Nudges = h.cfg.Policies.Nudge.Max
+	h.ticks(2, time.Minute)
+	if h.state(asks) != BlockedOnOwner {
+		t.Fatalf("%s is %s", asks, h.state(asks))
+	}
+	return h, asks, idle
+}
+
+// loopSkipsOf are the skips the loop recorded for ref.
+func (h *harness) loopSkipsOf(ref string) []string {
+	var out []string
+	for _, e := range h.events() {
+		if e.Kind == KindSkip && strings.HasPrefix(e.Skip.Key, "loop:"+ciKey("widgets", ref)+":") {
+			out = append(out, e.Skip.Reason)
+		}
+	}
+	return out
+}
+
+// A judge due at sessions.max waits for a place, and says so where the
+// owner looks: the place, the request's sentence and a card on the
+// repository page name the max and each holder, which waits on the owner
+// and which is idle past its nudges, and what the owner can do. One skip
+// is recorded for the holders, not one a tick; the judge starts on the
+// tick after the owner ends a holder, with one loop event.
+func TestLoopStepWaitsForAPlace(t *testing.T) {
+	h, asks, idle := loopAtMax(t)
+	judge := judgmentName("!1", KindJudge)
+	if _, ok := h.sup.st.Runtime[judge]; ok {
+		t.Fatal("a judge started past the max")
+	}
+	p := h.place("!1")
+	for _, want := range []string{"widgets runs 2 started sessions, its max 2", "the places are held by " + asks + ", " + idle,
+		asks + " waits on you", idle + " is idle past its nudges", "agentd sessions end NAME", "raise sessions.max"} {
+		if p.Phase != PlaceWaitPlace || !strings.Contains(p.Reason, want) {
+			t.Fatalf("place = %+v, want %q", p, want)
+		}
+	}
+	if s := h.sup.st.Sentences[sentenceKey("widgets", "!1")]; s == nil || !strings.Contains(s.Text, PlaceWaitPlace+": "+p.Reason) {
+		t.Fatalf("sentence = %+v", s)
+	}
+	rows, meta := SummarizeState(h.sup.cfg, h.sup.st)
+	var b bytes.Buffer
+	PrintStatus(&b, rows, meta, h.clock.Now())
+	if !strings.Contains(b.String(), "loop widgets !1: "+PlaceWaitPlace+" ("+p.Reason+")") {
+		t.Fatalf("status:\n%s", b.String())
+	}
+	var card *LevelDecision
+	for _, n := range requestNeeds(h.cfg, h.sup.st, "widgets", h.clock.Now()) {
+		if n.Entry == entryLoop+"!1" {
+			d := n.LevelDecision
+			card = &d
+		}
+	}
+	if card == nil || !strings.Contains(card.Asked, p.Reason) || len(card.Options) != 2 ||
+		card.Options[0].Key != nextEnd+asks || card.Options[1].Key != nextEnd+idle || !strings.Contains(card.Options[0].Label, "start the judge") {
+		t.Fatalf("card = %+v", card)
+	}
+	src := newUISource("live", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	u, _ := testUI(t, UIConfig{}, src)
+	if body := owner(t, u, "/repo/widgets"); !strings.Contains(body, `value="l:!1"`) || !strings.Contains(body, `value="end:`+asks+`"`) {
+		t.Fatalf("the page has no card:\n%s", body)
+	}
+	h.ticks(3, 5*time.Minute)
+	if skips := h.loopSkipsOf("!1"); len(skips) != 1 || !strings.Contains(skips[0], asks) {
+		t.Fatalf("skips = %q", skips)
+	}
+
+	// The owner ends the idle one from the card: the same end `agentd
+	// sessions end` writes.
+	if w := multipartTo(u, "/respond", u.token, map[string]string{"src": "live", "repository": "widgets", "entry": "l:!1", "choice": nextEnd + idle, "back": "/repo/widgets"}); w.Code != http.StatusSeeOther {
+		t.Fatalf("end: %d %s", w.Code, w.Body.String())
+	}
+	var ends []Event
+	for _, e := range h.events() {
+		if e.Kind == KindSession && e.Runtime.Action == SessionEnd && e.Session == idle {
+			ends = append(ends, e)
+		}
+	}
+	if len(ends) != 1 || ends[0].Mode != ModeOwner || ends[0].Runtime.By != "owner" || ends[0].Runtime.Repository != "widgets" {
+		t.Fatalf("ends = %+v", ends)
+	}
+	h.ticks(1, 5*time.Minute)
+	if _, ok := h.sup.st.Runtime[judge]; !ok {
+		t.Fatalf("no judge on the tick after a place freed: place %+v, steps %v", h.place("!1"), h.loopSteps("!1"))
+	}
+	h.ticks(3, 5*time.Minute)
+	judged := 0
+	for _, s := range h.loopSteps("!1") {
+		if s == LoopJudge {
+			judged++
+		}
+	}
+	if judged != 1 {
+		t.Fatalf("steps = %v", h.loopSteps("!1"))
+	}
+	if p := h.place("!1"); p.Phase != PlaceJudging {
+		t.Fatalf("place = %+v", p)
+	}
+}
+
+// A new set of holders records one skip more; the same set none.
+func TestLoopWaitSkipPerHolders(t *testing.T) {
+	h, _, idle := loopAtMax(t)
+	h.ticks(2, 5*time.Minute)
+	if n := len(h.loopSkipsOf("!1")); n != 1 {
+		t.Fatalf("skips = %q", h.loopSkipsOf("!1"))
+	}
+	// The place goes to another work session before the loop sees it.
+	h.sup.emit(idle, Event{Kind: KindSession, Mode: ModeShared, Runtime: &RuntimePayload{ID: newIntentID(), Action: SessionEnd, Repository: "widgets", By: "agentd"}})
+	h.sup.refreshRuntime()
+	other := h.startSession("issue-12", KindWork, 12)
+	h.alive(other, idleScreen)
+	h.ticks(3, 5*time.Minute)
+	if skips := h.loopSkipsOf("!1"); len(skips) != 2 || !strings.Contains(skips[1], other) {
+		t.Fatalf("skips = %q", skips)
+	}
+}
+
+// With sessions.yield_after set, a work session that holds no owner item
+// and is idle past its nudges is ended for the waiting judge once the
+// wait has lasted yield_after, never before; one console message names
+// it, and the judge starts. One that waits on the owner, or holds an
+// owner item, is never ended so, and the card says which and why.
+func TestLoopYieldsAnIdleHolder(t *testing.T) {
+	h, asks, idle := loopAtMax(t)
+	w := h.cfg.Repositories["widgets"]
+	w.Policy.Sessions.YieldAfter = Duration{time.Hour}
+	h.cfg.Repositories["widgets"] = w
+	h.ticks(1, 5*time.Minute)
+	var card *LevelDecision
+	for _, n := range requestNeeds(h.cfg, h.sup.st, "widgets", h.clock.Now()) {
+		if n.Entry == entryLoop+"!1" {
+			d := n.LevelDecision
+			card = &d
+		}
+	}
+	if card == nil || !strings.Contains(card.Asked, "never ends "+asks+", which waits on you") || !strings.Contains(card.Asked, idle) {
+		t.Fatalf("card = %+v", card)
+	}
+	h.ticks(6, 5*time.Minute) // 35 minutes in all
+	if _, ok := h.sup.st.Runtime[idle]; !ok {
+		t.Fatal("yielded before yield_after")
+	}
+	h.ticks(8, 5*time.Minute)
+	if _, ok := h.sup.st.Runtime[idle]; ok {
+		t.Fatalf("not yielded after yield_after: place %+v", h.place("!1"))
+	}
+	if _, ok := h.sup.st.Runtime[asks]; !ok {
+		t.Fatal("the one that waits on the owner was ended")
+	}
+	if _, ok := h.sup.st.Runtime[judgmentName("!1", KindJudge)]; !ok {
+		t.Fatalf("no judge after the yield: steps %v", h.loopSteps("!1"))
+	}
+	var notices []string
+	for _, e := range h.events() {
+		if e.Kind == KindMessage && e.Message.From == "agentd" && strings.Contains(e.Message.Text, "paused") {
+			notices = append(notices, e.Message.Text)
+		}
+	}
+	if len(notices) != 1 || !strings.Contains(notices[0], idle) || !strings.Contains(notices[0], "judge") || !strings.Contains(notices[0], "workdir and worktree stay") {
+		t.Fatalf("notices = %q", notices)
+	}
+}
+
+// An idle holder that holds an owner item is never yielded.
+func TestLoopNeverYieldsAnItemsHolder(t *testing.T) {
+	h, _, idle := loopAtMax(t)
+	w := h.cfg.Repositories["widgets"]
+	w.Policy.Sessions.YieldAfter = Duration{time.Hour}
+	h.cfg.Repositories["widgets"] = w
+	if h.sup.st.Work == nil {
+		h.sup.st.Work = map[string]*WorkItem{}
+	}
+	h.sup.st.Work["W1"] = &WorkItem{ID: "W1", Repository: "widgets", Session: idle, State: WorkAssigned, Opened: h.clock.Now()}
+	h.ticks(1, 5*time.Minute)
+	var card *LevelDecision
+	for _, n := range requestNeeds(h.cfg, h.sup.st, "widgets", h.clock.Now()) {
+		if n.Entry == entryLoop+"!1" {
+			d := n.LevelDecision
+			card = &d
+		}
+	}
+	if card == nil || !strings.Contains(card.Asked, idle+", which holds an owner item") {
+		t.Fatalf("card = %+v", card)
+	}
+	h.ticks(20, 5*time.Minute)
+	if _, ok := h.sup.st.Runtime[idle]; !ok {
+		t.Fatal("a holder of an owner item was yielded")
+	}
+	if p := h.place("!1"); p.Phase != PlaceWaitPlace {
+		t.Fatalf("place = %+v", p)
+	}
+}
