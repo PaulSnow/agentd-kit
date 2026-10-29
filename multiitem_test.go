@@ -197,3 +197,18 @@ func TestItemsPerIssueUndesigned(t *testing.T) {
 		t.Fatalf("the second item's session: %+v", p)
 	}
 }
+
+// The issue page of an item of a message that asked for several says
+// how many of how many were opened.
+func TestIssuePageSaysItemsOpened(t *testing.T) {
+	dir := fakeClaude(t)
+	h := designerHarness(t, false)
+	h.ticks(1, time.Minute)
+	claudeAnswers(t, dir, 0, designOut("Fix the widget", false, 0))
+	claudeAnswers(t, dir, 1, worksAgentOut(2, nil, nil, issueWork(101, "Widget squeaks"), issueWork(102, "Widget wobbles")))
+	h.askMany("One work item per issue for #101 and #102.")
+	v := BuildIssueLevel(h.cfg, h.sup.st, "widgets", 101, nil, true, h.clock.Now())
+	if !strings.Contains(strings.Join(v.Next, "\n"), "agentd opened 2 of 2 items asked") {
+		t.Fatalf("next = %q", v.Next)
+	}
+}
