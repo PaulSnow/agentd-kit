@@ -266,3 +266,35 @@ func TestHandOverWaitsOnPaneNotClaude(t *testing.T) {
 		t.Fatalf("not delivered once the pane runs claude: %+v", in)
 	}
 }
+
+// An answer on the entry of an item whose session is parked waits for the
+// session the item is reassigned to (#70), and reaches it; the owner is
+// told at once.
+func TestParkedSessionAnswerFollowsItem(t *testing.T) {
+	h := sessionsHarness(t)
+	it := h.blockedItem()
+	tr := h.sup.track("a")
+	tr.Parked, tr.Crashes = true, []Crash{{Exit: 1}}
+	in := h.respondWork(it, "Use the short form.")
+	h.ticks(1, time.Minute)
+	if in = h.logState().Instructions[in.ID]; in.Failed != "" {
+		t.Fatalf("the answer failed: %+v", in)
+	}
+	told := false
+	for _, n := range h.noticesAbout(it.ID) {
+		told = told || strings.Contains(n, in.ID) && strings.Contains(n, "parked")
+	}
+	if !told {
+		t.Fatalf("notices = %q", h.noticesAbout(it.ID))
+	}
+	h.ticks(1, time.Minute)
+	next := h.item(it.ID).Session
+	if next == "" || next == "a" {
+		t.Fatalf("not reassigned: %+v", h.item(it.ID))
+	}
+	h.alive(next, "launched\n"+idleScreen)
+	h.ticks(3, time.Minute)
+	if in = h.logState().Instructions[in.ID]; in.Session != next || in.Failed != "" || in.Delivered.IsZero() {
+		t.Fatalf("the answer did not reach %s: %+v", next, in)
+	}
+}
