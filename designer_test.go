@@ -136,7 +136,7 @@ func TestDesignerBriefPostsAsDecisionAndStartsOnGo(t *testing.T) {
 			t.Fatalf("the design lacks %q:\n%s", want, entry.Decision.Context)
 		}
 	}
-	if got := decisionOptions(entry.Decision.Decision); strings.Join(got, ",") != "go,change,decline" {
+	if got := decisionOptions(entry.Decision.Decision); strings.Join(got, ",") != "go,go-done-by-me,change,decline" {
 		t.Fatalf("options = %v", got)
 	}
 	// The item's own entry takes no done or re-assign while designed.
@@ -577,7 +577,7 @@ func TestDesignWithheldAsksOwnerAtOnce(t *testing.T) {
 	if it.State != WorkDesigned || it.Round != 2 || it.DesignWithheld || it.Design == nil || it.DesignError != "" {
 		t.Fatalf("after the change: %+v", it)
 	}
-	if got := it.designOptions(); strings.Join(got, ",") != "go,change,decline" {
+	if got := it.designOptions(); strings.Join(got, ",") != "go,go-done-by-me,change,decline" {
 		t.Fatalf("options after the change = %v", got)
 	}
 	if calls := claudeCalls(t, dir); calls != 3 {
@@ -632,11 +632,11 @@ func TestDesignWithheldDecline(t *testing.T) {
 // owner gets designRounds real rounds, and decline is always there.
 func TestDesignWithheldRoundsDoNotCount(t *testing.T) {
 	it := &WorkItem{Designer: true, State: WorkDesigned, Round: designRounds, Design: &WorkDesign{Round: designRounds}}
-	if got := it.designOptions(); strings.Join(got, ",") != "go,decline" {
+	if got := it.designOptions(); strings.Join(got, ",") != "go,go-done-by-me,decline" {
 		t.Fatalf("after %d real rounds: %v", designRounds, got)
 	}
 	it.WithheldRounds = 1
-	if got := it.designOptions(); strings.Join(got, ",") != "go,change,decline" {
+	if got := it.designOptions(); strings.Join(got, ",") != "go,go-done-by-me,change,decline" {
 		t.Fatalf("after %d rounds, one withheld: %v", designRounds, got)
 	}
 	it.DesignWithheld, it.WithheldRounds, it.Round = true, 2, designRounds+1
@@ -684,5 +684,45 @@ func TestDesignWithheldAfterGoodRound(t *testing.T) {
 	}
 	if !strings.Contains(des[0].Decision.Context, "round 2") {
 		t.Fatalf("the card:\n%s", des[0].Decision.Context)
+	}
+}
+
+// The owner's go can make the owner the item's done_when: the design's
+// card offers "go, done by me" beside go, and a go whose words say "done
+// by me" does the same. Only the owner's done closes the item then, its
+// session's brief says so, and no check ever runs (#73: an umbrella issue
+// that stays open is no done_when).
+func TestGoDoneByMeMakesDoneWhenOwner(t *testing.T) {
+	for _, c := range []struct{ choice, words string }{
+		{"go-done-by-me", "Q1: signal red"},
+		{DesignGo, "Go, done by me: #7 stays open as an umbrella."},
+	} {
+		dir := fakeClaude(t)
+		h := designerHarness(t, false)
+		h.ticks(1, time.Minute)
+		claudeAnswers(t, dir, 2, designOut("Add PaintAll to paint.go", false, 0))
+		it := h.askDesigned(dir, "Paint the shed red, all of it.")
+		h.ticks(2, time.Minute)
+		if it = h.item(it.ID); it.State != WorkDesigned || it.DoneWhen.Kind != DoneFile {
+			t.Fatalf("item = %+v", it)
+		}
+		if got := strings.Join(decisionOptions(designDecision(it, "")), ","); got != "go,go-done-by-me,change,decline" {
+			t.Fatalf("options = %s", got)
+		}
+		if err := h.respondDesign(it.ID, c.choice, c.words); err != nil {
+			t.Fatal(err)
+		}
+		h.ticks(3, time.Minute)
+		it = h.item(it.ID)
+		if it.DoneWhen.Kind != DoneOwner || it.ApprovedBy != "owner" || it.Session == "" {
+			t.Fatalf("%s: item = %+v", c.choice, it)
+		}
+		if a := h.answerOf(c.words); !strings.Contains(a, "done_when is now your word") {
+			t.Fatalf("%s: answer = %q", c.choice, a)
+		}
+		brief, err := os.ReadFile(filepath.Join(h.dir, it.Session, "BRIEF.md"))
+		if err != nil || !strings.Contains(string(brief), "## Done when\n\nthe owner says so\n") {
+			t.Fatalf("%s: BRIEF.md (%v):\n%s", c.choice, err, brief)
+		}
 	}
 }

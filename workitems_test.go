@@ -816,3 +816,165 @@ func TestItemReassignedWhenTmuxGone(t *testing.T) {
 		}
 	})
 }
+
+// issueSeven is widgets' issue #7 as the forge answers it alone.
+const issueSeven = "/projects/example-org%2Fwidgets/issues/7"
+
+// umbrellaWork is work whose done_when is widgets' #7 closed, and the
+// forge that answers #7 opened.
+func (h *harness) umbrellaWork() (*WorkItem, *fakeForgeAPI) {
+	h.t.Helper()
+	it := h.askWork("Fix the child of #7.", ThreadWork{Title: "Fix the child", Brief: "Fix it.", DoneWhen: EndCheck{Kind: DoneForge, Ref: "#7", State: "closed"}}, "")
+	api := &fakeForgeAPI{gitlab: map[string]string{"=" + issueSeven: `{"state":"opened"}`}}
+	h.sup.api = api
+	return it, api
+}
+
+// answerOf is agentd's answer to the owner's response text, "" for none.
+func (h *harness) answerOf(text string) string {
+	h.t.Helper()
+	in := h.instructionText(h.t, text)
+	for _, e := range h.events() {
+		if e.Kind == KindRoute && e.Route.Step == RouteAnswered && e.Route.Instruction == in.ID && e.Route.Agent != nil {
+			return e.Route.Agent.Answer
+		}
+	}
+	return ""
+}
+
+// othersFor are the sessions other than name that hold item it.
+func (h *harness) othersFor(it *WorkItem, name string) []string {
+	var out []string
+	for n, p := range h.sup.st.Runtime {
+		if n != name && (p.Item == it.ID || p.Owner == it.Instruction) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// A session that finishes with a done line its check refutes is not
+// given back: its claim goes to the owner on the item, once, with the
+// line and what the check saw, and no other session is started for it
+// (W0f446a9c ran three in 40 seconds). The owner's not-done then gives
+// it to a new session.
+func TestDoneLineFailingCheckAsksOwner(t *testing.T) {
+	h := sessionsHarness(t)
+	it, _ := h.umbrellaWork()
+	name := it.Session
+	h.ticks(1, time.Minute)
+	h.alive(name, "fixing")
+	h.status(name, "# Status\n\n## Now\n"+it.ID+": fixing\n")
+	h.ticks(2, time.Minute)
+	h.status(name, "# Status\n\n"+it.ID+" done: the child is fixed; #7 stays open as an umbrella\n\nDONE\n")
+	h.alive(name, "all done")
+	h.ticks(10, time.Minute)
+	it = h.item(it.ID)
+	if it.State == WorkDone || it.State == WorkOpen || it.Session != name || len(it.Tried) != 0 {
+		t.Fatalf("item = %+v", it)
+	}
+	if others := h.othersFor(it, name); len(others) != 0 {
+		t.Fatalf("sessions started for the item again: %v", others)
+	}
+	ns := h.noticesAbout(it.ID)
+	if len(ns) != 1 || !strings.Contains(ns[0], "the child is fixed; #7 stays open as an umbrella") || !strings.Contains(ns[0], "the check says: #7 is closed: it is opened") {
+		t.Fatalf("notices = %q", ns)
+	}
+	if opts := strings.Join(it.workOptions(), ","); opts != "done,not-done,reassign,decline" {
+		t.Fatalf("options = %s", opts)
+	}
+	ld, ok := workDecision(it)
+	if !ok || !strings.Contains(ld.CameBack, "the child is fixed") || !strings.Contains(ld.Checked, "it is opened") {
+		t.Fatalf("decision = %+v, %v", ld, ok)
+	}
+
+	// Not done: the finished session's item goes to a new one.
+	re := &EntryRe{ID: entryWork + it.ID, Kind: "work", At: it.Opened}
+	if err := recordInstructionRe(h.cfg, NewLogWriter(h.buf), h.clock.Now(), []string{"widgets"}, "", "", "ui", "the child is not fixed", re, &EntryAnswer{Choice: WorkAnswerNotDone}, nil); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(3, time.Minute)
+	if a := h.answerOf("the child is not fixed"); !strings.Contains(a, "open again") {
+		t.Fatalf("answer = %q", a)
+	}
+	if it = h.item(it.ID); len(it.Tried) != 1 || it.Tried[0] != name || it.Session == name {
+		t.Fatalf("after not done: item = %+v", it)
+	}
+}
+
+// A done line whose check finds the forge not yet closed is checked again
+// each poll_interval while the owner's card waits, one call for the
+// issue alone each time, so a close the forge shows late (We0ce4f4f)
+// closes the item, with no other session and no card left.
+func TestStaleForgeClosedAfterClaim(t *testing.T) {
+	h := sessionsHarness(t)
+	it, api := h.umbrellaWork()
+	name := it.Session
+	h.ticks(1, time.Minute)
+	h.alive(name, "fixing")
+	h.status(name, "# Status\n\n"+it.ID+" done: closed #7\n\nDONE\n")
+	h.ticks(4, time.Minute)
+	if it = h.item(it.ID); it.State == WorkDone || it.Refuted == "" || len(it.Tried) != 0 {
+		t.Fatalf("item = %+v", it)
+	}
+	api.set(func() { api.gitlab["="+issueSeven] = `{"state":"closed"}` })
+	h.ticks(2, h.cfg.PollInterval.Duration+time.Minute)
+	it = h.item(it.ID)
+	if it.State != WorkDone || it.DoneBy != "agentd" || !strings.Contains(it.Evidence, "it is closed") || len(it.Tried) != 0 {
+		t.Fatalf("item = %+v", it)
+	}
+	if others := h.othersFor(it, name); len(others) != 0 {
+		t.Fatalf("sessions started for the item again: %v", others)
+	}
+	if _, ok := workDecision(it); ok {
+		t.Fatal("the owner's card is still up on a closed item")
+	}
+	checks, asks := 0, 0
+	for _, e := range h.events() {
+		if e.Kind == KindWorkItem && e.Work.ID == it.ID && e.Work.Step == WorkStepCheck {
+			checks++
+		}
+	}
+	for _, c := range api.callList() {
+		if strings.Contains(c, "/issues") && strings.Contains(c, "widgets") {
+			if c != "gitlab "+issueSeven {
+				t.Fatalf("a check read more than the issue: %q", c)
+			}
+			asks++
+		}
+	}
+	if checks < 2 || asks < checks {
+		t.Fatalf("%d checks logged, %d calls for #7: %q", checks, asks, api.callList())
+	}
+}
+
+// The owner's done closes an item whatever its state, its check unmet:
+// assigned, or worked on.
+func TestOwnerDoneAcceptedOnAssignedItem(t *testing.T) {
+	for _, working := range []bool{false, true} {
+		h := sessionsHarness(t)
+		it, _ := h.umbrellaWork()
+		if working {
+			h.ticks(1, time.Minute)
+			h.alive(it.Session, "fixing")
+			h.status(it.Session, "# Status\n\n## Now\n"+it.ID+": fixing\n")
+			h.ticks(2, time.Minute)
+			if it = h.item(it.ID); it.State != WorkWorking {
+				t.Fatalf("item = %+v", it)
+			}
+		} else if it.State != WorkAssigned {
+			t.Fatalf("item = %+v", it)
+		}
+		re := &EntryRe{ID: entryWork + it.ID, Kind: "work", At: it.Opened}
+		if err := recordInstructionRe(h.cfg, NewLogWriter(h.buf), h.clock.Now(), []string{"widgets"}, "", "", "ui", "it stays open, an umbrella", re, &EntryAnswer{Choice: WorkAnswerDone}, nil); err != nil {
+			t.Fatal(err)
+		}
+		h.ticks(2, time.Minute)
+		if it = h.item(it.ID); it.State != WorkDone || it.DoneBy != "owner" || !strings.Contains(it.Evidence, "it stays open, an umbrella") {
+			t.Fatalf("working %v: item = %+v", working, it)
+		}
+		if a := h.answerOf("it stays open, an umbrella"); a != it.ID+" is done, as you said." {
+			t.Fatalf("answer = %q", a)
+		}
+	}
+}

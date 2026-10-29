@@ -47,6 +47,7 @@ const entryDesign = "b:"
 // Answers on a design's entry.
 const (
 	DesignGo      = "go"
+	DesignGoMine  = "go-done-by-me" // go, with the owner as done_when (#73)
 	DesignChange  = "change"
 	DesignDecline = "decline"
 )
@@ -239,6 +240,9 @@ func (it *WorkItem) applyDesign(p *WorkPayload, at time.Time) {
 			return
 		}
 		it.Approved, it.ApprovedBy, it.ApprovedNote, it.ApprovedWords = at, p.By, p.Note, p.Words
+		if p.DoneWhen != nil {
+			it.DoneWhen = *p.DoneWhen
+		}
 		it.State, it.Progress = WorkOpen, at
 	}
 }
@@ -627,6 +631,7 @@ const designerSystem = `You are agentd's designer. The owner of a software proje
 	`questions are what you could not settle from the input and the code: the session asks the owner them; leave it empty when there are none. ` +
 	`done_when is the observable end state that is true only once the work is done, which Go checks itself: {"kind":"url","url":U,"contains":S}; {"kind":"forge","ref":"#N","state":"closed"}, ` +
 	`{"kind":"forge","ref":"!N","state":"merged"} or {"kind":"forge","ref":TAG,"state":"tagged"}; {"kind":"file","path":P,"contains":S}; {"kind":"status","contains":S} only for a string the work itself produces; {"kind":"owner"} only when nothing observable can tell. ` +
+	`Never make done_when the close of an issue the owner says stays open (an umbrella, say): give {"kind":"owner"}. ` +
 	`rating says what the change touches: production (a running service or its data), deployment (it ships or installs anything), spend_usd (money it spends beyond its own tokens), and why, in a sentence. Be honest: Go starts contained work without the owner's go. ` +
 	`You can only read: never claim to have done anything.`
 
@@ -792,6 +797,9 @@ func (it *WorkItem) designOptions() []string {
 	var out []string
 	if !it.DesignWithheld {
 		out = append(out, DesignGo)
+		if it.DoneWhen.Kind != DoneOwner {
+			out = append(out, DesignGoMine)
+		}
 	}
 	if !it.roundsSpent() {
 		out = append(out, DesignChange)
@@ -800,9 +808,15 @@ func (it *WorkItem) designOptions() []string {
 }
 
 // designAnswers are it's design's answers as words: "go, change or
-// decline", which a round under way will take too.
+// decline", which a round under way will take too; go, done by me, is
+// on its card.
 func (it *WorkItem) designAnswers() string {
-	o := it.designOptions()
+	var o []string
+	for _, a := range it.designOptions() {
+		if a != DesignGoMine {
+			o = append(o, a)
+		}
+	}
 	switch len(o) {
 	case 0:
 		return "go, change or decline"
@@ -823,6 +837,7 @@ func designDecision(it *WorkItem, words string) Decision {
 	d := Decision{ID: it.ID, Type: DecisionChooseOne, Question: fmt.Sprintf("Design of %s, %s: %s?", it.ID, it.Title, it.designAnswers()), Context: designMarkdown(it, words)}
 	labels := map[string]DecisionOption{
 		DesignGo:      {Key: DesignGo, Label: "Go", Consequence: "agentd starts a work session briefed with this design"},
+		DesignGoMine:  {Key: DesignGoMine, Label: "Go, done by me", Consequence: "agentd starts a work session briefed with this design; only your done closes the item, and no check runs"},
 		DesignChange:  {Key: DesignChange, Label: "Change", Consequence: "your words go back to the designer for one more round"},
 		DesignDecline: {Key: DesignDecline, Label: "Decline", Consequence: "agentd drops the work; nothing starts"},
 	}
@@ -878,7 +893,7 @@ func (s *Supervisor) routeDesign(in *Instruction) bool {
 	if it.State != WorkDesigned || !contains(it.designOptions(), choice) {
 		why := it.ID + " is " + it.State
 		switch {
-		case it.State == WorkDesigned && it.DesignWithheld && choice == DesignGo:
+		case it.State == WorkDesigned && it.DesignWithheld && (choice == DesignGo || choice == DesignGoMine):
 			why = "the design of " + it.ID + " was withheld (it matched a confidential pattern), so no work starts from it; reword it with change, or decline"
 		case it.State == WorkDesigned:
 			why = "“" + cutUTF8(choice, 60) + "” is not an answer its design takes now"
@@ -887,16 +902,24 @@ func (s *Supervisor) routeDesign(in *Instruction) bool {
 		return true
 	}
 	switch choice {
-	case DesignGo:
+	case DesignGo, DesignGoMine:
 		note, words := "the owner said go", ""
 		if word != "" && in.Withheld == 0 {
 			note += ": " + oneLine(word, 300)
 			words = cutUTF8(word, workBrief)
 		}
-		if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepGo, Instruction: in.ID, Note: note, Words: words, By: "owner"}); s.halt != nil {
+		// Go, done by me, chosen or in the words: only the owner's done
+		// closes it (#73).
+		var doneWhen *EndCheck
+		mine := ""
+		if it.DoneWhen.Kind != DoneOwner && (choice == DesignGoMine || in.Withheld == 0 && strings.Contains(strings.ToLower(word), "done by me")) {
+			doneWhen = &EndCheck{Kind: DoneOwner}
+			mine = " done_when is now your word, not " + it.DoneWhen.String() + ": only your done closes it."
+		}
+		if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepGo, Instruction: in.ID, Note: note, Words: words, DoneWhen: doneWhen, By: "owner"}); s.halt != nil {
 			return true
 		}
-		answer("agentd assigns " + it.ID + " to a work session briefed with its design; the item shows where it stands.")
+		answer("agentd assigns " + it.ID + " to a work session briefed with its design; the item shows where it stands." + mine)
 	case DesignChange:
 		if in.Withheld > 0 || word == "" {
 			answer("A change needs your words on what to change, which agentd can pass to the designer; nothing was changed.")
