@@ -877,7 +877,7 @@ func TestDoneLineFailingCheckAsksOwner(t *testing.T) {
 		t.Fatalf("sessions started for the item again: %v", others)
 	}
 	ns := h.noticesAbout(it.ID)
-	if len(ns) != 1 || !strings.Contains(ns[0], "the child is fixed; #7 stays open as an umbrella") || !strings.Contains(ns[0], "the check says: it is opened") {
+	if len(ns) != 1 || !strings.Contains(ns[0], "the child is fixed; #7 stays open as an umbrella") || !strings.Contains(ns[0], "the check says: #7 is closed: it is opened") {
 		t.Fatalf("notices = %q", ns)
 	}
 	if opts := strings.Join(it.workOptions(), ","); opts != "done,not-done,reassign,decline" {

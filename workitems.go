@@ -694,8 +694,10 @@ func (s *Supervisor) unacknowledged(it *WorkItem, now time.Time) {
 }
 
 // finishedItem is an item whose session wrote DONE: a claim, which its
-// check settles, or the owner when only the owner can say; refuted, the
-// item is given back.
+// check settles, or the owner when only the owner can say. A done line
+// its check refutes is the owner's to judge, and is checked each
+// poll_interval meanwhile (#73): a new session would write the same line.
+// A bare DONE refuted gives the item back.
 func (s *Supervisor) finishedItem(it *WorkItem, status string, now time.Time) {
 	switch {
 	case it.Claimed.Before(it.Assigned) || it.Claim == "":
@@ -723,7 +725,18 @@ func (s *Supervisor) finishedItem(it *WorkItem, status string, now time.Time) {
 	case it.Refuted != "" || it.Check != nil && !it.Check.OK && it.Checked.After(it.Claimed):
 		detail := ""
 		if it.Check != nil {
-			detail = " Its check: " + it.Check.Detail + "."
+			detail = it.Check.Detail
+		}
+		if itemMarks(it.ID, status).done != "" && it.Claim != "" {
+			if s.escalateItem(it, fmt.Sprintf("claim-refuted:%s:%d", shortHash(HashPane(it.Claim))[:8], it.Claimed.UnixNano()),
+				fmt.Sprintf("%s finished and says %s is done: %s; the check says: %s. Answer done, not-done or reassign on the item's entry; agentd checks again each poll meanwhile.",
+					it.Session, it.ID, oneLine(it.Claim, 300), detail)); s.halt == nil {
+				s.checkItem(it, now, false)
+			}
+			return
+		}
+		if detail != "" {
+			detail = " Its check: " + detail + "."
 		}
 		s.reopenItem(it, fmt.Sprintf("%s wrote DONE with %s not done.%s", it.Session, it.ID, detail), status)
 	default:
@@ -1394,7 +1407,7 @@ func (it *WorkItem) workOptions() []string {
 		return []string{WorkAnswerDecline}
 	}
 	opts := []string{WorkAnswerDone}
-	if it.DoneWhen.Kind == DoneOwner && it.Claim != "" {
+	if it.Claim != "" {
 		opts = append(opts, WorkAnswerNotDone)
 	}
 	return append(opts, WorkAnswerReassign, WorkAnswerDecline)
@@ -1451,7 +1464,7 @@ func (s *Supervisor) routeWork(in *Instruction) bool {
 		s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepDone, Instruction: in.ID, Note: ev, By: "owner"})
 		answer(it.ID + " is done, as you said.")
 	case WorkAnswerNotDone:
-		if it.DoneWhen.Kind != DoneOwner || it.Claim == "" {
+		if it.Claim == "" {
 			answer(it.ID + " has no claim of done waiting on you; nothing was changed.")
 			return true
 		}

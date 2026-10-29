@@ -471,7 +471,7 @@ func levelDecisionsOf(cfg *Config, st *LogState, n int, j IssueJoin, decisions [
 
 // workDecision is work item it's card, when it waits on the owner: its
 // design waiting on a go, its question, or its claim of being done under
-// the owner's own check.
+// the owner's own check or refuted by its check.
 func workDecision(it *WorkItem) (LevelDecision, bool) {
 	if it.terminal() {
 		return LevelDecision{}, false
@@ -493,7 +493,7 @@ func workDecision(it *WorkItem) (LevelDecision, bool) {
 		}
 		return ld, true
 	}
-	if it.Question == "" && !(it.DoneWhen.Kind == DoneOwner && it.Claim != "") {
+	if it.Question == "" && !it.claimWaits() {
 		return LevelDecision{}, false
 	}
 	ld := LevelDecision{Entry: entryWork + it.ID, Session: it.Session}
@@ -513,6 +513,12 @@ func workDecision(it *WorkItem) (LevelDecision, bool) {
 		ld.Options = append(ld.Options, LevelOption{Key: o, Label: o, Consequence: workConsequences[o]})
 	}
 	return ld, true
+}
+
+// claimWaits says whether it's session's claim of done waits on the
+// owner: only the owner can say, or its check refuted it (#73).
+func (it *WorkItem) claimWaits() bool {
+	return it.Claim != "" && (it.DoneWhen.Kind == DoneOwner || it.Refuted == it.Claim)
 }
 
 // sessionDecision is a session's open decision d as a card.
