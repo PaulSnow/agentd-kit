@@ -36,15 +36,33 @@ type ThreadWork struct {
 	DoneWhen EndCheck `json:"done_when"`
 }
 
+// ThreadNotOpened is an item the owner asked for that the thread agent
+// does not open, and why: already fixed, closed, confidential.
+type ThreadNotOpened struct {
+	What string `json:"what"`
+	Why  string `json:"why"`
+}
+
+// key is how w is told apart from the other items of one message: its
+// issue, else its title.
+func (w ThreadWork) key() string {
+	if w.Issue > 0 {
+		return fmt.Sprintf("#%d", w.Issue)
+	}
+	return strings.ToLower(strings.TrimSpace(w.Title))
+}
+
 // Bounds of owner work.
 const (
-	workTitle     = 120
-	workBrief     = 4000
-	finishedSpan  = 3 * 24 * time.Hour // how far back finished sessions are facts
-	finishedTail  = 600                // bytes of STATUS.md before its DONE
-	finishedMax   = 8                  // finished sessions an agent is given, the latest
-	threadCardMax = 8                  // cards an agent is given
-	cardSummary   = 600                // bytes of a card's summary
+	workItemsMax    = 12 // items one message opens at most
+	threadHandBacks = 3  // times a message is handed back to its agent for the items it did not cover
+	workTitle       = 120
+	workBrief       = 4000
+	finishedSpan    = 3 * 24 * time.Hour // how far back finished sessions are facts
+	finishedTail    = 600                // bytes of STATUS.md before its DONE
+	finishedMax     = 8                  // finished sessions an agent is given, the latest
+	threadCardMax   = 8                  // cards an agent is given
+	cardSummary     = 600                // bytes of a card's summary
 )
 
 // threadFinished is a session of the repository that finished in the
@@ -222,8 +240,19 @@ func ownerWorkName(repo, title, id string) (name, branch string) {
 	return strings.Trim(nonName.ReplaceAllString(repo, "-"), "-") + "-owner-" + slug + "-" + h, "owner/" + slug + "-" + h
 }
 
-// ownerWorkPath is where the facts a session started for instruction id
-// is briefed with are kept until it is provisioned.
+// ownerWorkKey is what the facts a session for item of instruction are
+// kept under: the instruction's id for its first item, as before a
+// message could open several, else the item's.
+func ownerWorkKey(instruction, item string) string {
+	if item == "" || item == workID(instruction) {
+		return instruction
+	}
+	return item
+}
+
+// ownerWorkPath is where the facts a session started for instruction id,
+// or for an item of it after the first (ownerWorkKey), is briefed with
+// are kept until it is provisioned.
 func ownerWorkPath(cfg *Config, repo, id string) string {
 	if !safeDirName.MatchString(id) || strings.Contains(id, "..") {
 		id = "i-" + shortHash(HashPane(id))
@@ -377,7 +406,7 @@ func (s *Supervisor) ownerProvision(p RuntimePayload) *ownerProvision {
 // brief is the BRIEF.md body of the session p started for the owner's
 // work: the facts kept for it, or, with none, what the log holds.
 func (o *ownerProvision) brief(cfg *Config, p RuntimePayload) (map[string]any, error) {
-	b, err := os.ReadFile(ownerWorkPath(cfg, p.Repository, p.Owner))
+	b, err := os.ReadFile(ownerWorkPath(cfg, p.Repository, ownerWorkKey(p.Owner, p.Item)))
 	if err != nil {
 		if o == nil {
 			return nil, fmt.Errorf("no facts are kept for the owner's message %s: %v", p.Owner, err)
@@ -442,7 +471,7 @@ func reopened(text string) string {
 // carriesWork says whether in's thread agent read work in it, which a
 // work item holds.
 func (in *Instruction) carriesWork() bool {
-	return in.AgentLast != nil && in.AgentLast.Work != nil
+	return len(in.Works) > 0 || in.AgentLast != nil && in.AgentLast.Work != nil
 }
 
 // reopens says whether in waits on a session that finished and whose tmux
@@ -562,14 +591,17 @@ func (s *Supervisor) routeNext(in *Instruction) {
 		return
 	}
 	work := ThreadWork{Title: workTitleOf(orig.Text)}
-	if a := orig.AgentLast; a != nil && a.Work != nil {
-		work = *a.Work
+	if len(orig.Works) > 0 {
+		work = orig.Works[0]
 	}
 	switch {
 	case choice == nextDrop:
 		// The work its agent proposed is dropped with it: no item starts
 		// a session for it once a place frees.
-		if it := s.st.Work[workID(orig.ID)]; it != nil && !it.terminal() {
+		for _, it := range s.st.workOf(orig.ID) {
+			if it.terminal() {
+				continue
+			}
 			if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepDeclined, Instruction: orig.ID, Note: "dropped on its next step", By: "owner"}); s.halt != nil {
 				return
 			}

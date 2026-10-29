@@ -97,6 +97,9 @@ const threadSystem = `You answer the owner of a software project on agentd's con
 	`the observable end state that is true only once the work is done, which Go checks itself: {"kind":"url","url":U,"contains":S} a page whose body holds S (a version string, say); ` +
 	`{"kind":"forge","ref":"#N","state":"closed"}, {"kind":"forge","ref":"!N","state":"merged"} or {"kind":"forge","ref":TAG,"state":"tagged"}; {"kind":"file","path":P,"contains":S} a file of the worktree; ` +
 	`{"kind":"status","contains":S} a line the session's STATUS.md will hold, only for a string the work itself produces (a commit hash, a deployed version) and never words the session would write unasked; {"kind":"owner"} only when nothing observable can tell. ` +
+	`When the owner's message asks for several items of work (one work item per issue, a list), set works instead, with one entry per item asked, every one in this one reply (at most 12), each with its own issue and done_when; ` +
+	`set asked to how many the owner asked for, asked_for to each as the owner named it (#101, or a few words), and not_opened to each asked for that you do not open, with why (already fixed, closed, confidential). ` +
+	`When the input has handed_back, agentd already opened the items it lists for this message: set works only for those still asked for, and not_opened for each you will not open. ` +
 	`When the work belongs to one of the running sessions, also set hand_to to its name: the owner's message goes to it, and the work is its. ` +
 	`hand_to may also name a finished session marked alive, whose tmux session still runs: agentd reopens it with the message. Never a finished one not marked alive. ` +
 	`Without hand_to, agentd starts a work session of the repository for it, briefed with the owner's message, the thread and your facts. ` +
@@ -118,13 +121,30 @@ func threadSchema() []byte {
 		`"outcome":{"type":"object","additionalProperties":false,"required":["ref","kind","text"],"properties":{`+
 		`"ref":{"type":"string","pattern":"^[#!][0-9]+$"},"kind":{"enum":[%q,%q]},"text":{"type":"string","minLength":1,"maxLength":%d},`+
 		`"records":{"type":"array","items":{"type":"string"},"maxItems":10}}},`+
-		`"work":{"type":"object","additionalProperties":false,"required":["title","brief","done_when"],"properties":{`+
+		`"work":%[5]s,"works":{"type":"array","maxItems":%[6]d,"items":%[5]s},"asked":{"type":"integer","minimum":1},`+
+		`"asked_for":{"type":"array","maxItems":%[7]d,"items":{"type":"string","maxLength":%[8]d}},`+
+		`"not_opened":{"type":"array","maxItems":%[7]d,"items":{"type":"object","additionalProperties":false,"required":["what","why"],"properties":{`+
+		`"what":{"type":"string","minLength":1,"maxLength":%[8]d},"why":{"type":"string","minLength":1,"maxLength":%[9]d}}}}}}`,
+		agentAnswer, OutcomeDecision, OutcomeResult, outcomeMax, threadWorkSchema(), workItemsMax, askedMax, askedLine, notOpenedWhy))
+}
+
+// threadWorkSchema is the JSON schema of an item of work a thread agent
+// reads.
+func threadWorkSchema() string {
+	return fmt.Sprintf(`{"type":"object","additionalProperties":false,"required":["title","brief","done_when"],"properties":{`+
 		`"title":{"type":"string","minLength":1,"maxLength":%d},"brief":{"type":"string","minLength":1,"maxLength":%d},"issue":{"type":"integer","minimum":1},`+
 		`"done_when":{"type":"object","additionalProperties":false,"required":["kind"],"properties":{`+
 		`"kind":{"enum":[%q,%q,%q,%q,%q]},"url":{"type":"string","maxLength":500},"contains":{"type":"string","maxLength":%d},`+
-		`"ref":{"type":"string","maxLength":100},"state":{"enum":["closed","merged","tagged"]},"path":{"type":"string","maxLength":300}}}}}}}`,
-		agentAnswer, OutcomeDecision, OutcomeResult, outcomeMax, workTitle, workBrief, DoneURL, DoneForge, DoneFile, DoneStatus, DoneOwner, itemContainsMax))
+		`"ref":{"type":"string","maxLength":100},"state":{"enum":["closed","merged","tagged"]},"path":{"type":"string","maxLength":300}}}}}`,
+		workTitle, workBrief, DoneURL, DoneForge, DoneFile, DoneStatus, DoneOwner, itemContainsMax)
 }
+
+// Bounds of the items asked for that a thread agent names.
+const (
+	askedMax     = 50  // names of the items asked for
+	askedLine    = 200 // characters of each
+	notOpenedWhy = 300 // characters of why one is not opened
+)
 
 // threadJob is the job the config describes for thread agents.
 func threadJob(cfg *Config) Job {
@@ -153,14 +173,21 @@ type AgentPayload struct {
 	// Work is the work it read in the owner's message: Go starts a
 	// session for it unless it was handed over (#65), and holds it as a
 	// work item until its done_when is true (#66).
-	Work       *ThreadWork   `json:"work,omitempty"`
-	Outcome    string        `json:"outcome,omitempty"` // the reference it was posted on, or why it was not
-	Activity   []TurnPayload `json:"activity,omitempty"`
-	Model      string        `json:"model,omitempty"`
-	InputBytes int           `json:"input_bytes,omitempty"`
-	Records    int           `json:"records,omitempty"`
-	Usage      *JobUsage     `json:"usage,omitempty"`
-	Error      string        `json:"error,omitempty"`
+	Work *ThreadWork `json:"work,omitempty"`
+	// More are the items after Work when the message asked for several
+	// (#68), Asked how many it asked for and AskedFor which, and
+	// NotOpened those the agent did not open, with why.
+	More       []ThreadWork      `json:"more_work,omitempty"`
+	Asked      int               `json:"asked,omitempty"`
+	AskedFor   []string          `json:"asked_for,omitempty"`
+	NotOpened  []ThreadNotOpened `json:"not_opened,omitempty"`
+	Outcome    string            `json:"outcome,omitempty"` // the reference it was posted on, or why it was not
+	Activity   []TurnPayload     `json:"activity,omitempty"`
+	Model      string            `json:"model,omitempty"`
+	InputBytes int               `json:"input_bytes,omitempty"`
+	Records    int               `json:"records,omitempty"`
+	Usage      *JobUsage         `json:"usage,omitempty"`
+	Error      string            `json:"error,omitempty"`
 	// By is "agentd" on the outcome of a change Go carried out on the ops
 	// console (#63), which no agent wrote.
 	By string `json:"by,omitempty"`
@@ -253,6 +280,9 @@ type threadInput struct {
 	Scope string       `json:"scope,omitempty"`
 	Index []threadRow  `json:"index,omitempty"`
 	Issue *threadIssue `json:"issue_page,omitempty"`
+	// HandBack is set when Go hands the message back for the items its
+	// agent did not cover (#68).
+	HandBack *threadHandBack `json:"handed_back,omitempty"`
 }
 
 // threadRow is an open issue or request as the index and its sentence
@@ -478,12 +508,34 @@ func (x *threadInput) cutNow() bool {
 	return true
 }
 
+// works are the items of work p read, in order.
+func (p *AgentPayload) works() []ThreadWork {
+	if p.Work == nil {
+		return nil
+	}
+	return append([]ThreadWork{*p.Work}, p.More...)
+}
+
 // threadAnswer is a thread agent's answer, as its schema has it.
 type threadAnswer struct {
-	Answer  string         `json:"answer"`
-	HandTo  string         `json:"hand_to"`
-	Outcome *ThreadOutcome `json:"outcome"`
-	Work    *ThreadWork    `json:"work"`
+	Answer    string            `json:"answer"`
+	HandTo    string            `json:"hand_to"`
+	Outcome   *ThreadOutcome    `json:"outcome"`
+	Work      *ThreadWork       `json:"work"`
+	Works     []ThreadWork      `json:"works"`
+	Asked     int               `json:"asked"`
+	AskedFor  []string          `json:"asked_for"`
+	NotOpened []ThreadNotOpened `json:"not_opened"`
+}
+
+// threadHandBack is what a thread agent handed a message back is told:
+// the items agentd opened for it already, how many the owner asked for
+// and which, and those an agent said it does not open.
+type threadHandBack struct {
+	Opened    []ThreadWork      `json:"opened"`
+	Asked     int               `json:"asked"`
+	AskedFor  []string          `json:"asked_for,omitempty"`
+	NotOpened []ThreadNotOpened `json:"not_opened,omitempty"`
 }
 
 // startThread starts the agent for in, of repo, read in cwd: the start is
@@ -504,6 +556,12 @@ func (s *Supervisor) startThread(in *Instruction, repo, cwd string) {
 	x := s.threadInputFor(in, repo, cwd)
 	x.Cards = s.threadCards(&x, s.keepText)
 	s.scopeFacts(&x, in, repo, func(t string) string { return cutUTF8(s.keepText(t), agentText) })
+	// Handed back for the items not covered (#68): the agent is told what
+	// was opened, and its reply adds to it.
+	opened := append([]ThreadWork{}, in.Works...)
+	if len(opened) > 0 {
+		x.HandBack = &threadHandBack{Opened: opened, Asked: in.Asked, AskedFor: in.AskedFor, NotOpened: in.NotOpened}
+	}
 	job := threadJob(s.cfg)
 	// Who it may hand work to: a running session, or a finished one whose
 	// tmux session runs (#65).
@@ -513,6 +571,10 @@ func (s *Supervisor) startThread(in *Instruction, repo, cwd string) {
 	}
 	for _, f := range x.Finished {
 		running[f.Name], finished[f.Name] = running[f.Name] || f.Alive, true
+	}
+	if len(opened) > 0 {
+		// The message is its items' already: it goes to no session.
+		running, finished = map[string]bool{}, map[string]bool{}
 	}
 	cfg := s.cfg
 	// A worker's state holds no comments: those posted are named here.
@@ -559,7 +621,10 @@ func (s *Supervisor) startThread(in *Instruction, repo, cwd string) {
 				raw = dropHandOver(raw)
 			}
 			if err == nil {
-				a, err = w.checkThreadAnswer(raw, running, finished, p)
+				a, err = w.checkThreadAnswer(raw, running, finished, opened, p)
+			}
+			if len(opened) > 0 {
+				p.HandToDropped = ""
 			}
 			// Handed to a session that is not running, with no work
 			// named: the work is the owner's message (#68).
@@ -576,8 +641,15 @@ func (s *Supervisor) startThread(in *Instruction, repo, cwd string) {
 		}
 		// The facts the session started for the work is briefed with are
 		// those the agent was given.
-		if err == nil && p.Work != nil {
-			if kerr := keepOwnerWork(cfg, x, *p.Work, in.ID); kerr != nil {
+		if w.runCtx.Err() != nil {
+			return // agentd is stopping: the next start runs it again
+		}
+		for k, wk := range p.works() {
+			if err != nil {
+				break
+			}
+			key := ownerWorkKey(in.ID, workIDOf(in.ID, len(opened)+k))
+			if kerr := keepOwnerWork(cfg, x, wk, key); kerr != nil {
 				err = fmt.Errorf("agentd could not keep the work's brief: %v", kerr)
 			}
 		}
@@ -628,8 +700,9 @@ func safeThreadID(key string) string {
 // checkThreadAnswer checks an agent's answer and fills p from it: the
 // answer screened, a hand-over only to a session of the repository that
 // was running when the agent started, or finished with its tmux session
-// running; and work, unless it handed the work over.
-func (s *Supervisor) checkThreadAnswer(raw json.RawMessage, running, finished map[string]bool, p *AgentPayload) (threadAnswer, error) {
+// running; and work, unless it handed the work over: each item of it not
+// among those opened already, up to workItemsMax in all.
+func (s *Supervisor) checkThreadAnswer(raw json.RawMessage, running, finished map[string]bool, opened []ThreadWork, p *AgentPayload) (threadAnswer, error) {
 	var a threadAnswer
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -642,7 +715,7 @@ func (s *Supervisor) checkThreadAnswer(raw json.RawMessage, running, finished ma
 	}
 	if a.HandTo = strings.TrimSpace(a.HandTo); a.HandTo != "" {
 		switch {
-		case a.Work != nil && finished[a.HandTo], !running[a.HandTo]:
+		case (a.Work != nil || len(a.Works) > 0) && finished[a.HandTo], !running[a.HandTo]:
 			// Work is an item's, which a finished session never takes;
 			// and no owner's message goes to a session that is not
 			// running: Go opens its work itself (#68).
@@ -655,9 +728,21 @@ func (s *Supervisor) checkThreadAnswer(raw json.RawMessage, running, finished ma
 		}
 	}
 	// Work is held as an item (#66), handed over or not: the session it
-	// was handed to holds it, else one Go starts for it (#65).
-	if w := a.Work; w != nil {
+	// was handed to holds it, else one Go starts for it (#65); work of
+	// several items is held as an item each (#68).
+	works := a.Works
+	if a.Work != nil {
+		works = append([]ThreadWork{*a.Work}, works...)
+	}
+	seen := map[string]bool{}
+	for _, w := range opened {
+		seen[w.key()] = true
+	}
+	var kept []ThreadWork
+	for _, w := range works {
 		w.Title, w.Brief = oneLine(w.Title, workTitle), strings.TrimSpace(w.Brief)
+		// Told apart by the agent's own title: a withheld one reads alike.
+		raw := w.key()
 		if w.Title == "" {
 			return a, errors.New("the agent asked for work with no title")
 		}
@@ -673,7 +758,38 @@ func (s *Supervisor) checkThreadAnswer(raw json.RawMessage, running, finished ma
 		if s.confidentialMatch(w.Brief) > 0 {
 			w.Brief, w.Withheld = "", true
 		}
-		p.Work = &ThreadWork{Title: w.Title, Brief: cutUTF8(w.Brief, workBrief), Issue: w.Issue, Withheld: w.Withheld, DoneWhen: w.DoneWhen}
+		w = ThreadWork{Title: w.Title, Brief: cutUTF8(w.Brief, workBrief), Issue: w.Issue, Withheld: w.Withheld, DoneWhen: w.DoneWhen}
+		// An item named twice, or opened already, is one item.
+		if seen[w.key()] && (w.Issue > 0 || !strings.EqualFold(w.Title, "owner work")) || seen["raw:"+raw] || len(opened)+len(kept) >= workItemsMax {
+			continue
+		}
+		seen[w.key()], seen["raw:"+raw] = true, true
+		kept = append(kept, w)
+	}
+	if len(kept) > 0 {
+		p.Work, p.More = &kept[0], kept[1:]
+		if len(p.More) == 0 {
+			p.More = nil
+		}
+	}
+	// How many were asked for and which, and why some were not opened,
+	// as the owner's card shows them: screened.
+	if len(works) > 0 || len(a.NotOpened) > 0 || len(opened) > 0 {
+		p.Asked = max(a.Asked, len(a.AskedFor))
+		for _, n := range a.AskedFor {
+			if n = oneLine(n, askedLine); n != "" && s.confidentialMatch(n) == 0 && len(p.AskedFor) < askedMax {
+				p.AskedFor = append(p.AskedFor, n)
+			}
+		}
+		for _, n := range a.NotOpened {
+			n.What, n.Why = oneLine(n.What, askedLine), oneLine(n.Why, notOpenedWhy)
+			if s.confidentialMatch(n.What, n.Why) > 0 {
+				n.What, n.Why = "an item", "it matched a confidential pattern"
+			}
+			if n.What != "" && len(p.NotOpened) < askedMax {
+				p.NotOpened = append(p.NotOpened, n)
+			}
+		}
 	}
 	p.Answer = a.Answer
 	if i := s.confidentialMatch(a.Answer); i > 0 {

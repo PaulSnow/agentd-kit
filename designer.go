@@ -267,12 +267,18 @@ func (s *Supervisor) designs(repo string) bool {
 	return !s.cfg.Jobs.Designer.Off && !s.shadow && sp != nil && sp.Host == ""
 }
 
-// openDesign opens the item of work the agent read in in, to be
-// designed before any session starts; the message waits on it.
-func (s *Supervisor) openDesign(in *Instruction, repo string, w ThreadWork) {
-	id := workID(in.ID)
-	if s.st.Work[id] == nil {
-		scopedIssue(in, &w)
+// openDesigns opens the items of work the agent read in in, each to be
+// designed before any session starts; the message waits on them.
+func (s *Supervisor) openDesigns(in *Instruction, repo string) {
+	for k, w := range in.Works {
+		id := workIDOf(in.ID, k)
+		if s.st.Work[id] != nil {
+			continue
+		}
+		if k == 0 {
+			// The page's issue is the first item's; the others name their own.
+			scopedIssue(in, &w)
+		}
 		if s.issueForWork(id, repo, &w); s.halt != nil {
 			return
 		}
@@ -280,14 +286,20 @@ func (s *Supervisor) openDesign(in *Instruction, repo string, w ThreadWork) {
 			return
 		}
 	}
-	if it := s.st.Work[id]; it != nil {
+	if it := s.st.Work[workID(in.ID)]; it != nil {
 		s.designWait(in, it)
 	}
 }
 
-// designWait says on the owner's message what its item's design waits on.
+// designWait says on the owner's message what its item's design waits
+// on; for a message that asked for several items, how many were opened
+// of how many asked, and what each waits on.
 func (s *Supervisor) designWait(in *Instruction, it *WorkItem) {
 	if in == nil || in.Session != "" || !in.Replied.IsZero() || in.Failed != "" {
+		return
+	}
+	if items := s.st.workOf(in.ID); len(items) > 1 || in.Asked > 1 {
+		s.itemsWait(in, items)
 		return
 	}
 	why := ""
@@ -317,6 +329,92 @@ func (s *Supervisor) designWait(in *Instruction, it *WorkItem) {
 		return
 	}
 	s.routeStep(in, RouteWait, "", false, why)
+}
+
+// itemsWait says on the owner's message, which asked for several items,
+// how many agentd opened of how many asked, what each waits on, and those
+// not opened; the message goes to the first item's session that takes
+// it, and is answered once every item is declined.
+func (s *Supervisor) itemsWait(in *Instruction, items []*WorkItem) {
+	var states []string
+	declined := 0
+	for _, it := range items {
+		switch it.State {
+		case WorkDesigning:
+			states = append(states, fmt.Sprintf("agentd's designer is writing the brief of %s (round %d)", it.ID, it.Round))
+		case WorkDesigned:
+			switch {
+			case it.DesignWithheld:
+				states = append(states, withheldWait(it.ID))
+			case it.DesignError != "":
+				states = append(states, fmt.Sprintf("the designer failed round %d of %s; answer %s on its entry", it.Round, it.ID, it.designAnswers()))
+			default:
+				states = append(states, fmt.Sprintf("the design of %s waits on your %s on its entry", it.ID, it.designAnswers()))
+			}
+		case WorkDeclined:
+			declined++
+			states = append(states, it.ID+" is declined")
+		case WorkOpen:
+			states = append(states, fmt.Sprintf("%s's design was approved; agentd starts a work session for it as soon as one can start", it.ID))
+		case WorkDone:
+			states = append(states, it.ID+" is done")
+		default:
+			if it.Session != "" {
+				// The message goes with the first item a session took.
+				if s.followItem(it, it.Session, it.Started); s.halt != nil || in.Session != "" {
+					return
+				}
+				states = append(states, it.ID+" is with "+it.Session)
+			}
+		}
+	}
+	if declined == len(items) && len(items) > 0 {
+		s.declinedMessage(items[0])
+		return
+	}
+	why := opened(in, items)
+	if len(states) > 0 {
+		why += " Now: " + strings.Join(states, "; ")
+	}
+	s.routeStep(in, RouteWait, "", false, why)
+}
+
+// opened is the line that says how many items agentd opened for in of
+// how many it asked for, which, and those not opened: why, as its agent
+// said, or that a new message can ask for them.
+func opened(in *Instruction, items []*WorkItem) string {
+	var ids []string
+	covered := map[string]bool{}
+	for _, it := range items {
+		ids = append(ids, it.ID)
+		covered[it.ThreadWork.key()] = true
+		covered[strings.ToLower(it.Title)] = true
+	}
+	asked := max(in.Asked, len(items))
+	b := fmt.Sprintf("agentd opened %d of %d items asked: %s", len(items), asked, strings.Join(ids, ", "))
+	var not []string
+	for _, n := range in.NotOpened {
+		not = append(not, n.What+" ("+n.Why+")")
+		covered[strings.ToLower(n.What)] = true
+	}
+	if rest := asked - len(items) - len(in.NotOpened); rest > 0 {
+		var named []string
+		for _, a := range in.AskedFor {
+			if !covered[strings.ToLower(strings.TrimSpace(a))] && len(named) < rest {
+				named = append(named, a)
+			}
+		}
+		for _, a := range named {
+			not = append(not, a+" (no reason given)")
+		}
+		if n := rest - len(named); n > 0 {
+			not = append(not, fmt.Sprintf("%d more", n))
+		}
+		b += "; not opened: " + strings.Join(not, ", ") + ", which a new message can ask for"
+	} else if len(not) > 0 {
+		b += "; not opened: " + strings.Join(not, ", ")
+	}
+	return b + "."
 }
 
 // withheldWait is what a withheld design of item id waits on.
@@ -813,11 +911,29 @@ func (s *Supervisor) routeDesign(in *Instruction) bool {
 
 // declinedMessage answers the owner's message of a designed item the
 // owner declined before any session took it: nothing waits on it more.
+// Of several items, only once every one is declined.
 func (s *Supervisor) declinedMessage(it *WorkItem) {
-	if orig := s.st.Instructions[it.Instruction]; it.Designer && orig != nil && orig.Session == "" && orig.Replied.IsZero() && orig.Failed == "" {
-		s.emit("", Event{Kind: KindRoute, Route: &RoutePayload{Instruction: orig.ID, Step: RouteAnswered,
-			Agent: &AgentPayload{Answer: "You declined " + it.ID + "; agentd started nothing for it.", By: "agentd"}}})
+	orig := s.st.Instructions[it.Instruction]
+	if !it.Designer || orig == nil || orig.Session != "" || !orig.Replied.IsZero() || orig.Failed != "" {
+		return
 	}
+	var ids []string
+	for _, o := range s.st.workOf(orig.ID) {
+		if o.State != WorkDeclined {
+			s.designWait(orig, o)
+			return
+		}
+		ids = append(ids, o.ID)
+	}
+	if len(ids) == 0 {
+		ids = []string{it.ID}
+	}
+	what := "it"
+	if len(ids) > 1 {
+		what = "them"
+	}
+	s.emit("", Event{Kind: KindRoute, Route: &RoutePayload{Instruction: orig.ID, Step: RouteAnswered,
+		Agent: &AgentPayload{Answer: "You declined " + strings.Join(ids, ", ") + "; agentd started nothing for " + what + ".", By: "agentd"}}})
 }
 
 // uiDesignEntry is an item's design as an entry of its console: open while

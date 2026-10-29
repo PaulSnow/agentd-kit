@@ -90,6 +90,16 @@ type Instruction struct {
 	AgentRuns  int
 	AgentError string
 	AgentLast  *AgentPayload
+	// Works are the items of work its agents read in it (#68), in the
+	// order they named them, each run's added to those before; Asked how
+	// many the owner asked for and AskedFor which, as the agent named
+	// them; NotOpened those it did not open, with why; and HandBacks how
+	// often Go handed it back to an agent for the items not covered.
+	Works     []ThreadWork
+	Asked     int
+	AskedFor  []string
+	NotOpened []ThreadNotOpened
+	HandBacks int
 	// Attachments are the files the owner sent with it (#61).
 	Attachments []AttachmentPayload
 }
@@ -389,12 +399,27 @@ func (s *Supervisor) routeInstructions(now time.Time) {
 		}
 		// Work the agent named, which no running session covers: Go
 		// starts a work session for it (#65).
-		if a := in.AgentLast; in.Route && in.Agent && in.Session == "" && in.Replied.IsZero() && in.Failed == "" && in.AgentError == "" && a != nil && a.Work != nil && a.Error == "" && !s.work.busy("thread:"+in.ID) && len(in.Repositories) > 0 {
+		// Fewer items than the owner asked for are handed back to an agent
+		// first, until they are covered or it said why not; a hand-back
+		// that fails leaves those named.
+		if in.Route && in.Agent && in.Session == "" && in.Replied.IsZero() && in.Failed == "" && len(in.Works) > 0 && !s.work.busy("thread:"+in.ID) && len(in.Repositories) > 0 {
+			repo := in.Repositories[0]
+			if in.AgentError == "" && in.handsBack() && !s.shadow {
+				if cwd := s.threadCwd(repo); cwd != "" {
+					s.startThread(in, repo, cwd)
+					if s.halt != nil {
+						return
+					}
+					continue
+				}
+			}
 			// Designed first, unless the design step is off (#68).
-			if repo := in.Repositories[0]; s.st.Work[workID(in.ID)] != nil || s.designs(repo) {
-				s.openDesign(in, repo, *a.Work)
+			if s.st.Work[workID(in.ID)] != nil || s.designs(repo) {
+				s.openDesigns(in, repo)
 			} else {
-				s.startOwnerWork(in, repo, *a.Work)
+				// The others open once it is routed, and take sessions of
+				// their own (driveItems).
+				s.startOwnerWork(in, repo, in.Works[0])
 			}
 			if s.halt != nil {
 				return
@@ -429,7 +454,7 @@ func (s *Supervisor) routeInstructions(now time.Time) {
 		}
 		// Work held as an item whose session is gone: the item is
 		// assigned anew, and the message goes with it (#66).
-		if it := s.st.Work[workID(in.ID)]; in.Agent && it != nil {
+		if it := in.heldBy(s.st); in.Agent && it != nil {
 			// Not yet with the session holding its item (#68): it says
 			// what it waits on, or, its item closed, that it went nowhere.
 			switch {
@@ -461,6 +486,32 @@ func (s *Supervisor) routeInstructions(now time.Time) {
 		}
 	}
 	s.endChats(now)
+}
+
+// handsBack says whether in's items do not cover what the owner asked
+// for, nor did its agent say why, and it may be handed back again.
+func (in *Instruction) handsBack() bool {
+	return len(in.Works)+len(in.NotOpened) < in.Asked && len(in.Works) < workItemsMax && in.HandBacks < threadHandBacks
+}
+
+// heldBy is the item of in that holds it: the one whose session it went
+// to, else the first not closed, else the first; nil when it opened none.
+func (in *Instruction) heldBy(st *LogState) *WorkItem {
+	items := st.workOf(in.ID)
+	for _, it := range items {
+		if in.Session != "" && it.Session == in.Session {
+			return it
+		}
+	}
+	for _, it := range items {
+		if !it.terminal() {
+			return it
+		}
+	}
+	if len(items) > 0 {
+		return items[0]
+	}
+	return nil
 }
 
 // stranded says whether in, routed by agentd and not by the owner's
@@ -562,7 +613,14 @@ func (s *Supervisor) routeOne(in *Instruction, now time.Time) {
 	if in.Agent && in.Session != "" && in.carriesWork() {
 		// Its work is an item's, which goes to a session that takes it,
 		// and the message with it (#68).
-		s.routeStep(in, RouteWait, "", false, "its work item "+workID(in.ID)+" goes to a session that takes it, and your message with it")
+		ids := []string{workID(in.ID)}
+		if items := s.st.workOf(in.ID); len(items) > 0 {
+			ids = ids[:0]
+			for _, it := range items {
+				ids = append(ids, it.ID)
+			}
+		}
+		s.routeStep(in, RouteWait, "", false, "its work item "+strings.Join(ids, ", ")+" goes to a session that takes it, and your message with it")
 		return
 	}
 	if in.Agent && in.Session != "" {
@@ -761,7 +819,13 @@ func (st *LogState) applyRoute(e Event) {
 		// The agent takes it at once: delivered and taken as it starts,
 		// from any session it was routed to before.
 		in.Agent, in.AgentError, in.Waiting, in.Session = true, "", "", ""
-		in.AgentRuns++
+		// Handed back for the items not covered: a run of its own, which
+		// spends none of the failures' runs.
+		if len(in.Works) > 0 {
+			in.HandBacks++
+		} else {
+			in.AgentRuns++
+		}
 		in.Delivered, in.Taken, in.Activity = e.Time, e.Time, nil
 	case RouteAnswered:
 		a := p.Agent
@@ -769,6 +833,14 @@ func (st *LogState) applyRoute(e Event) {
 			return
 		}
 		in.AgentLast, in.Activity = a, a.Activity
+		if a.Error == "" && a.By == "" {
+			in.Works = append(in.Works, a.works()...)
+			in.Asked = max(in.Asked, a.Asked, len(in.Works))
+			if len(in.AskedFor) == 0 {
+				in.AskedFor = a.AskedFor
+			}
+			in.NotOpened = append(in.NotOpened, a.NotOpened...)
+		}
 		switch {
 		case a.Error != "":
 			in.AgentError = a.Error
@@ -777,10 +849,13 @@ func (st *LogState) applyRoute(e Event) {
 			// any other, and its reply is the answer; work the agent read
 			// is the session's item too (#66).
 			in.Session, in.Delivered, in.Taken, in.Activity = a.HandTo, time.Time{}, time.Time{}, nil
-		case a.Work != nil:
+		case a.By != "":
+			// Go's own answer: its items were declined, say.
+			in.Reply, in.ReplyWithheld, in.Replied, in.Waiting = a.Answer, a.Withheld > 0, e.Time, ""
+		case len(in.Works) > 0:
 			// Work no running session covers (#65): Go starts a session
 			// for it, which receives the owner's record, and its reply is
-			// the answer.
+			// the answer; or one of several items takes it.
 		default:
 			in.Reply, in.ReplyWithheld, in.Replied, in.Waiting = a.Answer, a.Withheld > 0, e.Time, ""
 		}

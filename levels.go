@@ -1078,7 +1078,14 @@ func BuildIssueLevel(cfg *Config, st *LogState, repo string, n int, decisions []
 		steps = steps[len(steps)-stepsShown:]
 	}
 	v.Steps = append(v.Steps, steps...)
+	asked := map[string]bool{}
 	for _, it := range j.Work {
+		// A message that asked for several items says how many it got,
+		// once (#68).
+		if in := st.Instructions[it.Instruction]; in != nil && !asked[in.ID] && (in.Asked > 1 || len(in.Works) > 1) {
+			asked[in.ID] = true
+			v.Next = append(v.Next, "The message of "+it.ID+": "+opened(in, st.workOf(in.ID)))
+		}
 		if it.terminal() {
 			continue
 		}

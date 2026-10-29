@@ -321,9 +321,34 @@ type WorkItem struct {
 // terminal says whether the item is closed.
 func (it *WorkItem) terminal() bool { return it.State == WorkDone || it.State == WorkDeclined }
 
-// workID is the item an instruction opens: one per instruction.
+// workID is the item an instruction opens: its first, and its only one
+// unless it asked for several.
 func workID(instruction string) string {
 	return "W" + shortHash(HashPane("work\n" + instruction))[:8]
+}
+
+// workIDOf is the k-th item an instruction opens, from 0.
+func workIDOf(instruction string, k int) string {
+	if k == 0 {
+		return workID(instruction)
+	}
+	return "W" + shortHash(HashPane(fmt.Sprintf("work\n%s\n%d", instruction, k)))[:8]
+}
+
+// workOf are the items instruction opened, in the order its agent named
+// them.
+func (st *LogState) workOf(instruction string) []*WorkItem {
+	var out []*WorkItem
+	n := 1
+	if in := st.Instructions[instruction]; in != nil && len(in.Works) > n {
+		n = len(in.Works)
+	}
+	for k := 0; k < n; k++ {
+		if it := st.Work[workIDOf(instruction, k)]; it != nil {
+			out = append(out, it)
+		}
+	}
+	return out
 }
 
 // applyWork folds a work item step.
@@ -457,21 +482,30 @@ func (s *Supervisor) driveItems(now time.Time) {
 		in := s.st.Instructions[id]
 		// Once its route settles: the session the agent handed it to, the
 		// one Go started for it (#65), or none, when that failed.
-		a := in.AgentLast
-		if a == nil || a.Work == nil || len(in.Repositories) == 0 || s.st.Work[workID(in.ID)] != nil || in.Session == "" && in.Failed == "" {
+		if len(in.Works) == 0 || len(in.Repositories) == 0 || in.Session == "" && in.Failed == "" {
 			continue
 		}
 		// The owner dropped it on its next step: no work is opened for it.
 		if r := s.st.nextAnswer(in); r != nil && r.Answer.Choice == nextDrop {
 			continue
 		}
-		w := *a.Work
-		scopedIssue(in, &w)
-		if s.issueForWork(workID(in.ID), in.Repositories[0], &w); s.halt != nil {
-			return
-		}
-		if s.workEmit(WorkPayload{ID: workID(in.ID), Step: WorkStepOpen, Repository: in.Repositories[0], Instruction: in.ID, Work: &w, HandTo: in.Session}); s.halt != nil {
-			return
+		// Each item the agent named; the message, and the session it
+		// went to, are the first's.
+		for k, w := range in.Works {
+			id, handTo := workIDOf(in.ID, k), ""
+			if s.st.Work[id] != nil {
+				continue
+			}
+			if k == 0 {
+				handTo = in.Session
+				scopedIssue(in, &w)
+			}
+			if s.issueForWork(id, in.Repositories[0], &w); s.halt != nil {
+				return
+			}
+			if s.workEmit(WorkPayload{ID: id, Step: WorkStepOpen, Repository: in.Repositories[0], Instruction: in.ID, Work: &w, HandTo: handTo}); s.halt != nil {
+				return
+			}
 		}
 	}
 	for _, id := range s.st.sortedWork() {
@@ -800,7 +834,7 @@ func (s *Supervisor) assignItem(it *WorkItem, now time.Time) {
 		}
 	}
 	for _, h := range cands {
-		if h != "" && !tried[h] && s.takesItem(h) {
+		if h != "" && !tried[h] && s.takesItem(h) && !s.holdsSibling(h, it) {
 			if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepAssign, Session: h}); s.halt == nil {
 				s.followItem(it, h, false)
 			}
@@ -835,12 +869,27 @@ func (s *Supervisor) assignItem(it *WorkItem, now time.Time) {
 		it.ID, why, strings.Join(holders, ", ")))
 }
 
+// holdsSibling says whether session name holds, or was started for,
+// another item of it's message: each item of a message that asked for
+// several takes a session of its own (#68).
+func (s *Supervisor) holdsSibling(name string, it *WorkItem) bool {
+	if p, ok := s.st.Runtime[name]; ok && p.Item != "" && p.Item != it.ID && s.st.Work[p.Item] != nil && s.st.Work[p.Item].Instruction == it.Instruction {
+		return true
+	}
+	for _, o := range s.st.itemsOf(name) {
+		if o.ID != it.ID && o.Instruction == it.Instruction {
+			return true
+		}
+	}
+	return false
+}
+
 // toldHandTo tells the owner once, on the repository's console, that
 // the session in's agent handed it to is not running, and that Go opened
 // item it from the message instead (#68).
 func (s *Supervisor) toldHandTo(in *Instruction, it *WorkItem) {
 	a := in.AgentLast
-	if a == nil || a.HandToDropped == "" || it == nil {
+	if a == nil || a.HandToDropped == "" || it == nil || it.ID != workID(in.ID) {
 		return
 	}
 	did := "starts a session for it as soon as one can start"
@@ -867,6 +916,9 @@ func (s *Supervisor) followItem(it *WorkItem, name string, started bool) {
 	in := s.st.Instructions[it.Instruction]
 	switch {
 	case in == nil || in.Session == name || in.Failed != "":
+		return
+	case in.Session != "" && len(in.Works) > 1:
+		// One of several items took the message already.
 		return
 	case in.Session == "":
 		// The designer took it: the session started answers it.
