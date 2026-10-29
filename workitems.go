@@ -703,9 +703,11 @@ func (s *Supervisor) unacknowledged(it *WorkItem, now time.Time) {
 // poll_interval meanwhile (#73): a new session would write the same line.
 // A bare DONE refuted gives the item back.
 func (s *Supervisor) finishedItem(it *WorkItem, status string, now time.Time) {
+	line := itemMarks(it.ID, status).done
 	switch {
-	case it.Claimed.Before(it.Assigned) || it.Claim == "":
-		claim := itemMarks(it.ID, status).done
+	case it.Claimed.Before(it.Assigned) || it.Claim == "" || line != "" && line != it.Claim && line != it.Refuted:
+		// No claim yet, or a new done line written with DONE.
+		claim := line
 		if claim == "" {
 			// A DONE that names not this item is this assignment's only
 			// when written after it, and naming no other item (#68).
@@ -731,7 +733,7 @@ func (s *Supervisor) finishedItem(it *WorkItem, status string, now time.Time) {
 		if it.Check != nil {
 			detail = it.Check.Detail
 		}
-		if itemMarks(it.ID, status).done != "" && it.Claim != "" {
+		if line != "" && it.Claim != "" {
 			if s.escalateItem(it, fmt.Sprintf("claim-refuted:%s:%d", shortHash(HashPane(it.Claim))[:8], it.Claimed.UnixNano()),
 				fmt.Sprintf("%s finished and says %s is done: %s; the check says: %s. Answer done, not-done or reassign on the item's entry; agentd checks again each poll meanwhile.",
 					it.Session, it.ID, oneLine(it.Claim, 300), detail)); s.halt == nil {
