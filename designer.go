@@ -286,6 +286,7 @@ func (s *Supervisor) openDesigns(in *Instruction, repo string) {
 		if s.issueForWork(id, repo, &w); s.halt != nil {
 			return
 		}
+		s.answerDoneWhen(in, repo, &w)
 		if s.workEmit(WorkPayload{ID: id, Step: WorkStepOpen, Repository: repo, Instruction: in.ID, Work: &w, Designer: true}); s.halt != nil {
 			return
 		}

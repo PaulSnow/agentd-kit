@@ -978,3 +978,46 @@ func TestOwnerDoneAcceptedOnAssignedItem(t *testing.T) {
 		}
 	}
 }
+
+// answerWork is the owner's words on entry, a judge's decision, or on
+// no entry when "", read by a thread agent as w: the item Go opens.
+func (h *harness) answerWork(id, entry string, w ThreadWork) *WorkItem {
+	h.t.Helper()
+	in := &InstructionPayload{ID: id, Repositories: []string{"widgets"}, Text: "fix it in this MR", From: "ui", Route: true}
+	if entry != "" {
+		in.Re = &EntryRe{ID: entry, Kind: "decision"}
+	}
+	h.appendEvent(Event{Kind: KindInstruction, Mode: ModeOwner, Instruction: in})
+	h.sup.ownerRecords()
+	h.sup.emit("", Event{Kind: KindRoute, Route: &RoutePayload{Instruction: id, Step: RouteAgent}})
+	h.sup.emit("", Event{Kind: KindRoute, Route: &RoutePayload{Instruction: id, Step: RouteAnswered,
+		Agent: &AgentPayload{Answer: "Go holds it as a work item until it is done.", Work: &w}}})
+	h.ticks(1, time.Minute)
+	it := h.sup.st.Work[workID(id)]
+	if it == nil {
+		h.t.Fatalf("no work item was opened for %s", id)
+	}
+	return it
+}
+
+// An item opened from the owner's answer to a judge's decision checks
+// its request merged only when the loop merges it; one the loop cannot
+// merge is the owner's to close (W60aa503c).
+func TestFixItemDoneWhenOwnerWhenLoopCannotMerge(t *testing.T) {
+	h, api := loopHarness(t)
+	outsideMR(api, outsideMRState{head: "5eed0101", pipeline: 60, status: "success", author: "someone-else"})
+	api.set(func() { api.gitlab[ciProject+"/merge_requests|state=opened"] = `[{"iid":1},{"iid":2}]` })
+	h.ticks(2, 5*time.Minute)
+	merged := func(ref string) ThreadWork {
+		return ThreadWork{Title: "Fix the finding on " + ref, Brief: "Fix it.", DoneWhen: EndCheck{Kind: DoneForge, Ref: ref, State: "merged"}}
+	}
+	if it := h.answerWork("Ifix2", entryDecision+"judge:D1", merged("!2")); it.DoneWhen.Kind != DoneOwner {
+		t.Fatalf("an unmergeable request's item done_when = %+v", it.DoneWhen)
+	}
+	if it := h.answerWork("Ifix1", entryDecision+"judge:D2", merged("!1")); it.DoneWhen != merged("!1").DoneWhen {
+		t.Fatalf("a mergeable request's item done_when = %+v", it.DoneWhen)
+	}
+	if it := h.answerWork("Iplain", "", merged("!2")); it.DoneWhen != merged("!2").DoneWhen {
+		t.Fatalf("an item from no decision done_when = %+v", it.DoneWhen)
+	}
+}

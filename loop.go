@@ -208,6 +208,62 @@ type loopRequest struct {
 	Case    string
 	Branch  string // the branch its judgment sessions are named for
 	Out     string
+	// Continuer is the work session that continues an outside request,
+	// or "": its fix rounds are that session's.
+	Continuer string
+}
+
+// worker is the work session that fixes q's rounds: the one that
+// delivered it, the one that continues it, or "".
+func (q loopRequest) worker() string {
+	if q.Outside {
+		return q.Continuer
+	}
+	return q.Session
+}
+
+// continuedBy is the work session of q's repository that continues q, a
+// request no session delivered, or "": one not stopped whose branch is
+// the request's source branch, or one of whose open items names it.
+func continuedBy(cfg *Config, st *LogState, q loopRequest) string {
+	branch := ""
+	if i := st.Index[q.Repository][q.Ref]; i != nil {
+		branch = i.Branch
+	}
+	c := withRuntime(cfg, st.Runtime)
+	for _, n := range sortedKeys(c.Sessions) {
+		sess := c.Sessions[n]
+		work := sess.Runtime && sess.Kind == KindWork || !sess.Runtime && sess.Role == "" && len(sess.Deliver) > 0
+		if sess.Repository != q.Repository || !work {
+			continue
+		}
+		if t := st.Tracks[n]; t != nil && (t.State == Stopped || t.State == Failed) {
+			continue
+		}
+		if branch != "" && sess.Branch == branch {
+			return n
+		}
+		for _, it := range st.itemsOf(n) {
+			if it.DoneWhen.Ref == q.Ref || namesRef(it.Title, q.Ref) || namesRef(it.Brief, q.Ref) {
+				return n
+			}
+		}
+	}
+	return ""
+}
+
+// namesRef says whether text names ref, "!N", whole.
+func namesRef(text, ref string) bool {
+	for i := 0; ; {
+		k := strings.Index(text[i:], ref)
+		if k < 0 {
+			return false
+		}
+		i += k + len(ref)
+		if i == len(text) || text[i] < '0' || text[i] > '9' {
+			return true
+		}
+	}
 }
 
 // loopRequests is every open request in a looped repository's loop,
@@ -289,6 +345,7 @@ func openLoopRequests(cfg *Config, st *LogState, now time.Time) []loopRequest {
 		q := loopRequest{ciWatched: w, Outside: i >= len(delivered), Branch: "request-" + w.Ref[1:], Out: outsideLoop(pol, own, r, ok, w.Ref, now)}
 		if q.Outside {
 			q.Case = repoKey(repo.Forge, repo.Project) + w.Ref
+			q.Continuer = continuedBy(cfg, st, q)
 		} else {
 			sess := cfg.Sessions[w.Session]
 			q.Case = cfg.caseOf(sess)
@@ -426,13 +483,15 @@ func placeOf(cfg *Config, st *LogState, q loopRequest, now time.Time) loopPlace 
 	}
 	if fix {
 		switch {
-		case q.Outside:
-			return owner("round %d has findings to fix on a request no session delivered; its author fixes them", last.N)
+		case q.worker() == "" && r.Head == L.ReviewHead:
+			return owner("round %d adopted findings; waiting for the author to push; the new head is reviewed", last.N)
+		case q.worker() == "":
+			// The author pushed: the new head is reviewed.
 		case L.FixRound < last.N:
 			return loopPlace{Phase: PlaceFixing, Reason: fmt.Sprintf("round %d has findings to fix; the work session is relaunched once it is done", last.N),
-				Do: LoopFix, Session: q.Session, Round: last.N, Head: r.Head}
+				Do: LoopFix, Session: q.worker(), Round: last.N, Head: r.Head}
 		case r.Head == L.FixHead:
-			if f, ok := lastFixRound(st.Tracks[q.Session], q); ok && f.Redelivered && f.Pushed == L.FixHead {
+			if f, ok := lastFixRound(st.Tracks[q.worker()], q); ok && f.Redelivered && f.Pushed == L.FixHead {
 				return owner("the fix round of round %d delivered no new commit", last.N)
 			}
 			return loopPlace{Phase: PlaceFixing, Reason: fmt.Sprintf("fix round %d: waiting for the work session's next delivery", last.N)}
@@ -1004,15 +1063,21 @@ func (s *Supervisor) fixRound(name string, sess Session, t *Track, ev Evidence, 
 		return false
 	}
 	for _, q := range loopRequests(s.cfg, s.st, s.clock.Now()) {
-		if q.Outside || q.Session != name {
+		if q.worker() != name {
 			continue
 		}
 		p := placeOf(s.cfg, s.st, q, s.clock.Now())
-		if p.Do != LoopFix || t.Delivered[q.Delivered] == "" {
+		if p.Do != LoopFix || !q.Outside && t.Delivered[q.Delivered] == "" {
 			continue
 		}
+		// A session that continues a request it did not deliver has the
+		// request's rounds in its facts, not its own case's.
+		with := sess
+		if q.Outside {
+			with.Request = q.Ref
+		}
 		id := newSessionID()
-		cmd, facts := s.launchCommandWith(name, sess, t, id, "fix-round", nil)
+		cmd, facts := s.launchCommandWith(name, with, t, id, "fix-round", nil)
 		line, err := s.launchLine(sess, cmd)
 		if err != nil {
 			s.skipOnce(name, "account:"+name, "not starting a fix round: "+err.Error(), t, &SkipPayload{Account: sess.Account})

@@ -1343,3 +1343,155 @@ func TestLoopDeferredAnswerIssueOpens(t *testing.T) {
 		t.Fatalf("merges = %+v; place %+v", h.forge.merges, h.place("!1"))
 	}
 }
+
+// deferOne runs ref, a request no session delivered, through a review
+// with one finding that widens the scope and a judge that raises its
+// decision and defers it, then writes DONE.
+func deferOne(t *testing.T, h *harness, ref string) {
+	t.Helper()
+	h.ticks(3, 5*time.Minute)
+	if text, refused := h.callAs(judgmentName(ref, KindReviewer), ToolReviewFindings, map[string]any{"findings": []any{
+		wideFinding("Add a widget catalogue", "catalogue.go")}}); refused {
+		t.Fatalf("review refused: %s; steps %v", text, h.loopSteps(ref))
+	}
+	h.ticks(3, 5*time.Minute)
+	judge := judgmentName(ref, KindJudge)
+	if text, refused := h.callAs(judge, ToolRaiseDecision, deferDecision("F1")); refused {
+		t.Fatalf("raise refused: %s; steps %v", text, h.loopSteps(ref))
+	}
+	if text, refused := h.callAs(judge, ToolJudgeDispositions, map[string]any{"dispositions": []any{
+		map[string]any{"finding_id": "F1", "disposition": DispositionDefer, "reason": "It widens the scope; the owner decides."}}, "plan": []any{}}); refused {
+		t.Fatalf("judge refused: %s", text)
+	}
+	h.sup.track(judge).State = Done
+	h.ticks(3, 5*time.Minute)
+}
+
+// fixContinued answers !2's deferred finding fix, and checks the fix
+// round starts on name, which continues !2, with the round in its facts;
+// then name pushes a fix to !2's branch and writes DONE, and the new head
+// is reviewed.
+func fixContinued(t *testing.T, h *harness, api *fakeForgeAPI, name string) {
+	t.Helper()
+	deferOne(t, h, "!2")
+	if err := h.answerCard(h.deferredCard().Entry, FindingFix, ""); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(3, 5*time.Minute)
+	if n := h.count(KindAction, ActFixRound, name); n != 1 {
+		t.Fatalf("fix rounds = %d; steps %v; place %+v", n, h.loopSteps("!2"), h.place("!2"))
+	}
+	if cmd := h.lastLaunch(name); !strings.Contains(cmd, `"owner":"fix"`) || !strings.Contains(cmd, "Add a widget catalogue") {
+		t.Fatalf("fix round facts: %s", cmd)
+	}
+	if p := h.place("!2"); p.Phase != PlaceFixing {
+		t.Fatalf("place = %+v", p)
+	}
+	outsideMR(api, outsideMRState{head: "5eed0102", pipeline: 61, status: "success"})
+	h.statusOf(name, "# Fixed\n\nDONE\n")
+	h.ticks(6, 5*time.Minute)
+	reviewer := judgmentName("!2", KindReviewer)
+	if _, ok := h.sup.st.Runtime[reviewer]; !ok || !strings.Contains(h.lastLaunch(reviewer), `"head":"5eed0102"`) {
+		t.Fatalf("no review of the new head: steps %v, place %+v", h.loopSteps("!2"), h.place("!2"))
+	}
+	if got := strings.Join(h.loopSteps("!2"), ","); got != "review,judge,fix,review" {
+		t.Fatalf("steps = %s", got)
+	}
+}
+
+// statusOf writes the STATUS.md of a configured or started session.
+func (h *harness) statusOf(name, text string) {
+	h.t.Helper()
+	sess, ok := withRuntime(h.sup.cfg, h.sup.st.Runtime).Sessions[name]
+	if !ok {
+		h.t.Fatalf("no session %s", name)
+	}
+	if err := os.WriteFile(filepath.Join(sess.Workdir, "STATUS.md"), []byte(text), 0o644); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// A request the owner opened, which no session delivered but a work
+// session continues on its source branch, takes the fix answer as a fix
+// round on that session, and its new head is reviewed (!1269).
+func TestLoopContinuedRequestFixRound(t *testing.T) {
+	h, api := loopHarness(t)
+	d := h.cfg.Sessions["d"]
+	d.Branch = "fix-squeak"
+	h.cfg.Sessions["d"] = d
+	outsideOpen(api)
+	h.sup.emit("", Event{Kind: KindIndex, Index: &IndexPayload{Repository: "widgets", Ref: "!2", Title: "Fix the squeak", State: "open", Branch: "fix-squeak"}})
+	fixContinued(t, h, api, "d")
+}
+
+// A work session whose open item names the request continues it too.
+func TestLoopContinuedRequestByFacts(t *testing.T) {
+	h, api := loopHarness(t)
+	outsideOpen(api)
+	h.sup.emit("", Event{Kind: KindWorkItem, Work: &WorkPayload{ID: "W2", Step: WorkStepOpen, Repository: "widgets", Instruction: "I2",
+		Work: &ThreadWork{Title: "Finish the squeak fix on !2", Brief: "Push the fix to !2's branch.", DoneWhen: EndCheck{Kind: DoneOwner}}}})
+	h.sup.emit("", Event{Kind: KindWorkItem, Work: &WorkPayload{ID: "W2", Step: WorkStepAssign, Session: "d"}})
+	h.status("d", "# Pushed\n\nW2 done: pushed to !2's branch\n\nDONE\n")
+	h.ticks(1, 5*time.Minute)
+	if its := h.sup.st.itemsOf("d"); len(its) != 1 {
+		t.Fatalf("d's items: %+v", h.item("W2"))
+	}
+	fixContinued(t, h, api, "d")
+}
+
+// adoptOutside runs !2, which no session delivered nor continues, its
+// goal recorded, through a review with one finding and a judge that
+// adopts it.
+func adoptOutside(t *testing.T, h *harness, api *fakeForgeAPI) {
+	t.Helper()
+	h.ticks(3, 5*time.Minute)
+	if err := RecordGoal(NewLogWriter(h.buf), withRuntime(h.cfg, h.sup.st.Runtime), h.logState(), h.clock.Now(), "gitlab/example-org/widgets!2", widgetsBody); err != nil {
+		t.Fatal(err)
+	}
+	h.restart(false)
+	h.sup.api = api
+	if text, refused := h.callAs(judgmentName("!2", KindReviewer), ToolReviewFindings, map[string]any{"findings": []any{finding("Spin is untested")}}); refused {
+		t.Fatalf("review refused: %s", text)
+	}
+	h.ticks(3, 5*time.Minute)
+	if text, refused := h.callAs(judgmentName("!2", KindJudge), ToolJudgeDispositions, map[string]any{"dispositions": []any{
+		map[string]any{"finding_id": "F1", "disposition": DispositionAdopt, "reason": "A spin test is cheap."}}}); refused {
+		t.Fatalf("judge refused: %s", text)
+	}
+	h.ticks(3, 5*time.Minute)
+}
+
+// An outside request's adopted findings wait for its author, and the
+// head the author pushes next is reviewed.
+func TestLoopOutsideFixHeadMovedReviewed(t *testing.T) {
+	h, api := loopHarness(t)
+	outsideOpen(api)
+	adoptOutside(t, h, api)
+	outsideMR(api, outsideMRState{head: "5eed0102", pipeline: 61, status: "success"})
+	h.ticks(4, 5*time.Minute)
+	reviewer := judgmentName("!2", KindReviewer)
+	if _, ok := h.sup.st.Runtime[reviewer]; !ok || !strings.Contains(h.lastLaunch(reviewer), `"head":"5eed0102"`) {
+		t.Fatalf("no review of the new head: steps %v, place %+v", h.loopSteps("!2"), h.place("!2"))
+	}
+	if got := strings.Join(h.loopSteps("!2"), ","); got != "review,judge,review" {
+		t.Fatalf("steps = %s", got)
+	}
+	if n := h.count(KindAction, ActFixRound, ""); n != 0 {
+		t.Fatalf("fix rounds = %d", n)
+	}
+}
+
+// Until the author pushes, the request waits for them, and says the new
+// head is reviewed.
+func TestLoopOutsideFixHeadUnchangedWaits(t *testing.T) {
+	h, api := loopHarness(t)
+	outsideOpen(api)
+	adoptOutside(t, h, api)
+	h.ticks(4, 5*time.Minute)
+	if p := h.place("!2"); p.Phase != PlaceOwner || !strings.Contains(p.Reason, "round 1 adopted findings; waiting for the author to push; the new head is reviewed") {
+		t.Fatalf("place = %+v", p)
+	}
+	if n := h.countSteps("!2", LoopReview); n != 1 {
+		t.Fatalf("reviews = %d; steps %v", n, h.loopSteps("!2"))
+	}
+}
