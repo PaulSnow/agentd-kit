@@ -1027,6 +1027,21 @@ func (s *Supervisor) escalateItem(it *WorkItem, key, text string) {
 	s.emit("", Event{Kind: KindMessage, Mode: ModeShared, Message: m})
 }
 
+// undelivered fails the owner's words in, which could not be typed into
+// session, and tells the owner on it, the item they are about, at once:
+// which answer, on which entry, why, and what the owner can do.
+func (s *Supervisor) undelivered(in *Instruction, it *WorkItem, session, why string) {
+	reason := "could not be typed into " + session + ": " + why
+	if s.routeStep(in, RouteFail, "", false, reason); s.halt != nil {
+		return
+	}
+	entry := "its entry"
+	if e := itemEntry(in); e != "" {
+		entry = e
+	}
+	s.escalateItem(it, "undelivered:"+in.ID, fmt.Sprintf("%s: your answer %s on %s %s. Reopen the session, reassign %s, or type the answer into its pane by hand.", it.ID, in.ID, entry, reason, it.ID))
+}
+
 // stalledItem tells the owner, once a stall, of an item with no change of
 // state and no change of its session's STATUS.md for items.escalate_after.
 func (s *Supervisor) stalledItem(it *WorkItem, workdir string, now time.Time) {
@@ -1387,6 +1402,10 @@ func (s *Supervisor) routeWork(in *Instruction) bool {
 			return false // routeOne says why it is never delivered
 		}
 		if it.Session != "" && s.takesInstructions(it.Session) && s.reachable(it.Session) {
+			if why := s.untypeable(it.Session); why != "" && s.noRestart(it.Session) != "" {
+				s.undelivered(in, it, it.Session, why)
+				return true
+			}
 			s.routeStep(in, RouteTo, it.Session, false, "")
 			return true
 		}

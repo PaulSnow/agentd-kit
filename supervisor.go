@@ -279,10 +279,11 @@ func (s *Supervisor) withheld(text string) string {
 }
 
 // eventMode is the mode an event is written with: the run's, except for a
-// fact about the world, which is shared.
+// fact about the world, which is shared, and the owner's answer a delivery
+// of the owner's words stands for (#56), which is the owner's.
 func eventMode(e Event, run string) string {
-	if e.Mode == ModeShared {
-		return ModeShared
+	if e.Mode == ModeShared || e.Mode == ModeOwner {
+		return e.Mode
 	}
 	return run
 }
