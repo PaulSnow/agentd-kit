@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"sync"
 	"time"
 )
@@ -42,6 +43,9 @@ type workState struct {
 	// liveCursor is each source's cursor as far as polls have moved it,
 	// ahead of its event.
 	liveCursor map[string]time.Time
+	// ignored tells, once, the unknown fields of the external files the
+	// polls read.
+	ignored *ignoredFields
 }
 
 // workerMsg is an event a worker appended, or the end of its job.
@@ -52,7 +56,7 @@ type workerMsg struct {
 
 func newWorkState() *workState {
 	return &workState{inFlight: map[string]bool{}, wake: make(chan struct{}, 1), nextPoll: map[string]time.Time{}, nextUsage: map[string]time.Time{},
-		pollTally: map[string]PollPayload{}, liveCursor: map[string]time.Time{}}
+		pollTally: map[string]PollPayload{}, liveCursor: map[string]time.Time{}, ignored: newIgnoredFields(os.Stderr)}
 }
 
 // busy says whether a job of key runs in a worker now.

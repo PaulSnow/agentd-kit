@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -184,7 +185,7 @@ const (
 // error and yields no events from it, so a bad file never empties or
 // rewrites the list. The mail findings need the inventory, for their
 // repositories, so they wait while the tracking files cannot be read.
-func RefreshItems(st *LogState, tr Tracking, now time.Time) ([]Event, error) {
+func RefreshItems(st *LogState, tr Tracking, ignored *ignoredFields, now time.Time) ([]Event, error) {
 	var events []Event
 	var errs []error
 	queued := map[string]bool{}
@@ -199,6 +200,9 @@ func RefreshItems(st *LogState, tr Tracking, now time.Time) ([]Event, error) {
 		}
 	}
 	inv, err := LoadInventory(tr)
+	if err == nil {
+		ignored.noteInventory(tr, inv)
+	}
 	if err != nil {
 		errs = append(errs, err)
 	} else if since := st.Cursors[SourceSnapshot]; inv.AsOf.After(since) {
@@ -207,7 +211,9 @@ func RefreshItems(st *LogState, tr Tracking, now time.Time) ([]Event, error) {
 	}
 	if tr.Mail != "" && inv != nil {
 		var m MailFindings
-		if err := readStrict(tr.Mail, &m); err != nil {
+		unknown, err := readTolerant(tr.Mail, &m)
+		ignored.note("tracking mail findings", tr.Mail, unknown)
+		if err != nil {
 			errs = append(errs, fmt.Errorf("tracking mail findings %w", err))
 		} else if m.AsOf.IsZero() || m.Findings == nil {
 			errs = append(errs, fmt.Errorf("tracking mail findings %s: unknown shape: asOf and findings must be present", tr.Mail))
@@ -328,7 +334,7 @@ func itemsCmd(args []string, w io.Writer) error {
 		}
 		return MarkSeen(log, time.Now(), ids, "")
 	}
-	fresh, rerr := RefreshItems(st, cfg.Tracking, time.Now())
+	fresh, rerr := RefreshItems(st, cfg.Tracking, newIgnoredFields(os.Stderr), time.Now())
 	for _, e := range fresh {
 		if err := log.Append(e); err != nil {
 			return err

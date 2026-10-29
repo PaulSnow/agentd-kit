@@ -80,10 +80,13 @@ type PollPayload struct {
 	Items  int    `json:"items"`
 }
 
-// PollRecord is a source's latest poll record, and when.
+// PollRecord is a source's latest poll record, and when. Since is when
+// a failing source's run of failed records began, through heartbeats and
+// changes of the error's text; zero while it works.
 type PollRecord struct {
 	PollPayload
-	At time.Time
+	At    time.Time
+	Since time.Time
 }
 
 // APIResponse is one forge API reply: its status, headers and body.
@@ -226,6 +229,7 @@ func (s *Supervisor) pollSource(src string, now time.Time) pollResult {
 	if err != nil {
 		return pollResult{err: err}
 	}
+	s.work.ignored.noteInventory(s.cfg.Tracking, inv)
 	if src == SourceGitHub {
 		return pollGitHub(s.api, s.st, inv)
 	}

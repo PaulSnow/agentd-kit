@@ -281,7 +281,13 @@ func (st *LogState) apply(e Event) {
 		case KindCursor:
 			st.Cursors[e.Cursor.Source] = e.Cursor.AsOf
 		case KindPoll:
-			st.Polls[e.Poll.Source] = PollRecord{PollPayload: *e.Poll, At: e.Time}
+			r := PollRecord{PollPayload: *e.Poll, At: e.Time}
+			if prev, ok := st.Polls[e.Poll.Source]; !r.OK && ok && !prev.OK {
+				r.Since = prev.Since
+			} else if !r.OK {
+				r.Since = e.Time
+			}
+			st.Polls[e.Poll.Source] = r
 		case KindTriage:
 			for _, r := range e.Triage.Results {
 				r := r
