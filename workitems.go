@@ -228,8 +228,10 @@ type WorkPayload struct {
 	Designer bool        `json:"designer,omitempty"`
 	Design   *WorkDesign `json:"design,omitempty"`
 	// Words are the owner's words at a go, whole: the answers to the
-	// design's questions.
-	Words string `json:"words,omitempty"`
+	// design's questions; DoneWhen, the owner's done_when when the go
+	// said "done by me" (#73).
+	Words    string    `json:"words,omitempty"`
+	DoneWhen *EndCheck `json:"done_when,omitempty"`
 }
 
 // check says what a work item step lacks.
@@ -245,6 +247,8 @@ func (p *WorkPayload) check() error {
 		return errors.New("a check carries its result")
 	case p.Step == WorkStepDesign && p.Design == nil:
 		return errors.New("a design step carries its design")
+	case p.DoneWhen != nil && p.DoneWhen.check() != nil:
+		return fmt.Errorf("a step's done_when: %v", p.DoneWhen.check())
 	}
 	return nil
 }

@@ -136,7 +136,7 @@ func TestDesignerBriefPostsAsDecisionAndStartsOnGo(t *testing.T) {
 			t.Fatalf("the design lacks %q:\n%s", want, entry.Decision.Context)
 		}
 	}
-	if got := decisionOptions(entry.Decision.Decision); strings.Join(got, ",") != "go,change,decline" {
+	if got := decisionOptions(entry.Decision.Decision); strings.Join(got, ",") != "go,go-done-by-me,change,decline" {
 		t.Fatalf("options = %v", got)
 	}
 	// The item's own entry takes no done or re-assign while designed.
@@ -577,7 +577,7 @@ func TestDesignWithheldAsksOwnerAtOnce(t *testing.T) {
 	if it.State != WorkDesigned || it.Round != 2 || it.DesignWithheld || it.Design == nil || it.DesignError != "" {
 		t.Fatalf("after the change: %+v", it)
 	}
-	if got := it.designOptions(); strings.Join(got, ",") != "go,change,decline" {
+	if got := it.designOptions(); strings.Join(got, ",") != "go,go-done-by-me,change,decline" {
 		t.Fatalf("options after the change = %v", got)
 	}
 	if calls := claudeCalls(t, dir); calls != 3 {
@@ -632,11 +632,11 @@ func TestDesignWithheldDecline(t *testing.T) {
 // owner gets designRounds real rounds, and decline is always there.
 func TestDesignWithheldRoundsDoNotCount(t *testing.T) {
 	it := &WorkItem{Designer: true, State: WorkDesigned, Round: designRounds, Design: &WorkDesign{Round: designRounds}}
-	if got := it.designOptions(); strings.Join(got, ",") != "go,decline" {
+	if got := it.designOptions(); strings.Join(got, ",") != "go,go-done-by-me,decline" {
 		t.Fatalf("after %d real rounds: %v", designRounds, got)
 	}
 	it.WithheldRounds = 1
-	if got := it.designOptions(); strings.Join(got, ",") != "go,change,decline" {
+	if got := it.designOptions(); strings.Join(got, ",") != "go,go-done-by-me,change,decline" {
 		t.Fatalf("after %d rounds, one withheld: %v", designRounds, got)
 	}
 	it.DesignWithheld, it.WithheldRounds, it.Round = true, 2, designRounds+1
