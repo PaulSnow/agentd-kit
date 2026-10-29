@@ -30,7 +30,7 @@ func itemsFixture(t *testing.T) (Tracking, *Config) {
 // events it made.
 func refresh(t *testing.T, st *LogState, tr Tracking) ([]Event, error) {
 	t.Helper()
-	events, err := RefreshItems(st, tr, time.Date(2026, 10, 24, 0, 0, 0, 0, time.UTC))
+	events, err := RefreshItems(st, tr, nil, time.Date(2026, 10, 24, 0, 0, 0, 0, time.UTC))
 	for _, e := range events {
 		if cerr := e.check(); cerr != nil {
 			t.Fatalf("refresh made an unreadable event: %v", cerr)
@@ -113,7 +113,7 @@ func TestMarkSeenSurvivesReplay(t *testing.T) {
 	st := NewLogState(cfg, ModeLive)
 	for _, step := range []func(){func() {}, func() { laterSnapshot(t, tr) }} {
 		step()
-		events, err := RefreshItems(st, tr, time.Now())
+		events, err := RefreshItems(st, tr, nil, time.Now())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -136,7 +136,7 @@ func TestMarkSeenSurvivesReplay(t *testing.T) {
 		if it := replayed.Items["gitlab/example-org/widgets#19"]; it == nil || !it.Seen {
 			t.Fatalf("%s: issue 19 after replay = %+v", mode, it)
 		}
-		if again, err := RefreshItems(replayed, tr, time.Now()); err != nil || len(again) != 0 {
+		if again, err := RefreshItems(replayed, tr, nil, time.Now()); err != nil || len(again) != 0 {
 			t.Fatalf("%s: a refresh after replay made %d events, %v", mode, len(again), err)
 		}
 	}
@@ -148,6 +148,31 @@ func TestMarkSeenSurvivesReplay(t *testing.T) {
 // A mail findings file that cannot be read is an error naming it, and the
 // items already listed stay: a bad file never empties the list. The
 // snapshot is still read.
+// The mail findings file is the tracking system's: fields agentd does not
+// know, at its top level and in a finding, are ignored and told once (#75).
+func TestMailToleratesUnknownFields(t *testing.T) {
+	tr, cfg := itemsFixture(t)
+	writeFile(t, tr.Mail, strings.Replace(strings.Replace(mailFixture, `"searched": 12,`, `"searched": 12, "model": "m",`, 1), `"threadId": "t1",`, `"threadId": "t1", "score": 0.9,`, 1))
+	var told bytes.Buffer
+	ignored := newIgnoredFields(&told)
+	st := NewLogState(cfg, ModeLive)
+	for i := 0; i < 2; i++ {
+		events, err := RefreshItems(st, tr, ignored, time.Date(2026, 10, 24, 0, 0, 0, 0, time.UTC))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range events {
+			st.apply(e)
+		}
+	}
+	if st.Items["mail:t1"] == nil {
+		t.Fatal("the mail findings were not read")
+	}
+	if want := "agentd: info: tracking mail findings " + tr.Mail + ": ignored unknown fields findings[].score, model\n"; told.String() != want {
+		t.Fatalf("told %q, want %q", told.String(), want)
+	}
+}
+
 func TestMalformedMailNeverEmptiesTheList(t *testing.T) {
 	tr, cfg := itemsFixture(t)
 	st := NewLogState(cfg, ModeLive)
@@ -228,8 +253,8 @@ func TestItemSeenAgainIsNotDuplicated(t *testing.T) {
 		t.Fatalf("the same threads again: %+v, %v", events, err)
 	}
 	laterSnapshot(t, tr)
-	a, errA := RefreshItems(st, tr, time.Now())
-	b, errB := RefreshItems(st, tr, time.Now())
+	a, errA := RefreshItems(st, tr, nil, time.Now())
+	b, errB := RefreshItems(st, tr, nil, time.Now())
 	if errA != nil || errB != nil || len(a) == 0 || len(a) != len(b) {
 		t.Fatalf("two refreshes: %d and %d events, %v %v", len(a), len(b), errA, errB)
 	}

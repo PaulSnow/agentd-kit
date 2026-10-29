@@ -315,33 +315,41 @@ func TestRankCasesWithPriorities(t *testing.T) {
 	}
 }
 
-// The priorities file is the tracking system's weekly review: a field
-// agentd does not know refuses it, and a missing file is no priorities.
+// The priorities file is the tracking system's weekly review, written
+// outside agentd: a field agentd does not know is ignored and told once
+// (#75), and a missing file is no priorities.
 func TestLoadPriorities(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "priorities.json")
-	if pr, err := LoadPriorities(p); err != nil || pr != nil {
+	if pr, err := LoadPriorities(p, nil); err != nil || pr != nil {
 		t.Fatalf("missing: %+v, %v", pr, err)
 	}
 	writeFile(t, p, `{"week":"2026-W43","pins":["widgets"]}`)
-	if _, err := LoadPriorities(p); err == nil {
+	if _, err := LoadPriorities(p, nil); err == nil {
 		t.Fatal("a pin that is no case was accepted")
 	}
 	os.Remove(p)
-	if pr, err := LoadPriorities(""); err != nil || pr != nil {
+	if pr, err := LoadPriorities("", nil); err != nil || pr != nil {
 		t.Fatalf("unconfigured: %+v, %v", pr, err)
 	}
 	writeFile(t, p, `{"week":"2026-W43","repositories":[{"repository":"gitlab/example-org/widgets","priority":1}],"pins":["gitlab/example-org/widgets#7"]}`)
-	pr, err := LoadPriorities(p)
+	pr, err := LoadPriorities(p, nil)
 	if err != nil || pr.Week != "2026-W43" || pr.Repositories[0].Priority != 1 || pr.Pins[0] != widgetsCase {
 		t.Fatalf("%+v, %v", pr, err)
 	}
-	writeFile(t, p, `{"week":"2026-W43","weights":{}}`)
-	if _, err := LoadPriorities(p); err == nil {
-		t.Fatal("an unknown field was accepted")
+	writeFile(t, p, `{"week":"2026-W43","weights":{},"repositories":[{"repository":"gitlab/example-org/widgets","priority":2,"why":"x"}]}`)
+	var told bytes.Buffer
+	ignored := newIgnoredFields(&told)
+	for i := 0; i < 2; i++ {
+		if pr, err := LoadPriorities(p, ignored); err != nil || pr.Repositories[0].Priority != 2 {
+			t.Fatalf("with unknown fields: %+v, %v", pr, err)
+		}
+	}
+	if want := "agentd: info: tracking priorities " + p + ": ignored unknown fields repositories[].why, weights\n"; told.String() != want {
+		t.Fatalf("told %q, want %q", told.String(), want)
 	}
 	writeFile(t, p, `{"week":"2026-W43","repositories":[{"repository":"gitlab/example-org/widgets","priority":0}]}`)
-	if _, err := LoadPriorities(p); err == nil {
+	if _, err := LoadPriorities(p, nil); err == nil {
 		t.Fatal("priority 0 was accepted")
 	}
 }
