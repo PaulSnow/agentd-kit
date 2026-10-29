@@ -358,6 +358,28 @@ func openLoopRequests(cfg *Config, st *LogState, now time.Time) []loopRequest {
 	return out
 }
 
+// loopDeferral is the request of in's repository, and the deferred
+// finding of its latest round, whose decision in, the owner's response
+// on a judge's d: entry, answers with a finding key, read from the log's
+// folds; ok is false for any other instruction (#76).
+func loopDeferral(cfg *Config, st *LogState, in *Instruction, now time.Time) (q loopRequest, d deferral, ok bool) {
+	if in.Re == nil || !strings.HasPrefix(in.Re.ID, entryDecision) || len(in.Repositories) == 0 {
+		return q, d, false
+	}
+	for _, q := range openLoopRequests(cfg, st, now) {
+		c := st.Cases[q.Case]
+		if q.Repository != in.Repositories[0] || c == nil || len(c.Rounds) == 0 {
+			continue
+		}
+		for _, d := range c.deferred(st, &c.Rounds[len(c.Rounds)-1]) {
+			if d.Entry == in.Re.ID && d.Answer != "" {
+				return q, d, true
+			}
+		}
+	}
+	return q, d, false
+}
+
 // loopPlace is where a request stands, and the step due, if any: Do is a
 // loop step, or "end" for a judgment session whose part is over.
 type loopPlace struct {
