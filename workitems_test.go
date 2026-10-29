@@ -699,3 +699,120 @@ func TestWorkMessageAtMaxNotReopened(t *testing.T) {
 		t.Fatalf("next step offers %s: %+v", w1, d)
 	}
 }
+
+// An item never waits on a session Go cannot type into (#70): a new one
+// passes it by for a started session, and one it holds that agentd will
+// not bring back is given back, the note saying why. A session gone that
+// the restart policy brings back keeps the item it took.
+func TestItemReassignedWhenTmuxGone(t *testing.T) {
+	// gone makes w1 blocked on the owner with its tmux session gone.
+	gone := func(h *harness, w1, status string) {
+		t.Helper()
+		h.status(w1, status)
+		h.tmux.alive[w1] = false
+		h.ticks(1, time.Minute)
+		if st := h.state(w1); st != BlockedOnOwner {
+			t.Fatalf("state = %v", st)
+		}
+	}
+	work := ThreadWork{Title: "Ship the follow-up", Brief: "Ship it.", DoneWhen: EndCheck{Kind: DoneOwner}}
+	t.Run("new item", func(t *testing.T) {
+		h := sessionsHarness(t)
+		w1 := h.startSession("issue-1", KindWork, 1)
+		h.ticks(2, time.Minute)
+		h.alive(w1, "w1 works")
+		h.ticks(1, time.Minute)
+		gone(h, w1, "# s\n\n## Questions\n- Which version?\n")
+		it := h.askWork("Ship the follow-up.", work, w1)
+		h.ticks(1, time.Minute)
+		it = h.item(it.ID)
+		if contains(h.workItemAssigns(it.ID), w1) {
+			t.Fatalf("the item went to %s, whose tmux session is gone: item = %+v", w1, it)
+		}
+		if it.Session == "" || it.Session == w1 || !it.Started {
+			t.Fatalf("no session started for it: item = %+v", it)
+		}
+	})
+	for _, c := range []string{"typed", "acknowledged"} {
+		t.Run("held "+c, func(t *testing.T) {
+			h := sessionsHarness(t)
+			w1 := h.startSession("issue-1", KindWork, 1)
+			h.ticks(2, time.Minute)
+			h.alive(w1, "w1 works")
+			h.ticks(1, time.Minute)
+			it := h.askWork("Ship the follow-up.", work, w1)
+			h.alive(w1, "w1 works on")
+			h.ticks(1, time.Minute)
+			if it = h.item(it.ID); it.Session != w1 {
+				t.Fatalf("not given to %s: item = %+v", w1, it)
+			}
+			status := "# s\n\n## Questions\n- Which version?\n"
+			if c == "acknowledged" {
+				status = "# s\n\n## Now\n- " + it.ID + ": shipping\n\n## Questions\n- Which version?\n"
+				h.status(w1, status)
+				h.ticks(1, time.Minute)
+				if st := h.item(it.ID).State; st == WorkAssigned {
+					t.Fatalf("not acknowledged: %s", st)
+				}
+			}
+			gone(h, w1, status)
+			h.ticks(1, time.Minute)
+			it = h.item(it.ID)
+			if !contains(it.Tried, w1) || len(it.Notes) == 0 {
+				t.Fatalf("not given back: item = %+v", it)
+			}
+			note := it.Notes[0].Text
+			if !strings.Contains(note, w1+" cannot be typed into") || !strings.Contains(note, "blocked on the owner") || !strings.Contains(note, "not restart") {
+				t.Fatalf("note = %q", note)
+			}
+			if it.Session == "" || it.Session == w1 || !it.Started {
+				t.Fatalf("no session started for it: item = %+v", it)
+			}
+		})
+	}
+	t.Run("restarted", func(t *testing.T) {
+		// Gone with no Questions: the restart brings it back, and the item
+		// it took stays with it.
+		h := sessionsHarness(t)
+		w1 := h.startSession("issue-1", KindWork, 1)
+		h.ticks(2, time.Minute)
+		h.alive(w1, "w1 works")
+		h.ticks(1, time.Minute)
+		it := h.askWork("Ship the follow-up.", work, w1)
+		h.status(w1, "# s\n\n## Now\n- "+it.ID+": shipping\n")
+		h.alive(w1, "w1 works on")
+		h.ticks(1, time.Minute)
+		h.tmux.alive[w1] = false
+		h.ticks(2, time.Minute)
+		if it = h.item(it.ID); it.Session != w1 || len(it.Tried) != 0 {
+			t.Fatalf("taken off %s, which the restart brings back: item = %+v", w1, it)
+		}
+	})
+	t.Run("takesItem", func(t *testing.T) {
+		h := sessionsHarness(t)
+		if !h.sup.takesItem("a") {
+			t.Fatal("a, running, refused")
+		}
+		h.tmux.alive["b"] = false // configured, never seen, no tmux
+		if h.sup.takesItem("b") {
+			t.Fatal("b, with no tmux session, takes an item")
+		}
+		for _, c := range []string{"parked", "stopped", "crash-looping", "blocked"} {
+			tr := h.sup.track("a")
+			*tr = Track{}
+			switch c {
+			case "parked":
+				tr.Parked = true
+			case "stopped":
+				tr.State, tr.Stopped = Stopped, "its spend cap"
+			case "crash-looping":
+				tr.State = CrashLooping
+			case "blocked":
+				tr.State, tr.LastObs = BlockedOnOwner, &ObservePayload{State: string(BlockedOnOwner)}
+			}
+			if h.sup.takesItem("a") {
+				t.Fatalf("a, %s, takes an item", c)
+			}
+		}
+	})
+}
