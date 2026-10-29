@@ -503,15 +503,31 @@ func (s *Supervisor) driveItem(it *WorkItem, now time.Time) {
 	_, running := s.cfg.Sessions[it.Session]
 	sess := s.cfg.Sessions[it.Session]
 	status, _ := readRegular(filepath.Join(sess.Workdir, "STATUS.md"), statusLimit)
+	why := ""
+	if running {
+		why = s.untypeable(it.Session)
+	}
 	switch {
-	case !running || t != nil && (t.State == Stopped || t.State == CrashLooping || t.Parked):
-		// Gone, stopped or parked: it is not doing the work.
+	case !running:
+		// Gone: it is not doing the work.
 		s.reopenItem(it, fmt.Sprintf("%s stopped with %s not done", it.Session, it.ID), string(status))
+		return
+	case t != nil && (t.State == Stopped || t.State == CrashLooping || t.Parked):
+		// Stopped or parked: it is not doing the work.
+		s.reopenItem(it, fmt.Sprintf("%s cannot be typed into: %s, and agentd does not restart it; %s is not done", it.Session, why, it.ID), string(status))
 		return
 	case t != nil && t.State == Done && s.reopening(it):
 		return // #65 reopens it with the owner's message first
 	case t != nil && t.State == Done:
 		s.finishedItem(it, string(status), now)
+		return
+	case why != "" && s.noRestart(it.Session) != "":
+		// Its tmux session is gone and nothing brings it back (#70); one
+		// the restart policy brings back keeps the item.
+		s.reopenItem(it, fmt.Sprintf("%s cannot be typed into: %s, and agentd does not restart %s; %s is not done", it.Session, why, s.noRestart(it.Session), it.ID), string(status))
+		if s.halt == nil && it.State == WorkOpen {
+			s.assignItem(it, now) // it waits on no tick
+		}
 		return
 	}
 	marks := itemMarks(it.ID, string(status))
@@ -885,9 +901,48 @@ func lastNote(it *WorkItem) string {
 }
 
 // takesItem says whether session name may be given an item: it runs
-// here, takes instructions, and its STATUS.md does not end with DONE.
+// here, takes instructions, Go can type into it now, and its STATUS.md
+// does not end with DONE.
 func (s *Supervisor) takesItem(name string) bool {
-	return s.takesInstructions(name) && s.reachable(name) && !readSessionFiles(s.cfg.Sessions[name].Workdir).Done
+	return s.takesInstructions(name) && s.reachable(name) && s.untypeable(name) == "" && !readSessionFiles(s.cfg.Sessions[name].Workdir).Done
+}
+
+// untypeable is why Go cannot type into session name now, or "" when it
+// can: its tmux session must run with a live pane, and it must not be
+// parked, stopped, crash-looping, or blocked on the owner.
+func (s *Supervisor) untypeable(name string) string {
+	t := s.st.Tracks[name]
+	switch {
+	case t != nil && t.Parked:
+		return "it is parked"
+	case t != nil && t.State == Stopped:
+		return "it is stopped: " + t.Stopped
+	case t != nil && t.State == CrashLooping:
+		return "it is crash-looping"
+	}
+	alive, err := s.tmux.HasSession(name)
+	if err == nil && alive && (t == nil || t.LastObs == nil || t.LastObs.Alive) {
+		return ""
+	}
+	if _, started := s.st.Runtime[name]; started && (t == nil || t.State == "") {
+		return "" // agentd started it, and its pass launches it
+	}
+	if t != nil && t.State == BlockedOnOwner {
+		return "it is blocked on the owner and its tmux session is gone"
+	}
+	return "its tmux session is gone"
+}
+
+// noRestart is why agentd's restart policy does not bring session name
+// back once its tmux session is gone, or "" when it does.
+func (s *Supervisor) noRestart(name string) string {
+	switch t := s.st.Tracks[name]; {
+	case !s.cfg.Policies.Restart.Enabled:
+		return "it: the restart policy is off"
+	case t != nil && t.State == BlockedOnOwner:
+		return "a session blocked on the owner"
+	}
+	return ""
 }
 
 // reachable says whether Go can type into session name: one it
