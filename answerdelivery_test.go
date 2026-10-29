@@ -147,7 +147,10 @@ func TestDesignWordsAfterGoReachRunningSession(t *testing.T) {
 
 // An answer that cannot be typed into the item's session tells the owner
 // at once, on the item: the instruction, its entry, why, and what the
-// owner can do; the instruction fails with the reason.
+// owner can do. Its pane not running Claude, the instruction fails with
+// the reason; its tmux gone, which nothing restarts for a session blocked
+// on the owner, the item is reassigned (#70) and the answer waits for the
+// new session, which is handed it.
 func TestDeadPaneAnswerEscalatesItem(t *testing.T) {
 	for _, c := range []string{"tmux gone", "not claude"} {
 		t.Run(c, func(t *testing.T) {
@@ -170,16 +173,43 @@ func TestDeadPaneAnswerEscalatesItem(t *testing.T) {
 					note = e.Work.Note
 				}
 			}
-			for _, want := range []string{it.ID, in.ID, entryWork + it.ID, "could not be typed into a", "Reopen the session", "reassign", "by hand"} {
+			wants := []string{it.ID, in.ID, entryWork + it.ID, "could not be typed into a", "eopen", "by hand"}
+			if c == "not claude" {
+				wants = append(wants, "its pane does not run claude", "Reopen the session", "reassign")
+			} else {
+				wants = append(wants, "tmux session is gone", "agentd reassigns", "new session")
+			}
+			for _, want := range wants {
 				if !strings.Contains(note, want) {
 					t.Fatalf("escalation lacks %q: %q", want, note)
 				}
 			}
-			if in = h.logState().Instructions[in.ID]; in.Failed == "" || !strings.Contains(note, in.Failed) {
+			told := false
+			for _, n := range h.noticesAbout(it.ID) {
+				told = told || strings.Contains(n, in.ID)
+			}
+			if !told {
+				t.Fatalf("notices = %q", h.noticesAbout(it.ID))
+			}
+			in = h.logState().Instructions[in.ID]
+			if c == "not claude" {
+				if in.Failed == "" || !strings.Contains(note, in.Failed) {
+					t.Fatalf("instruction = %+v, note %q", in, note)
+				}
+				return
+			}
+			if in.Failed != "" || in.Waiting == "" || !strings.Contains(note, in.Waiting) {
 				t.Fatalf("instruction = %+v, note %q", in, note)
 			}
-			if ns := h.noticesAbout(it.ID); len(ns) == 0 || !strings.Contains(ns[len(ns)-1], in.ID) {
-				t.Fatalf("notices = %q", ns)
+			h.ticks(1, time.Minute)
+			next := h.item(it.ID).Session
+			if next == "" || next == "a" {
+				t.Fatalf("not reassigned: %+v", h.item(it.ID))
+			}
+			h.alive(next, "launched\n"+idleScreen)
+			h.ticks(3, time.Minute)
+			if in = h.logState().Instructions[in.ID]; in.Session != next || in.Failed != "" || in.Delivered.IsZero() {
+				t.Fatalf("the answer did not reach %s: %+v", next, in)
 			}
 		})
 	}
@@ -213,5 +243,26 @@ func TestBlockedEndsWhenAnswerDelivered(t *testing.T) {
 	h.ticks(2, time.Minute)
 	if st := h.state("a"); st != BlockedOnOwner {
 		t.Fatalf("new Questions: a is %s", st)
+	}
+}
+
+// Only the owner's answer on an item's entry fails when it cannot be
+// typed: the message a thread agent handed over with the item waits on a
+// pane that does not run Claude, and is delivered once it does.
+func TestHandOverWaitsOnPaneNotClaude(t *testing.T) {
+	h := sessionsHarness(t)
+	h.alive("a", "a works")
+	h.tmux.commands["a"] = "bash"
+	it := h.askWork("Write the release notes.", ThreadWork{Title: "Release notes", Brief: "Write them.", DoneWhen: EndCheck{Kind: DoneOwner}}, "a")
+	h.ticks(2, time.Minute)
+	in := h.logState().Instructions[it.Instruction]
+	if in.Failed != "" || !in.Delivered.IsZero() {
+		t.Fatalf("instruction = %+v", in)
+	}
+	h.tmux.commands["a"] = "claude"
+	h.alive("a", "a works on\n"+idleScreen)
+	h.ticks(3, time.Minute)
+	if in = h.logState().Instructions[it.Instruction]; in.Failed != "" || in.Delivered.IsZero() {
+		t.Fatalf("not delivered once the pane runs claude: %+v", in)
 	}
 }
