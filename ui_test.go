@@ -1011,7 +1011,7 @@ func TestHomeShowsFailingPollCard(t *testing.T) {
 		return body[:strings.Index(body, "</section>")]
 	}
 	poll := func(ago time.Duration, src string, ok bool, why string) Event {
-		return Event{V: EventVersion, Time: pageAt.Add(-ago), Kind: KindPoll, Mode: ModeShared, Poll: &PollPayload{Source: src, OK: ok, Error: why, Polls: 1}}
+		return Event{V: EventVersion, Time: pageAt.Add(-ago), Kind: KindPoll, Mode: ModeLive, Poll: &PollPayload{Source: src, OK: ok, Error: why, Polls: 1}}
 	}
 	github := poll(5*time.Minute, SourceGitHub, true, "")
 	bad := `tracking snapshot /srv/snapshot.json: unknown shape: json: unknown field "Behind"`
