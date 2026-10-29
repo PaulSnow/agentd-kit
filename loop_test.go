@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1493,5 +1494,288 @@ func TestLoopOutsideFixHeadUnchangedWaits(t *testing.T) {
 	}
 	if n := h.countSteps("!2", LoopReview); n != 1 {
 		t.Fatalf("reviews = %d; steps %v", n, h.loopSteps("!2"))
+	}
+}
+
+// deferMany runs !1 through a review with a finding that widens the
+// scope for each title, F1 on, and a judge that raises a decision for
+// each and defers them all, then writes DONE.
+func deferMany(t *testing.T, h *harness, titles ...string) {
+	t.Helper()
+	h.ticks(5, 5*time.Minute)
+	var fs, ds []any
+	for i, title := range titles {
+		fs = append(fs, wideFinding(title, "f"+strconv.Itoa(i+1)+".go"))
+		ds = append(ds, map[string]any{"finding_id": "F" + strconv.Itoa(i+1), "disposition": DispositionDefer, "reason": "It widens the scope; the owner decides."})
+	}
+	if text, refused := h.callAs(judgmentName("!1", KindReviewer), ToolReviewFindings, map[string]any{"findings": fs}); refused {
+		t.Fatalf("review refused: %s", text)
+	}
+	h.ticks(3, 5*time.Minute)
+	judge := judgmentName("!1", KindJudge)
+	for i := range titles {
+		if text, refused := h.callAs(judge, ToolRaiseDecision, deferDecision("F"+strconv.Itoa(i+1))); refused {
+			t.Fatalf("raise for F%d refused: %s", i+1, text)
+		}
+	}
+	if text, refused := h.callAs(judge, ToolJudgeDispositions, map[string]any{"dispositions": ds, "plan": []any{}}); refused {
+		t.Fatalf("judge refused: %s", text)
+	}
+	h.sup.track(judge).State = Done
+	h.ticks(3, 5*time.Minute)
+}
+
+// deferredEntries is the console entries of the decisions of the latest
+// round of case id's deferred findings, F1 first.
+func (h *harness) deferredEntries(id string) []string {
+	h.t.Helper()
+	c := h.sup.st.Cases[id]
+	if c == nil || len(c.Rounds) == 0 {
+		h.t.Fatalf("no rounds in %s", id)
+	}
+	var out []string
+	for _, d := range c.deferred(h.sup.st, &c.Rounds[len(c.Rounds)-1]) {
+		out = append(out, d.Entry)
+	}
+	return out
+}
+
+// answerAsks answers the decision at entry with choice and the owner's
+// words through the page, and the thread agent then asks for work on
+// ref for it, as it did for each answer on the night of #76. With
+// replay, the agent's answer is written to the log, as the build before
+// the fix wrote it, rather than emitted.
+func (h *harness) answerAsks(entry, choice, words, ref string, replay bool) {
+	h.t.Helper()
+	if err := h.answerCard(entry, choice, words); err != nil {
+		h.t.Fatal(err)
+	}
+	events, _, err := ReadEvents(bytes.NewReader(h.buf.Bytes()))
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	id := ""
+	for _, e := range events {
+		if e.Kind == KindInstruction && e.Instruction.Re != nil && e.Instruction.Re.ID == entry {
+			id = e.Instruction.ID
+		}
+	}
+	if id == "" {
+		h.t.Fatalf("no instruction on %s", entry)
+	}
+	w := ThreadWork{Title: "Fix the judge's finding on " + ref, Brief: "Answer " + choice + " on " + entry + ": do it on " + ref + ".",
+		DoneWhen: EndCheck{Kind: DoneForge, Ref: ref, State: "merged"}}
+	routes := []RoutePayload{{Instruction: id, Step: RouteAgent},
+		{Instruction: id, Step: RouteAnswered, Agent: &AgentPayload{Answer: "Go holds it as a work item until it is done.", Work: &w}}}
+	if replay {
+		for i := range routes {
+			h.appendEvent(Event{Kind: KindRoute, Mode: ModeLive, Route: &routes[i]})
+		}
+		return
+	}
+	h.sup.ownerRecords()
+	for i := range routes {
+		h.sup.emit("", Event{Kind: KindRoute, Route: &routes[i]})
+	}
+}
+
+// allow adds actions to widgets' delivery.allow and restarts agentd.
+func (h *harness) allow(api *fakeForgeAPI, actions ...string) {
+	w := h.cfg.Repositories["widgets"]
+	w.Policy.Delivery.Allow = append(w.Policy.Delivery.Allow, actions...)
+	h.cfg.Repositories["widgets"] = w
+	h.restart(false)
+	h.sup.api = api
+}
+
+// The owner's fix on a delivered request's deferred finding, which the
+// thread agent took for work, opens no item: the work session's fix round
+// carries it, with the decision's question and the owner's words (#76).
+func TestLoopAnswerFixDeliveredOpensNoItem(t *testing.T) {
+	h, _ := loopHarness(t)
+	deferBoth(t, h)
+	es := h.deferredEntries(widgetsCase)
+	h.answerAsks(es[0], FindingFix, "extend the test in this MR", "!1", false)
+	h.ticks(2, 5*time.Minute)
+	h.answerAsks(es[1], FindingMerge, "", "!1", false)
+	h.ticks(4, 5*time.Minute)
+	if len(h.sup.st.Work) != 0 {
+		t.Fatalf("items opened: %+v", h.sup.st.Work)
+	}
+	if n := h.count(KindAction, ActFixRound, "d"); n != 1 {
+		t.Fatalf("fix rounds = %d; steps %v; place %+v", n, h.loopSteps("!1"), h.place("!1"))
+	}
+	if cmd := h.lastLaunch("d"); !strings.Contains(cmd, `"question":"Fix F1 in this request?"`) || !strings.Contains(cmd, `"words":"extend the test in this MR"`) {
+		t.Fatalf("fix round facts lack the decision's words: %s", cmd)
+	}
+}
+
+// A request a work session continues takes the fix as that session's
+// fix round, and opens no item either.
+func TestLoopAnswerFixContinuedOpensNoItem(t *testing.T) {
+	h, api := loopHarness(t)
+	d := h.cfg.Sessions["d"]
+	d.Branch = "fix-squeak"
+	h.cfg.Sessions["d"] = d
+	outsideOpen(api)
+	h.sup.emit("", Event{Kind: KindIndex, Index: &IndexPayload{Repository: "widgets", Ref: "!2", Title: "Fix the squeak", State: "open", Branch: "fix-squeak"}})
+	deferOne(t, h, "!2")
+	h.answerAsks(h.deferredEntries("gitlab/example-org/widgets!2")[0], FindingFix, "do it here", "!2", false)
+	h.ticks(4, 5*time.Minute)
+	if len(h.sup.st.Work) != 0 {
+		t.Fatalf("items opened: %+v", h.sup.st.Work)
+	}
+	if n := h.count(KindAction, ActFixRound, "d"); n != 1 {
+		t.Fatalf("fix rounds = %d; steps %v; place %+v", n, h.loopSteps("!2"), h.place("!2"))
+	}
+}
+
+// A merge answer opens no item: the loop converges and merges.
+func TestLoopAnswerMergeOpensNoItem(t *testing.T) {
+	h, _ := loopHarness(t)
+	deferBoth(t, h)
+	for _, e := range h.deferredEntries(widgetsCase) {
+		h.answerAsks(e, FindingMerge, "", "!1", false)
+		h.ticks(1, 5*time.Minute)
+	}
+	h.ticks(6, 5*time.Minute)
+	if len(h.sup.st.Work) != 0 {
+		t.Fatalf("items opened: %+v", h.sup.st.Work)
+	}
+	if len(h.forge.merges) != 1 {
+		t.Fatalf("merges = %+v; place %+v", h.forge.merges, h.place("!1"))
+	}
+}
+
+// Where delivery.allow has issue, an issue answer opens no item: agentd
+// opens the follow-up once and names it on the request once.
+func TestLoopAnswerIssueNoItemWithAllow(t *testing.T) {
+	h, api := loopHarness(t)
+	h.allow(api, ActIssue, ActComment)
+	deferBoth(t, h)
+	es := h.deferredEntries(widgetsCase)
+	h.answerAsks(es[0], FindingIssue, "", "!1", false)
+	h.ticks(1, 5*time.Minute)
+	h.answerAsks(es[1], FindingMerge, "", "!1", false)
+	h.ticks(4, 5*time.Minute)
+	h.restart(false)
+	h.sup.api = api
+	h.ticks(4, 5*time.Minute)
+	if len(h.sup.st.Work) != 0 {
+		t.Fatalf("items opened: %+v", h.sup.st.Work)
+	}
+	if len(h.forge.issues) != 1 {
+		t.Fatalf("issues = %q", h.forge.issues)
+	}
+	var notes []string
+	for _, c := range h.forge.comments {
+		if strings.HasPrefix(c, "!1 ") && strings.Contains(c, "#") && strings.Contains(c, "F1") {
+			notes = append(notes, c)
+		}
+	}
+	if len(notes) != 1 {
+		t.Fatalf("comments naming the follow-up on !1: %q", h.forge.comments)
+	}
+}
+
+// Without issue in delivery.allow, a round's issue answers open one item
+// between them.
+func TestLoopAnswerIssueOneItemWithoutAllow(t *testing.T) {
+	h, _ := loopHarness(t)
+	deferBoth(t, h)
+	for _, e := range h.deferredEntries(widgetsCase) {
+		h.answerAsks(e, FindingIssue, "", "!1", false)
+		h.ticks(2, 5*time.Minute)
+	}
+	h.ticks(2, 5*time.Minute)
+	if len(h.sup.st.Work) != 1 {
+		t.Fatalf("items opened: %d: %+v", len(h.sup.st.Work), h.sup.st.Work)
+	}
+}
+
+// A request no session delivered nor continues opens no item for a fix:
+// agentd comments the decision on it to its author, once, where
+// delivery.allow has comment, or tells the owner once where it lacks it,
+// and waits for the push.
+func TestLoopOutsideFixCommentsAuthor(t *testing.T) {
+	for _, allowed := range []bool{true, false} {
+		h, api := loopHarness(t)
+		if allowed {
+			h.allow(api, ActComment)
+		}
+		outsideOpen(api)
+		deferOne(t, h, "!2")
+		h.answerAsks(h.deferredEntries("gitlab/example-org/widgets!2")[0], FindingFix, "please add the catalogue here", "!2", false)
+		h.ticks(3, 5*time.Minute)
+		h.restart(false)
+		h.sup.api = api
+		h.ticks(3, 5*time.Minute)
+		if len(h.sup.st.Work) != 0 {
+			t.Fatalf("allowed %v: items opened: %+v", allowed, h.sup.st.Work)
+		}
+		var asks []string
+		for _, c := range h.forge.comments {
+			if strings.HasPrefix(c, "!2 ") {
+				asks = append(asks, c)
+			}
+		}
+		told := 0
+		for _, e := range h.events() {
+			if e.Kind == KindMessage && strings.Contains(e.Message.Text, "!2") && strings.Contains(e.Message.Text, "please add the catalogue here") {
+				told++
+			}
+		}
+		switch {
+		case allowed && (len(asks) != 1 || !strings.Contains(asks[0], "widget-bot") || !strings.Contains(asks[0], "Add a widget catalogue") || !strings.Contains(asks[0], "please add the catalogue here")):
+			t.Fatalf("comments on !2: %q", h.forge.comments)
+		case !allowed && (len(asks) != 0 || told != 1):
+			t.Fatalf("without comment: comments %q, told %d", h.forge.comments, told)
+		}
+		if p := h.place("!2"); p.Phase != PlaceOwner || !strings.Contains(p.Reason, "waiting for the author to push") {
+			t.Fatalf("place = %+v", p)
+		}
+	}
+}
+
+// Three answers in one batch, no pass between them, fold into one fix
+// round whose facts list each decision, and open no item.
+func TestLoopBatchAnswersOneFixRound(t *testing.T) {
+	h, _ := loopHarness(t)
+	deferMany(t, h, "Add a widget catalogue", "Log every spin", "Count the squeaks")
+	for i, e := range h.deferredEntries(widgetsCase) {
+		h.answerAsks(e, FindingFix, "words "+strconv.Itoa(i+1), "!1", false)
+	}
+	h.ticks(4, 5*time.Minute)
+	if len(h.sup.st.Work) != 0 {
+		t.Fatalf("items opened: %+v", h.sup.st.Work)
+	}
+	if n := h.count(KindAction, ActFixRound, "d"); n != 1 {
+		t.Fatalf("fix rounds = %d; steps %v; place %+v", n, h.loopSteps("!1"), h.place("!1"))
+	}
+	cmd := h.lastLaunch("d")
+	for _, id := range []string{"1", "2", "3"} {
+		if !strings.Contains(cmd, `"question":"Fix F`+id+` in this request?"`) || !strings.Contains(cmd, `"words":"words `+id+`"`) {
+			t.Fatalf("fix round facts lack decision F%s: %s", id, cmd)
+		}
+	}
+}
+
+// Tonight's log, as on !1295: three fix answers on one delivered request,
+// each taken by the thread agent for work, read back after a restart,
+// give one fix round and no item.
+func TestLoopReplayedTonightOneFixRound(t *testing.T) {
+	h, api := loopHarness(t)
+	deferMany(t, h, "Add a widget catalogue", "Log every spin", "Count the squeaks")
+	for _, e := range h.deferredEntries(widgetsCase) {
+		h.answerAsks(e, FindingFix, "", "!1", true)
+	}
+	h.restart(false)
+	h.sup.api = api
+	h.ticks(6, 5*time.Minute)
+	if len(h.sup.st.Work) != 0 {
+		t.Fatalf("items opened: %+v", h.sup.st.Work)
+	}
+	if n := h.count(KindAction, ActFixRound, "d"); n != 1 {
+		t.Fatalf("fix rounds = %d; steps %v; place %+v", n, h.loopSteps("!1"), h.place("!1"))
 	}
 }
