@@ -576,6 +576,13 @@ func (s *Supervisor) ownerRecords() {
 				base := sp + t.SpendBase
 				s.emit(e.Session, Event{Kind: KindClear, Clear: &ClearPayload{By: "agentd", Base: &base}})
 			}
+			continue
+		}
+		// The owner's answer to a decision of a session ended since, a
+		// judge's for a finding it deferred, is folded as a replay folds
+		// it: the loop reads it from the judge's track.
+		if _, ok := s.st.Tracks[e.Session]; ok && e.Kind == KindAnswer && e.Mode == ModeOwner {
+			s.st.apply(e)
 		}
 	}
 }

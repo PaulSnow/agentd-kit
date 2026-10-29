@@ -213,6 +213,9 @@ func TestRoundsJudgeChecks(t *testing.T) {
 			t.Errorf("%s: %s", name, text)
 		}
 	}
+	if text, refused := callOne(t, jd, ToolRaiseDecision, deferDecision("F2")); refused {
+		t.Fatalf("raise for F2 %s", text)
+	}
 	if text, refused := call([]any{d("F1", "adopt", "Yes."), d("F2", "defer", "Out of scope; asked the owner.")}, []any{}); refused {
 		t.Fatalf("valid %s", text)
 	}
@@ -222,6 +225,74 @@ func TestRoundsJudgeChecks(t *testing.T) {
 	c := roundsOf(t, h)
 	if r := c.Rounds[0]; len(r.Dispositions) != 2 || r.Dispositions[1].Disposition != DispositionDefer || c.Disposition("F2") == nil {
 		t.Fatalf("round %+v", r)
+	}
+}
+
+// deferDecision is the judge's raise_decision for finding id: a choose_one
+// of fix, merge and issue.
+func deferDecision(id string) map[string]any {
+	return map[string]any{"type": "choose_one", "question": "Fix " + id + " in this request?", "context": id + " widens the scope.",
+		"why": "It bears on no done-when item.", "if_wrong": "A merge can be followed up; a fix round costs a round.", "recommendation": "merge",
+		"blocking": true, "finding": id, "options": []any{
+			map[string]any{"key": "fix", "label": "Fix it in this request", "consequence": "A fix round, then review of the new head."},
+			map[string]any{"key": "merge", "label": "Merge as is", "consequence": "The round converges."},
+			map[string]any{"key": "issue", "label": "Merge and file an issue", "consequence": "The round converges and a follow-up issue is opened."}}}
+}
+
+// A defer is accepted only with the judge's decision for that finding
+// raised first, and the refusal says how to raise it within its limits;
+// raise_decision takes a finding only from the judge, only of the latest
+// undisposed round, and only as a choose_one of fix, merge and issue.
+func TestRoundsDeferNeedsDecision(t *testing.T) {
+	h, _ := roundsHarness(t)
+	wide := map[string]any{"title": "Add a widget catalogue", "severity": "low", "widens_scope": true, "paths": []any{"catalogue.go"},
+		"consequence": "None for spinning.", "suggestion": "File it."}
+	review(t, h, finding("Spin has no test"), wide)
+	jd := h.mcpServerFor("jd")
+	ds := []any{map[string]any{"finding_id": "F1", "disposition": "adopt", "reason": "Yes."},
+		map[string]any{"finding_id": "F2", "disposition": "defer", "reason": "Out of scope."}}
+	dispose := func() (string, bool) {
+		return callOne(t, jd, ToolJudgeDispositions, map[string]any{"dispositions": ds, "plan": []any{}})
+	}
+	text, refused := dispose()
+	for _, want := range []string{"F2", "raise_decision", "1000 characters", "fix", "merge", "issue"} {
+		if !refused || !strings.Contains(text, want) {
+			t.Fatalf("defer without a decision: %s (want %q)", text, want)
+		}
+	}
+	bad := func(name string, mod func(map[string]any), want string) {
+		t.Helper()
+		d := deferDecision("F2")
+		mod(d)
+		if text, refused := callOne(t, jd, ToolRaiseDecision, d); !refused || !strings.Contains(text, want) {
+			t.Errorf("%s: %s", name, text)
+		}
+	}
+	bad("unknown finding", func(d map[string]any) { d["finding"] = "F9" }, "F9")
+	bad("not choose_one", func(d map[string]any) { d["type"] = "yes_no"; delete(d, "options") }, "choose_one")
+	bad("other keys", func(d map[string]any) {
+		d["options"] = []any{map[string]any{"key": "a", "label": "Fix", "consequence": "A fix round."}, map[string]any{"key": "b", "label": "Merge", "consequence": "Converge."}}
+	}, "fix, merge and issue")
+	bad("a fourth key", func(d map[string]any) {
+		d["options"] = append(d["options"].([]any), map[string]any{"key": "later", "label": "Later", "consequence": "Wait."})
+	}, "fix, merge and issue")
+	// A work session cannot raise a decision for a finding.
+	if text, refused := callOne(t, h.mcpServerFor("s1"), ToolRaiseDecision, deferDecision("F2")); !refused || !strings.Contains(text, "judge") {
+		t.Errorf("worker's raise: %s", text)
+	}
+	if text, refused := callOne(t, jd, ToolRaiseDecision, deferDecision("F2")); refused {
+		t.Fatalf("raise for F2: %s", text)
+	}
+	if text, refused := dispose(); refused {
+		t.Fatalf("defer with its decision: %s", text)
+	}
+	c := roundsOf(t, h)
+	if b, _ := json.Marshal(c.Decisions); len(c.Decisions) != 1 || !strings.Contains(string(b), `"finding":"F2"`) || c.Decisions[0].Session != "jd" {
+		t.Fatalf("decisions %+v", c.Decisions)
+	}
+	// Round 1 is disposed: a decision for its finding is no longer raised.
+	if text, refused := callOne(t, jd, ToolRaiseDecision, deferDecision("F1")); !refused || !strings.Contains(text, "undisposed") {
+		t.Errorf("raise after the dispositions: %s", text)
 	}
 }
 

@@ -688,7 +688,7 @@ func (srv *MCPServer) call(tool string, args json.RawMessage) (string, bool) {
 		}
 	} else if tool == ToolRaiseDecision {
 		var withheld bool
-		rec.Raised, withheld, problems = srv.checkRaise(args, st.Tracks[srv.name])
+		rec.Raised, withheld, problems = srv.checkRaise(args, st.Tracks[srv.name], c)
 		if rec.Raised != nil {
 			reply = map[string]any{"raised": true, "id": rec.Raised.ID, "case": srv.caseID, "answers": AnswersFile}
 			if withheld {
@@ -758,7 +758,8 @@ func (srv *MCPServer) caseInstructions() string {
 			"Repeat an earlier finding by its id, F1…, from your facts; name the done-when items each bears on, or set widens_scope."
 	case RoleJudge:
 		return "Dispose every finding of case " + srv.caseID + "'s latest round with judge_dispositions: adopt, decline or defer, each with a reason, and a plan by id. " +
-			"A finding that widens the scope is deferred and asked of the owner with raise_decision. The owner's answers arrive in " + AnswersFile + " in your workdir."
+			"A finding that widens the scope is deferred: before judge_dispositions, raise its decision with raise_decision, finding set to its id, a choose_one with the option keys fix (a fix round in this request), merge (accept it as is) and issue (merge and file a follow-up issue); " +
+			"the question is at most " + strconv.Itoa(maxQuestion) + " characters, context, why, if_wrong and recommendation at most " + strconv.Itoa(maxDecisionField) + " each. A defer with no such decision is refused. The owner's answers arrive in " + AnswersFile + " in your workdir."
 	}
 	return "Report progress on case " + srv.caseID + " with report_progress, ask the owner with raise_decision, and ask for review, delivery or stop with request_step. " +
 		"Arguments are JSON data; evidence is a typed reference agentd checks, never prose. The owner's answers arrive in " + AnswersFile + " in your workdir."
@@ -1155,7 +1156,8 @@ func toolList() []MCPTool {
 		`"default":{"type":"string","description":"yes or no, a key, keys joined by commas, a number or a date; applied only if the owner sets a deadline"},` +
 		`"deadline":{"type":"string","description":"a suggested deadline, RFC 3339 or YYYY-MM-DD; the owner sets the one that applies"},` +
 		`"blocking":{"type":"boolean"},` +
-		`"supersedes":{"type":"string","description":"the open decision this replaces, after the owner answered it in their own words"}},` +
+		`"supersedes":{"type":"string","description":"the open decision this replaces, after the owner answered it in their own words"},` +
+		`"finding":{"type":"string","description":"for a judge, the finding F1… of the latest round it defers to the owner: a choose_one with the option keys fix, merge and issue"}},` +
 		`"required":["type","question","context","why","if_wrong","recommendation","blocking"],"additionalProperties":false}`
 	finding := `{"type":"object","properties":{` +
 		`"id":{"type":"string","description":"an earlier finding's id, F1…, when it comes back; leave out for a new one"},` +
@@ -1177,7 +1179,7 @@ func toolList() []MCPTool {
 		{Name: ToolRaiseDecision, Description: "Ask the owner a decision, with its whole form. agentd gives it an id, D1 on; the answer arrives in answers.json as JSON of its type. An answer in the owner's own words (other) does not settle it: raise it again with options drawn from it, superseding it.", InputSchema: json.RawMessage(raise)},
 		{Name: ToolRequestStep, Description: "Ask for review, delivery or stop. A request is recorded, never evidence; agentd moves the case only on the facts.", InputSchema: json.RawMessage(step)},
 		{Name: ToolReviewFindings, Description: "Report this round's findings, all of them in one call. agentd numbers new ones F1 on and keeps an id across rounds; a round with nothing new stops the loop.", InputSchema: json.RawMessage(findings)},
-		{Name: ToolJudgeDispositions, Description: "Dispose every finding of the latest round exactly once: adopt, decline or defer, with a reason. A finding that widens the scope cannot be adopted.", InputSchema: json.RawMessage(dispositions)},
+		{Name: ToolJudgeDispositions, Description: "Dispose every finding of the latest round exactly once: adopt, decline or defer, with a reason. A finding that widens the scope cannot be adopted. A defer needs the decision for its finding raised first with raise_decision (finding set).", InputSchema: json.RawMessage(dispositions)},
 	}
 }
 

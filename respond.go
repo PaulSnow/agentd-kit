@@ -153,6 +153,20 @@ func (src *uiSource) entryOf(cfg *Config, rep Report, repo, id string, now time.
 	secret := confidentialMatcher(cfg)
 	switch {
 	case strings.HasPrefix(id, entryDecision):
+		// A finding deferred to the owner is answered on its request's
+		// card, open until the owner chose a key, even once its judge was
+		// ended.
+		for _, n := range requestNeeds(cfg, src.st, repo, now) {
+			if n.Entry != id || n.Decision == nil {
+				continue
+			}
+			re := EntryRe{ID: id, Kind: "decision", Session: n.Session, At: src.askedAt[n.Session+" "+n.Decision.ID], Decision: n.Decision.ID, Options: decisionOptions(*n.Decision)}
+			if !n.Decision.Withheld {
+				re.Question, re.Text = n.Decision.Question, n.Decision.Context
+			}
+			dec := *n.Decision
+			return re, n.Session, &dec, nil
+		}
 		for _, d := range src.decisionEntries(cfg, rep, repo) {
 			if decisionEntry(d.Session, d.ID) != id {
 				continue
