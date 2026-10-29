@@ -294,22 +294,28 @@ type WorkItem struct {
 	Escalated map[string]bool
 	// Designer marks an item designed before its work starts (#68):
 	// Round is the round designed now or last, Design its brief,
-	// DesignError and DesignFails the round's failures, DesignCost what
-	// every round cost, Change the owner's words on the last, and
+	// DesignError and DesignFails the round's failures, DesignWithheld
+	// that the round's brief matched a confidential pattern and
+	// WithheldRounds how many rounds were, which do not count against
+	// designRounds, DesignCost what every round cost, Change the owner's
+	// words on the last, and
 	// Approved when it went on, by whom, and ApprovedWords the owner's
 	// words then, whole.
-	Designer      bool
-	Round         int
-	Design        *WorkDesign
-	DesignError   string
-	DesignFails   int
-	DesignCost    *JobUsage
-	Designed      time.Time
-	Change        string
-	Approved      time.Time
-	ApprovedBy    string
-	ApprovedNote  string
-	ApprovedWords string
+	Designer    bool
+	Round       int
+	Design      *WorkDesign
+	DesignError string
+	DesignFails int
+	// DesignWithheld and WithheldRounds: see above.
+	DesignWithheld bool
+	WithheldRounds int
+	DesignCost     *JobUsage
+	Designed       time.Time
+	Change         string
+	Approved       time.Time
+	ApprovedBy     string
+	ApprovedNote   string
+	ApprovedWords  string
 }
 
 // terminal says whether the item is closed.

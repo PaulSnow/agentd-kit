@@ -163,7 +163,14 @@ type WorkDesign struct {
 	Model     string        `json:"model,omitempty"`
 	Usage     *JobUsage     `json:"usage,omitempty"`
 	Error     string        `json:"error,omitempty"`
+	// Withheld marks an Error that is errDesignWithheld: running the
+	// designer again on the same input would only withhold it again.
+	Withheld bool `json:"withheld,omitempty"`
 }
+
+// errDesignWithheld is a designer's brief that matched a confidential
+// pattern.
+var errDesignWithheld = errors.New("the designer's brief matched a confidential pattern")
 
 // contained says whether rules let d go on without the owner's go, and
 // why not when they do not.
@@ -201,13 +208,20 @@ func (it *WorkItem) applyDesign(p *WorkPayload, at time.Time) {
 		if d.Error != "" {
 			it.DesignError, it.DesignFails = d.Error, it.DesignFails+1
 			it.DesignCost = addUsage(it.DesignCost, d.Usage)
+			if d.Withheld {
+				// The same input withholds it again: the owner rewords
+				// it or declines, at once.
+				it.DesignWithheld, it.WithheldRounds = true, it.WithheldRounds+1
+				it.State, it.Progress = WorkDesigned, at
+				return
+			}
 			if it.DesignFails >= designTries {
 				it.State, it.Progress = WorkDesigned, at
 			}
 			return
 		}
 		c := *d
-		it.Design, it.DesignError, it.DesignFails, it.Designed = &c, "", 0, at
+		it.Design, it.DesignError, it.DesignFails, it.DesignWithheld, it.Designed = &c, "", 0, false, at
 		it.DesignCost = addUsage(it.DesignCost, d.Usage)
 		if d.DoneWhen != nil {
 			it.DoneWhen = *d.DoneWhen
@@ -218,7 +232,7 @@ func (it *WorkItem) applyDesign(p *WorkPayload, at time.Time) {
 			return
 		}
 		it.Round++
-		it.Change, it.DesignError, it.DesignFails = p.Note, "", 0
+		it.Change, it.DesignError, it.DesignFails, it.DesignWithheld = p.Note, "", 0, false
 		it.State, it.Progress = WorkDesigning, at
 	case WorkStepGo:
 		if it.State != WorkDesigned {
@@ -281,9 +295,13 @@ func (s *Supervisor) designWait(in *Instruction, it *WorkItem) {
 	case WorkDesigning:
 		why = fmt.Sprintf("agentd's designer is writing the brief of %s (round %d); you see the design on its entry before any work starts", it.ID, it.Round)
 	case WorkDesigned:
-		why = fmt.Sprintf("the design of %s waits on your go, change or decline on its entry", it.ID)
-		if it.DesignError != "" {
+		switch {
+		case it.DesignWithheld:
+			why = withheldWait(it.ID)
+		case it.DesignError != "":
 			why = fmt.Sprintf("the designer failed round %d of %s; answer go, change or decline on its entry", it.Round, it.ID)
+		default:
+			why = fmt.Sprintf("the design of %s waits on your go, change or decline on its entry", it.ID)
 		}
 	case WorkDeclined:
 		s.declinedMessage(it)
@@ -299,6 +317,11 @@ func (s *Supervisor) designWait(in *Instruction, it *WorkItem) {
 		return
 	}
 	s.routeStep(in, RouteWait, "", false, why)
+}
+
+// withheldWait is what a withheld design of item id waits on.
+func withheldWait(id string) string {
+	return fmt.Sprintf("the design of %s was withheld (it matched a confidential pattern); answer change with reworded words, or decline, on its entry", id)
 }
 
 // previousDesign is d as a later round is given it: its brief, questions
@@ -403,6 +426,7 @@ func (s *Supervisor) runDesigner(it *WorkItem, in *Instruction, now time.Time) {
 				err = w.checkDesign(raw, out)
 			}
 		}
+		out.Withheld = errors.Is(err, errDesignWithheld)
 		if w.runCtx.Err() != nil {
 			return // agentd is stopping: the next start runs it again
 		}
@@ -480,7 +504,7 @@ func (s *Supervisor) checkDesign(raw json.RawMessage, d *WorkDesign) error {
 	texts := append(append(append(append(append(append([]string{b.Where, a.Rating.Why, a.DoneWhen.URL, a.DoneWhen.Contains, a.DoneWhen.Path, a.DoneWhen.Ref},
 		b.Exists...), b.Missing...), b.Design...), b.OutOfScope...), b.Acceptance...), a.Questions...)
 	if s.confidentialMatch(texts...) > 0 {
-		return errors.New("the designer's brief matched a confidential pattern")
+		return errDesignWithheld
 	}
 	if a.Rating.SpendUSD < 0 {
 		a.Rating.SpendUSD = 0
@@ -530,6 +554,17 @@ func designerSchema() []byte {
 func designMarkdown(it *WorkItem, words string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# %s: %s\n\n", it.ID, it.Title)
+	if it.DesignWithheld {
+		// Nothing of the round's input or answer: the owner's words, the
+		// thread agent's brief and the designer's may each hold it.
+		fmt.Fprintf(&b, "## Design withheld\n\nThe designer's brief of round %d matched one of the repository's confidential patterns, so agentd neither shows it nor starts work from it, and does not run the designer again on the same words. ", it.Round)
+		b.WriteString("Answer change with reworded words, which the designer takes for a new round that does not count against the rounds of design, or decline.\n")
+		if it.DesignCost != nil {
+			fmt.Fprintf(&b, "\nThe designer cost $%.4f in all (%d input, %d output tokens).\n", it.DesignCost.CostUSD,
+				it.DesignCost.InputTokens+it.DesignCost.CacheReadTokens+it.DesignCost.CacheCreationTokens, it.DesignCost.OutputTokens)
+		}
+		return b.String()
+	}
 	b.WriteString("## What was asked\n\n")
 	if words == "" {
 		b.WriteString("(the owner's words are withheld: they matched a confidential pattern)\n\n")
@@ -650,15 +685,26 @@ func designMarkdown(it *WorkItem, words string) string {
 	return b.String()
 }
 
-// designOptions are the answers it's design entry takes now.
+// designOptions are the answers it's design entry takes now: no go on a
+// withheld design, and no change once it had its rounds.
 func (it *WorkItem) designOptions() []string {
 	if it.State != WorkDesigned {
 		return nil
 	}
-	if it.Round >= designRounds {
-		return []string{DesignGo, DesignDecline}
+	var out []string
+	if !it.DesignWithheld {
+		out = append(out, DesignGo)
 	}
-	return []string{DesignGo, DesignChange, DesignDecline}
+	if !it.roundsSpent() {
+		out = append(out, DesignChange)
+	}
+	return append(out, DesignDecline)
+}
+
+// roundsSpent says whether it had its designRounds rounds of design,
+// counting none that was withheld.
+func (it *WorkItem) roundsSpent() bool {
+	return it.Round-it.WithheldRounds >= designRounds
 }
 
 // designDecision is it's design as a decision the owner answers.
@@ -705,7 +751,7 @@ func (s *Supervisor) routeDesign(in *Instruction) bool {
 		// After the go, words on the design are for the session doing it.
 		s.routeStep(in, RouteTo, it.Session, false, "")
 		return true
-	case it.State == WorkDesigned && it.Round >= designRounds:
+	case it.State == WorkDesigned && it.roundsSpent():
 		answer(fmt.Sprintf("%s has had its %d rounds of design, so your words were not passed to the designer; answer go or decline.", it.ID, designRounds))
 		return true
 	case word != "":
@@ -713,7 +759,10 @@ func (s *Supervisor) routeDesign(in *Instruction) bool {
 	}
 	if it.State != WorkDesigned || !contains(it.designOptions(), choice) {
 		why := it.ID + " is " + it.State
-		if it.State == WorkDesigned {
+		switch {
+		case it.State == WorkDesigned && it.DesignWithheld && choice == DesignGo:
+			why = "the design of " + it.ID + " was withheld (it matched a confidential pattern), so no work starts from it; reword it with change, or decline"
+		case it.State == WorkDesigned:
 			why = "“" + cutUTF8(choice, 60) + "” is not an answer its design takes now"
 		}
 		answer(why + "; nothing was changed.")
@@ -775,7 +824,7 @@ func (src *uiSource) designEntries(cfg *Config, repo string, secret func(...stri
 		if !it.Designer || it.Design == nil && it.DesignError == "" || it.Repository != repo && cfg.RepositoryConsole(it.Repository) != repo {
 			continue
 		}
-		if it.State == WorkDesigning || it.State == WorkDesigned && it.Design == nil && it.DesignFails < designTries {
+		if it.State == WorkDesigning || it.State == WorkDesigned && it.Design == nil && it.DesignFails < designTries && !it.DesignWithheld {
 			continue // a round under way
 		}
 		words := ""
