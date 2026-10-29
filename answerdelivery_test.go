@@ -169,7 +169,7 @@ func TestDeadPaneAnswerEscalatesItem(t *testing.T) {
 			}
 			var note string
 			for _, e := range h.events() {
-				if e.Kind == KindWorkItem && e.Work.ID == it.ID && e.Work.Step == WorkStepEscalate && strings.HasPrefix(e.Work.Key, "undelivered:") {
+				if e.Kind == KindWorkItem && e.Work.ID == it.ID && e.Work.Step == WorkStepEscalate && (strings.HasPrefix(e.Work.Key, "undelivered:") || strings.HasPrefix(e.Work.Key, "waiting:")) {
 					note = e.Work.Note
 				}
 			}

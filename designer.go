@@ -858,12 +858,15 @@ func (s *Supervisor) routeDesign(in *Instruction) bool {
 	case in.Withheld > 0:
 		answer("Your words matched a confidential pattern, so agentd cannot pass them on; nothing was changed. Answer go, change or decline, or reword them.")
 		return true
+	case it.Session == "" && it.State == WorkOpen && in.Waiting != "":
+		return true // it waits for the session the item is given to
+	case it.Session != "" && !it.terminal() && s.reachable(it.Session) && s.losesItem(it.Session) != "":
+		// The session is taken off the item (#70): the words wait for the
+		// one it is given to.
+		s.reassigning(in, it, s.losesItem(it.Session))
+		return true
 	case it.Session != "" && !it.terminal() && s.takesInstructions(it.Session) && s.reachable(it.Session):
 		// After the go, words on the design are for the session doing it.
-		if why := s.untypeable(it.Session); why != "" && s.noRestart(it.Session) != "" {
-			s.reassigning(in, it, why)
-			return true
-		}
 		s.routeStep(in, RouteTo, it.Session, false, "")
 		return true
 	case it.State == WorkDesigned && it.roundsSpent():

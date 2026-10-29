@@ -1038,6 +1038,17 @@ func (s *Supervisor) undelivered(in *Instruction, it *WorkItem, session, why str
 	s.escalateItem(it, "undelivered:"+in.ID, fmt.Sprintf("%s: your answer %s on %s %s. Reopen the session, reassign %s, or type the answer into its pane by hand.", it.ID, in.ID, itemEntry(in), reason, it.ID))
 }
 
+// losesItem is why driveItem takes its item off session name (#70): it
+// cannot be typed into, and is parked, stopped or crash-looping, or its
+// tmux session is gone and nothing restarts it; "" when it keeps it.
+func (s *Supervisor) losesItem(name string) string {
+	why := s.untypeable(name)
+	if t := s.st.Tracks[name]; why == "" || !(t != nil && (t.Parked || t.State == Stopped || t.State == CrashLooping) || s.noRestart(name) != "") {
+		return ""
+	}
+	return why
+}
+
 // reassigning holds the owner's words in, which cannot be typed into the
 // item's session, which nothing restarts, for the session the item is
 // given to this pass (#70), and tells the owner on the item at once.
@@ -1046,7 +1057,7 @@ func (s *Supervisor) reassigning(in *Instruction, it *WorkItem, why string) {
 	if s.routeStep(in, RouteWait, "", false, reason); s.halt != nil {
 		return
 	}
-	s.escalateItem(it, "undelivered:"+in.ID, fmt.Sprintf("%s: your answer %s on %s %s. agentd reassigns %s and hands your answer to its new session; you can instead reopen %s, or type the answer into its pane by hand.", it.ID, in.ID, itemEntry(in), reason, it.ID, it.Session))
+	s.escalateItem(it, "waiting:"+in.ID, fmt.Sprintf("%s: your answer %s on %s %s. agentd reassigns %s and hands your answer to its new session; you can instead reopen %s, or type the answer into its pane by hand.", it.ID, in.ID, itemEntry(in), reason, it.ID, it.Session))
 }
 
 // stalledItem tells the owner, once a stall, of an item with no change of
@@ -1408,11 +1419,16 @@ func (s *Supervisor) routeWork(in *Instruction) bool {
 		if in.Withheld > 0 {
 			return false // routeOne says why it is never delivered
 		}
-		if it.Session != "" && s.takesInstructions(it.Session) && s.reachable(it.Session) {
-			if why := s.untypeable(it.Session); why != "" && s.noRestart(it.Session) != "" {
+		if it.Session == "" && it.State == WorkOpen && in.Waiting != "" {
+			return true // it waits for the session the item is given to
+		}
+		if it.Session != "" && s.reachable(it.Session) {
+			if why := s.losesItem(it.Session); why != "" {
 				s.reassigning(in, it, why)
 				return true
 			}
+		}
+		if it.Session != "" && s.takesInstructions(it.Session) && s.reachable(it.Session) {
 			s.routeStep(in, RouteTo, it.Session, false, "")
 			return true
 		}
