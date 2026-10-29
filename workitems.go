@@ -1289,7 +1289,7 @@ func (s *Supervisor) routeWork(in *Instruction) bool {
 		answer(it.ID + " is " + it.State + " already; nothing was changed.")
 		return true
 	case !contains(it.workOptions(), in.Answer.Choice) && (it.State == WorkDesigning || it.State == WorkDesigned):
-		answer(it.ID + " is " + it.State + ": answer go, change or decline on its design entry, " + entryDesign + it.ID + "; nothing was changed.")
+		answer(it.ID + " is " + it.State + ": answer " + it.designAnswers() + " on its design entry, " + entryDesign + it.ID + "; nothing was changed.")
 		return true
 	}
 	word := strings.TrimSpace(in.Text)
@@ -1386,7 +1386,7 @@ func WorkViews(cfg *Config, st *LogState, console string, all bool, now time.Tim
 		case it.State == WorkDesigning:
 			v.Progress = fmt.Sprintf("the designer is writing round %d", it.Round)
 		case it.State == WorkDesigned:
-			v.Progress = "its design waits on your go, change or decline: " + entryDesign + it.ID
+			v.Progress = "its design waits on your " + it.designAnswers() + ": " + entryDesign + it.ID
 		case len(it.Notes) > 0 && it.Notes[len(it.Notes)-1].At.After(it.Progress.Add(-time.Second)):
 			v.Progress = oneLine(it.Notes[len(it.Notes)-1].Text, 300)
 		case it.Session != "":

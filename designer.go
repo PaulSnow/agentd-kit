@@ -701,6 +701,19 @@ func (it *WorkItem) designOptions() []string {
 	return append(out, DesignDecline)
 }
 
+// designAnswers are it's design's answers as words: "go, change or
+// decline", which a round under way will take too.
+func (it *WorkItem) designAnswers() string {
+	o := it.designOptions()
+	switch len(o) {
+	case 0:
+		return "go, change or decline"
+	case 1:
+		return o[0]
+	}
+	return strings.Join(o[:len(o)-1], ", ") + " or " + o[len(o)-1]
+}
+
 // roundsSpent says whether it had its designRounds rounds of design,
 // counting none that was withheld.
 func (it *WorkItem) roundsSpent() bool {
@@ -709,7 +722,7 @@ func (it *WorkItem) roundsSpent() bool {
 
 // designDecision is it's design as a decision the owner answers.
 func designDecision(it *WorkItem, words string) Decision {
-	d := Decision{ID: it.ID, Type: DecisionChooseOne, Question: fmt.Sprintf("Design of %s, %s: go, change or decline?", it.ID, it.Title), Context: designMarkdown(it, words)}
+	d := Decision{ID: it.ID, Type: DecisionChooseOne, Question: fmt.Sprintf("Design of %s, %s: %s?", it.ID, it.Title, it.designAnswers()), Context: designMarkdown(it, words)}
 	labels := map[string]DecisionOption{
 		DesignGo:      {Key: DesignGo, Label: "Go", Consequence: "agentd starts a work session briefed with this design"},
 		DesignChange:  {Key: DesignChange, Label: "Change", Consequence: "your words go back to the designer for one more round"},
@@ -832,7 +845,7 @@ func (src *uiSource) designEntries(cfg *Config, repo string, secret func(...stri
 			words = in.Text
 		}
 		at := it.Designed
-		if at.IsZero() {
+		if at.IsZero() || it.DesignWithheld {
 			at = it.Progress
 		}
 		d := designDecision(it, words)

@@ -208,6 +208,9 @@ func (src *uiSource) entryOf(cfg *Config, rep Report, repo, id string, now time.
 			return EntryRe{}, "", nil, fmt.Errorf("%s's console holds no design %q", repo, id)
 		}
 		re := EntryRe{ID: id, Kind: "decision", At: it.Designed, Decision: it.ID, Options: it.designOptions()}
+		if it.DesignWithheld {
+			re.At = it.Progress
+		}
 		if !secret(it.Title) {
 			re.Question = it.Title
 		}
