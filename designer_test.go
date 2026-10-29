@@ -491,3 +491,198 @@ func TestDesignPolicyNarrowed(t *testing.T) {
 		t.Fatalf("a url check is contained: %v %q", ok, why)
 	}
 }
+
+// withheldHarness is designerHarness with a confidential pattern the
+// fake designer's brief matches, and the owner asking for teal.
+func withheldHarness(t *testing.T) (*harness, string, *WorkItem) {
+	t.Helper()
+	dir := fakeClaude(t)
+	h := designerHarness(t, false)
+	h.cfg.ConfidentialPatterns = []string{`(?i)blueprint-[0-9]+`}
+	h.restart(false)
+	h.ticks(1, time.Minute)
+	claudeAnswers(t, dir, 2, designOut("Follow blueprint-7 for the shed's colour", false, 0))
+	it := h.askDesigned(dir, "Paint the shed teal.")
+	return h, dir, it
+}
+
+// A design withheld because its brief matched a confidential pattern is
+// not run again: after one designer call the item waits on the owner,
+// with a card that says why in general terms and offers change and
+// decline; go is refused; change runs round 2, which does not count
+// against the rounds.
+func TestDesignWithheldAsksOwnerAtOnce(t *testing.T) {
+	h, dir, it := withheldHarness(t)
+	h.ticks(int(designRetry/time.Minute)*3, time.Minute)
+	it = h.item(it.ID)
+	if it.State != WorkDesigned || !it.DesignWithheld || it.DesignError == "" {
+		t.Fatalf("after a withheld design: %+v", it)
+	}
+	steps := 0
+	for _, e := range h.events() {
+		if e.Kind == KindWorkItem && e.Work.Step == WorkStepDesign {
+			steps++
+			if !e.Work.Design.Withheld {
+				t.Fatalf("the design step is not marked withheld: %+v", e.Work.Design)
+			}
+		}
+	}
+	if calls := claudeCalls(t, dir); steps != 1 || calls != 2 {
+		t.Fatalf("%d design steps, %d claude calls", steps, calls)
+	}
+	if strings.Contains(h.buf.String(), "blueprint-7") {
+		t.Fatal("the log holds the confidential text")
+	}
+	in := h.sup.st.Instructions[it.Instruction]
+	if !strings.Contains(in.Waiting, "the design of "+it.ID+" was withheld") || !strings.Contains(in.Waiting, "change with reworded words, or decline") {
+		t.Fatalf("waiting = %q", in.Waiting)
+	}
+
+	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	src.catchUp()
+	des := src.designEntries(h.sup.cfg, "widgets", confidentialMatcher(h.sup.cfg))
+	if len(des) != 1 || !des[0].open || des[0].Withheld != "" {
+		t.Fatalf("design entries = %+v", des)
+	}
+	if got := decisionOptions(des[0].Decision); strings.Join(got, ",") != "change,decline" {
+		t.Fatalf("options = %v", got)
+	}
+	ctx := des[0].Decision.Context
+	for _, want := range []string{"## Design withheld", it.ID, "confidential patterns", "round 1", "$0.25"} {
+		if !strings.Contains(ctx, want) {
+			t.Fatalf("the card lacks %q:\n%s", want, ctx)
+		}
+	}
+	for _, not := range []string{"blueprint", "Paint the shed teal.", "Paint the shed red.", "pattern 1"} {
+		if strings.Contains(ctx, not) {
+			t.Fatalf("the card holds %q:\n%s", not, ctx)
+		}
+	}
+
+	if err := h.respondDesign(it.ID, DesignGo, ""); err == nil {
+		t.Fatal("the page took go on a withheld design")
+	}
+	if q := des[0].Decision.Question; strings.Contains(q, "go,") || !strings.Contains(q, "change or decline") {
+		t.Fatalf("question = %q", q)
+	}
+	if v := WorkViews(h.sup.cfg, h.sup.st, "widgets", true, h.clock.Now(), func(...string) bool { return false }); len(v) != 1 || strings.Contains(v[0].Progress, "go,") {
+		t.Fatalf("work views = %+v", v)
+	}
+	claudeAnswers(t, dir, 3, designOut("Mix the teal from blue and green", false, 0))
+	if err := h.respondDesign(it.ID, DesignChange, "Teal from blue and green, no plans needed."); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(3, time.Minute)
+	it = h.item(it.ID)
+	if it.State != WorkDesigned || it.Round != 2 || it.DesignWithheld || it.Design == nil || it.DesignError != "" {
+		t.Fatalf("after the change: %+v", it)
+	}
+	if got := it.designOptions(); strings.Join(got, ",") != "go,change,decline" {
+		t.Fatalf("options after the change = %v", got)
+	}
+	if calls := claudeCalls(t, dir); calls != 3 {
+		t.Fatalf("claude was called %d times", calls)
+	}
+}
+
+// Decline on a withheld design answers the owner's message and starts
+// nothing; go through the route is refused with the reason.
+func TestDesignWithheldDecline(t *testing.T) {
+	h, dir, it := withheldHarness(t)
+	h.ticks(3, time.Minute)
+	if it = h.item(it.ID); !it.DesignWithheld {
+		t.Fatalf("item = %+v", it)
+	}
+	if err := h.respondDesign(it.ID, DesignGo, ""); err == nil {
+		t.Fatal("the page took go on a withheld design")
+	}
+	// A go that reaches the route, as an older page could send it.
+	re := EntryRe{ID: entryDesign + it.ID, Kind: "decision", Decision: it.ID}
+	if err := respondInstruction(h.cfg, NewLogWriter(h.buf), h.clock.Now(), "widgets", "", "", &re, entryAnswer(AnswerPayload{ID: it.ID, Choice: DesignGo}), nil); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(2, time.Minute)
+	if it = h.item(it.ID); it.State != WorkDesigned {
+		t.Fatalf("go went on: %+v", it)
+	}
+	refused := ""
+	for _, e := range h.events() {
+		if e.Kind == KindRoute && e.Route.Step == RouteAnswered && e.Route.Instruction != it.Instruction && e.Route.Agent != nil {
+			refused = e.Route.Agent.Answer
+		}
+	}
+	if !strings.Contains(refused, "was withheld") || !strings.Contains(refused, "reword") {
+		t.Fatalf("the refusal = %q", refused)
+	}
+	if err := h.respondDesign(it.ID, DesignDecline, ""); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(2, time.Minute)
+	it = h.item(it.ID)
+	in := h.sup.st.Instructions[it.Instruction]
+	if it.State != WorkDeclined || in.Replied.IsZero() || !strings.Contains(in.Reply, "declined") || len(h.sup.st.Runtime) != 0 {
+		t.Fatalf("after decline: item = %+v, instruction = %+v", it, in)
+	}
+	if calls := claudeCalls(t, dir); calls != 2 {
+		t.Fatalf("claude was called %d times", calls)
+	}
+}
+
+// A withheld round does not count against the rounds of design: the
+// owner gets designRounds real rounds, and decline is always there.
+func TestDesignWithheldRoundsDoNotCount(t *testing.T) {
+	it := &WorkItem{Designer: true, State: WorkDesigned, Round: designRounds, Design: &WorkDesign{Round: designRounds}}
+	if got := it.designOptions(); strings.Join(got, ",") != "go,decline" {
+		t.Fatalf("after %d real rounds: %v", designRounds, got)
+	}
+	it.WithheldRounds = 1
+	if got := it.designOptions(); strings.Join(got, ",") != "go,change,decline" {
+		t.Fatalf("after %d rounds, one withheld: %v", designRounds, got)
+	}
+	it.DesignWithheld, it.WithheldRounds, it.Round = true, 2, designRounds+1
+	if got := it.designOptions(); strings.Join(got, ",") != "change,decline" {
+		t.Fatalf("a withheld round: %v", got)
+	}
+}
+
+// A round withheld after a contained round 1 starts nothing from round
+// 1's design, even with design.auto on, and its card shows neither that
+// design nor the owner's change; the card is as new as the round.
+func TestDesignWithheldAfterGoodRound(t *testing.T) {
+	dir := fakeClaude(t)
+	h := designerHarness(t, false)
+	h.cfg.ConfidentialPatterns = []string{`(?i)blueprint-[0-9]+`}
+	h.restart(false)
+	h.ticks(1, time.Minute)
+	claudeAnswers(t, dir, 2, designOut("Add PaintAll to paint.go", false, 0))
+	it := h.askDesigned(dir, "Paint the shed teal.")
+	h.ticks(2, time.Minute)
+	if it = h.item(it.ID); it.State != WorkDesigned || it.Design == nil {
+		t.Fatalf("round 1: %+v", it)
+	}
+	w := h.cfg.Repositories["widgets"]
+	w.Policy.Design.Auto = true
+	h.cfg.Repositories["widgets"] = w
+	h.restart(false)
+	h.sup.workEmit(WorkPayload{ID: it.ID, Step: WorkStepChange, Note: "Use the garden's teal.", By: "owner"})
+	h.sup.workEmit(WorkPayload{ID: it.ID, Step: WorkStepDesign, Design: &WorkDesign{Round: 2, Error: errDesignWithheld.Error(), Withheld: true}})
+	h.ticks(3, time.Minute)
+	it = h.item(it.ID)
+	if it.State != WorkDesigned || !it.DesignWithheld || !it.Approved.IsZero() {
+		t.Fatalf("after a withheld round 2: %+v", it)
+	}
+	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	src.catchUp()
+	des := src.designEntries(h.sup.cfg, "widgets", func(...string) bool { return false })
+	if len(des) != 1 || !des[0].open || !des[0].At.Equal(it.Progress) {
+		t.Fatalf("design entries = %+v, progress %v", des, it.Progress)
+	}
+	for _, not := range []string{"PaintAll", "garden", "Paint the shed teal."} {
+		if strings.Contains(des[0].Decision.Context, not) {
+			t.Fatalf("the card holds %q:\n%s", not, des[0].Decision.Context)
+		}
+	}
+	if !strings.Contains(des[0].Decision.Context, "round 2") {
+		t.Fatalf("the card:\n%s", des[0].Decision.Context)
+	}
+}

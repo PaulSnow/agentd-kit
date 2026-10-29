@@ -473,10 +473,13 @@ func workDecision(it *WorkItem) (LevelDecision, bool) {
 	if it.State == WorkDesigned {
 		d := designDecision(it, "")
 		ld := LevelDecision{Entry: entryDesign + it.ID, Session: it.Session, Asked: d.Question}
-		if it.Design != nil && it.Design.Brief != nil {
+		switch {
+		case it.DesignWithheld:
+			ld.CameBack = fmt.Sprintf("The designer's round %d brief was withheld: it matched a confidential pattern.", it.Round)
+		case it.Design != nil && it.Design.Brief != nil:
 			ld.CameBack = fmt.Sprintf("The designer's round %d brief.", it.Design.Round)
 		}
-		if it.Design != nil && it.Design.Rating != nil {
+		if it.Design != nil && it.Design.Rating != nil && !it.DesignWithheld {
 			ld.Checked = "Go checked whether the design is contained; it waits on your go."
 		}
 		for _, o := range d.Options {
@@ -1086,6 +1089,8 @@ func BuildIssueLevel(cfg *Config, st *LogState, repo string, n int, decisions []
 		switch {
 		case it.State == WorkDesigning:
 			next += " Go waits on its designer."
+		case it.State == WorkDesigned && it.DesignWithheld:
+			next += " Go waits on your change or decline."
 		case it.State == WorkDesigned:
 			next += " Go waits on your go."
 		case it.Question != "":

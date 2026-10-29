@@ -294,22 +294,28 @@ type WorkItem struct {
 	Escalated map[string]bool
 	// Designer marks an item designed before its work starts (#68):
 	// Round is the round designed now or last, Design its brief,
-	// DesignError and DesignFails the round's failures, DesignCost what
-	// every round cost, Change the owner's words on the last, and
+	// DesignError and DesignFails the round's failures, DesignWithheld
+	// that the round's brief matched a confidential pattern and
+	// WithheldRounds how many rounds were, which do not count against
+	// designRounds, DesignCost what every round cost, Change the owner's
+	// words on the last, and
 	// Approved when it went on, by whom, and ApprovedWords the owner's
 	// words then, whole.
-	Designer      bool
-	Round         int
-	Design        *WorkDesign
-	DesignError   string
-	DesignFails   int
-	DesignCost    *JobUsage
-	Designed      time.Time
-	Change        string
-	Approved      time.Time
-	ApprovedBy    string
-	ApprovedNote  string
-	ApprovedWords string
+	Designer    bool
+	Round       int
+	Design      *WorkDesign
+	DesignError string
+	DesignFails int
+	// DesignWithheld and WithheldRounds: see above.
+	DesignWithheld bool
+	WithheldRounds int
+	DesignCost     *JobUsage
+	Designed       time.Time
+	Change         string
+	Approved       time.Time
+	ApprovedBy     string
+	ApprovedNote   string
+	ApprovedWords  string
 }
 
 // terminal says whether the item is closed.
@@ -1338,7 +1344,7 @@ func (s *Supervisor) routeWork(in *Instruction) bool {
 		answer(it.ID + " is " + it.State + " already; nothing was changed.")
 		return true
 	case !contains(it.workOptions(), in.Answer.Choice) && (it.State == WorkDesigning || it.State == WorkDesigned):
-		answer(it.ID + " is " + it.State + ": answer go, change or decline on its design entry, " + entryDesign + it.ID + "; nothing was changed.")
+		answer(it.ID + " is " + it.State + ": answer " + it.designAnswers() + " on its design entry, " + entryDesign + it.ID + "; nothing was changed.")
 		return true
 	}
 	word := strings.TrimSpace(in.Text)
@@ -1435,7 +1441,7 @@ func WorkViews(cfg *Config, st *LogState, console string, all bool, now time.Tim
 		case it.State == WorkDesigning:
 			v.Progress = fmt.Sprintf("the designer is writing round %d", it.Round)
 		case it.State == WorkDesigned:
-			v.Progress = "its design waits on your go, change or decline: " + entryDesign + it.ID
+			v.Progress = "its design waits on your " + it.designAnswers() + ": " + entryDesign + it.ID
 		case len(it.Notes) > 0 && it.Notes[len(it.Notes)-1].At.After(it.Progress.Add(-time.Second)):
 			v.Progress = oneLine(it.Notes[len(it.Notes)-1].Text, 300)
 		case it.Session != "":
