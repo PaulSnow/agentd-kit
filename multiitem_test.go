@@ -212,3 +212,50 @@ func TestIssuePageSaysItemsOpened(t *testing.T) {
 		t.Fatalf("next = %q", v.Next)
 	}
 }
+
+// Items of one message approved out of order each take a session of
+// their own: the message goes with the first, and no item joins
+// another's session.
+func TestItemsApprovedOutOfOrder(t *testing.T) {
+	dir := fakeClaude(t)
+	h := designerHarness(t, false)
+	h.ticks(1, time.Minute)
+	claudeAnswers(t, dir, 0, designOut("Fix the widget", false, 0))
+	claudeAnswers(t, dir, 1, worksAgentOut(2, nil, nil, issueWork(101, "Widget squeaks"), issueWork(102, "Widget wobbles")))
+	_, items := h.askMany("One work item per issue for #101 and #102.")
+	if len(items) != 2 {
+		t.Fatalf("items = %+v", items)
+	}
+	for _, it := range []*WorkItem{items[1], items[0]} {
+		if err := h.respondDesign(it.ID, DesignGo, ""); err != nil {
+			t.Fatal(err)
+		}
+		h.ticks(2, time.Minute)
+	}
+	a, b := h.item(items[0].ID), h.item(items[1].ID)
+	if a.Session == "" || b.Session == "" || a.Session == b.Session {
+		t.Fatalf("sessions: %q and %q", a.Session, b.Session)
+	}
+}
+
+// Items whose titles are withheld are still told apart, and none is
+// handed back for.
+func TestWithheldTitlesStayItems(t *testing.T) {
+	dir := fakeClaude(t)
+	h := designerHarness(t, false)
+	h.cfg.ConfidentialPatterns = []string{`(?i)gizmo-[0-9]+`}
+	h.restart(false)
+	h.ticks(1, time.Minute)
+	claudeAnswers(t, dir, 0, designOut("Fix the widget", false, 0))
+	w := func(title string) map[string]any {
+		return map[string]any{"title": title, "brief": "Fix it.", "done_when": map[string]any{"kind": "owner"}}
+	}
+	claudeAnswers(t, dir, 1, worksAgentOut(3, nil, nil, w("Paint gizmo-1"), w("Paint gizmo-2"), w("Paint gizmo-3")))
+	in, items := h.askMany("One item each for the three gizmos.")
+	if len(items) != 3 || in.HandBacks != 0 || !strings.Contains(in.Waiting, "opened 3 of 3") {
+		t.Fatalf("items %d, hand-backs %d, waiting %q", len(items), in.HandBacks, in.Waiting)
+	}
+	if strings.Contains(h.buf.String(), "gizmo-") {
+		t.Fatal("the log holds a withheld title")
+	}
+}
