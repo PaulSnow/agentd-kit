@@ -907,7 +907,9 @@ func TestLoopStepWaitsForAPlace(t *testing.T) {
 			t.Fatalf("place = %+v, want %q", p, want)
 		}
 	}
-	if s := h.sup.st.Sentences[sentenceKey("widgets", "!1")]; s == nil || !strings.Contains(s.Text, PlaceWaitPlace+": "+p.Reason) {
+	// The sentence counts the holders when naming them would not fit;
+	// the card names them.
+	if s := h.sup.st.Sentences[sentenceKey("widgets", "!1")]; s == nil || !strings.Contains(s.Text, "!1 is "+PlaceWaitPlace+": widgets runs 2 started sessions, its max 2 (1 waits on you, 1 is idle past its nudges); end one or raise sessions.max") {
 		t.Fatalf("sentence = %+v", s)
 	}
 	rows, meta := SummarizeState(h.sup.cfg, h.sup.st)
@@ -1043,7 +1045,9 @@ func TestLoopNeverYieldsAnItemsHolder(t *testing.T) {
 	if h.sup.st.Work == nil {
 		h.sup.st.Work = map[string]*WorkItem{}
 	}
-	h.sup.st.Work["W1"] = &WorkItem{ID: "W1", Repository: "widgets", Session: idle, State: WorkAssigned, Opened: h.clock.Now()}
+	now := h.clock.Now()
+	h.sup.st.Work["W1"] = &WorkItem{ID: "W1", Repository: "widgets", Session: idle, State: WorkAssigned, Opened: now, Progress: now, Assigned: now, Typed: now, Acked: now, Escalated: map[string]bool{}}
+	h.status(idle, "# Status\n\n## Now\nW1: painting the shed.\n")
 	h.ticks(1, 5*time.Minute)
 	var card *LevelDecision
 	for _, n := range requestNeeds(h.cfg, h.sup.st, "widgets", h.clock.Now()) {
@@ -1057,7 +1061,7 @@ func TestLoopNeverYieldsAnItemsHolder(t *testing.T) {
 	}
 	h.ticks(20, 5*time.Minute)
 	if _, ok := h.sup.st.Runtime[idle]; !ok {
-		t.Fatal("a holder of an owner item was yielded")
+		t.Fatalf("a holder of an owner item was yielded: %+v", h.sup.st.Work["W1"])
 	}
 	if p := h.place("!1"); p.Phase != PlaceWaitPlace {
 		t.Fatalf("place = %+v", p)

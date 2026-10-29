@@ -229,6 +229,12 @@ func (st *LogState) noteSteps(e Event) {
 			s.Text = fmt.Sprintf("Its session was sent back to fix what round %d of %s found.", p.Round, name)
 		case LoopApprove:
 			s.Text = fmt.Sprintf("The loop approved %s.", name)
+		case LoopWait:
+			what := "reviewer"
+			if p.Waits == LoopJudge {
+				what = "judge"
+			}
+			s.Text = fmt.Sprintf("The %s of round %d of %s waits for a place under sessions.max.", what, p.Round, name)
 		case LoopFailed:
 			what := "review"
 			if p.Failed == LoopJudge {
@@ -575,7 +581,11 @@ func requestNeeds(cfg *Config, st *LogState, repo string, now time.Time) []repoN
 		if q.Repository != repo {
 			continue
 		}
-		p := placeOf(cfg, st, q)
+		p := placeOf(cfg, st, q, now)
+		if p.Phase == PlaceWaitPlace {
+			out = append(out, waitNeed(cfg, st, c, q, p, now))
+			continue
+		}
 		if p.Phase != PlaceOwner || p.Do != "" {
 			continue // moving, or a step of the loop's own is due
 		}
@@ -594,6 +604,35 @@ func requestNeeds(cfg *Config, st *LogState, repo string, now time.Time) []repoN
 		out = append(out, n)
 	}
 	return out
+}
+
+// waitNeed is the card of q's step p, waiting for a place (#71): end one
+// of the holders, each its own option, which the step then takes; or
+// raise sessions.max, which the card says in words, as it is the
+// configuration's.
+func waitNeed(cfg *Config, st *LogState, c *Config, q loopRequest, p loopPlace, now time.Time) repoNeed {
+	what := "reviewer"
+	if p.Do == LoopJudge {
+		what = "judge"
+	}
+	w := placeWaitOf(cfg, st, q.Repository)
+	n := repoNeed{Request: true, LevelDecision: LevelDecision{Entry: entryLoop + q.Ref,
+		Asked:   fmt.Sprintf("%s is %s: %s. %s", q.Ref, PlaceWaitPlace, p.Reason, yieldNote(cfg, st, w, now)),
+		Command: "agentd sessions end NAME, NAME one of " + strings.Join(p.Holders, ", ") + "; or raise repositories." + q.Repository + ".policy.sessions.max"}}
+	for _, h := range p.Holders {
+		n.Options = append(n.Options, LevelOption{Key: nextEnd + h, Label: "End " + h + ", then start the " + what, Consequence: h + " is stopped; its workdir and worktree stay"})
+	}
+	if confidentialMatcher(cfg)(n.Asked) {
+		n.Asked = fmt.Sprintf("%s is %s; the reason was withheld, as it matched a confidential pattern.", q.Ref, PlaceWaitPlace)
+	}
+	if k := c.Sessions[q.Session].Issue; k > 0 && !q.Outside {
+		n.Issue = "#" + strconv.Itoa(k)
+	} else if i := st.Index[q.Repository][q.Ref]; i != nil {
+		if k := requestIssue(i.Title); k > 0 {
+			n.Issue = "#" + strconv.Itoa(k)
+		}
+	}
+	return n
 }
 
 // Why an issue has no sentence.
@@ -674,7 +713,7 @@ func levelIssue(cfg *Config, st *LogState, repo string, i *IndexIssue, decisions
 // loopRanks order the request loop's places for the MR box: what waits on
 // the owner first, then what is moving, then what waits on CI, and what is
 // outside the loop last.
-var loopRanks = []string{PlaceOwner, PlaceFixing, PlaceJudging, PlaceReviewing, PlaceMerging, PlaceCI, PlaceOutside}
+var loopRanks = []string{PlaceOwner, PlaceWaitPlace, PlaceFixing, PlaceJudging, PlaceReviewing, PlaceMerging, PlaceCI, PlaceOutside}
 
 // levelRequest is request i of repo as the MR box shows it.
 func levelRequest(cfg *Config, st *LogState, repo string, i *IndexIssue) LevelRequest {

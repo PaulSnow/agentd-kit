@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Go keeps its own room (#68): a start that finds its repository at
@@ -20,20 +21,26 @@ import (
 // finishedFor says why a started session may be ended for room, "" when
 // it may not.
 func (s *Supervisor) finishedFor(name string) string {
-	p, ok := s.st.Runtime[name]
-	t := s.st.Tracks[name]
-	if !ok || p.Kind != KindWork || t == nil || len(s.st.itemsOf(name)) > 0 {
+	return finishedWhy(s.cfg, s.st, name, s.clock.Now(), s.work.busy)
+}
+
+// finishedWhy is finishedFor from the state alone at now; busy, when
+// given, says whether a worker runs a keyed job, as a delivery.
+func finishedWhy(cfg *Config, st *LogState, name string, now time.Time, busy func(string) bool) string {
+	p, ok := st.Runtime[name]
+	t := st.Tracks[name]
+	if !ok || p.Kind != KindWork || t == nil || len(st.itemsOf(name)) > 0 {
 		return ""
 	}
 	// A message routed to it and not yet delivered waits on it: the
 	// owner may have sent it there to reopen it.
-	if len(s.st.freshInstructions(name, false, s.clock.Now())) > 0 {
+	if len(st.freshInstructions(name, false, now)) > 0 {
 		return ""
 	}
 	// Each delivery it makes after DONE has its outcome, and none runs.
-	for _, d := range s.cfg.Sessions[name].Deliver {
+	for _, d := range withRuntime(cfg, st.Runtime).Sessions[name].Deliver {
 		key := name + ":" + d.Worktree
-		if t.Delivered[key] == "" || s.work.busy("deliver:"+key) {
+		if t.Delivered[key] == "" || busy != nil && busy("deliver:"+key) {
 			return ""
 		}
 	}
@@ -50,7 +57,7 @@ func (s *Supervisor) finishedFor(name string) string {
 	}
 	refs := []string{}
 	for _, d := range t.Deliveries {
-		r, ok := s.st.CI[ciKey(p.Repository, d.Ref)]
+		r, ok := st.CI[ciKey(p.Repository, d.Ref)]
 		if !ok || r.State != CIMerged && r.State != CIClosed {
 			return ""
 		}

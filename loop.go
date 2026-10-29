@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -34,6 +35,10 @@ const (
 	LoopRetry   = "retry"   // the owner's word to take a failed step again
 	LoopSkip    = "skip"    // the owner's word to take a failed review as clean
 	LoopStop    = "stop"    // the owner's word to leave the request alone
+	// LoopWait: a reviewer or judge, Waits, is due and finds no place
+	// under sessions.max; recorded once a step and round, so how long it
+	// waited is known (#71).
+	LoopWait = "wait"
 )
 
 // ownerLoopStep says whether a loop step is the owner's word.
@@ -50,6 +55,10 @@ const (
 	PlaceMerging   = "merging"
 	PlaceOwner     = "waiting for the owner"
 	PlaceOutside   = "outside the loop"
+	// PlaceWaitPlace: the reviewer or judge due cannot start, as every
+	// place under sessions.max is held by a session the loop may not end
+	// for room (#71).
+	PlaceWaitPlace = "waiting for a place"
 )
 
 // Why a request is outside the loop (#55): it is watched for CI, and
@@ -69,7 +78,7 @@ const (
 
 func validLoopStep(step string) bool {
 	switch step {
-	case LoopReview, LoopJudge, LoopFix, LoopApprove, LoopFailed, LoopRetry, LoopSkip, LoopStop:
+	case LoopReview, LoopJudge, LoopFix, LoopApprove, LoopFailed, LoopRetry, LoopSkip, LoopStop, LoopWait:
 		return true
 	}
 	return false
@@ -84,6 +93,7 @@ type LoopPayload struct {
 	Head       string `json:"head,omitempty"`
 	Step       string `json:"step"`
 	Failed     string `json:"failed,omitempty"`
+	Waits      string `json:"waits,omitempty"` // the step a wait is of
 	Session    string `json:"session,omitempty"`
 	Round      int    `json:"round,omitempty"`
 	Reason     string `json:"reason,omitempty"`
@@ -106,6 +116,11 @@ type LoopRecord struct {
 	// at SkipHead: it goes on as converged there.
 	Skipped  int
 	SkipHead string
+	// WaitSince is when step WaitStep of round WaitRound began to wait
+	// for a place; zero once a step is taken.
+	WaitSince time.Time
+	WaitStep  string
+	WaitRound int
 }
 
 // requestsTrackPrefix begins the name of the track a repository's
@@ -126,7 +141,12 @@ func (st *LogState) applyLoop(e Event) {
 		st.Loops = map[string]LoopRecord{}
 	}
 	r := st.Loops[key]
+	if p.Step != LoopWait {
+		r.WaitSince, r.WaitStep, r.WaitRound = time.Time{}, "", 0
+	}
 	switch p.Step {
+	case LoopWait:
+		r.WaitSince, r.WaitStep, r.WaitRound = e.Time, p.Waits, p.Round
 	case LoopReview:
 		r.ReviewRound, r.ReviewHead = p.Round, p.Head
 	case LoopJudge:
@@ -290,13 +310,18 @@ type loopPlace struct {
 	Failed        string // the step a failure is of
 	Round         int
 	Head          string
+	// Holders are the sessions that hold the places a step waiting for
+	// one needs; Brief is the wait in fewer words, for a sentence the
+	// whole reason does not fit.
+	Holders []string
+	Brief   string
 }
 
 // judgment is the name of the request's reviewer or judge session.
 func (q loopRequest) judgment(kind string) string { return runtimeName(q.Repository, q.Branch, kind) }
 
-// placeOf works out where q stands from the state alone.
-func placeOf(cfg *Config, st *LogState, q loopRequest) loopPlace {
+// placeOf works out where q stands at now from the state alone.
+func placeOf(cfg *Config, st *LogState, q loopRequest, now time.Time) loopPlace {
 	owner := func(format string, a ...any) loopPlace {
 		return loopPlace{Phase: PlaceOwner, Reason: fmt.Sprintf(format, a...)}
 	}
@@ -368,7 +393,7 @@ func placeOf(cfg *Config, st *LogState, q loopRequest) loopPlace {
 		case L.JudgeRound < last.N && judging:
 			return loopPlace{Phase: PlaceJudging, Reason: "an earlier judge is still running", Do: "end", Session: judge}
 		case L.JudgeRound < last.N:
-			return loopPlace{Phase: PlaceJudging, Reason: fmt.Sprintf("round %d's findings await a judge", last.N), Do: LoopJudge, Session: judge, Round: last.N, Head: r.Head}
+			return waitingFor(cfg, st, q.Repository, now, loopPlace{Phase: PlaceJudging, Reason: fmt.Sprintf("round %d's findings await a judge", last.N), Do: LoopJudge, Session: judge, Round: last.N, Head: r.Head})
 		case !judging && st.Mode == ModeShadow:
 			return loopPlace{Phase: PlaceJudging, Reason: fmt.Sprintf("round %d; shadow mode starts no judge", last.N)}
 		case !judging:
@@ -409,7 +434,7 @@ func placeOf(cfg *Config, st *LogState, q loopRequest) loopPlace {
 	case L.ReviewRound < next && reviewing:
 		return loopPlace{Phase: PlaceReviewing, Reason: "an earlier reviewer is still running", Do: "end", Session: reviewer}
 	case L.ReviewRound < next:
-		return loopPlace{Phase: PlaceReviewing, Reason: fmt.Sprintf("round %d is due at %s", next, shortHash(r.Head)), Do: LoopReview, Session: reviewer, Round: next, Head: r.Head}
+		return waitingFor(cfg, st, q.Repository, now, loopPlace{Phase: PlaceReviewing, Reason: fmt.Sprintf("round %d is due at %s", next, shortHash(r.Head)), Do: LoopReview, Session: reviewer, Round: next, Head: r.Head})
 	case !reviewing && st.Mode == ModeShadow:
 		return loopPlace{Phase: PlaceReviewing, Reason: fmt.Sprintf("round %d at %s; shadow mode starts no reviewer", next, shortHash(L.ReviewHead))}
 	case !reviewing:
@@ -422,6 +447,160 @@ func placeOf(cfg *Config, st *LogState, q loopRequest) loopPlace {
 		return loopPlace{Phase: PlaceReviewing, Do: LoopFailed, Failed: LoopReview, Session: reviewer, Round: next, Reason: fmt.Sprintf("the reviewer of round %d %s", next, why)}
 	}
 	return loopPlace{Phase: PlaceReviewing, Reason: fmt.Sprintf("round %d at %s", next, shortHash(L.ReviewHead))}
+}
+
+// waitingFor is p, a reviewer or judge due in repo, or, when every place
+// under the repository's sessions.max is held by a session a start may
+// not end for room, the same step waiting for a place, with the holders.
+// Shadow mode starts nothing, so it waits for nothing.
+func waitingFor(cfg *Config, st *LogState, repo string, now time.Time, p loopPlace) loopPlace {
+	if st.Mode == ModeShadow {
+		return p
+	}
+	w := placeWaitOf(cfg, st, repo)
+	if len(w.Held) < w.Max {
+		return p
+	}
+	for _, n := range w.Held {
+		if finishedWhy(cfg, st, n, now, nil) != "" {
+			return p // a start ends it for room
+		}
+	}
+	p.Phase, p.Reason, p.Holders, p.Brief = PlaceWaitPlace, w.text(), w.Held, w.brief()
+	return p
+}
+
+// placeWait is who holds repo's places under its sessions.max: Asks
+// those that wait on the owner, Idle those idle past their nudges.
+type placeWait struct {
+	Repository string
+	Max        int
+	Held       []string
+	Asks, Idle map[string]bool
+}
+
+// placeWaitOf is who holds repo's places now.
+func placeWaitOf(cfg *Config, st *LogState, repo string) placeWait {
+	rules, _ := effectivePolicy(cfg, st, repo)
+	w := placeWait{Repository: repo, Max: rules.Sessions.Max, Held: sessionsOf(st.Runtime, repo), Asks: map[string]bool{}, Idle: map[string]bool{}}
+	for _, n := range w.Held {
+		t := st.Tracks[n]
+		switch {
+		case waitsOnOwner(t):
+			w.Asks[n] = true
+		case idlePastNudges(cfg, t):
+			w.Idle[n] = true
+		}
+	}
+	return w
+}
+
+// waitsOnOwner says whether a session waits on the owner's answer.
+func waitsOnOwner(t *Track) bool {
+	return t != nil && (t.State == BlockedOnOwner || t.Questions.Open)
+}
+
+// idlePastNudges says whether a session was nudged as often as the
+// policy nudges it, and did not move.
+func idlePastNudges(cfg *Config, t *Track) bool {
+	return t != nil && cfg.Policies.Nudge.Max > 0 && t.Nudges >= cfg.Policies.Nudge.Max
+}
+
+// text is the wait in words, with what the owner can do: "REPO runs N
+// started sessions, its max M; the places are held by S1, S2 (S1 waits on
+// you, S2 is idle past its nudges); end one (agentd sessions end NAME) or
+// raise sessions.max".
+func (w placeWait) text() string {
+	text := fmt.Sprintf("%s runs %d started sessions, its max %d; the places are held by %s", w.Repository, len(w.Held), w.Max, strings.Join(w.Held, ", "))
+	var how []string
+	for _, n := range w.Held {
+		switch {
+		case w.Asks[n]:
+			how = append(how, n+" waits on you")
+		case w.Idle[n]:
+			how = append(how, n+" is idle past its nudges")
+		}
+	}
+	if len(how) > 0 {
+		text += " (" + strings.Join(how, ", ") + ")"
+	}
+	return text + "; end one (agentd sessions end NAME) or raise sessions.max"
+}
+
+// brief is the wait counted, not named: "REPO runs N started sessions,
+// its max M (1 waits on you, 2 are idle past their nudges); end one or
+// raise sessions.max; the request's card names them".
+func (w placeWait) brief() string {
+	text := fmt.Sprintf("%s runs %d started sessions, its max %d", w.Repository, len(w.Held), w.Max)
+	var how []string
+	switch n := len(w.Asks); {
+	case n == 1:
+		how = append(how, "1 waits on you")
+	case n > 1:
+		how = append(how, fmt.Sprintf("%d wait on you", n))
+	}
+	switch n := len(w.Idle); {
+	case n == 1:
+		how = append(how, "1 is idle past its nudges")
+	case n > 1:
+		how = append(how, fmt.Sprintf("%d are idle past their nudges", n))
+	}
+	if len(how) > 0 {
+		text += " (" + strings.Join(how, ", ") + ")"
+	}
+	return text + "; end one or raise sessions.max; the request's card names them"
+}
+
+// neverYields says why holder n of w is never ended for a step waiting
+// past sessions.yield_after (#71), "" when it may be once it is idle past
+// its nudges: only a work session that does not wait on the owner, holds
+// no owner item and has no message waiting on it may.
+func neverYields(st *LogState, w placeWait, n string, now time.Time) string {
+	switch p := st.Runtime[n]; {
+	case p.Kind == KindReviewer:
+		return "is a reviewer"
+	case p.Kind == KindJudge:
+		return "is a judge"
+	case p.Kind != KindWork:
+		return "is no work session"
+	case w.Asks[n]:
+		return "waits on you"
+	case len(st.itemsOf(n)) > 0:
+		return "holds an owner item"
+	case len(st.freshInstructions(n, false, now)) > 0:
+		return "has a message waiting on it"
+	}
+	return ""
+}
+
+// yieldNote says, for the card of a step waiting for a place, what
+// sessions.yield_after does with the holders.
+func yieldNote(cfg *Config, st *LogState, w placeWait, now time.Time) string {
+	rules, _ := effectivePolicy(cfg, st, w.Repository)
+	if rules.Sessions.YieldAfter.Duration <= 0 {
+		return "sessions.yield_after is off, so agentd ends none of them itself."
+	}
+	var may, never []string
+	for _, n := range w.Held {
+		if why := neverYields(st, w, n, now); why != "" {
+			never = append(never, n+", which "+why)
+		} else {
+			may = append(may, n)
+		}
+	}
+	text := fmt.Sprintf("Once the step has waited sessions.yield_after (%s), agentd ends the oldest of %s that is idle past its nudges", rules.Sessions.YieldAfter.Duration, orNone(may))
+	if len(never) > 0 {
+		text += "; it never ends " + strings.Join(never, "; ")
+	}
+	return text + "."
+}
+
+// orNone is names joined, or "none of them".
+func orNone(names []string) string {
+	if len(names) == 0 {
+		return "none of them"
+	}
+	return strings.Join(names, ", ")
 }
 
 // skippedPlace is where q stands once the owner took round L.Skipped's
@@ -506,7 +685,7 @@ func loopViews(cfg *Config, st *LogState, now time.Time) []LoopView {
 			out = append(out, LoopView{Repository: q.Repository, Ref: q.Ref, Phase: PlaceOutside, Reason: q.Out})
 			continue
 		}
-		p := placeOf(cfg, st, q)
+		p := placeOf(cfg, st, q, now)
 		out = append(out, LoopView{Repository: q.Repository, Ref: q.Ref, Phase: p.Phase, Reason: p.Reason})
 	}
 	return out
@@ -520,7 +699,7 @@ func (s *Supervisor) runLoops(now time.Time) {
 		if s.halt != nil {
 			return
 		}
-		p := placeOf(s.cfg, s.st, q)
+		p := placeOf(s.cfg, s.st, q, now)
 		s.noteLoopSentence(q, p)
 		lp := LoopPayload{Repository: q.Repository, Ref: q.Ref, Case: q.Case, Head: p.Head, Step: p.Do, Session: p.Session, Round: p.Round}
 		switch p.Do {
@@ -535,8 +714,23 @@ func (s *Supervisor) runLoops(now time.Time) {
 				s.emit("", Event{Kind: KindLoop, Loop: &lp})
 				continue
 			}
+			// The start is tried every pass, so the step starts on the
+			// pass after a place frees; a wait is recorded once a step,
+			// and a skip once a set of holders (#71).
+			key := fmt.Sprintf("loop:%s:%s:%d", ciKey(q.Repository, q.Ref), p.Do, p.Round)
+			if p.Phase == PlaceWaitPlace {
+				key += ":" + textHash(strings.Join(p.Holders, ","))
+				if L := s.st.Loops[ciKey(q.Repository, q.Ref)]; L.WaitSince.IsZero() || L.WaitStep != p.Do || L.WaitRound != p.Round {
+					if s.emit("", Event{Kind: KindLoop, Loop: &LoopPayload{Repository: q.Repository, Ref: q.Ref, Case: q.Case, Head: p.Head, Step: LoopWait, Waits: p.Do, Session: p.Session, Round: p.Round, Reason: p.Reason}}); s.halt != nil {
+						return
+					}
+				}
+				if s.yieldPlace(q, p, kind, now); s.halt != nil {
+					return
+				}
+			}
 			if why := s.startJudgment(q, kind, p.Session); why != "" {
-				s.skipOnce(requestsTrack(q.Repository), fmt.Sprintf("loop:%s:%s:%d", ciKey(q.Repository, q.Ref), p.Do, p.Round), fmt.Sprintf("not starting the %s of %s in %s: %s", kind, q.Ref, q.Repository, why), s.track(requestsTrack(q.Repository)), nil)
+				s.skipOnce(requestsTrack(q.Repository), key, fmt.Sprintf("not starting the %s of %s in %s: %s", kind, q.Ref, q.Repository, why), s.track(requestsTrack(q.Repository)), nil)
 				continue
 			}
 			s.emit("", Event{Kind: KindLoop, Loop: &lp})
@@ -556,6 +750,43 @@ func (s *Supervisor) runLoops(now time.Time) {
 	}
 	s.endFinished(now)
 	s.startNext(now)
+}
+
+// yieldPlace ends the oldest holder of the place step p of q waits for
+// that may yield it, once the step has waited sessions.yield_after, and
+// tells the repository's console which and why (#71). Off by default.
+func (s *Supervisor) yieldPlace(q loopRequest, p loopPlace, kind string, now time.Time) {
+	rules, _ := effectivePolicy(s.cfg, s.st, q.Repository)
+	L := s.st.Loops[ciKey(q.Repository, q.Ref)]
+	after := rules.Sessions.YieldAfter.Duration
+	if after <= 0 || L.WaitSince.IsZero() || now.Sub(L.WaitSince) < after {
+		return
+	}
+	w := placeWaitOf(s.cfg, s.st, q.Repository)
+	var cands []string
+	for _, n := range w.Held {
+		if w.Idle[n] && neverYields(s.st, w, n, now) == "" {
+			cands = append(cands, n)
+		}
+	}
+	if len(cands) == 0 {
+		return
+	}
+	sort.SliceStable(cands, func(i, j int) bool { return s.st.StartedAt[cands[i]].Before(s.st.StartedAt[cands[j]]) })
+	c := cands[0]
+	why := fmt.Sprintf("agentd paused %s, a work session that is idle past its nudges and holds no owner item, to give its place to the %s of round %d of %s, which waited %s for a place under %s's sessions.max (%d), past sessions.yield_after (%s); its workdir and worktree stay, and a start of its branch takes it up again.",
+		c, kind, p.Round, q.Ref, now.Sub(L.WaitSince).Round(time.Minute), q.Repository, w.Max, after)
+	if s.emit(c, Event{Kind: KindSession, Mode: ModeShared, Runtime: &RuntimePayload{ID: newIntentID(), Action: SessionEnd, Repository: q.Repository, By: "agentd", Why: why}}); s.halt != nil {
+		return
+	}
+	m := &MessagePayload{ID: "Y" + shortHash(HashPane(c + "\n" + p.Session))[:8], Console: s.cfg.RepositoryConsole(q.Repository), Kind: "info", From: "agentd", Text: why}
+	if i := s.confidentialMatch(why); i > 0 {
+		m.Text, m.Withheld = "", i
+	}
+	if s.emit("", Event{Kind: KindMessage, Mode: ModeShared, Message: m}); s.halt != nil {
+		return
+	}
+	s.refreshRuntime()
 }
 
 // endFinished ends each work session agentd started in a looped
@@ -628,7 +859,7 @@ func (s *Supervisor) startRuntime(repo, name string, p RuntimePayload) string {
 		if s.halt != nil {
 			return s.halt.Error()
 		}
-		return fmt.Sprintf("%s runs %d started sessions, its max", repo, n)
+		return placeWaitOf(s.cfg, s.st, repo).text()
 	}
 	switch {
 	case len(rules.Sessions.Fallback) > 0 && p.Host == "":
@@ -667,7 +898,7 @@ func (s *Supervisor) fixRound(name string, sess Session, t *Track, ev Evidence, 
 		if q.Outside || q.Session != name {
 			continue
 		}
-		p := placeOf(s.cfg, s.st, q)
+		p := placeOf(s.cfg, s.st, q, s.clock.Now())
 		if p.Do != LoopFix || t.Delivered[q.Delivered] == "" {
 			continue
 		}
