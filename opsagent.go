@@ -273,7 +273,7 @@ func (s *Supervisor) checkOpsAnswer(raw json.RawMessage, p *AgentPayload) error 
 		return fmt.Errorf("the agent's answer does not read: %v", err)
 	}
 	b, _ := json.Marshal(threadAnswer{Answer: a.Answer})
-	_, err := s.checkThreadAnswer(b, nil, nil, p)
+	_, err := s.checkThreadAnswer(b, nil, nil, nil, p)
 	return err
 }
 
