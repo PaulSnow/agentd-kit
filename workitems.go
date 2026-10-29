@@ -469,6 +469,35 @@ func (st *LogState) sortedWork() []string {
 	return ids
 }
 
+// answerDoneWhen makes the owner the done_when of w, an item of repo
+// opened from the owner's answer to a session's decision, when it waits
+// on a request merged that the loop cannot merge: nothing would merge it
+// but the owner (#74).
+func (s *Supervisor) answerDoneWhen(in *Instruction, repo string, w *ThreadWork) {
+	d := w.DoneWhen
+	if in.Re == nil || !strings.HasPrefix(in.Re.ID, entryDecision) || d.Kind != DoneForge || d.State != "merged" || s.loopCanMerge(repo, d.Ref) {
+		return
+	}
+	w.DoneWhen = EndCheck{Kind: DoneOwner}
+}
+
+// loopCanMerge says whether agentd's loop merges request ref of repo: the
+// repository's policy merges, the request is in its loop, and one no
+// session delivered is by an author merge.authors lists.
+func (s *Supervisor) loopCanMerge(repo, ref string) bool {
+	if !s.cfg.Repositories[repo].Policy.Merge.Enabled {
+		return false
+	}
+	for _, q := range openLoopRequests(s.cfg, s.st, s.clock.Now()) {
+		if q.Repository != repo || q.Ref != ref {
+			continue
+		}
+		r := s.st.CI[ciKey(repo, ref)]
+		return q.Out == "" && (!q.Outside || contains(effectiveFor(s.cfg, s.st, repo, r.Target).Merge.Authors, r.Author))
+	}
+	return false
+}
+
 // workEmit logs a step of an item.
 func (s *Supervisor) workEmit(p WorkPayload) {
 	p.Note = s.withheld(p.Note)
@@ -507,6 +536,7 @@ func (s *Supervisor) driveItems(now time.Time) {
 			if s.issueForWork(id, in.Repositories[0], &w); s.halt != nil {
 				return
 			}
+			s.answerDoneWhen(in, in.Repositories[0], &w)
 			if s.workEmit(WorkPayload{ID: id, Step: WorkStepOpen, Repository: in.Repositories[0], Instruction: in.ID, Work: &w, HandTo: handTo}); s.halt != nil {
 				return
 			}
