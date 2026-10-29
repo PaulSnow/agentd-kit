@@ -686,3 +686,43 @@ func TestDesignWithheldAfterGoodRound(t *testing.T) {
 		t.Fatalf("the card:\n%s", des[0].Decision.Context)
 	}
 }
+
+// The owner's go can make the owner the item's done_when: the design's
+// card offers "go, done by me" beside go, and a go whose words say "done
+// by me" does the same. Only the owner's done closes the item then, its
+// session's brief says so, and no check ever runs (#73: an umbrella issue
+// that stays open is no done_when).
+func TestGoDoneByMeMakesDoneWhenOwner(t *testing.T) {
+	for _, c := range []struct{ choice, words string }{
+		{"go-done-by-me", "Q1: signal red"},
+		{DesignGo, "Go, done by me: #7 stays open as an umbrella."},
+	} {
+		dir := fakeClaude(t)
+		h := designerHarness(t, false)
+		h.ticks(1, time.Minute)
+		claudeAnswers(t, dir, 2, designOut("Add PaintAll to paint.go", false, 0))
+		it := h.askDesigned(dir, "Paint the shed red, all of it.")
+		h.ticks(2, time.Minute)
+		if it = h.item(it.ID); it.State != WorkDesigned || it.DoneWhen.Kind != DoneFile {
+			t.Fatalf("item = %+v", it)
+		}
+		if got := strings.Join(decisionOptions(designDecision(it, "")), ","); got != "go,go-done-by-me,change,decline" {
+			t.Fatalf("options = %s", got)
+		}
+		if err := h.respondDesign(it.ID, c.choice, c.words); err != nil {
+			t.Fatal(err)
+		}
+		h.ticks(3, time.Minute)
+		it = h.item(it.ID)
+		if it.DoneWhen.Kind != DoneOwner || it.ApprovedBy != "owner" || it.Session == "" {
+			t.Fatalf("%s: item = %+v", c.choice, it)
+		}
+		if a := h.answerOf(c.words); !strings.Contains(a, "done_when is now your word") {
+			t.Fatalf("%s: answer = %q", c.choice, a)
+		}
+		brief, err := os.ReadFile(filepath.Join(h.dir, it.Session, "BRIEF.md"))
+		if err != nil || !strings.Contains(string(brief), "## Done when\n\nthe owner says so\n") {
+			t.Fatalf("%s: BRIEF.md (%v):\n%s", c.choice, err, brief)
+		}
+	}
+}
