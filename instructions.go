@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // The owner's reply in a console that is neither an answer nor a seen mark
@@ -801,9 +802,15 @@ func (s *Supervisor) deliverInstructions(name string, sess Session, t *Track, ev
 		}
 	}
 	newest := s.st.Instructions[ids[len(ids)-1]]
-	line := s.cfg.Policies.Instructions.Pointer
+	var fresh []*Instruction
+	for _, id := range ids {
+		if in := s.st.Instructions[id]; in != nil {
+			fresh = append(fresh, in)
+		}
+	}
+	line := instructionsLine(s.cfg.Policies.Instructions.Pointer, fresh)
 	if newest != nil && itemEntry(newest) != "" {
-		line = answeredLine(itemEntry(newest), newest.ID)
+		line = answeredLine(itemEntry(newest), newest)
 	}
 	// Delivered, the owner's answer on the item's entry, or words in the
 	// session's own box, answer STATUS.md's Questions as they stand: the
@@ -818,6 +825,15 @@ func (s *Supervisor) deliverInstructions(name string, sess Session, t *Track, ev
 	err := s.typeInto(name, ActInstruct, a, t, ev.PaneHash, func() error {
 		if err := writeInstructions(s.cfg, sess.Workdir, ins, s.clock.Now()); err != nil {
 			return fmt.Errorf("%w: %v", errWrite, err)
+		}
+		// An answer on an item's entry may have changed the item, its
+		// note holding the owner's words: items.json says so too.
+		if newest != nil && itemEntry(newest) != "" {
+			if docs := s.itemDocs(name, sess.Workdir); len(docs) > 0 {
+				if err := writeItems(sess.Workdir, docs); err != nil {
+					return fmt.Errorf("%w: items.json: %v", errWrite, err)
+				}
+			}
 		}
 		if err := s.tmux.Type(name, line); err != nil {
 			return err
@@ -865,11 +881,26 @@ func itemEntry(in *Instruction) string {
 	return ""
 }
 
-// answeredLine is the fixed line typed for the owner's answer on an item's
-// entry: it names the entry and the instruction and says what to do,
-// never the owner's words, which instructions.json holds.
-func answeredLine(entry, id string) string {
-	return "The owner answered on " + entry + " (instruction " + id + "): read " + InstructionsFile + " now, act on it, and answer in the text you end your turn with."
+// answeredLine is the fixed line typed for the owner's answer in on an
+// item's entry: it names the entry, the instruction and how many
+// characters it holds, so a session that read less knows to read the file
+// again, and says what to do; never the owner's words, which
+// instructions.json holds whole.
+func answeredLine(entry string, in *Instruction) string {
+	return fmt.Sprintf("The owner answered on %s (instruction %s, %d characters): read %s now, act on it, and answer in the text you end your turn with.",
+		entry, in.ID, utf8.RuneCountInString(in.Text), InstructionsFile)
+}
+
+// instructionsLine is the policy's pointer with how many new
+// instructions there are and how many characters they hold: one line,
+// with none of the owner's words. A restart's prompt still starts with
+// the pointer itself.
+func instructionsLine(pointer string, fresh []*Instruction) string {
+	n := 0
+	for _, in := range fresh {
+		n += utf8.RuneCountInString(in.Text)
+	}
+	return fmt.Sprintf("%s (%d new, %d characters)", pointer, len(fresh), n)
 }
 
 // answerItem is the item whose entry the owner's words in answer, or nil.

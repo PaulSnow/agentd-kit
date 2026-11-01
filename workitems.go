@@ -1525,7 +1525,9 @@ func (it *WorkItem) workOptions() []string {
 
 // routeWork takes the owner's response on an item's entry, and says
 // whether it was the item's: a choice is carried out by Go and answered
-// with what it did; words alone go to the item's session.
+// with what it did; words alone go to the item's session, and so do the
+// words with not done or re-assign, whole, to the session that works the
+// item next (#77).
 func (s *Supervisor) routeWork(in *Instruction) bool {
 	if in.Re == nil || !strings.HasPrefix(in.Re.ID, entryWork) || !in.Route || in.Failed != "" || !in.Replied.IsZero() || in.Session != "" || in.Agent {
 		return false
@@ -1534,11 +1536,14 @@ func (s *Supervisor) routeWork(in *Instruction) bool {
 	answer := func(text string) {
 		s.emit("", Event{Kind: KindRoute, Route: &RoutePayload{Instruction: in.ID, Step: RouteAnswered, Agent: &AgentPayload{Answer: text, By: "agentd"}}})
 	}
+	// A choice carried out already whose words wait for the item's next
+	// session: from here they are words alone.
+	carried := in.Answer != nil && in.Answer.Choice != "" && in.Waiting != ""
 	switch {
 	case it == nil:
 		s.routeStep(in, RouteFail, "", false, "the log holds no work item "+in.Re.ID)
 		return true
-	case in.Answer == nil || in.Answer.Choice == "":
+	case in.Answer == nil || in.Answer.Choice == "" || carried:
 		if in.Withheld > 0 {
 			return false // routeOne says why it is never delivered
 		}
@@ -1564,12 +1569,28 @@ func (s *Supervisor) routeWork(in *Instruction) bool {
 		answer(it.ID + " is " + it.State + ": answer " + it.designAnswers() + " on its design entry, " + entryDesign + it.ID + "; nothing was changed.")
 		return true
 	}
+	// The owner's words are kept whole in the item's note, which
+	// items.json gives its session; only the page cuts them.
 	word := strings.TrimSpace(in.Text)
+	// toSession hands the words with a choice to the item's session, in
+	// instructions.json, whole, and says whether it did; the owner's
+	// answer is then the session's.
+	toSession := func() bool {
+		if word == "" || in.Withheld > 0 {
+			return false
+		}
+		if it.Session != "" && s.takesInstructions(it.Session) && s.reachable(it.Session) && s.losesItem(it.Session) == "" {
+			s.routeStep(in, RouteTo, it.Session, false, "")
+			return true
+		}
+		s.routeStep(in, RouteWait, "", false, "your words wait for the session "+it.ID+" is given to")
+		return true
+	}
 	switch in.Answer.Choice {
 	case WorkAnswerDone:
 		ev := "marked done by the owner"
 		if word != "" {
-			ev += ": " + oneLine(word, 300)
+			ev += ": " + word
 		}
 		s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepDone, Instruction: in.ID, Note: ev, By: "owner"})
 		answer(it.ID + " is done, as you said.")
@@ -1580,25 +1601,36 @@ func (s *Supervisor) routeWork(in *Instruction) bool {
 		}
 		note := "the owner said not done"
 		if word != "" {
-			note += ": " + oneLine(word, 300)
+			note += ": " + word
 		}
 		if t := s.st.Tracks[it.Session]; t != nil && t.State == Done || it.Session == "" {
-			s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepReopen, Session: it.Session, Instruction: in.ID, Note: note})
+			if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepReopen, Session: it.Session, Instruction: in.ID, Note: note}); s.halt != nil || toSession() {
+				return true
+			}
 			answer(it.ID + " is open again; agentd assigns it to a new session.")
 		} else {
-			s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepWorking, Session: it.Session, Instruction: in.ID, Note: note, By: "owner"})
+			if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepWorking, Session: it.Session, Instruction: in.ID, Note: note, By: "owner"}); s.halt != nil {
+				return true
+			}
+			// With words, the line typed for them tells the session; the
+			// item's own line is typed again otherwise.
+			if toSession() {
+				return true
+			}
 			s.dueRetype[it.ID] = true
 			answer(it.ID + " is not done: " + it.Session + " keeps it.")
 		}
 	case WorkAnswerReassign:
 		note := "the owner re-assigned it"
 		if word != "" {
-			note += ": " + oneLine(word, 300)
+			note += ": " + word
 		}
-		s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepReopen, Session: it.Session, Instruction: in.ID, Note: note, By: "owner"})
+		if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepReopen, Session: it.Session, Instruction: in.ID, Note: note, By: "owner"}); s.halt != nil || toSession() {
+			return true
+		}
 		answer(it.ID + " is open again; agentd assigns it to a new session.")
 	case WorkAnswerDecline:
-		if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepDeclined, Instruction: in.ID, Note: oneLine(word, 300), By: "owner"}); s.halt != nil {
+		if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepDeclined, Instruction: in.ID, Note: word, By: "owner"}); s.halt != nil {
 			return true
 		}
 		answer(it.ID + " is declined; agentd drops it.")

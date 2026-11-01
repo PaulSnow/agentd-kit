@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // blockedItem is an item of the owner's held by session a, whose
@@ -53,8 +54,8 @@ func (h *harness) newInstruction(before map[string]bool) *Instruction {
 }
 
 // answerLine is the fixed line that says the owner answered on entry.
-func answerLine(entry, id string) string {
-	return "The owner answered on " + entry + " (instruction " + id + "): read " + InstructionsFile + " now, act on it, and answer in the text you end your turn with."
+func answerLine(entry, id, text string) string {
+	return "The owner answered on " + entry + " (instruction " + id + ", " + itoa(utf8.RuneCountInString(text)) + " characters): read " + InstructionsFile + " now, act on it, and answer in the text you end your turn with."
 }
 
 // instructActs are the instruct acts taken into session name.
@@ -80,7 +81,7 @@ func TestBlockedItemSessionGetsAnswerTyped(t *testing.T) {
 	in := h.respondWork(it, text)
 	h.ticks(1, time.Minute)
 	typed := h.typed("a")[before:]
-	if len(typed) != 1 || typed[0] != answerLine(entryWork+it.ID, in.ID) || strings.Contains(typed[0], text) {
+	if len(typed) != 1 || typed[0] != answerLine(entryWork+it.ID, in.ID, text) || strings.Contains(typed[0], text) {
 		t.Fatalf("typed into a: %q", typed)
 	}
 	acts := h.instructActs("a")
@@ -136,7 +137,7 @@ func TestDesignWordsAfterGoReachRunningSession(t *testing.T) {
 	}
 	in := h.newInstruction(ids)
 	h.ticks(1, time.Minute)
-	if typed := h.typed(name)[before:]; len(typed) != 1 || typed[0] != answerLine(entryDesign+it.ID, in.ID) {
+	if typed := h.typed(name)[before:]; len(typed) != 1 || typed[0] != answerLine(entryDesign+it.ID, in.ID, "Signal red.") {
 		t.Fatalf("typed into %s: %q", name, typed)
 	}
 	docs := readInstructions(t, h.sup.cfg.Sessions[name].Workdir)
