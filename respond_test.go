@@ -145,7 +145,7 @@ func TestResponseBoundToItsEntry(t *testing.T) {
 	if want := `{"from":"ui","new":true,"re":{"id":"` + entries[4] + `","kind":"info","session":"b","text":"I paused the second coat: the primer is still wet."},"text":"Explain: why is it still wet?"}`; string(b) != want {
 		t.Fatalf("b receives\n%s\nwant\n%s", b, want)
 	}
-	if got := h.typed("c"); len(got) == 0 || got[len(got)-1] != h.cfg.Policies.Instructions.Pointer {
+	if got := h.typed("c"); len(got) == 0 || got[len(got)-1] != h.cfg.Policies.Instructions.Pointer+" (1 new, 26 characters)" {
 		t.Fatalf("typed into c: %q", got)
 	}
 }

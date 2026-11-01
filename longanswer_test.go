@@ -62,7 +62,7 @@ func TestLongAnswerOnItemReachesSessionWhole(t *testing.T) {
 	if n := utf8.RuneCountInString(text); n != 2000 || !strings.Contains(text, "\n2. F2-PART-OMEGA") {
 		t.Fatalf("the answer has %d characters: %q", n, text)
 	}
-	respond := func(h *harness, it *WorkItem, choice string) *Instruction {
+	respond := func(t *testing.T, h *harness, it *WorkItem, choice string) *Instruction {
 		t.Helper()
 		before := map[string]bool{}
 		for id := range h.logState().Instructions {
@@ -79,7 +79,7 @@ func TestLongAnswerOnItemReachesSessionWhole(t *testing.T) {
 		return h.newInstruction(before)
 	}
 	// arrived checks what session name holds of instruction in.
-	arrived := func(h *harness, name string, in *Instruction, it *WorkItem, items bool) {
+	arrived := func(t *testing.T, h *harness, name string, in *Instruction, it *WorkItem, items, started bool) {
 		t.Helper()
 		workdir := h.sup.cfg.Sessions[name].Workdir
 		var got *InstructionDoc
@@ -92,14 +92,24 @@ func TestLongAnswerOnItemReachesSessionWhole(t *testing.T) {
 		if got == nil || got.Text != text {
 			t.Fatalf("instructions.json of %s does not hold %s whole: %+v", name, in.ID, got)
 		}
+		// The line typed for it names it; a session started for the item
+		// is launched with the pointer to instructions.json instead, which
+		// counts the item's own message too: "Write the release notes.",
+		// 24 characters.
 		var line string
-		for _, l := range h.typed(name) {
-			if strings.Contains(l, in.ID) {
-				line = l
+		for _, c := range h.tmux.calls {
+			if c.name != name || c.op != "type" && c.op != "new-session" && c.op != "respawn" && c.op != "replace" {
+				continue
+			}
+			for _, a := range c.args {
+				if c.op == "type" && strings.Contains(a, in.ID) || c.op != "type" && strings.Contains(a, InstructionsFile) {
+					line = a
+				}
 			}
 		}
-		if !strings.Contains(line, "2000 characters") || strings.Contains(line, "F1-PART-ALPHA") || strings.Contains(line, "F2-PART-OMEGA") || strings.Contains(line, "\n") {
-			t.Fatalf("typed into %s: %q (all: %q)", name, line, h.typed(name))
+		if want := "2000 characters"; !started && !strings.Contains(line, "(instruction "+in.ID+", "+want+")") || started && !strings.Contains(line, "(2 new, 2024 characters)") ||
+			strings.Contains(line, "F1-PART-ALPHA") || strings.Contains(line, "F2-PART-OMEGA") || strings.Contains(line, "\n") {
+			t.Fatalf("line for %s: %q (typed: %q)", name, line, h.typed(name))
 		}
 		if items {
 			if doc := itemsDocOf(t, workdir, it.ID); !strings.Contains(doc, "F1-PART-ALPHA") || !strings.Contains(doc, "F2-PART-OMEGA") || !strings.Contains(doc, "F2-END-ZETA") {
@@ -111,9 +121,9 @@ func TestLongAnswerOnItemReachesSessionWhole(t *testing.T) {
 	t.Run("words alone", func(t *testing.T) {
 		h := sessionsHarness(t)
 		it := h.blockedItem()
-		in := respond(h, it, "")
+		in := respond(t, h, it, "")
 		h.ticks(1, time.Minute)
-		arrived(h, "a", in, it, false)
+		arrived(t, h, "a", in, it, false, false)
 	})
 
 	t.Run("not done", func(t *testing.T) {
@@ -126,13 +136,13 @@ func TestLongAnswerOnItemReachesSessionWhole(t *testing.T) {
 		if it = h.item(it.ID); it.Claim == "" {
 			t.Fatalf("item = %+v", it)
 		}
-		in := respond(h, it, WorkAnswerNotDone)
+		in := respond(t, h, it, WorkAnswerNotDone)
 		h.alive(name, "resizing still")
 		h.ticks(3, time.Minute)
 		if it = h.item(it.ID); it.State != WorkWorking || it.Session != name {
 			t.Fatalf("item = %+v", it)
 		}
-		arrived(h, name, in, it, true)
+		arrived(t, h, name, in, it, true, false)
 	})
 
 	t.Run("reassign", func(t *testing.T) {
@@ -142,7 +152,7 @@ func TestLongAnswerOnItemReachesSessionWhole(t *testing.T) {
 		if it.Session != "a" {
 			t.Fatalf("item = %+v", it)
 		}
-		in := respond(h, it, WorkAnswerReassign)
+		in := respond(t, h, it, WorkAnswerReassign)
 		h.ticks(2, time.Minute)
 		it = h.item(it.ID)
 		name := it.Session
@@ -151,11 +161,9 @@ func TestLongAnswerOnItemReachesSessionWhole(t *testing.T) {
 		}
 		h.alive(name, "launched\n"+idleScreen)
 		h.ticks(3, time.Minute)
-		arrived(h, name, in, it, true)
-		for _, d := range readInstructions(t, h.sup.cfg.Sessions["a"].Workdir) {
-			if d.ID == in.ID {
-				t.Fatalf("the words went to a, which the item was taken from")
-			}
+		arrived(t, h, name, in, it, true, true)
+		if b, err := os.ReadFile(filepath.Join(h.sup.cfg.Sessions["a"].Workdir, InstructionsFile)); err == nil && strings.Contains(string(b), in.ID) {
+			t.Fatalf("the words went to a, which the item was taken from: %s", b)
 		}
 	})
 }

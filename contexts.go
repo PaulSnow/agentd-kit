@@ -822,7 +822,7 @@ type restartFacts struct {
 // restartPrompt is the fresh session's prompt: the fixed instruction, then
 // the facts agentd recorded, from the progress file and the last merge.
 func (s *Supervisor) restartPrompt(name string, sess Session, t *Track, why string) string {
-	return s.promptWith(s.packFacts(name, sess, t, why), why)
+	return s.promptWith(name, s.packFacts(name, sess, t, why), why)
 }
 
 // packFacts is the facts document a fresh session is handed, its context
@@ -891,16 +891,27 @@ func encodeFacts(f restartFacts) []byte {
 	return []byte(strings.TrimSuffix(b.String(), "\n"))
 }
 
-// promptWith is the prompt that hands a fresh session facts.
-func (s *Supervisor) promptWith(facts []byte, why string) string {
+// promptWith is the prompt that hands fresh session name facts. The
+// pointer to instructions.json states how many characters the new
+// instructions hold (#77).
+func (s *Supervisor) promptWith(name string, facts []byte, why string) string {
 	prompt := DefaultRestartPrompt + " "
+	instructed := func() string {
+		var fresh []*Instruction
+		for _, id := range s.st.freshInstructions(name, true, s.clock.Now()) {
+			if in := s.st.Instructions[id]; in != nil {
+				fresh = append(fresh, in)
+			}
+		}
+		return instructionsLine(s.cfg.Policies.Instructions.Pointer, fresh)
+	}
 	switch why {
 	case "answered":
 		prompt += s.cfg.Policies.Answers.Pointer + " "
 	case "instructed":
-		prompt += s.cfg.Policies.Instructions.Pointer + " "
+		prompt += instructed() + " "
 	case "answered-instructed":
-		prompt += s.cfg.Policies.Answers.Pointer + " " + s.cfg.Policies.Instructions.Pointer + " "
+		prompt += s.cfg.Policies.Answers.Pointer + " " + instructed() + " "
 	case "ci-fix":
 		prompt += s.cfg.Policies.CI.Pointer + " "
 	case "fix-round":
@@ -933,7 +944,7 @@ func (s *Supervisor) launchCommandWith(name string, sess Session, t *Track, id, 
 	facts := s.packFactsWith(name, sess, t, why, ci)
 	s.noteTrust(name, sess, t)
 	r := strings.NewReplacer("{brief}", sess.Workdir+"/BRIEF.md", "{status}", sess.Workdir+"/STATUS.md",
-		"{session_id}", id, "{prompt}", s.promptWith(facts, why), "{mcp}", mcpLaunchConfig(s.cfg, name, sess))
+		"{session_id}", id, "{prompt}", s.promptWith(name, facts, why), "{mcp}", mcpLaunchConfig(s.cfg, name, sess))
 	cmd := withModel(s.cfg.Policies.Restart.Command, sessionModel(s.cfg, s.st, sess))
 	for i, part := range cmd {
 		cmd[i] = r.Replace(part)
