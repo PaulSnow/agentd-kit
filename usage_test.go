@@ -31,6 +31,7 @@ type fakeUsageAPI struct {
 	pct      map[string][2]float64 // by token: five-hour, weekly
 	calls    []string
 	messages []map[string]any
+	down     bool // every answer is a 500
 }
 
 func newFakeUsageAPI(t *testing.T) (*fakeUsageAPI, *httptest.Server) {
@@ -46,6 +47,8 @@ func newFakeUsageAPI(t *testing.T) (*fakeUsageAPI, *httptest.Server) {
 		}
 		p, ok := f.pct[tok]
 		switch {
+		case f.down:
+			http.Error(w, "the service is down", http.StatusInternalServerError)
 		case !ok:
 			http.Error(w, "unknown token "+tok, http.StatusUnauthorized)
 		case r.URL.Path == "/api/oauth/usage" && tok == tokenB:
@@ -342,7 +345,16 @@ func TestAccountFold(t *testing.T) {
 		{V: EventVersion, Time: t0, Kind: KindAccount, Mode: ModeShared, Account: &AccountPayload{Account: "a", Method: UsageEndpoint, FiveHour: &five, Weekly: &week}},
 		{V: EventVersion, Time: t0.Add(time.Minute), Kind: KindAccount, Mode: ModeShared, Account: &AccountPayload{Account: "a", Error: "down"}},
 	})
-	if r := st.Accounts["a"]; *r.FiveHour != 10 || r.Error != "down" || !r.At.Equal(t0) {
+	if r := st.Accounts["a"]; *r.FiveHour != 10 || r.Error != "down" || !r.At.Equal(t0) || !r.FailingSince.Equal(t0.Add(time.Minute)) {
+		t.Fatalf("a %+v", r)
+	}
+	// A later error keeps when the failing began; a good reading clears it.
+	st.Fold([]Event{{V: EventVersion, Time: t0.Add(2 * time.Minute), Kind: KindAccount, Mode: ModeShared, Account: &AccountPayload{Account: "a", Error: "still down"}}})
+	if r := st.Accounts["a"]; !r.FailingSince.Equal(t0.Add(time.Minute)) || r.readingDown(t0.Add(time.Hour)) || !r.readingDown(t0.Add(62*time.Minute)) {
+		t.Fatalf("a %+v", r)
+	}
+	st.Fold([]Event{{V: EventVersion, Time: t0.Add(3 * time.Minute), Kind: KindAccount, Mode: ModeShared, Account: &AccountPayload{Account: "a", Method: UsageEndpoint, FiveHour: &five, Weekly: &week}}})
+	if r := st.Accounts["a"]; !r.FailingSince.IsZero() || r.readingDown(t0.Add(2*time.Hour)) {
 		t.Fatalf("a %+v", r)
 	}
 	st.Runtime = map[string]RuntimePayload{"s": {ID: "i1", Action: SessionStart, Repository: "widgets"}}
@@ -392,7 +404,7 @@ func TestUsageSteadyAccountStaysFresh(t *testing.T) {
 	if n < 3 {
 		t.Fatalf("a logged %d times in an hour, want a reading at least every %s", n, relogAfter(h.cfg.Usage))
 	}
-	if a, why, _ := placeAccount(h.cfg, h.logState(), "widgets", h.clock.Now(), nil); a != "a" {
+	if a, why, _, _ := placeAccount(h.cfg, h.logState(), "widgets", h.clock.Now(), nil); a != "a" {
 		t.Fatalf("placed on %q: %s", a, why)
 	}
 }
@@ -657,5 +669,80 @@ func TestUsageHeadersNoWindow(t *testing.T) {
 	p := newPlanReader(cfg.Usage, 5*time.Second).read("a", a)
 	if !strings.Contains(p.Error, "rate-limit headers: anthropic-ratelimit-unified-status)") {
 		t.Fatalf("error %q", p.Error)
+	}
+}
+
+func (f *fakeUsageAPI) setDown(down bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.down = down
+}
+
+// accountCards counts the overview's account cards for name.
+func accountCards(t *testing.T, h *harness, name string) int {
+	t.Helper()
+	return strings.Count(owner(t, harnessUI(t, h), "/"), name+"&#39;s usage readings have failed since")
+}
+
+// Readings that fail on every account hold a start for the first hour;
+// after it the start goes on the first fallback account without a
+// reading, and says so in its place event and on the console. Each
+// failing account is one card in the overview, from the hour on, until a
+// reading succeeds (#80).
+func TestPlacementWithoutAReading(t *testing.T) {
+	h, f := usageHarness(t)
+	f.setDown(true)
+	h.ticks(1, time.Minute)
+	if r := h.logState().Accounts["a"]; r.FailingSince.IsZero() || r.Error == "" {
+		t.Fatalf("a %+v", r)
+	}
+	name := h.startSession("fix/spin", KindWork, 7)
+	h.ticks(50, time.Minute)
+	for _, p := range h.sessionEvents() {
+		if p.Action == SessionPlace {
+			t.Fatalf("placed within the hour: %+v", p)
+		}
+	}
+	if n := accountCards(t, h, "a"); n != 0 {
+		t.Fatalf("%d cards for a within the hour", n)
+	}
+	h.ticks(15, time.Minute)
+	var placed []RuntimePayload
+	for _, p := range h.sessionEvents() {
+		if p.Action == SessionPlace {
+			placed = append(placed, p)
+		}
+	}
+	if len(placed) != 1 || placed[0].Account != "a" || !strings.Contains(placed[0].Why, "placed on a without a reading: its usage readings have failed since") {
+		t.Fatalf("placements %+v", placed)
+	}
+	if acct := projected(h.cfg, h.events()).Sessions[name].Account; acct != "a" {
+		t.Fatalf("session account %q", acct)
+	}
+	told := 0
+	for _, e := range h.events() {
+		if e.Kind == KindMessage && strings.Contains(e.Message.Text, name+", started for branch fix/spin, was placed on a without a reading") {
+			told++
+		}
+	}
+	if told != 1 {
+		t.Fatalf("told the console %d times", told)
+	}
+	for _, acct := range []string{"a", "b", "c"} {
+		if n := accountCards(t, h, acct); n != 1 {
+			t.Fatalf("%d cards for %s after the hour", n, acct)
+		}
+	}
+	// A good reading takes the card away.
+	f.setDown(false)
+	h.ticks(16, time.Minute)
+	if r := h.logState().Accounts["a"]; !r.FailingSince.IsZero() {
+		t.Fatalf("a still failing: %+v", r)
+	}
+	if n := accountCards(t, h, "a"); n != 0 {
+		t.Fatalf("%d cards for a after a good reading", n)
+	}
+	if n := accountCards(t, h, "c"); n != 1 {
+		t.Fatalf("%d cards for c, which still fails", n)
 	}
 }

@@ -107,6 +107,21 @@ type AccountRecord struct {
 	AccountPayload
 	At      time.Time // when the numbers were read
 	ErrorAt time.Time
+	// FailingSince is when the readings began failing: the first error
+	// after a good reading, or the first ever; zero while they read
+	// (#80).
+	FailingSince time.Time
+}
+
+// usageReadingDown is how long an account's readings fail before the
+// owner is shown one card for it and placement goes on without a
+// reading (#80).
+const usageReadingDown = time.Hour
+
+// readingDown says whether r's readings have failed for longer than
+// usageReadingDown at now.
+func (r AccountRecord) readingDown(now time.Time) bool {
+	return !r.FailingSince.IsZero() && now.Sub(r.FailingSince) > usageReadingDown
 }
 
 // applyAccount folds a reading. A failed one keeps the numbers before it.
@@ -118,6 +133,9 @@ func (st *LogState) applyAccount(e Event) {
 	r := st.Accounts[p.Account]
 	if p.Error != "" {
 		r.Account, r.Error, r.ErrorAt = p.Account, p.Error, e.Time
+		if r.FailingSince.IsZero() {
+			r.FailingSince = e.Time
+		}
 		st.Accounts[p.Account] = r
 		return
 	}
@@ -505,22 +523,27 @@ func (s *Supervisor) readAccounts(now time.Time) {
 // not yet tried is waited for, never passed over for a later one, since
 // a placement holds for good. When no account is chosen, it is "" and why
 // says each account's state; full says every account was read and is at
-// or over the limit, rather than unread.
-func placeAccount(cfg *Config, st *LogState, repo string, now time.Time, tried func(string) bool) (account, why string, full bool) {
+// or over the limit, rather than unread. An account whose readings have
+// failed for over usageReadingDown, with no fresh numbers, counts as
+// having room (#80): blind then says it is placed on without a reading.
+func placeAccount(cfg *Config, st *LogState, repo string, now time.Time, tried func(string) bool) (account, why string, full bool, blind string) {
 	rules, _ := effectivePolicy(cfg, st, repo)
 	u := cfg.Usage
 	var states []string
 	full = len(rules.Sessions.Fallback) > 0
 	for _, a := range rules.Sessions.Fallback {
 		if !u.Enabled || cfg.Accounts[a].Usage == UsageOff {
-			return a, "", false
+			return a, "", false, ""
 		}
 		if tried != nil && !tried(a) {
-			return "", strings.Join(append(states, a+": not read yet by this run"), "; "), false
+			return "", strings.Join(append(states, a+": not read yet by this run"), "; "), false, ""
 		}
 		r, ok := st.Accounts[a]
 		high, both := r.usageHigh()
+		fresh := both && now.Sub(r.At) <= usageStale*u.Every.Duration
 		switch {
+		case !fresh && r.readingDown(now):
+			return a, "", false, fmt.Sprintf("placed on %s without a reading: its usage readings have failed since %s", a, r.FailingSince.UTC().Format(time.RFC3339))
 		case !ok || !both:
 			states, full = append(states, a+": no reading yet"), false
 		case now.Sub(r.At) > usageStale*u.Every.Duration:
@@ -528,13 +551,13 @@ func placeAccount(cfg *Config, st *LogState, repo string, now time.Time, tried f
 		case high >= u.Limit:
 			states = append(states, fmt.Sprintf("%s: %s", a, usageText(r.AccountPayload)))
 		default:
-			return a, "", false
+			return a, "", false, ""
 		}
 	}
 	if len(states) == 0 {
-		return "", "the repository's policy has no sessions.fallback", false
+		return "", "the repository's policy has no sessions.fallback", false, ""
 	}
-	return "", strings.Join(states, "; "), full
+	return "", strings.Join(states, "; "), full, ""
 }
 
 // usageText is a reading in words.
@@ -579,7 +602,7 @@ func (s *Supervisor) place(name string, t *Track, now time.Time) {
 	since := s.work.usageSince
 	s.work.mu.Unlock()
 	tried := func(a string) bool { _, ok := read[a]; return ok }
-	account, why, full := placeAccount(s.cfg, s.st, p.Repository, now, tried)
+	account, why, full, blind := placeAccount(s.cfg, s.st, p.Repository, now, tried)
 	if s.shadow {
 		if account != "" {
 			why = "the live run places it; it would go on " + account
@@ -610,7 +633,17 @@ func (s *Supervisor) place(name string, t *Track, now time.Time) {
 		}
 		return
 	}
-	s.emit(name, Event{Kind: KindSession, Mode: ModeShared, Runtime: &RuntimePayload{ID: p.ID, Action: SessionPlace, Repository: p.Repository, Account: account, By: "agentd"}})
+	s.emit(name, Event{Kind: KindSession, Mode: ModeShared, Runtime: &RuntimePayload{ID: p.ID, Action: SessionPlace, Repository: p.Repository, Account: account, By: "agentd", Why: blind}})
+	if blind != "" {
+		// Placed without a reading: the repository's console is told,
+		// once for the start, as its place event says.
+		text := fmt.Sprintf("%s, started for branch %s, was %s.", name, p.Branch, blind)
+		m := &MessagePayload{ID: "P" + shortHash(HashPane("place:" + name + ":" + p.ID))[:8], Console: s.cfg.RepositoryConsole(p.Repository), Kind: "info", From: "agentd", Text: text, Account: account}
+		if i := s.confidentialMatch(text); i > 0 {
+			m.Text, m.Withheld = "", i
+		}
+		s.emit("", Event{Kind: KindMessage, Mode: ModeShared, Message: m})
+	}
 	s.refreshRuntime()
 }
 
