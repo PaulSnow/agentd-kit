@@ -47,6 +47,9 @@ type MessagePayload struct {
 	// Account is the account an agentd notice of token use is about
 	// (#64): at most one is posted per account per noticeEvery.
 	Account string `json:"account,omitempty"`
+	// Capped is the repository an agentd notice that its curators reached
+	// a daily limit is about (#82): at most one a day.
+	Capped string `json:"capped,omitempty"`
 }
 
 // InboxPayload records that Reader read the instructions IDs of Console.
