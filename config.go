@@ -488,7 +488,7 @@ func (c *Config) finish(base string) error {
 	if s := c.Jobs.Status; s.Every.Duration < 0 || s.Every.Duration > 0 && s.Every.Duration < time.Minute || s.MaxInput < 0 {
 		errs = append(errs, errors.New("jobs.status.every must be a minute or more, and jobs.status.max_input not negative"))
 	}
-	if k := c.Jobs.Curator; k.Quiet.Duration < 0 || k.MaxWait.Duration < 0 || k.Gap.Duration < 0 || k.Lookback.Duration < 0 || k.MaxInput < 0 || k.PerDay < 0 ||
+	if k := c.Jobs.Curator; k.Quiet.Duration < 0 || k.MaxWait.Duration < 0 || k.Gap.Duration < 0 || k.Lookback.Duration < 0 || k.MaxInput < 0 || k.PerDay < 0 || k.BudgetTokens < 0 ||
 		c.Jobs.Expert.BudgetTokens < 0 || c.Jobs.Expert.Timeout.Duration < 0 {
 		errs = append(errs, errors.New("jobs.curator's and jobs.expert's settings must not be negative"))
 	}

@@ -75,6 +75,9 @@ type Supervisor struct {
 	// cards is the repositories' context the curators keep (#60): the
 	// loop's alone.
 	cards *ContextStore
+	// cappedAt is when agentd posted that a repository's curators reached
+	// a daily limit, until the store folds the post.
+	cappedAt map[string]time.Time
 	// ops is what the ops console's changes run on (#63), nil without an
 	// ops block.
 	ops *opsEnv

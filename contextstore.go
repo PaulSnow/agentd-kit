@@ -33,6 +33,9 @@ type CardPayload struct {
 	InputBytes int       `json:"input_bytes,omitempty"`
 	Model      string    `json:"model,omitempty"`
 	Usage      *JobUsage `json:"usage,omitempty"`
+	// GaveUp says a failed call's records are given up after
+	// curatorRefusals failures in a row: Through is past them.
+	GaveUp bool `json:"gave_up,omitempty"`
 }
 
 // ThreadPayload is an issue's or request's thread: its title, state,
@@ -98,8 +101,10 @@ type curation struct {
 	At      time.Time
 	Refused string
 	Failed  bool
-	// Refusals is how many curations in a row were refused.
+	// Refusals is how many curations in a row were refused, Failures
+	// how many failed.
 	Refusals int
+	Failures int
 }
 
 // contextFlag is an agent's word that state lacked what it needed.
@@ -126,12 +131,19 @@ type ContextStore struct {
 	newCards []string // repo|topic of cards revised since the repository's card was curated
 	expert   map[string][]expertSpend
 	runs     map[string][]time.Time // each repository's curations
+	firsts   map[string][]time.Time // each repository's curations of a topic never curated before
+	// curatorSpend is each repository's curator tokens, call by call, and
+	// capped when agentd last said its curators reached a daily limit.
+	curatorSpend map[string][]expertSpend
+	capped       map[string]time.Time
+	lastFact     map[string]string // repo|source|session|topic: the text of its last fact record
 }
 
 func NewContextStore(cfg *Config) *ContextStore {
 	cs := &ContextStore{cfg: cfg, src: newHistSource(cfg), hist: map[string]*History{}, cards: map[string]map[string]*Card{},
 		curated: map[string]map[string]curation{}, flags: map[string]map[string][]contextFlag{}, threads: map[string]map[string]time.Time{}, expert: map[string][]expertSpend{},
-		issues: map[string]string{}, policies: NewLogState(cfg, ModeLive), runs: map[string][]time.Time{}}
+		issues: map[string]string{}, policies: NewLogState(cfg, ModeLive), runs: map[string][]time.Time{}, firsts: map[string][]time.Time{},
+		curatorSpend: map[string][]expertSpend{}, capped: map[string]time.Time{}, lastFact: map[string]string{}}
 	for _, p := range screenPatterns(cfg) {
 		cs.screen = append(cs.screen, regexp.MustCompile(p))
 	}
@@ -182,15 +194,29 @@ func (cs *ContextStore) Apply(e Event) {
 		}
 	case e.Card != nil:
 		p := e.Card
+		prev, before := cs.curated[p.Repository][p.Topic]
 		c := curation{Through: p.Through, At: e.Time, Refused: p.Refused, Failed: p.Error != ""}
 		if p.Refused != "" {
-			c.Refusals = cs.curated[p.Repository][p.Topic].Refusals + 1
+			c.Refusals = prev.Refusals + 1
+		}
+		if p.Error != "" && !p.GaveUp {
+			c.Failures = prev.Failures + 1
+		}
+		if !before {
+			cs.firsts[p.Repository] = keepDay(cs.firsts[p.Repository], e.Time)
+		}
+		if p.Usage != nil {
+			sp := cs.curatorSpend[p.Repository]
+			for len(sp) > 0 && e.Time.Sub(sp[0].At) >= 24*time.Hour {
+				sp = sp[1:]
+			}
+			cs.curatorSpend[p.Repository] = append(sp, expertSpend{At: e.Time, Tokens: jobTokens(p.Usage)})
 		}
 		if p.Card != nil && p.Topic != TopicRepo {
 			nested(cs.cards, p.Repository)[p.Topic] = p.Card
 			cs.newCards = append(cs.newCards, p.Repository+"|"+p.Topic)
 		}
-		if p.Topic == TopicRepo && p.Error == "" {
+		if p.Topic == TopicRepo && (p.Error == "" || p.GaveUp) {
 			if p.Card != nil {
 				nested(cs.cards, p.Repository)[p.Topic] = p.Card
 			}
@@ -200,11 +226,7 @@ func (cs *ContextStore) Apply(e Event) {
 			}
 		}
 		nested(cs.curated, p.Repository)[p.Topic] = c
-		runs := cs.runs[p.Repository]
-		for len(runs) > 0 && e.Time.Sub(runs[0]) >= 24*time.Hour {
-			runs = runs[1:]
-		}
-		cs.runs[p.Repository] = append(runs, e.Time)
+		cs.runs[p.Repository] = keepDay(cs.runs[p.Repository], e.Time)
 	case e.Thread != nil:
 		t := e.Thread
 		nested(cs.threads, t.Repository)[t.Ref] = e.Time
@@ -225,10 +247,37 @@ func (cs *ContextStore) Apply(e Event) {
 	case e.Policy != nil:
 		cs.policies.applyPolicy(e)
 	default:
+		if m := e.Message; m != nil && m.Capped != "" && m.From == "agentd" {
+			cs.capped[m.Capped] = e.Time
+		}
 		for _, r := range cs.src.records(e) {
+			if e.Fact != nil && cs.sameFact(e.Fact, r) {
+				continue
+			}
 			cs.History(r.repo).add(r)
 		}
 	}
+}
+
+// sameFact says whether r, the record of fact p, says what the last fact
+// on its session's run, brief or Now, or on its issue, said: the same state read again is no new
+// record, so it calls no curator.
+func (cs *ContextStore) sameFact(p *FactPayload, r *HistRecord) bool {
+	key := p.Repository + "|" + factKey(p)
+	said := r.Source + "\n" + r.Title + "\n" + r.Text
+	if cs.lastFact[key] == said {
+		return true
+	}
+	cs.lastFact[key] = said
+	return false
+}
+
+// keepDay is ats with at added and those a day older than it dropped.
+func keepDay(ats []time.Time, at time.Time) []time.Time {
+	for len(ats) > 0 && at.Sub(ats[0]) >= 24*time.Hour {
+		ats = ats[1:]
+	}
+	return append(ats, at)
 }
 
 func dropKey(list []string, key string) []string {

@@ -706,3 +706,206 @@ func withoutLists(calls []string) []string {
 	}
 	return out
 }
+
+// curatorFails makes the fake's curator of key fail, paid as a call.
+func curatorFails(t *testing.T, dir, key string) {
+	t.Helper()
+	writeFile(t, filepath.Join(dir, "out."+key), `{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom",`+
+		`"usage":{"input_tokens":900,"output_tokens":10},"total_cost_usd":0.001}`)
+}
+
+// quietCurator is a curator harness with no session, so that only the
+// records a test adds make a topic due.
+func quietCurator(t *testing.T) (*harness, string) {
+	h, dir := curatorHarness(t)
+	delete(h.cfg.Sessions, "s1")
+	return h, dir
+}
+
+// onIssue is an owner's instruction on widgets that names issue n.
+func onIssue(n int) Event {
+	return Event{Kind: KindInstruction, Mode: ModeOwner, Instruction: &InstructionPayload{ID: fmt.Sprintf("I%04x", n),
+		Repositories: []string{"widgets"}, Text: fmt.Sprintf("see #%d", n), From: "owner"}}
+}
+
+// cardsAt is topic's card events with their times.
+func cardsAt(h *harness, topic string) (out []*CardPayload, at []time.Time) {
+	for _, e := range h.events() {
+		if e.Card != nil && e.Card.Topic == topic {
+			out, at = append(out, e.Card), append(at, e.Time)
+		}
+	}
+	return out, at
+}
+
+// A failed curation is tried again only after a backoff that doubles, and
+// given up after curatorRefusals failures in a row, for a topic's card and
+// for the repository's; then nothing is called until a new record comes
+// (#82).
+func TestCuratorFailureBacksOff(t *testing.T) {
+	for _, failing := range []string{"#7", TopicRepo} {
+		t.Run(failing, func(t *testing.T) {
+			h, dir := quietCurator(t)
+			key := map[string]string{"#7": "_7", TopicRepo: "repo"}[failing]
+			h.appendEvent(ruling("R1", "never push to main"))
+			r1 := onTopic(h, "#7", "never push")
+			curatorAnswers(t, dir, "_7", fmt.Sprintf(`{"status":"open","summary":"s","src":[%q]}`, r1))
+			curatorFails(t, dir, key)
+			h.ticks(300, 2*time.Minute) // ten hours
+			ps, at := cardsAt(h, failing)
+			if len(ps) != curatorRefusals {
+				t.Fatalf("%d calls on %s, want %d: %v", len(ps), failing, curatorRefusals, curatorCalls(t, dir))
+			}
+			cfg := h.cfg.Jobs.Curator
+			for i := 1; i < len(at); i++ {
+				if d := at[i].Sub(at[i-1]); d < cfg.backoff(i) {
+					t.Fatalf("call %d came %v after the failure before, within its backoff %v", i+1, d, cfg.backoff(i))
+				}
+			}
+			last := ps[len(ps)-1]
+			if !last.GaveUp || !strings.Contains(last.Error, "given up") || ps[0].GaveUp || ps[1].GaveUp {
+				t.Fatalf("calls: %+v %+v %+v", ps[0], ps[1], last)
+			}
+			if failing == "#7" {
+				// A new record is curated again, from a clean slate.
+				curatorAnswers(t, dir, "_7", `{}`)
+				h.appendEvent(onIssue(7))
+				h.ticks(10, 2*time.Minute)
+				if ps, _ := cardsAt(h, "#7"); len(ps) != curatorRefusals+1 || ps[len(ps)-1].Error != "" {
+					t.Fatalf("after a new record: %d calls", len(ps))
+				}
+			}
+		})
+	}
+}
+
+// A topic with no record newer than its last curation is never called
+// again, however many passes go by (#82).
+func TestCuratorNothingNewNoCall(t *testing.T) {
+	h, dir := quietCurator(t)
+	h.appendEvent(ruling("R1", "never push to main"))
+	r1 := onTopic(h, "#7", "never push")
+	curatorAnswers(t, dir, "_7", fmt.Sprintf(`{"status":"open","summary":"s","src":[%q]}`, r1))
+	h.ticks(720, 2*time.Minute) // a day
+	if n := countOf(curatorCalls(t, dir), "_7"); n != 1 {
+		t.Fatalf("#7 curated %d times with one record", n)
+	}
+}
+
+// The same fact read again, or the same thread, adds no record, so it
+// calls no curator (#82).
+func TestCuratorSameFactNoRecord(t *testing.T) {
+	h, dir := quietCurator(t)
+	fact := func() Event {
+		return Event{Kind: KindFact, Mode: ModeLive, Fact: &FactPayload{Repository: "widgets", Change: FactOpened, Ref: "#7", Title: "spin", State: "opened"}}
+	}
+	thread := func() Event {
+		return Event{Kind: KindThread, Mode: ModeShared, Thread: &ThreadPayload{Repository: "widgets", Ref: "#7", Title: "spin", State: "opened", Body: "Make the widgets spin."}}
+	}
+	h.appendEvent(fact())
+	h.appendEvent(thread())
+	n := len(storeOf(h).History("widgets").OnTopic("#7"))
+	if n == 0 {
+		t.Fatal("no record of the fact or the thread")
+	}
+	h.ticks(10, 2*time.Minute)
+	calls := countOf(curatorCalls(t, dir), "_7")
+	for i := 0; i < 5; i++ {
+		h.appendEvent(fact())
+		h.appendEvent(thread())
+		h.ticks(10, 2*time.Minute)
+	}
+	if m := len(storeOf(h).History("widgets").OnTopic("#7")); m != n {
+		t.Fatalf("%d records on #7 after reading the same again, want %d", m, n)
+	}
+	if c := countOf(curatorCalls(t, dir), "_7"); c != calls {
+		t.Fatalf("#7 curated %d times, want %d", c, calls)
+	}
+}
+
+// Once a repository's curator tokens over the day reach budget_tokens, no
+// curator call starts there; one info message on its console says so, and
+// curation resumes when the day's window allows (#82).
+func TestCuratorTokenBudget(t *testing.T) {
+	h, dir := quietCurator(t)
+	h.cfg.Jobs.Curator.BudgetTokens = 1
+	h.appendEvent(ruling("R1", "never push to main"))
+	h.ticks(10, 2*time.Minute)
+	if countOf(curatorCalls(t, dir), "_7") != 1 {
+		t.Fatalf("calls %v", curatorCalls(t, dir))
+	}
+	before := len(curatorCalls(t, dir))
+	for i := 0; i < 3; i++ {
+		h.appendEvent(onIssue(8 + i))
+		h.ticks(60, 2*time.Minute)
+	}
+	if calls := curatorCalls(t, dir); len(calls) != before {
+		t.Fatalf("calls past the budget: %v", calls[before:])
+	}
+	notices := func() (out []*MessagePayload) {
+		for _, e := range h.events() {
+			if m := e.Message; m != nil && m.Capped == "widgets" {
+				out = append(out, m)
+			}
+		}
+		return out
+	}
+	ms := notices()
+	if len(ms) != 1 || ms[0].Kind != "info" || ms[0].Console != h.cfg.RepositoryConsole("widgets") ||
+		!strings.Contains(ms[0].Text, "budget_tokens") || !strings.Contains(ms[0].Text, "until about") {
+		t.Fatalf("notices: %+v", ms)
+	}
+	cs := storeOf(h)
+	if cs.capped["widgets"].IsZero() || cs.CuratorSpent("widgets", h.clock.Now()) < 1 {
+		t.Fatalf("store: capped %v, spent %d", cs.capped["widgets"], cs.CuratorSpent("widgets", h.clock.Now()))
+	}
+	h.ticks(150, 10*time.Minute) // past the window: a budget of one token lets one call start
+	if calls := curatorCalls(t, dir); len(calls) != before+1 || calls[before] != "_10" {
+		t.Fatalf("after the window: %v, want #10's, the newest", calls)
+	}
+	if n := len(notices()); n > 3 {
+		t.Fatalf("%d notices in about two days", n)
+	}
+}
+
+// A repository's topics never curated start at most firstsPerDay a day,
+// so a new repository's back-fill spreads over days (#82).
+func TestCuratorBackfillShare(t *testing.T) {
+	h, dir := quietCurator(t)
+	h.cfg.Jobs.Curator.PerDay = 8 // two first curations a day
+	for i := 0; i < 5; i++ {
+		h.appendEvent(onIssue(20 + i))
+	}
+	h.ticks(66, 20*time.Minute) // 22 hours
+	firsts := func() int {
+		n := 0
+		for i := 0; i < 5; i++ {
+			if countOf(curatorCalls(t, dir), fmt.Sprintf("_%d", 20+i)) > 0 {
+				n++
+			}
+		}
+		return n
+	}
+	if n := firsts(); n != h.cfg.Jobs.Curator.firstsPerDay() {
+		t.Fatalf("%d topics first curated in a day, want %d: %v", n, h.cfg.Jobs.Curator.firstsPerDay(), curatorCalls(t, dir))
+	}
+	h.ticks(150, 20*time.Minute) // two days more
+	if n := firsts(); n != 5 {
+		t.Fatalf("%d of 5 topics curated after three days", n)
+	}
+}
+
+// Calls started in one pass count against the budget before their cost
+// is logged, so one pass does not start every due topic past it (#82).
+func TestCuratorBudgetWithinPass(t *testing.T) {
+	h, dir := quietCurator(t)
+	per := jobTokens(&JobUsage{InputTokens: 900, OutputTokens: 120, CacheReadTokens: 10})
+	h.cfg.Jobs.Curator.BudgetTokens = 3 * per
+	for i := 0; i < 8; i++ {
+		h.appendEvent(onIssue(30 + i))
+	}
+	h.ticks(30, 2*time.Minute)
+	if calls := curatorCalls(t, dir); len(calls) == 0 || len(calls) > 3 {
+		t.Fatalf("calls %v within a budget of three", calls)
+	}
+}
