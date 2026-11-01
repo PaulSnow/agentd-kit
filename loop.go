@@ -1135,6 +1135,12 @@ func (s *Supervisor) startRuntime(repo, name string, p RuntimePayload) string {
 	if c, ok := s.cfg.Sessions[name]; ok && !c.Runtime {
 		return "a configured session has the name"
 	}
+	// Nothing starts on what the owner's laptop holds (W8510403e).
+	if p.Kind != KindChat {
+		if why := s.laptopWait(repo, name, p, nil); why != "" {
+			return why
+		}
+	}
 	p.ID, p.Action, p.Repository, p.Max, p.By = newIntentID(), SessionStart, repo, rules.Sessions.Max, "agentd"
 	if sp := s.cfg.Repositories[repo].Sessions; sp != nil {
 		p.Host = sp.Host
@@ -1190,6 +1196,16 @@ func (s *Supervisor) fixRound(name string, sess Session, t *Track, ev Evidence, 
 		p := placeOf(s.cfg, s.st, q, s.clock.Now())
 		if p.Do != LoopFix || !q.Outside && t.Delivered[q.Delivered] == "" {
 			continue
+		}
+		rp := s.st.Runtime[name]
+		rp.Request = q.Ref
+		var files []string
+		if s.st.Coord != nil {
+			files = s.st.Coord.Files[filesKey(q.Repository, q.Ref)].Files
+		}
+		if why := s.laptopWait(q.Repository, name, rp, unionPaths(files, s.worktreeFor(name, rp))); why != "" {
+			s.skipOnce(name, "laptop:"+name+":"+q.Ref, "not starting a fix round: "+why, t, &SkipPayload{Repository: q.Repository})
+			return false
 		}
 		// A session that continues a request it did not deliver has the
 		// request's rounds in its facts, not its own case's.

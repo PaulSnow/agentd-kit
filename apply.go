@@ -94,6 +94,9 @@ type LogState struct {
 	// Swept is when the steps and sentences were last swept of what
 	// nothing holds (sweepSteps), by the events' time.
 	Swept time.Time
+	// Coord is coordination with the owner's laptop (coord.go): nil
+	// until a node reports or an overlap is logged.
+	Coord *CoordState
 
 	cfg *Config // its policies, read as each event is applied
 }
@@ -230,6 +233,11 @@ func (st *LogState) apply(e Event) {
 		if e.Node.Result != nil && e.Node.Result.Action == NodeDeployStep {
 			st.applyDeployResult(e)
 		}
+		st.applyNodeReport(e)
+		return
+	}
+	if e.Kind == KindLaptop {
+		st.applyLaptop(e)
 		return
 	}
 	if e.Kind == KindWorkItem {

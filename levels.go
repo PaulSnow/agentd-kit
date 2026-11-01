@@ -398,6 +398,10 @@ type RepoLevel struct {
 	// URL is the repository's page on its forge, "" when none is
 	// configured.
 	URL string `json:"url,omitempty"`
+	// Overlaps are the cards of the laptop's work that meets agentd's
+	// here, and Laptop the observing hosts' clones (coord.go).
+	Overlaps []LevelOverlap `json:"overlaps,omitempty"`
+	Laptop   []LevelLaptop  `json:"laptop,omitempty"`
 }
 
 // IssueLevel is level 3: an issue, what belongs to it, its open
@@ -798,6 +802,7 @@ func BuildRepoLevel(cfg *Config, st *LogState, repo string, decisions []UIDecisi
 	v := RepoLevel{Repository: repo, Tracked: indexed(cfg.Repositories[repo]) && cfg.Poll.Index, Issues: []LevelIssue{}, Requests: []LevelRequest{},
 		URL: webURL(cfg.Repositories[repo], 0, 0)}
 	v.Read = st.IndexRead[repo]
+	v.Overlaps, v.Laptop = repoOverlaps(st, repo), repoLaptops(cfg, st, repo, now)
 	busy := workingOn(cfg, st, repo)
 	secret := confidentialMatcher(cfg)
 	needs := map[string]bool{}
@@ -1221,6 +1226,8 @@ type HomeRow struct {
 	// URL is the repository's page on its forge, "" when none is
 	// configured.
 	URL string `json:"url,omitempty"`
+	// Overlaps counts the laptop's work that meets agentd's here.
+	Overlaps int `json:"overlaps,omitempty"`
 }
 
 // homeSentence says where the repositories stand together.
@@ -1274,7 +1281,7 @@ func homeSentence(rows []HomeRow) string {
 // BuildHomeRow is repo's row on the home page, from the fold.
 func BuildHomeRow(cfg *Config, st *LogState, repo string, decisions []UIDecision, now time.Time) HomeRow {
 	v := BuildRepoLevel(cfg, st, repo, decisions, now)
-	return HomeRow{Repository: repo, Tracked: v.Tracked, Listed: v.Tracked && !v.Read.IsZero(), Counts: v.Counts, Sentence: v.Sentence, URL: v.URL}
+	return HomeRow{Repository: repo, Tracked: v.Tracked, Listed: v.Tracked && !v.Read.IsZero(), Counts: v.Counts, Sentence: v.Sentence, URL: v.URL, Overlaps: len(v.Overlaps)}
 }
 
 // listedRepos is n repositories, in words.

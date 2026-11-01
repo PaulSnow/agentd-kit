@@ -48,6 +48,10 @@ type HubConfig struct {
 // so one node cannot report as another.
 type HostConfig struct {
 	TokenFile string `json:"token_file"`
+	// Observe marks a host agentd only watches, such as the owner's
+	// laptop: the hub sends it no clone, session or deploy command, and
+	// placement never chooses it.
+	Observe bool `json:"observe,omitempty"`
 }
 
 // NodeConfig is this machine's node: its host name, the hub's URL, its
@@ -73,6 +77,12 @@ type NodeConfig struct {
 	// steps the node may run; SSH the hosts it holds ssh access to (#67).
 	Deploy []string `json:"deploy,omitempty"`
 	SSH    []string `json:"ssh,omitempty"`
+	// Observe makes the node report only: it refuses every command,
+	// whatever the hub sends, so it never changes a checkout.
+	Observe bool `json:"observe,omitempty"`
+	// MoreRoots are other roots laid out as ReposRoot is, such as
+	// ~/go/src, scanned for the same repositories.
+	MoreRoots []string `json:"more_roots,omitempty"`
 }
 
 // Hub and node defaults.
@@ -103,6 +113,47 @@ type NodePayload struct {
 type NodeReport struct {
 	Clones   []CloneState `json:"clones"`
 	Sessions []TmuxState  `json:"sessions,omitempty"`
+	// Claude are the Claude Code sessions running on the machine, each
+	// by the clone or worktree it runs in; ClaudeError why they could not
+	// be read.
+	Claude      []ClaudeSession `json:"claude,omitempty"`
+	ClaudeError string          `json:"claude_error,omitempty"`
+	// Same says the node found everything as in its last report the hub
+	// holds, and sends nothing else: the host is seen, and the log does
+	// not grow by a whole report a tick.
+	Same bool `json:"same,omitempty"`
+}
+
+// reportHash is what a report says, for Same.
+func reportHash(r *NodeReport) string {
+	b, _ := json.Marshal(r)
+	return shortHash(HashPane(string(b)))
+}
+
+// ClaudeSession is a Claude Code process on a node: the repository whose
+// clone or worktree it runs in, the path there relative to the root it
+// was found under, its branch, and the worktree's changed paths when it
+// is not the clone itself. One that runs outside every watched clone is
+// Outside, and its directory is not reported.
+type ClaudeSession struct {
+	Repository string   `json:"repository,omitempty"`
+	Cwd        string   `json:"cwd,omitempty"`
+	Branch     string   `json:"branch,omitempty"`
+	Changed    []string `json:"changed,omitempty"`
+	Outside    bool     `json:"outside,omitempty"`
+}
+
+// LocalBranch is a local branch the forge has no branch of, as origin was
+// last fetched: its head and the paths it changes against the target.
+type LocalBranch struct {
+	Name  string   `json:"name"`
+	Head  string   `json:"head,omitempty"`
+	Paths []string `json:"paths,omitempty"`
+	// OnForge marks a branch the forge has, with commits it lacks: its
+	// paths are those commits'. NoBase says its paths could not be read
+	// (no origin/target as last fetched): it may hold anything.
+	OnForge bool `json:"on_forge,omitempty"`
+	NoBase  bool `json:"no_base,omitempty"`
 }
 
 // CloneState is one watched clone. Path is relative to the node's repos
@@ -123,7 +174,25 @@ type CloneState struct {
 	Behind     int      `json:"behind,omitempty"`
 	OpenState  []string `json:"open_state,omitempty"`
 	Error      string   `json:"error,omitempty"`
+	// Root is the extra root the clone was found under, "" for the repos
+	// root. Changed are the paths it holds changes on, staged, unstaged
+	// and untracked but not ignored; Unpushed the paths its branch's
+	// commits change that its upstream does not have; Local its branches
+	// the forge has none of. Truncated says paths were left out past
+	// nodePathsMax. Paths only: a node never reads a file.
+	Root      string        `json:"root,omitempty"`
+	Changed   []string      `json:"changed,omitempty"`
+	Unpushed  []string      `json:"unpushed,omitempty"`
+	Local     []LocalBranch `json:"local,omitempty"`
+	Truncated bool          `json:"truncated,omitempty"`
+	// Pushed are its local branches the forge has with nothing unpushed,
+	// as origin was last fetched.
+	Pushed []string `json:"pushed,omitempty"`
 }
+
+// nodePathsMax bounds the paths one clone reports, so a report stays
+// under nodeBodyMax.
+const nodePathsMax = 500
 
 // TmuxState is whether a session the hub placed here is running.
 type TmuxState struct {
@@ -176,6 +245,9 @@ type nodeReply struct {
 type NodeWatch struct {
 	Repository string `json:"repository"`
 	Path       string `json:"path"`
+	// Target is the branch the repository's requests go to, which a
+	// local branch's paths are read against.
+	Target string `json:"target,omitempty"`
 }
 
 // NodeCommand is something the hub's record allows a node to do.
@@ -218,12 +290,21 @@ func watchList(cfg *Config, host string) []NodeWatch {
 		r := cfg.Repositories[name]
 		for _, h := range r.CloneOn {
 			if h == host {
-				out = append(out, NodeWatch{Repository: name, Path: layoutPath(r)})
+				out = append(out, NodeWatch{Repository: name, Path: layoutPath(r), Target: repoTarget(r)})
 				break
 			}
 		}
 	}
 	return out
+}
+
+// repoTarget is the branch r's requests go to: its sessions' target, else
+// main.
+func repoTarget(r Repository) string {
+	if r.Sessions != nil && r.Sessions.Target != "" {
+		return r.Sessions.Target
+	}
+	return "main"
 }
 
 // NodeRecord is the hub's record of one host, folded from its events.
@@ -256,11 +337,15 @@ func (r *NodeRecord) apply(e Event) {
 	p := e.Node
 	r.Seq, r.LastAt = p.Seq, e.Time
 	switch {
+	case p.Report != nil && p.Report.Same:
+		r.ReportSeq = p.Seq // what it last reported stands
 	case p.Report != nil:
 		r.ReportSeq = p.Seq
 		r.Clones = map[string]CloneState{}
 		for _, c := range p.Report.Clones {
-			r.Clones[c.Repository] = c
+			if c.Root == "" { // a more root's clone is coordination's alone
+				r.Clones[c.Repository] = c
+			}
 		}
 		r.Sessions = map[string]TmuxState{}
 		for _, t := range p.Report.Sessions {
@@ -459,6 +544,9 @@ func (h *Hub) take(host string, events []NodePayload) (int, nodeReply) {
 		return http.StatusInternalServerError, nodeReply{Acked: rec.Seq, Error: "the hub could not read its log"}
 	}
 	for _, p := range events {
+		if p.Report != nil {
+			screenNodeReport(h.cfg, p.Report)
+		}
 		if p.Seq <= rec.Seq {
 			continue
 		}
@@ -483,7 +571,7 @@ func (h *Hub) take(host string, events []NodePayload) (int, nodeReply) {
 	}
 	h.places.settle(h.nodes)
 	reply := nodeReply{Acked: rec.Seq, Watch: watchList(h.cfg, host), Sessions: h.places.on(host), Error: msg}
-	if code == http.StatusOK {
+	if code == http.StatusOK && !h.cfg.Hosts[host].Observe {
 		reply.Commands = append(commands(h.cfg, rec, h.now()), h.places.commands(h.cfg, rec, h.now())...)
 		reply.Commands = append(reply.Commands, deployCommands(h.cfg, h.places.st, rec)...)
 	}
@@ -494,7 +582,7 @@ func (h *Hub) take(host string, events []NodePayload) (int, nodeReply) {
 // and a scan that changes nothing.
 type NodeGit interface {
 	Clone(ctx context.Context, url, dir string) error
-	Scan(dir string) (CloneState, error)
+	Scan(dir, target string) (CloneState, error)
 	AddWorktree(clone, dir, branch, target string, detach bool) error
 }
 
@@ -545,17 +633,25 @@ func (g ExecNodeGit) Clone(ctx context.Context, url, dir string) error {
 	return os.Rename(into, dir)
 }
 
-// Scan reads dir's branch, head, changes, stashes and distance from its
-// upstream. It takes none of git's optional locks, so not even the index
-// is refreshed. A directory that is not a checkout's top is no checkout.
-func (g ExecNodeGit) Scan(dir string) (CloneState, error) {
+// Scan reads dir's branch, head, changed paths, stashes, distance from
+// its upstream and the paths its unpushed commits change, and its local
+// branches origin has none of, with the paths each changes against
+// origin/target, as origin was last fetched: it never fetches. It takes
+// none of git's optional locks, so not even the index is refreshed, and
+// reads names only, never a file. A directory that is not a checkout's
+// top is no checkout.
+func (g ExecNodeGit) Scan(dir, target string) (CloneState, error) {
 	var c CloneState
-	run := func(args ...string) (string, error) {
+	raw := func(args ...string) (string, error) {
 		out, err := runTimed(g.Timeout, dir, append([]string{"GIT_OPTIONAL_LOCKS=0", "LC_ALL=C"}, gitEnv...), false, "git", append(append([]string{}, gitSafe...), args...)...)
 		if err != nil {
 			return "", fmt.Errorf("git %s in %s: %s", strings.Join(args, " "), dir, exitMessage(err))
 		}
-		return strings.TrimSpace(string(out)), nil
+		return string(out), nil
+	}
+	run := func(args ...string) (string, error) {
+		out, err := raw(args...)
+		return strings.TrimSpace(out), err
 	}
 	top, err := run("rev-parse", "--show-toplevel")
 	if err != nil {
@@ -572,11 +668,13 @@ func (g ExecNodeGit) Scan(dir string) (CloneState, error) {
 		c.Branch = "" // detached
 	}
 	c.Head, _ = run("rev-parse", "-q", "--verify", "HEAD")
-	status, err := run("status", "--porcelain=v1", "--untracked-files=normal")
+	status, err := raw("status", "--porcelain=v1", "-z", "--untracked-files=normal")
 	if err != nil {
 		return c, err
 	}
-	c.Dirty = countLines(status)
+	var entries int
+	c.Changed, entries = statusPaths(status)
+	c.Dirty = entries
 	stashes, err := run("stash", "list")
 	if err != nil {
 		return c, err
@@ -589,7 +687,129 @@ func (g ExecNodeGit) Scan(dir string) (CloneState, error) {
 			c.Ahead, _ = strconv.Atoi(f[1])
 		}
 	}
+	if c.Ahead > 0 {
+		if out, err := raw("diff", "--name-only", "-z", "@{upstream}...HEAD", "--"); err == nil {
+			c.Unpushed = nulPaths(out)
+		}
+	}
+	heads, err := run("for-each-ref", "--format=%(refname:short) %(objectname) %(upstream:short) %(upstream:track)", "refs/heads")
+	if err != nil {
+		return c, err
+	}
+	remotes, _ := run("for-each-ref", "--format=%(refname:short)", "refs/remotes/origin")
+	onForge := map[string]bool{}
+	for _, r := range strings.Fields(remotes) {
+		onForge[strings.TrimPrefix(r, "origin/")] = true
+	}
+	base := ""
+	if target != "" && plainBranch(target) && onForge[target] {
+		base = "refs/remotes/origin/" + target
+	}
+	for _, line := range strings.Split(heads, "\n") {
+		f := strings.SplitN(line, " ", 4)
+		if len(f) < 2 || !plainBranch(f[0]) {
+			continue
+		}
+		name, head, upstream, track := f[0], f[1], "", ""
+		if len(f) > 2 {
+			upstream = f[2]
+		}
+		if len(f) > 3 {
+			track = f[3]
+		}
+		if onForge[name] {
+			// On the forge: pushed, unless it has commits origin's
+			// branch lacks, which are then its paths.
+			ahead := strings.Contains(track, "ahead")
+			if upstream != "origin/"+name {
+				n, err := run("rev-list", "--count", "refs/remotes/origin/"+name+"..refs/heads/"+name)
+				ahead = err != nil || n != "0"
+			}
+			if !ahead {
+				c.Pushed = append(c.Pushed, name)
+				continue
+			}
+			b := LocalBranch{Name: name, Head: head, OnForge: true}
+			if out, err := raw("diff", "--name-only", "-z", "refs/remotes/origin/"+name+"...refs/heads/"+name, "--"); err == nil {
+				b.Paths = nulPaths(out)
+			} else {
+				b.NoBase = true
+			}
+			c.Local = append(c.Local, b)
+			continue
+		}
+		b := LocalBranch{Name: name, Head: head, NoBase: base == ""}
+		if base != "" {
+			if out, err := raw("diff", "--name-only", "-z", base+"..."+"refs/heads/"+name, "--"); err == nil {
+				b.Paths = nulPaths(out)
+			} else {
+				b.NoBase = true
+			}
+		}
+		c.Local = append(c.Local, b)
+	}
+	c.capPaths()
 	return c, nil
+}
+
+// statusPaths are the paths git status --porcelain=v1 -z names, a
+// rename's or copy's both, once each, and how many entries it has.
+func statusPaths(out string) ([]string, int) {
+	var paths []string
+	seen := map[string]bool{}
+	add := func(p string) {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			paths = append(paths, p)
+		}
+	}
+	fields := strings.Split(out, "\x00")
+	entries := 0
+	for i := 0; i < len(fields); i++ {
+		f := fields[i]
+		if len(f) < 4 {
+			continue
+		}
+		entries++
+		add(f[3:])
+		if x, y := f[0], f[1]; x == 'R' || x == 'C' || y == 'R' || y == 'C' {
+			if i+1 < len(fields) {
+				i++
+				add(fields[i])
+			}
+		}
+	}
+	return paths, entries
+}
+
+// nulPaths are the NUL-separated paths git printed.
+func nulPaths(out string) []string {
+	var paths []string
+	for _, p := range strings.Split(out, "\x00") {
+		if p = strings.TrimPrefix(p, "\n"); p != "" {
+			paths = append(paths, p)
+		}
+	}
+	return paths
+}
+
+// capPaths keeps at most nodePathsMax paths in all, marking the clone
+// Truncated when it left any out.
+func (c *CloneState) capPaths() {
+	left := nodePathsMax
+	cut := func(ps []string) []string {
+		if len(ps) > left {
+			c.Truncated = true
+			ps = ps[:left]
+		}
+		left -= len(ps)
+		return ps
+	}
+	c.Changed = cut(c.Changed)
+	c.Unpushed = cut(c.Unpushed)
+	for i := range c.Local {
+		c.Local[i].Paths = cut(c.Local[i].Paths)
+	}
 }
 
 func countLines(s string) int {
@@ -626,8 +846,12 @@ type Node struct {
 	width, height int
 	// run runs a release's step (#67).
 	run func(dir string, argv []string, timeout time.Duration) (int, string, error)
+	// claude lists the working directories of the Claude Code processes
+	// on the machine, nil to report none.
+	claude func() ([]string, error)
 
 	known   bool          // acked is the hub's: no post since has failed
+	held    string        // the hash of the latest whole report the hub holds
 	acked   int64         // the last of the host's events the hub holds
 	seq     int64         // the last number given to an event
 	pending []NodePayload // the events the hub does not hold, in order
@@ -685,7 +909,14 @@ func (n *Node) queueReport() {
 	}
 	n.pending = kept
 	n.renumber(n.acked)
-	n.queue(NodePayload{Report: &NodeReport{Clones: n.scan(), Sessions: n.scanSessions()}})
+	rep := &NodeReport{Clones: n.scan(), Sessions: n.scanSessions()}
+	if n.claude != nil {
+		rep.Claude, rep.ClaudeError = n.scanClaude(n.claude())
+	}
+	if n.known && n.held != "" && n.held == reportHash(rep) {
+		rep = &NodeReport{Same: true}
+	}
+	n.queue(NodePayload{Report: rep})
 }
 
 func (n *Node) queue(p NodePayload) {
@@ -708,6 +939,13 @@ func (n *Node) renumber(after int64) {
 // holds.
 func (n *Node) send(ctx context.Context) (nodeReply, error) {
 	reply, code, err := n.post(ctx, n.pending)
+	if code == http.StatusConflict && reply.Acked < n.acked {
+		// The hub holds less than it did: its log is not the one the
+		// last whole report went to, so a same report means nothing.
+		n.held = ""
+		n.acked = reply.Acked
+		n.queueReport()
+	}
 	if code == http.StatusConflict {
 		n.ack(reply.Acked)
 		n.renumber(reply.Acked)
@@ -727,11 +965,18 @@ func (n *Node) send(ctx context.Context) (nodeReply, error) {
 // ack records that the hub holds the host's events up to acked, and drops
 // them.
 func (n *Node) ack(acked int64) {
+	if acked < n.acked {
+		// The hub holds less than it did: a same report would stand on
+		// a report it no longer has.
+		n.held = ""
+	}
 	n.acked = acked
 	kept := n.pending[:0]
 	for _, p := range n.pending {
 		if p.Seq > acked {
 			kept = append(kept, p)
+		} else if p.Report != nil && !p.Report.Same {
+			n.held = reportHash(p.Report)
 		}
 	}
 	n.pending = kept
@@ -768,37 +1013,144 @@ func (n *Node) post(ctx context.Context, events []NodePayload) (nodeReply, int, 
 	return reply, resp.StatusCode, nil
 }
 
-// scan is the state of each watched clone.
+// scan is the state of each watched clone: under the repos root, always,
+// and under each more root where one is.
 func (n *Node) scan() []CloneState {
 	out := make([]CloneState, 0, len(n.watch))
 	for _, w := range n.watch {
-		c := CloneState{Repository: w.Repository, Path: w.Path}
-		dir, err := n.local(w.Path)
-		if err != nil {
-			c.Error = err.Error()
-			out = append(out, c)
-			continue
-		}
-		if _, err := os.Lstat(dir); err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				c.Exists, c.Error = true, err.Error()
-			}
-			out = append(out, c)
-			continue
-		}
-		s, err := n.git.Scan(dir)
-		s.Repository, s.Path, s.Exists = w.Repository, w.Path, true
-		if err != nil {
-			s.Error = err.Error()
-		}
-		for _, o := range n.cfg.OpenState {
-			if _, err := os.Lstat(filepath.Join(dir, o)); err == nil {
-				s.OpenState = append(s.OpenState, o)
+		out = append(out, n.scanAt(w, n.cfg.ReposRoot, ""))
+		for _, root := range n.cfg.MoreRoots {
+			if dir, err := n.localAt(root, w.Path); err == nil {
+				if _, err := os.Lstat(dir); err == nil {
+					out = append(out, n.scanAt(w, root, root))
+				}
 			}
 		}
-		out = append(out, s)
 	}
 	return out
+}
+
+// scanAt is the state of w's clone under root, labelled label.
+func (n *Node) scanAt(w NodeWatch, root, label string) CloneState {
+	c := CloneState{Repository: w.Repository, Path: w.Path, Root: label}
+	dir, err := n.localAt(root, w.Path)
+	if err != nil {
+		c.Error = err.Error()
+		return c
+	}
+	if _, err := os.Lstat(dir); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			c.Exists, c.Error = true, err.Error()
+		}
+		return c
+	}
+	s, err := n.git.Scan(dir, w.Target)
+	s.Repository, s.Path, s.Exists, s.Root = w.Repository, w.Path, true, label
+	if err != nil {
+		s.Error = err.Error()
+	}
+	for _, o := range n.cfg.OpenState {
+		if _, err := os.Lstat(filepath.Join(dir, o)); err == nil {
+			s.OpenState = append(s.OpenState, o)
+		}
+	}
+	return s
+}
+
+// scanClaude maps each Claude Code process's directory to the watched
+// clone it is in, or to a worktree of one, with its branch; a directory
+// in none is reported as outside, without the directory.
+func (n *Node) scanClaude(cwds []string, err error) ([]ClaudeSession, string) {
+	if err != nil {
+		return nil, err.Error()
+	}
+	var out []ClaudeSession
+	seen := map[string]bool{}
+	for _, cwd := range cwds {
+		if seen[cwd] {
+			continue
+		}
+		seen[cwd] = true
+		out = append(out, n.claudeAt(cwd))
+	}
+	return out, ""
+}
+
+func (n *Node) claudeAt(cwd string) ClaudeSession {
+	roots := append([]string{n.cfg.ReposRoot}, n.cfg.MoreRoots...)
+	top, common := gitDirs(cwd)
+	for _, w := range n.watch {
+		for _, root := range roots {
+			clone, err := n.localAt(root, w.Path)
+			if err != nil {
+				continue
+			}
+			inClone := underDir(clone, cwd)
+			if !inClone && (common == "" || !underDir(filepath.Join(clone, ".git"), common)) {
+				continue
+			}
+			c := ClaudeSession{Repository: w.Repository}
+			if rel, err := filepath.Rel(root, cwd); err == nil && filepath.IsLocal(rel) {
+				c.Cwd = rel
+			}
+			if top != "" {
+				if s, err := n.git.Scan(top, w.Target); err == nil {
+					c.Branch = s.Branch
+					if same, _ := sameDir(top, clone); !same {
+						c.Changed = s.Changed
+					}
+				}
+			}
+			return c
+		}
+	}
+	return ClaudeSession{Outside: true}
+}
+
+// gitDirs are the top of the checkout dir is in and its common git
+// directory, both absolute, or "" outside any; read-only.
+func gitDirs(dir string) (string, string) {
+	out, err := runTimed(10*time.Second, dir, append([]string{"GIT_OPTIONAL_LOCKS=0", "LC_ALL=C"}, gitEnv...), false, "git",
+		append(append([]string{}, gitSafe...), "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir")...)
+	if err != nil {
+		return "", ""
+	}
+	f := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(f) != 2 {
+		return "", ""
+	}
+	return f[0], f[1]
+}
+
+// underDir says whether path is dir or under it.
+func underDir(dir, path string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(path))
+	return err == nil && (rel == "." || filepath.IsLocal(rel))
+}
+
+// procClaude lists the working directories of the processes named claude,
+// from /proc: Linux only.
+func procClaude() ([]string, error) {
+	ents, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, fmt.Errorf("the Claude Code sessions are read from /proc, which this host has not: %w", err)
+	}
+	var out []string
+	for _, e := range ents {
+		if _, err := strconv.Atoi(e.Name()); err != nil {
+			continue
+		}
+		pid := filepath.Join("/proc", e.Name())
+		comm, _ := os.ReadFile(filepath.Join(pid, "comm"))
+		exe, _ := os.Readlink(filepath.Join(pid, "exe"))
+		if strings.TrimSpace(string(comm)) != "claude" && filepath.Base(exe) != "claude" {
+			continue
+		}
+		if cwd, err := os.Readlink(filepath.Join(pid, "cwd")); err == nil {
+			out = append(out, cwd)
+		}
+	}
+	return out, nil
 }
 
 // scanSessions is whether each session the hub placed here runs.
@@ -820,11 +1172,14 @@ func (n *Node) scanSessions() []TmuxState {
 
 // local is a layout path under the node's root, refusing one that would
 // leave it.
-func (n *Node) local(rel string) (string, error) {
+func (n *Node) local(rel string) (string, error) { return n.localAt(n.cfg.ReposRoot, rel) }
+
+// localAt is a layout path under root, refusing one that would leave it.
+func (n *Node) localAt(root, rel string) (string, error) {
 	if rel == "" || filepath.IsAbs(rel) || !filepath.IsLocal(rel) {
 		return "", fmt.Errorf("path %q is not inside the repos root", rel)
 	}
-	return filepath.Join(n.cfg.ReposRoot, rel), nil
+	return filepath.Join(root, rel), nil
 }
 
 // do carries out one command, if it is safe: a clone, of a repository the
@@ -835,6 +1190,9 @@ func (n *Node) do(ctx context.Context, c NodeCommand) *NodeResult {
 	refuse := func(why string) *NodeResult {
 		r.Outcome, r.Error = NodeRefused, why
 		return r
+	}
+	if n.cfg.Observe {
+		return refuse("the node only observes: it does nothing the hub sends")
 	}
 	switch c.Action {
 	case NodeSessionStart:
@@ -847,11 +1205,7 @@ func (n *Node) do(ctx context.Context, c NodeCommand) *NodeResult {
 	default:
 		return refuse("the node does no " + c.Action)
 	}
-	watched := false
-	for _, w := range n.watch {
-		watched = watched || w == NodeWatch{Repository: c.Repository, Path: c.Path}
-	}
-	if !watched {
+	if !n.watches(c.Repository, c.Path) {
 		return refuse("the node does not watch " + c.Repository + " at " + c.Path)
 	}
 	dir, err := n.local(c.Path)
@@ -940,6 +1294,9 @@ func cloneText(c CloneState) string {
 	if len(c.OpenState) > 0 {
 		parts = append(parts, "open "+strings.Join(c.OpenState, ","))
 	}
+	if len(c.Local) > 0 {
+		parts = append(parts, fmt.Sprintf("local %d", len(c.Local)))
+	}
 	if len(parts) == 0 {
 		return "clean"
 	}
@@ -991,6 +1348,9 @@ func (c *Config) checkNodeConfig(path func(field, p string) string, errs *[]erro
 				*errs = append(*errs, fmt.Errorf("repositories.%s.clone_on: %q is not in hosts", name, h))
 			}
 		}
+		if sp := c.Repositories[name].Sessions; sp != nil && sp.Host != "" && c.Hosts[sp.Host].Observe {
+			*errs = append(*errs, fmt.Errorf("repositories.%s.sessions.host %q only observes: agentd places nothing on it", name, sp.Host))
+		}
 	}
 	n := &c.Node
 	if n.Every.Duration <= 0 || n.CloneTimeout.Duration <= 0 {
@@ -999,6 +1359,9 @@ func (c *Config) checkNodeConfig(path func(field, p string) string, errs *[]erro
 	c.checkPlacement(errs)
 	n.TokenFile = path("node.token_file", n.TokenFile)
 	n.ReposRoot = path("node.repos_root", n.ReposRoot)
+	for i, r := range n.MoreRoots {
+		n.MoreRoots[i] = path(fmt.Sprintf("node.more_roots[%d]", i), r)
+	}
 	if n.SessionsRoot != "" {
 		n.SessionsRoot = path("node.sessions_root", n.SessionsRoot)
 	}
@@ -1074,6 +1437,7 @@ func nodeCmd(args []string) error {
 	n := NewNode(nc, string(tok), ExecNodeGit{Timeout: cfg.Timeouts.Forge.Duration, CloneTimeout: nc.CloneTimeout.Duration},
 		ExecTmux{Timeout: cfg.Timeouts.Tmux.Duration}, &http.Client{Timeout: time.Minute}, time.Now)
 	n.width, n.height = cfg.Policies.Restart.Width, cfg.Policies.Restart.Height
+	n.claude = procClaude
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	for {

@@ -357,6 +357,17 @@ func (src *uiSource) answer(session string, a AnswerPayload) error {
 	return RecordAnswer(src.log, src.st, time.Now(), session, a)
 }
 
+// coordChoice records the owner's choice on an open overlap, checked
+// against the overlap as the log holds it now.
+func (src *uiSource) coordChoice(key, choice string) error {
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	if err := src.catchUp(); err != nil {
+		return err
+	}
+	return RecordCoordChoice(src.log, src.st, src.clock(), key, choice)
+}
+
 // deadline records the owner's deadline on one of session's open
 // decisions, checked against the decision as the log holds it now.
 func (src *uiSource) deadline(session, id string, at time.Time) error {
@@ -531,6 +542,7 @@ func (u *UI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	get := r.Method == http.MethodGet || r.Method == http.MethodHead
 	posts := map[string]func(http.ResponseWriter, *http.Request){
 		"/seen": u.serveSeen, "/answer": u.serveAnswer, "/deadline": u.serveDeadline, "/reply": u.serveReply, "/respond": u.serveRespond,
+		"/coord": u.serveCoord,
 	}
 	switch {
 	case path == "/ui.css" || path == "/ui.js":
@@ -991,6 +1003,28 @@ func (u *UI) serveDeadline(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := src.deadline(session, id, at); err != nil {
 		http.Error(w, "the deadline was not recorded: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	u.back(w, r)
+}
+
+// serveCoord records the owner's choice on an overlap's card: hold, go
+// on, or the laptop work is the item.
+func (u *UI) serveCoord(w http.ResponseWriter, r *http.Request) {
+	if !u.checkPost(w, r) {
+		return
+	}
+	src := u.postSource(w, r)
+	if src == nil {
+		return
+	}
+	key, choice := strings.TrimSpace(r.PostForm.Get("key")), strings.TrimSpace(r.PostForm.Get("choice"))
+	if key == "" || choice == "" {
+		http.Error(w, "name the overlap and the choice", http.StatusBadRequest)
+		return
+	}
+	if err := src.coordChoice(key, choice); err != nil {
+		http.Error(w, "the choice was not recorded: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	u.back(w, r)

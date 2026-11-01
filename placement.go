@@ -260,7 +260,7 @@ func (n *Node) stopSession(c NodeCommand, r *NodeResult, refuse func(string) *No
 // watches says whether the hub has the node watch repo at path.
 func (n *Node) watches(repo, path string) bool {
 	for _, w := range n.watch {
-		if w == (NodeWatch{Repository: repo, Path: path}) {
+		if w.Repository == repo && w.Path == path {
 			return true
 		}
 	}
