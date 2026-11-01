@@ -30,7 +30,7 @@ or asleep shows "laptop: last seen <time>".
 2. In `~/.config/agentd-kit/coord-live.json`, add the hub on the tailnet
    IP, the hosts, and the laptop to each repository it should watch:
 
-       "hub": {"address": "100.64.0.1:8737", "silent_after": "10m", "retry_after": "30m"},
+       "hub": {"address": "HUB_ADDRESS:8737", "silent_after": "10m", "retry_after": "30m"},
        "hosts": {
          "buildhost": {"token_file": "~/.config/agentd-kit/hub-buildhost.token"},
          "laptop": {"token_file": "~/.config/agentd-kit/hub-laptop.token", "observe": true}
@@ -39,6 +39,9 @@ or asleep shows "laptop: last seen <time>".
          "staking": {..., "clone_on": ["laptop"]},
          "agentd-kit": {..., "clone_on": ["laptop"]}
        }
+
+   `HUB_ADDRESS` stands for the build host's tailnet address (as
+   `tailscale ip -4` prints it there).
 
    `observe: true` means the hub sends the laptop no clone, session or
    deploy command, and no repository may place its sessions there.
@@ -56,7 +59,7 @@ or asleep shows "laptop: last seen <time>".
        {
          "node": {
            "name": "laptop",
-           "hub": "http://100.64.0.1:8737",
+           "hub": "http://HUB_ADDRESS:8737",
            "token_file": "~/.config/agentd/hub.token",
            "repos_root": "~/repos",
            "more_roots": ["~/go/src"],
@@ -65,6 +68,7 @@ or asleep shows "laptop: last seen <time>".
          }
        }
 
+   `HUB_ADDRESS` is the build host's tailnet address, as above.
    Clones are found at `<root>/<forge host>/<project>`, as
    `~/repos/gitlab.com/accumulatenetwork/core/staking`.
 
