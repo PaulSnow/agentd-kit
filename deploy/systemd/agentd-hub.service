@@ -1,0 +1,20 @@
+# agentd hub on the build host, beside the coord-live supervisor: it reads
+# and appends the same event log, from the same config, so the supervisor
+# sees the laptop's reports. It listens on the build host's tailnet IP
+# alone (hub.address).
+#
+#   cp deploy/systemd/agentd-hub.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now agentd-hub
+[Unit]
+Description=agentd hub: takes the nodes' reports into the coord-live log
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/agentd hub -config %h/.config/agentd-kit/coord-live.json
+Restart=on-failure
+RestartSec=30s
+
+[Install]
+WantedBy=default.target

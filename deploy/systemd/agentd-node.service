@@ -1,0 +1,22 @@
+# agentd node on the owner's laptop (W8510403e, on #29): a systemd user
+# service that reports the laptop's clones and Claude Code sessions to the
+# hub over the tailnet. The node asks; the hub never connects to it. With
+# "observe": true in node.json it refuses every command, so it never
+# changes a checkout.
+#
+#   cp deploy/systemd/agentd-node.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now agentd-node
+#   loginctl enable-linger "$USER"
+[Unit]
+Description=agentd node (observe only): reports this machine's clones to the hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/go/bin/agentd node -config %h/.config/agentd/node.json
+Restart=on-failure
+RestartSec=30s
+
+[Install]
+WantedBy=default.target

@@ -63,9 +63,12 @@ type Supervisor struct {
 	// read it, shared by the loop and its workers.
 	status *statusCopies
 	usage  *usageReader
-	api    ForgeAPI    // the forges' APIs for the poll, or nil for none
-	rel    *releaseRun // the release driver's reads (#67)
-	idx    *indexRun   // the issue index's reads (#69)
+	api    ForgeAPI // the forges' APIs for the poll, or nil for none
+	// worktreePaths reads the paths a session's worktree changes, for
+	// coordination with the laptop (coord.go); nil runs git.
+	worktreePaths func(dir, target string) []string
+	rel           *releaseRun // the release driver's reads (#67)
+	idx           *indexRun   // the issue index's reads (#69)
 	// live is each repository's issue list as last read, shared by the
 	// loop and its workers (#62).
 	live *liveIssues
@@ -514,6 +517,8 @@ func (s *Supervisor) Pass() error {
 		s.pollForges(s.clock.Now())
 		s.driveReleases(s.clock.Now())
 		s.readIndexes(s.clock.Now())
+		s.readRequestFiles(s.clock.Now())
+		s.coordinate(s.clock.Now())
 		s.watchCI(s.clock.Now())
 		s.mergeGreen(s.clock.Now())
 		s.runLoops(s.clock.Now())
@@ -557,7 +562,8 @@ func (s *Supervisor) ownerRecords() {
 		shared := e.Kind == KindSeen || e.Kind == KindInstruction || e.Kind == KindAttachment || e.Kind == KindAccount || e.Kind == KindTriage || e.Kind == KindError && e.Error.Triage != nil ||
 			e.Kind == KindItem && s.st.itemChanged(*e.Item) || e.Kind == KindCase && e.Mode == ModeOwner ||
 			e.Kind == KindLoop && e.Mode == ModeOwner || e.Kind == KindOps && e.Ops.Step == OpsProposed ||
-			e.Kind == KindRelease && e.Mode == ModeOwner || e.Kind == KindNode && e.Node.Result != nil && e.Node.Result.Action == NodeDeployStep
+			e.Kind == KindRelease && e.Mode == ModeOwner || e.Kind == KindNode && e.Node.Result != nil && e.Node.Result.Action == NodeDeployStep ||
+			e.Kind == KindNode && e.Node.Report != nil || e.Kind == KindLaptop && e.Mode == ModeOwner
 		if e.Session == "" && shared {
 			s.st.apply(e)
 			continue

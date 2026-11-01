@@ -44,8 +44,8 @@ func (g *fakeNodeGit) Clone(_ context.Context, url, dir string) error {
 	return nil
 }
 
-func (g *fakeNodeGit) Scan(dir string) (CloneState, error) {
-	return ExecNodeGit{Timeout: 10 * time.Second}.Scan(dir)
+func (g *fakeNodeGit) Scan(dir, target string) (CloneState, error) {
+	return ExecNodeGit{Timeout: 10 * time.Second}.Scan(dir, target)
 }
 
 // hubHarness is a hub on a test server and the nodes that report to it,
@@ -587,17 +587,17 @@ func TestExecNodeGitClonesAndScans(t *testing.T) {
 	if err := g.Clone(context.Background(), origin, dst); err != nil {
 		t.Fatal(err)
 	}
-	c, err := g.Scan(dst)
+	c, err := g.Scan(dst, "")
 	if err != nil || !c.Git || c.Dirty != 0 || len(c.Head) != 40 || c.Branch == "" {
 		t.Fatalf("scan: %+v, %v", c, err)
 	}
 	writeFile(t, filepath.Join(dst, "a"), "b\n")
-	if c, _ := g.Scan(dst); c.Dirty != 1 {
+	if c, _ := g.Scan(dst, ""); c.Dirty != 1 {
 		t.Fatalf("dirty: %+v", c)
 	}
 	plain := filepath.Join(root, "plain")
 	os.MkdirAll(plain, 0o755)
-	if c, err := g.Scan(plain); err != nil || c.Git {
+	if c, err := g.Scan(plain, ""); err != nil || c.Git {
 		t.Fatalf("a directory that is no checkout: %+v, %v", c, err)
 	}
 }

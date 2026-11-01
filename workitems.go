@@ -969,6 +969,11 @@ func (s *Supervisor) assignItem(it *WorkItem, now time.Time) {
 		return
 	}
 	branch := fmt.Sprintf("owner/%s-%s-%d", itemSlug(it.Title), strings.ToLower(it.ID), len(it.Tried)+1)
+	// The owner said the laptop's branch is this item's work: once it is
+	// pushed, the item's session continues it.
+	if b := linkedBranch(s.cfg, s.st, it.ID); b != "" {
+		branch = b
+	}
 	name := runtimeName(repo, branch, KindWork)
 	why := s.startRuntime(repo, name, RuntimePayload{Kind: KindWork, Branch: branch, Issue: it.Issue, Owner: it.Instruction, Item: it.ID})
 	if s.halt != nil {
