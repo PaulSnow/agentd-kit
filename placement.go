@@ -313,6 +313,7 @@ func RemoteSessionStatus(cfg *Config, events []Event, now time.Time) []SessionRo
 		if rec != nil {
 			t = rec.Sessions[name]
 		}
+		asked := p.st.StartedAt[name]
 		switch {
 		case rec == nil:
 			row.State = NodeUnknown
@@ -329,6 +330,10 @@ func RemoteSessionStatus(cfg *Config, events []Event, now time.Time) []SessionRo
 			row.State = SessionGone
 		case last.Command == startID(name, r) && last.Outcome != NodeDone:
 			row.State, row.Error = SessionFailed, last.Error
+		case !t.Alive && !asked.IsZero() && now.Sub(asked) > cfg.Hub.SilentAfter.Duration && rec.ReportAt.After(asked):
+			// The start was asked long enough ago to have been done, and
+			// the node's report since runs no tmux session of the name.
+			row.State, row.Error = SessionGone, "gone since "+rec.ReportAt.UTC().Format(time.RFC3339)+": the node's report runs no tmux session of the name"
 		default:
 			row.State = SessionStarting
 		}

@@ -230,6 +230,10 @@ func (src *uiSource) needs(cfg *Config, rep Report, asked map[string]time.Time) 
 			if t == nil || t.State == Done {
 				continue
 			}
+			// A session no longer supervised waits on no one.
+			if shown, _ := src.st.shownState(c.Session, t, rep.WrittenAt); shown == Gone {
+				continue
+			}
 			kind := ""
 			switch {
 			case t.Stopped != "":
@@ -1187,7 +1191,7 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 					Text: n.Text, Entry: needEntry(n.Session, n.Kind)}, Src: src.Name}, Need: &n, Quick: quickWords("need")})
 			}
 			if !src.echo {
-				for _, p := range src.panels(cfg, repo, needs, secret) {
+				for _, p := range src.panels(cfg, repo, needs, secret, now) {
 					p.Status = statusGraph(src.st.Tracks[p.Name], cfg.Jobs.Status.every(), now, u.loc, secret)
 					if p.Status != nil {
 						v.StatusTokens += p.Status.Tokens
@@ -1346,7 +1350,7 @@ func (src *uiSource) messageView(cfg *Config, m uiMessage, now time.Time, secret
 // panels are the sessions of src that console repo shows: a repository's,
 // or those a console without one takes; each with what it does now, read
 // from its transcript, and its last reply.
-func (src *uiSource) panels(cfg *Config, repo string, needs []uiNeed, secret func(...string) bool) []uiPanel {
+func (src *uiSource) panels(cfg *Config, repo string, needs []uiNeed, secret func(...string) bool, now time.Time) []uiPanel {
 	var out []uiPanel
 	for _, name := range cfg.SessionNames() {
 		sess := cfg.Sessions[name]
@@ -1356,7 +1360,8 @@ func (src *uiSource) panels(cfg *Config, repo string, needs []uiNeed, secret fun
 		p := uiPanel{Src: src.Name, Name: name, Kind: sess.Kind, State: "unknown"}
 		t := src.st.Tracks[name]
 		if t != nil && t.State != "" {
-			p.State, p.Since = string(t.State), t.Since
+			shown, _ := src.st.shownState(name, t, now)
+			p.State, p.Since = string(shown), t.Since
 		}
 		// A finished session takes no message: one addressed to it fails.
 		if sess.Role == "" && src.st.Mode == ModeLive && (t == nil || t.State != Done) {
@@ -1487,8 +1492,14 @@ func (u *UI) sessionView(src *uiSource, name string, now time.Time) (*uiSessionP
 			}
 		}
 	}
-	if !secret(t.Reason) {
-		v.Reason = t.Reason
+	shown, why := src.st.shownState(name, t, now)
+	if shown == Gone || shown == Stale {
+		// The meta line says gone or stale since when: the reason keeps
+		// what it was last seen as.
+		_, why, _ = strings.Cut(why, "; ")
+	}
+	if !secret(why) {
+		v.Reason = why
 	}
 	var turns []TurnRecord
 	for _, tr := range t.Turns {

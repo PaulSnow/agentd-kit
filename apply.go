@@ -20,12 +20,15 @@ type LogState struct {
 	Pending map[string]Event // intents with no outcome yet, by intent id
 	Started time.Time
 	Stopped time.Time
-	Events  int                   // events of this mode, the owner's and the shared ones, applied
-	Last    time.Time             // the latest time of those events
-	Items   map[string]*Item      // new items by id, and whether the owner saw them
-	Cursors map[string]time.Time  // how far each source of items has been read
-	Polls   map[string]PollRecord // each forge source's latest poll record
-	Cases   map[string]*Case      // each case by id
+	// StopReason is why the run stopped: "once" for a --once run, whose
+	// next run comes on its own, so its sessions are not stale for it.
+	StopReason string
+	Events     int                   // events of this mode, the owner's and the shared ones, applied
+	Last       time.Time             // the latest time of those events
+	Items      map[string]*Item      // new items by id, and whether the owner saw them
+	Cursors    map[string]time.Time  // how far each source of items has been read
+	Polls      map[string]PollRecord // each forge source's latest poll record
+	Cases      map[string]*Case      // each case by id
 	// Instructions are the owner's console instructions, by id.
 	Instructions map[string]*Instruction
 	// Ops are the changes proposed on the ops console (#63), by id.
@@ -253,9 +256,12 @@ func (st *LogState) apply(e Event) {
 		case KindFeed:
 			st.applyFeed(e)
 		case KindStart:
-			st.Started, st.Stopped = e.Time, time.Time{}
+			st.Started, st.Stopped, st.StopReason = e.Time, time.Time{}, ""
 		case KindStop:
-			st.Stopped = e.Time
+			st.Stopped, st.StopReason = e.Time, ""
+			if e.Stop != nil {
+				st.StopReason = e.Stop.Reason
+			}
 		case KindItem:
 			// An item is one however often it is seen: the first sighting's
 			// time stands, and so does the owner's having seen it. A

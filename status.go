@@ -104,7 +104,8 @@ func summarizeState(cfg *Config, st *LogState, now time.Time) ([]SessionStatus, 
 	}
 	out := make([]SessionStatus, 0, len(tracks))
 	for name, t := range tracks {
-		r := SessionStatus{Name: name, State: t.State, Since: t.Since, LastSeen: t.LastSeen, Head: t.Head, Reason: t.Reason,
+		state, reason := st.shownState(name, t, now)
+		r := SessionStatus{Name: name, State: state, Since: t.Since, LastSeen: t.LastSeen, Head: t.Head, Reason: reason,
 			Restarts: t.RestartCount, Nudges: t.NudgeCount, Escalations: t.Escalations, Delivered: t.DeliveredRefs,
 			Would: t.Would, Errors: t.Errors, GaveUp: t.GaveUp, CutShort: append(append([]string(nil), t.CutShort...), pending[name]...),
 			Context: -1, Spend: -1, Guessed: t.guessed(), Rotations: t.Rotations, Stopped: t.Stopped}

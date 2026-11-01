@@ -93,7 +93,7 @@ h4 { font-size: var(--size-s); color: var(--muted); margin: var(--space-3) 0 var
 
 .badge { display: inline-block; padding: 0 var(--space-2); border-radius: 1em; background: var(--chip-bg); color: var(--muted); font-size: var(--size-s); white-space: nowrap; }
 .badge.alert, .kind-decision, .kind-blocked, .kind-crash-looping, .kind-failed, .state-blocked-on-owner, .state-crash-looping, .state-failed, .ci-failed { background: var(--alert-bg); color: var(--alert); }
-.kind-usage-limited, .kind-stopped, .kind-account, .state-usage-limited, .state-stopped, .state-idle, .ci-pending, .mode-shadow { background: var(--warn-bg); color: var(--warn); }
+.kind-usage-limited, .kind-stopped, .kind-account, .state-usage-limited, .state-stopped, .state-stale, .state-idle, .ci-pending, .mode-shadow { background: var(--warn-bg); color: var(--warn); }
 .state-working, .state-starting, .ci-success, .mode-live { background: var(--ok-bg); color: var(--ok); }
 .state-done { background: var(--info-bg); color: var(--accent); }
 
@@ -197,7 +197,7 @@ body:has(.console) > .foot { display: none; }
 .dot { display: inline-block; width: .6rem; height: .6rem; border-radius: 50%; padding: 0; flex: none; }
 .dot { background: var(--muted); }
 .dot.state-working, .dot.state-starting { background: var(--ok); }
-.dot.state-idle, .dot.state-usage-limited, .dot.state-stopped { background: var(--warn); }
+.dot.state-idle, .dot.state-usage-limited, .dot.state-stopped, .dot.state-stale { background: var(--warn); }
 .dot.state-blocked-on-owner, .dot.state-crash-looping, .dot.state-failed { background: var(--alert); }
 .dot.state-done { background: var(--accent); }
 .spark { display: none; position: absolute; top: 100%; left: 0; z-index: 10; width: min(20rem, 90vw); margin-top: var(--space-1); padding: var(--space-2); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 4px 12px rgb(0 0 0 / .15); font-size: var(--size-s); white-space: normal; }

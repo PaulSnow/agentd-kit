@@ -788,6 +788,12 @@ func (s *Supervisor) crash(name string, t *Track, c Crash, restartError bool) {
 	s.emit(name, Event{Kind: KindCrash, Crash: &p})
 }
 
+// observeHeartbeat is how long an unchanged observation goes unlogged:
+// one is logged again once the last is older, so a quiet session agentd
+// still observes moves its LastSeen, and the views can tell it from a
+// stale one (shownState).
+const observeHeartbeat = 30 * time.Minute
+
 func (s *Supervisor) logObserve(name string, t *Track, ev Evidence, state State, reason string, now time.Time) {
 	o := ObservePayload{
 		State:     string(state),
@@ -820,7 +826,7 @@ func (s *Supervisor) logObserve(name string, t *Track, ev Evidence, state State,
 		n := t.restartsInWindow(now, s.cfg.Policies.Restart.Window.Duration)
 		o.Restarts = &n
 	}
-	if t.LastObs != nil && sameObservation(*t.LastObs, o) {
+	if t.LastObs != nil && sameObservation(*t.LastObs, o) && now.Sub(t.LastSeen) < observeHeartbeat {
 		return
 	}
 	logged := o

@@ -131,6 +131,9 @@ func (st *LogState) applySession(e Event) {
 		if r, ok := st.Runtime[e.Session]; ok {
 			delete(st.Runtime, e.Session)
 			delete(st.StartedAt, e.Session)
+			if t := st.Tracks[e.Session]; t != nil {
+				t.EndedAt = e.Time
+			}
 			// A session on another host is stopped by its node, which the
 			// hub asks (placement.go), not here.
 			if r.Host == "" {
