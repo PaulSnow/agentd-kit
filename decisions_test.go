@@ -336,7 +336,7 @@ func TestQuestionsFileReservedIDs(t *testing.T) {
 func TestUIDecisionTypesAndDeadline(t *testing.T) {
 	h, _ := mcpHarness(t)
 	many := mustRaise(t, h, decisionArgs(DecisionChooseMany, "Which platforms should it ship on?", map[string]any{"options": options("Linux", "Mac"), "default": "a,b",
-		"deadline": "2026-11-01T12:00:00Z"}))
+		"deadline": "2030-11-01T12:00:00Z"}))
 	number := mustRaise(t, h, decisionArgs(DecisionNumber, "How many spins per second?", map[string]any{"limits": map[string]any{"min": 1, "max": 5}}))
 	date := mustRaise(t, h, decisionArgs(DecisionDate, "When should it ship?", nil))
 	h.alive("s1", "working")
@@ -344,7 +344,7 @@ func TestUIDecisionTypesAndDeadline(t *testing.T) {
 	u := harnessUI(t, h)
 	body := owner(t, u, "/")
 	for _, want := range []string{`type="checkbox" name="choices" value="a"`, `type="number" name="value" aria-label="Your answer" min="1" max="5"`, `type="date" name="value"`,
-		`action="/deadline"`, "suggests 2026-11-01", "<dt>If wrong</dt><dd>A second release"} {
+		`action="/deadline"`, "suggests 2030-11-01", "<dt>If wrong</dt><dd>A second release"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("page lacks %q", want)
 		}
@@ -352,16 +352,16 @@ func TestUIDecisionTypesAndDeadline(t *testing.T) {
 	if strings.Index(body, "A second release") > strings.Index(body, `name="choices"`) {
 		t.Error("the controls come before the decision")
 	}
-	if w := ownerPost(u, "/deadline", url.Values{"src": {"main"}, "session": {"s1"}, "id": {many}, "deadline": {"2026-11-01T12:00:00Z"}}); w.Code != http.StatusSeeOther {
+	if w := ownerPost(u, "/deadline", url.Values{"src": {"main"}, "session": {"s1"}, "id": {many}, "deadline": {"2030-11-01T12:00:00Z"}}); w.Code != http.StatusSeeOther {
 		t.Fatalf("deadline: %d %s", w.Code, w.Body.String())
 	}
 	if w := ownerPost(u, "/deadline", url.Values{"src": {"main"}, "session": {"s1"}, "id": {many}, "deadline": {"soon"}}); w.Code != http.StatusBadRequest {
 		t.Fatalf("unreadable deadline: %d", w.Code)
 	}
-	if w := postTo(u, "/deadline", "", u.token, url.Values{"src": {"main"}, "session": {"s1"}, "id": {many}, "deadline": {"2026-11-01T12:00:00Z"}}, "192.0.2.20:51000"); w.Code != http.StatusForbidden {
+	if w := postTo(u, "/deadline", "", u.token, url.Values{"src": {"main"}, "session": {"s1"}, "id": {many}, "deadline": {"2030-11-01T12:00:00Z"}}, "192.0.2.20:51000"); w.Code != http.StatusForbidden {
 		t.Fatalf("no origin: %d", w.Code)
 	}
-	if dl, ok := h.logState().Tracks["s1"].Deadlines[many]; !ok || !dl.At.Equal(time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)) {
+	if dl, ok := h.logState().Tracks["s1"].Deadlines[many]; !ok || !dl.At.Equal(time.Date(2030, 11, 1, 12, 0, 0, 0, time.UTC)) {
 		t.Fatalf("deadline %+v", dl)
 	}
 	for _, form := range []url.Values{
