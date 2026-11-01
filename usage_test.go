@@ -543,3 +543,119 @@ func TestFallbackNamesAnAccount(t *testing.T) {
 		t.Fatalf("an empty fallback: %v", err)
 	}
 }
+
+// serveRecorded serves a recorded answer of testdata/usage (#80): a JSON
+// body, or an .http file of status line, headers, a blank line and the
+// body.
+func serveRecorded(t *testing.T, file string) *httptest.Server {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", "usage", file))
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, header, body := http.StatusOK, http.Header{}, b
+	if strings.HasSuffix(file, ".http") {
+		head, rest, ok := strings.Cut(string(b), "\n\n")
+		if !ok {
+			t.Fatalf("%s has no blank line after its headers", file)
+		}
+		lines := strings.Split(head, "\n")
+		if f := strings.Fields(lines[0]); len(f) < 2 || func() bool { _, err := fmt.Sscan(f[1], &status); return err != nil }() {
+			t.Fatalf("%s: status line %q", file, lines[0])
+		}
+		for _, l := range lines[1:] {
+			k, v, _ := strings.Cut(l, ":")
+			header.Add(strings.TrimSpace(k), strings.TrimSpace(v))
+		}
+		body = []byte(rest)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for k, vs := range header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(status)
+		w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// readRecorded reads account a, by method, from a recorded answer.
+func readRecorded(t *testing.T, file, method string) AccountPayload {
+	t.Helper()
+	cfg := DefaultConfig()
+	cfg.Usage.API = serveRecorded(t, file).URL
+	a := usageAccounts(t, t.TempDir())["a"]
+	a.Usage = method
+	return newPlanReader(cfg.Usage, 5*time.Second).read("a", a)
+}
+
+// The usage endpoint's answer of 2026-11-01 is read: its five-hour window
+// is null while nothing was used in it, which is 0% with no reset, not a
+// failure.
+func TestUsageEndpointCurrentAnswer(t *testing.T) {
+	p := readRecorded(t, "endpoint-2026-11-01.json", UsageEndpoint)
+	if p.Error != "" {
+		t.Fatalf("error %q", p.Error)
+	}
+	if got := usageText(p); got != "5h 0%, weekly 20% until 2026-11-07 04:59Z, overage off" {
+		t.Fatalf("reading %q", got)
+	}
+	if p.FiveHourReset != nil || p.WeeklyReset == nil || p.WeeklyReset.Unix() != time.Date(2026, 11, 7, 4, 59, 59, 0, time.UTC).Unix() {
+		t.Fatalf("resets %v %v", p.FiveHourReset, p.WeeklyReset)
+	}
+}
+
+// The messages answer of 2026-11-01 is read: it carries the seven-day
+// headers only while nothing was used in the five hours.
+func TestUsageHeadersCurrentAnswer(t *testing.T) {
+	p := readRecorded(t, "messages-2026-11-01.http", UsageHeaders)
+	if p.Error != "" {
+		t.Fatalf("error %q", p.Error)
+	}
+	if got := usageText(p); got != "5h 0%, weekly 12% until 2026-11-03 12:00Z, overage off" {
+		t.Fatalf("reading %q", got)
+	}
+}
+
+// Other shapes of the endpoint's answer: a utilization in a string, the
+// weekly window only in the limits list, and an answer with neither
+// window, whose error names its keys and no values.
+func TestUsageEndpointShapes(t *testing.T) {
+	for body, want := range map[string]string{
+		`{"five_hour":{"utilization":"33.5","resets_at":"2026-11-01T20:00:00Z"},"seven_day":null}`:                            "5h 34% until 2026-11-01 20:00Z, weekly 0%",
+		`{"five_hour":null,"seven_day":null,"limits":[{"kind":"weekly_all","group":"weekly","percent":41,"resets_at":null}]}`: "5h 0%, weekly 41%",
+		`{"five_hour":null,"seven_day":null,"secret_field":"value-not-shown"}`:                                                "error: usage endpoint: the answer has no five-hour or weekly utilization; its keys: five_hour, secret_field, seven_day",
+	} {
+		var p AccountPayload
+		got := ""
+		if err := readEndpointAnswer([]byte(body), &p); err != nil {
+			got = "error: " + err.Error()
+		} else {
+			got = usageText(p)
+		}
+		if got != want {
+			t.Errorf("%s:\n got %q\nwant %q", body, got, want)
+		}
+	}
+}
+
+// A messages answer with neither window's headers fails, naming the
+// rate-limit headers it had.
+func TestUsageHeadersNoWindow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("anthropic-ratelimit-unified-status", "allowed")
+		fmt.Fprint(w, `{"type":"message"}`)
+	}))
+	defer srv.Close()
+	cfg := DefaultConfig()
+	cfg.Usage.API = srv.URL
+	a := usageAccounts(t, t.TempDir())["a"]
+	a.Usage = UsageHeaders
+	p := newPlanReader(cfg.Usage, 5*time.Second).read("a", a)
+	if !strings.Contains(p.Error, "rate-limit headers: anthropic-ratelimit-unified-status)") {
+		t.Fatalf("error %q", p.Error)
+	}
+}

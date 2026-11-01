@@ -285,18 +285,51 @@ func (u planReader) endpoint(tok string, p *AccountPayload) error {
 	case resp.StatusCode != http.StatusOK:
 		return fmt.Errorf("usage endpoint: HTTP %d: %s", resp.StatusCode, oneLine(scrubToken(string(body), tok), 200))
 	}
+	return readEndpointAnswer(body, p)
+}
+
+// usageNumber is a utilization as the endpoint gives it: a number, or a
+// number in a string.
+type usageNumber struct{ v *float64 }
+
+func (n *usageNumber) UnmarshalJSON(b []byte) error {
+	s := strings.Trim(strings.TrimSpace(string(b)), `"`)
+	if s == "" || s == "null" {
+		return nil
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
+		return nil // not a utilization: the window counts as unread
+	}
+	n.v = &v
+	return nil
+}
+
+// usageWindow is one window of the endpoint's answer.
+type usageWindow struct {
+	Utilization usageNumber `json:"utilization"`
+	ResetsAt    *string     `json:"resets_at"`
+}
+
+// readEndpointAnswer reads the usage endpoint's answer (#80). A window
+// that is null or absent while the other is read is idle: 0% with no
+// reset, as the endpoint answers when nothing was used in it. The weekly
+// window is also read from the limits list (group weekly, kind
+// weekly_all) when seven_day has none. Only when neither window can be
+// read does it fail, naming the answer's top-level keys, never values.
+func readEndpointAnswer(body []byte, p *AccountPayload) error {
 	var doc struct {
-		FiveHour *struct {
-			Utilization *float64 `json:"utilization"`
-			ResetsAt    *string  `json:"resets_at"`
-		} `json:"five_hour"`
-		SevenDay *struct {
-			Utilization *float64 `json:"utilization"`
-			ResetsAt    *string  `json:"resets_at"`
-		} `json:"seven_day"`
+		FiveHour   *usageWindow `json:"five_hour"`
+		SevenDay   *usageWindow `json:"seven_day"`
 		ExtraUsage *struct {
 			IsEnabled *bool `json:"is_enabled"`
 		} `json:"extra_usage"`
+		Limits []struct {
+			Kind     string      `json:"kind"`
+			Group    string      `json:"group"`
+			Percent  usageNumber `json:"percent"`
+			ResetsAt *string     `json:"resets_at"`
+		} `json:"limits"`
 	}
 	if err := json.Unmarshal(body, &doc); err != nil {
 		return fmt.Errorf("usage endpoint: unreadable answer: %w", err)
@@ -313,18 +346,38 @@ func (u planReader) endpoint(tok string, p *AccountPayload) error {
 		return &t
 	}
 	if doc.FiveHour != nil {
-		p.FiveHour, p.FiveHourReset = doc.FiveHour.Utilization, reset(doc.FiveHour.ResetsAt)
+		p.FiveHour, p.FiveHourReset = doc.FiveHour.Utilization.v, reset(doc.FiveHour.ResetsAt)
 	}
 	if doc.SevenDay != nil {
-		p.Weekly, p.WeeklyReset = doc.SevenDay.Utilization, reset(doc.SevenDay.ResetsAt)
+		p.Weekly, p.WeeklyReset = doc.SevenDay.Utilization.v, reset(doc.SevenDay.ResetsAt)
+	}
+	for _, l := range doc.Limits {
+		if p.Weekly == nil && l.Kind == "weekly_all" && l.Percent.v != nil {
+			p.Weekly, p.WeeklyReset = l.Percent.v, reset(l.ResetsAt)
+		}
 	}
 	if doc.ExtraUsage != nil {
 		p.Overage = doc.ExtraUsage.IsEnabled
 	}
-	if p.FiveHour == nil || p.Weekly == nil {
-		return errors.New("usage endpoint: the answer has no five-hour or weekly utilization")
+	if p.FiveHour == nil && p.Weekly == nil {
+		var keys map[string]json.RawMessage
+		json.Unmarshal(body, &keys)
+		return fmt.Errorf("usage endpoint: the answer has no five-hour or weekly utilization; its keys: %s", strings.Join(sortedKeys(keys), ", "))
 	}
+	idleWindow(p)
 	return nil
+}
+
+// idleWindow reads a window the answer left out, while it gave the
+// other, as idle: 0% with no reset.
+func idleWindow(p *AccountPayload) {
+	zero := func() *float64 { v := 0.0; return &v }
+	if p.FiveHour == nil {
+		p.FiveHour, p.FiveHourReset = zero(), nil
+	}
+	if p.Weekly == nil {
+		p.Weekly, p.WeeklyReset = zero(), nil
+	}
 }
 
 // claudeCodeSystem is the system line Claude Code sends, which an OAuth
@@ -378,10 +431,25 @@ func (u planReader) headers(tok string, p *AccountPayload) error {
 		p.Overage = &on
 	}
 	// A refused request (429, the limit reached) still carries the
-	// headers; without them the reading failed.
-	if p.FiveHour == nil || p.Weekly == nil {
-		return fmt.Errorf("messages: HTTP %d without the rate-limit headers: %s", resp.StatusCode, oneLine(scrubToken(string(answer), tok), 200))
+	// headers; without either window's the reading failed, naming the
+	// rate-limit headers the answer had. A window left out while the
+	// other is given is idle (#80): the answer gives no 5h headers when
+	// nothing was used in the five hours.
+	if p.FiveHour == nil && p.Weekly == nil {
+		var names []string
+		for k := range h {
+			if k = strings.ToLower(k); strings.HasPrefix(k, "anthropic-ratelimit-") {
+				names = append(names, k)
+			}
+		}
+		sort.Strings(names)
+		had := "none"
+		if len(names) > 0 {
+			had = strings.Join(names, ", ")
+		}
+		return fmt.Errorf("messages: HTTP %d without the five-hour or weekly rate-limit headers (rate-limit headers: %s): %s", resp.StatusCode, had, oneLine(scrubToken(string(answer), tok), 120))
 	}
+	idleWindow(p)
 	return nil
 }
 
