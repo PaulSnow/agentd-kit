@@ -56,11 +56,12 @@ func (h *harness) callAs(name, tool string, args map[string]any) (string, bool) 
 	return callOne(h.t, srv, tool, args)
 }
 
-// loopSteps is the loop events' steps for ref, oldest first.
+// loopSteps is the loop events' steps for ref, oldest first, without
+// the changes of place.
 func (h *harness) loopSteps(ref string) []string {
 	var out []string
 	for _, e := range h.events() {
-		if e.Kind == KindLoop && e.Loop.Ref == ref {
+		if e.Kind == KindLoop && e.Loop.Ref == ref && e.Loop.Step != LoopPlace {
 			out = append(out, e.Loop.Step)
 		}
 	}
@@ -715,12 +716,12 @@ func loopAtOwner(t *testing.T) *harness {
 	return h
 }
 
-// lastLoop is the last loop event of h's log.
+// lastLoop is the last loop event of h's log that is no change of place.
 func (h *harness) lastLoop() Event {
 	h.t.Helper()
 	es := h.events()
 	for i := len(es) - 1; i >= 0; i-- {
-		if es[i].Kind == KindLoop {
+		if es[i].Kind == KindLoop && es[i].Loop.Step != LoopPlace {
 			return es[i]
 		}
 	}
@@ -1777,5 +1778,142 @@ func TestLoopReplayedTonightOneFixRound(t *testing.T) {
 	}
 	if n := h.count(KindAction, ActFixRound, "d"); n != 1 {
 		t.Fatalf("fix rounds = %d; steps %v; place %+v", n, h.loopSteps("!1"), h.place("!1"))
+	}
+}
+
+// continuedBlocked opens !2, continued by d on its source branch, with
+// d asking the owner in its STATUS.md, and runs it to a deferred finding
+// the owner answers fix: the fix round is due, and d cannot take it.
+func continuedBlocked(t *testing.T) (*harness, *fakeForgeAPI) {
+	t.Helper()
+	h, api := loopHarness(t)
+	d := h.cfg.Sessions["d"]
+	d.Branch = "fix-squeak"
+	h.cfg.Sessions["d"] = d
+	outsideOpen(api)
+	h.sup.emit("", Event{Kind: KindIndex, Index: &IndexPayload{Repository: "widgets", Ref: "!2", Title: "Fix the squeak", State: "open", Branch: "fix-squeak"}})
+	h.status("d", "# Squeak\n\n## Questions\n\nQ1. Which spin test do you want?\n")
+	deferOne(t, h, "!2")
+	if err := h.answerCard(h.deferredCard().Entry, FindingFix, ""); err != nil {
+		t.Fatal(err)
+	}
+	h.ticks(3, 5*time.Minute)
+	if got := h.state("d"); got != BlockedOnOwner {
+		t.Fatalf("d is %s", got)
+	}
+	if n := h.count(KindAction, ActFixRound, "d"); n != 0 {
+		t.Fatalf("fix rounds = %d", n)
+	}
+	return h, api
+}
+
+// The three stuck fix rounds of the 2026-11-01 review: a work session
+// that continues a request, blocked on the owner when the judge adopted
+// a finding, is never relaunched, and pushes the fix itself on the
+// owner's word. The request said "the work session is relaunched once it
+// is done" for days: now it says what the relaunch waits on, and the head
+// the session pushed is reviewed.
+func TestLoopContinuedFixPushedWhileBlockedIsReviewed(t *testing.T) {
+	h, api := continuedBlocked(t)
+	if p := h.place("!2"); p.Phase != PlaceFixing || p.Reason != "round 1 has findings to fix; the relaunch waits on: d is blocked-on-owner, not done or idle" {
+		t.Fatalf("place = %+v", p)
+	}
+	outsideMR(api, outsideMRState{head: "5eed0102", pipeline: 61, status: "success"})
+	h.ticks(6, 5*time.Minute)
+	reviewer := judgmentName("!2", KindReviewer)
+	if _, ok := h.sup.st.Runtime[reviewer]; !ok || !strings.Contains(h.lastLaunch(reviewer), `"head":"5eed0102"`) {
+		t.Fatalf("no review of the new head: steps %v, place %+v", h.loopSteps("!2"), h.place("!2"))
+	}
+	if got := strings.Join(h.loopSteps("!2"), ","); got != "review,judge,review" {
+		t.Fatalf("steps = %s", got)
+	}
+	if n := h.count(KindAction, ActFixRound, "d"); n != 0 {
+		t.Fatalf("fix rounds = %d", n)
+	}
+	// d is done, and round 2 is under review: round 1 is behind it.
+	h.status("d", "# Squeak\n\nPushed the spin test.\n\nDONE\n")
+	h.ticks(3, 5*time.Minute)
+	if p := h.place("!2"); p.Phase != PlaceReviewing {
+		t.Fatalf("place = %+v", p)
+	}
+	if n := h.count(KindAction, ActFixRound, "d"); n != 0 {
+		t.Fatalf("fix rounds = %d", n)
+	}
+}
+
+// fixHoldOf names each thing a fix round's relaunch waits on, and nothing
+// for a session fixRound relaunches; fixHold reads a session the state
+// has no track of as not running.
+func TestFixHoldNamesWhatTheRelaunchWaitsOn(t *testing.T) {
+	delivered := loopRequest{ciWatched: ciWatched{Session: "d", Delivered: "widgets:main"}}
+	outside := loopRequest{Outside: true, Continuer: "d"}
+	for _, c := range []struct {
+		name  string
+		t     *Track
+		state State
+		q     loopRequest
+		want  string
+	}{
+		{"not running", nil, Done, delivered, "its work session d is not running"},
+		{"blocked", &Track{}, BlockedOnOwner, outside, "d is blocked-on-owner, not done or idle"},
+		{"working", &Track{}, Working, outside, "d is working, not done or idle"},
+		{"limited", &Track{Limited: true}, Done, outside, "d is rate-limited"},
+		{"undelivered", &Track{Delivered: map[string]string{}}, Done, delivered, "d has not delivered the request"},
+		{"delivered", &Track{Delivered: map[string]string{"widgets:main": "!1"}}, Idle, delivered, ""},
+		{"continued", &Track{}, Done, outside, ""},
+	} {
+		if got := fixHoldOf("d", c.t, c.state, c.q); got != c.want {
+			t.Errorf("%s: hold = %q, want %q", c.name, got, c.want)
+		}
+	}
+	if got := fixHold(&LogState{}, outside); got != "its work session d is not running" {
+		t.Errorf("no track: hold = %q", got)
+	}
+}
+
+// A request that stands at one place for LoopStallAfter, with no step,
+// head or round, is one owner card saying what it waits on and since
+// when: none before, one however many passes and restarts follow; a new
+// place starts the clock again.
+func TestLoopStalledPlaceIsOneCard(t *testing.T) {
+	h, api := continuedBlocked(t)
+	stalls := func() []string {
+		var out []string
+		for _, e := range h.events() {
+			if e.Kind == KindAction && e.Act != nil && e.Act.Action == ActEscalate && strings.HasPrefix(e.Act.Key, "loop-stall:widgets !2:") {
+				out = append(out, e.Act.Message)
+			}
+		}
+		return out
+	}
+	h.ticks(10, 30*time.Minute) // under six hours since the place began
+	if got := stalls(); len(got) != 0 {
+		t.Fatalf("stall told early: %q", got)
+	}
+	h.ticks(4, 30*time.Minute)
+	got := stalls()
+	if len(got) != 1 || !strings.Contains(got[0], "!2 in widgets has been fixing since ") ||
+		!strings.Contains(got[0], "it waits on: round 1 has findings to fix; the relaunch waits on: d is blocked-on-owner, not done or idle.") ||
+		!strings.Contains(got[0], "Look at its work session d.") || !strings.Contains(got[0], "agentd loop stop widgets !2") {
+		t.Fatalf("stall cards = %q", got)
+	}
+	h.ticks(6, 30*time.Minute)
+	h.restart(false)
+	h.sup.api = api
+	h.ticks(6, 30*time.Minute)
+	if got := stalls(); len(got) != 1 {
+		t.Fatalf("stall cards after more passes and a restart = %d: %q", len(got), got)
+	}
+	// d pushes: the new head is reviewed, a new place, whose clock
+	// starts at its own beginning.
+	outsideMR(api, outsideMRState{head: "5eed0102", pipeline: 61, status: "success"})
+	h.ticks(10, 30*time.Minute)
+	if got := stalls(); len(got) != 1 {
+		t.Fatalf("stall told within six hours of the new place: %q", got)
+	}
+	h.ticks(6, 30*time.Minute)
+	got = stalls()
+	if len(got) != 2 || !strings.Contains(got[1], "!2 in widgets has been reviewing since ") {
+		t.Fatalf("stall cards = %q; place %+v", got, h.place("!2"))
 	}
 }

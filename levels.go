@@ -229,6 +229,9 @@ func (st *LogState) noteSteps(e Event) {
 			s.Text = fmt.Sprintf("Its session was sent back to fix what round %d of %s found.", p.Round, name)
 		case LoopApprove:
 			s.Text = fmt.Sprintf("The loop approved %s.", name)
+		case LoopPlace:
+			// A change of place is no step of the issue's history: the
+			// loop's sentence says where it stands.
 		case LoopWait:
 			what := "reviewer"
 			if p.Waits == LoopJudge {
