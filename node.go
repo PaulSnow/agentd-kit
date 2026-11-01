@@ -734,7 +734,7 @@ func statusPaths(out string) ([]string, int) {
 		}
 		entries++
 		add(f[3:])
-		if x := f[0]; x == 'R' || x == 'C' {
+		if x, y := f[0], f[1]; x == 'R' || x == 'C' || y == 'R' || y == 'C' {
 			if i+1 < len(fields) {
 				i++
 				add(fields[i])
@@ -748,7 +748,7 @@ func statusPaths(out string) ([]string, int) {
 func nulPaths(out string) []string {
 	var paths []string
 	for _, p := range strings.Split(out, "\x00") {
-		if p = strings.TrimSpace(p); p != "" {
+		if p = strings.TrimPrefix(p, "\n"); p != "" {
 			paths = append(paths, p)
 		}
 	}
@@ -901,6 +901,13 @@ func (n *Node) renumber(after int64) {
 // holds.
 func (n *Node) send(ctx context.Context) (nodeReply, error) {
 	reply, code, err := n.post(ctx, n.pending)
+	if code == http.StatusConflict && reply.Acked < n.acked {
+		// The hub holds less than it did: its log is not the one the
+		// last whole report went to, so a same report means nothing.
+		n.held = ""
+		n.acked = reply.Acked
+		n.queueReport()
+	}
 	if code == http.StatusConflict {
 		n.ack(reply.Acked)
 		n.renumber(reply.Acked)

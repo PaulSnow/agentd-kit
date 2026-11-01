@@ -238,6 +238,9 @@ type laptopWork struct {
 	Pushed                   bool // the branch is on the forge with nothing unpushed
 }
 
+// detachedHead is a clone's work with no branch checked out.
+const detachedHead = "a detached HEAD"
+
 // laptopWorks are the observing hosts' work, by repository, from their
 // latest reports.
 func laptopWorks(cfg *Config, c *CoordState) []laptopWork {
@@ -260,7 +263,9 @@ func laptopWorks(cfg *Config, c *CoordState) []laptopWork {
 				o := &out[i]
 				o.Paths = unionPaths(o.Paths, w.Paths)
 				o.Holds = o.Holds || w.Holds
-				o.Pushed = o.Pushed && w.Pushed
+				if w.Holds {
+					o.Pushed = false // a session's worktree that holds nothing leaves it as it is
+				}
 				return
 			}
 			w.Host = h
@@ -276,14 +281,18 @@ func laptopWorks(cfg *Config, c *CoordState) []laptopWork {
 			for _, b := range cl.Local {
 				local[b.Name] = true
 			}
-			if cl.Branch != "" {
-				paths := unionPaths(cl.Changed, cl.Unpushed)
-				unpushed := cl.Ahead > 0 || local[cl.Branch]
-				add(laptopWork{Repository: cl.Repository, Branch: cl.Branch, Paths: paths, Holds: len(cl.Changed) > 0 || unpushed,
-					Pushed: !unpushed && cl.Upstream && len(cl.Changed) == 0})
+			branch := cl.Branch
+			if branch == "" {
+				branch = detachedHead // its changes still meet paths
 			}
+			paths := unionPaths(cl.Changed, cl.Unpushed)
+			unpushed := cl.Ahead > 0 || local[cl.Branch]
+			add(laptopWork{Repository: cl.Repository, Branch: branch, Paths: paths, Holds: len(cl.Changed) > 0 || unpushed,
+				Pushed: !unpushed && cl.Upstream && len(cl.Changed) == 0 && cl.Branch != ""})
 			for _, b := range cl.Local {
-				add(laptopWork{Repository: cl.Repository, Branch: b.Name, Paths: b.Paths, Holds: true})
+				// One whose commits the target has, merged, holds
+				// nothing; a squash-merged one is go on's to clear.
+				add(laptopWork{Repository: cl.Repository, Branch: b.Name, Paths: b.Paths, Holds: len(b.Paths) > 0})
 			}
 		}
 		for _, s := range rep.Claude {
@@ -508,10 +517,11 @@ func Overlaps(cfg *Config, st *LogState, worktree func(string, RuntimePayload) [
 	if st.Coord != nil {
 		for _, k := range sortedKeys(st.Coord.Overlaps) {
 			o := st.Coord.Overlaps[k]
+			// A held start's card stands while the laptop still holds it,
+			// a fix round's too, whose session runs: it is closed only
+			// when what it waits on ends, or the start is not tried again.
 			if o.WorkKind == WorkKindStart && now.Sub(o.Asked) < startOverlapKept {
-				if _, running := st.Runtime[o.Work]; !running {
-					hws = append(hws, hereWork{ID: o.Work, Kind: WorkKindStart, Repository: o.Repository, Branch: o.Branch, Issue: o.Issue, Item: o.Item, Paths: o.Paths, Verb: "would change", Asked: o.Asked})
-				}
+				hws = append(hws, hereWork{ID: o.Work, Kind: WorkKindStart, Repository: o.Repository, Branch: o.Branch, Issue: o.Issue, Item: o.Item, Paths: o.Paths, Verb: "would change", Asked: o.Asked})
 			}
 		}
 	}
@@ -520,6 +530,9 @@ func Overlaps(cfg *Config, st *LogState, worktree func(string, RuntimePayload) [
 			if o := meet(l, h); o != nil {
 				if h.Kind == WorkKindStart && !l.Holds {
 					continue // a start waits only on what the laptop holds
+				}
+				if had := out[o.Key]; had != nil && had.WorkKind != WorkKindStart {
+					continue // the work itself, once it runs, is the card
 				}
 				out[o.Key] = o
 			}
@@ -623,11 +636,8 @@ func (s *Supervisor) laptopWait(repo, name string, p RuntimePayload, paths []str
 		}
 		involved := o.Work == work || o.Work == name || p.Request != "" && o.Work == p.Request ||
 			p.Issue > 0 && o.Issue == p.Issue || p.Branch != "" && o.Branch == p.Branch
-		if !involved {
-			continue
-		}
-		if c.Choices[k] == CoordIsItem && !o.Holds {
-			continue // linked, and nothing of it is held on the laptop
+		if !involved || !o.Holds {
+			continue // a card of what the laptop does not hold only tells
 		}
 		if o.WorkKind == WorkKindStart && now.Sub(o.Asked) > startOverlapKept/6 && !s.shadow {
 			again := *o
@@ -641,7 +651,7 @@ func (s *Supervisor) laptopWait(repo, name string, p RuntimePayload, paths []str
 			paths = unionPaths(paths, briefPaths(*it.Design.Brief))
 		}
 	}
-	h := hereWork{ID: name, Kind: WorkKindStart, Repository: repo, Branch: p.Branch, Issue: p.Issue, Item: p.Item, Paths: paths, Verb: "would change", Asked: now}
+	h := hereWork{ID: work, Kind: WorkKindStart, Repository: repo, Branch: p.Branch, Issue: p.Issue, Item: p.Item, Paths: paths, Verb: "would change", Asked: now}
 	for _, l := range laptopWorks(s.cfg, c) {
 		if !l.Holds {
 			continue
@@ -677,7 +687,13 @@ func linkedBranch(cfg *Config, st *LogState, item string) string {
 			return ""
 		}
 	}
-	return "" // no longer reported: not known to be pushed
+	// No longer reported: the laptop checked out another branch, and this
+	// one is not among its local branches the forge lacks, so origin had
+	// it when the laptop last fetched.
+	if seen := st.Coord.Seen[o.Host]; seen != nil {
+		return o.Laptop
+	}
+	return ""
 }
 
 // readRequestFiles reads, in a worker, the changed files of each open

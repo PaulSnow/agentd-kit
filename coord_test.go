@@ -421,3 +421,76 @@ func TestUnchangedReportIsSame(t *testing.T) {
 		t.Fatalf("a changed report was not sent whole: %+v", seen)
 	}
 }
+
+// A fix round held on the laptop keeps one card while its session runs:
+// the card neither closes nor opens again pass after pass, and the
+// owner's go on lets the round start.
+func TestHeldFixRoundCardStands(t *testing.T) {
+	c := newCoordHarness(t)
+	running := c.startSession("fix-wobble", KindWork, 0)
+	gitRun(t, c.clone, "checkout", "-q", "-b", "laptop-work")
+	writeFile(t, filepath.Join(c.clone, "a.go"), "package a\n")
+	c.report()
+	rp := c.sup.st.Runtime[running]
+	rp.Request = "!5"
+	if why := c.sup.laptopWait("widgets", running, rp, []string{"a.go"}); !strings.Contains(why, "a.go") {
+		t.Fatalf("the fix round did not wait: %q", why)
+	}
+	key := overlapKey("laptop", "widgets", "laptop-work", running)
+	laptopEvents := func() int {
+		n := 0
+		for _, e := range c.events() {
+			if e.Kind == KindLaptop {
+				n++
+			}
+		}
+		return n
+	}
+	before := laptopEvents()
+	for i := 0; i < 3; i++ {
+		c.clock.advance(time.Minute)
+		c.report()
+	}
+	if got := c.overlaps(); len(got) != 1 || got[key] == nil {
+		t.Fatalf("overlaps %+v", got)
+	}
+	if after := laptopEvents(); after != before {
+		t.Fatalf("the card was logged %d more times", after-before)
+	}
+	if err := RecordCoordChoice(NewLogWriter(c.buf), c.logState(), c.clock.Now(), key, CoordGoOn); err != nil {
+		t.Fatal(err)
+	}
+	c.report()
+	if why := c.sup.laptopWait("widgets", running, rp, []string{"a.go"}); why != "" {
+		t.Fatalf("go on did not let the fix round start: %q", why)
+	}
+	c.report()
+	if c.logState().Coord.Choices[key] != CoordGoOn {
+		t.Fatal("go on was wiped")
+	}
+}
+
+// An item's card answered go on lets its start go ahead, with no second
+// card for the start.
+func TestItemGoOnIsOneCard(t *testing.T) {
+	c := newCoordHarness(t)
+	it := &WorkItem{ID: "W5555aaaa", Repository: "widgets", State: WorkOpen, Designer: true,
+		Design: &WorkDesign{Round: 1, Brief: &DesignBrief{Design: []string{"Change spin.go."}}}}
+	c.sup.st.Work = map[string]*WorkItem{it.ID: it}
+	writeFile(t, filepath.Join(c.clone, "spin.go"), "package spin\n")
+	c.report()
+	key := overlapKey("laptop", "widgets", "main", it.ID)
+	if c.sup.st.Coord.Overlaps[key] == nil {
+		t.Fatalf("overlaps %+v", c.sup.st.Coord.Overlaps)
+	}
+	if err := RecordCoordChoice(NewLogWriter(c.buf), c.logState(), c.clock.Now(), key, CoordGoOn); err != nil {
+		t.Fatal(err)
+	}
+	c.sup.ownerRecords()
+	if why := c.sup.laptopWait("widgets", "x", RuntimePayload{Kind: KindWork, Item: it.ID, Branch: "owner/x"}, nil); why != "" {
+		t.Fatalf("go on did not let the item start: %q", why)
+	}
+	if got := c.overlaps(); len(got) != 1 {
+		t.Fatalf("overlaps %+v", got)
+	}
+}
