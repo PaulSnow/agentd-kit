@@ -500,6 +500,17 @@ Every step is a `loop` event (repository, request, case, head, step, session, ro
 ./bin/check
 ```
 
-`bin/check` runs `gofmt -l`, `go vet` and `go test -race`, and fails when Go is missing rather than passing without it. CI runs the same script on every push.
+`bin/check` runs `gofmt -l`, `bin/private-check`, `go vet` and `go test -race`, and fails when Go is missing rather than passing without it. CI runs the same script on every push.
+
+`bin/private-check` fails when a tracked file holds a private value, printing each hit's file, line and kind but never the value. Built in, it flags any address in the tailnet range 100.64.0.0/10 (a range written with its prefix length passes). The rest comes from a local patterns file that is never committed, looked up as `$PRIVATE_PATTERNS`, then `.private-patterns` at the repository root (ignored by git), then `${XDG_CONFIG_HOME:-~/.config}/agentd-kit/private-patterns`. One entry per line; blank lines and lines starting with `#` are skipped:
+
+```
+host buildbox.example        # a host name, matched as a whole word, any case
+email someone@example.invalid
+user someone                 # the path /home/someone
+ip 192.0.2.10                # one address, as a whole word
+```
+
+CI has no patterns file, so there only the built-in range is checked; run `./bin/check` locally before pushing.
 
 The tests run the supervisor against a fake tmux, forge, git and clock over simulated hours. Each failure the old tools showed is a test: a crash loop parks for the owner and escalates once; a session blocked on the owner is not nudged; an escalation is posted once, and reworded Questions are updates to it; nothing is killed but a rotation, a budget stop or an ended session; shadow mode never acts.
