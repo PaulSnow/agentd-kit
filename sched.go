@@ -19,10 +19,14 @@ import (
 // ScheduledJob is one job of jobs.scheduled: exactly one of Every and At
 // (HH:MM, daily, in agentd's local time), the argv it runs in Cwd, the
 // account whose login it runs under (none: agentd's own), and its timeout.
+// A step job names a step spec (#85) in place of argv: it runs the step
+// as agentd step does, under the spec's model, account and timeout, with
+// the job's account and timeout when the spec sets none.
 type ScheduledJob struct {
 	Every   Duration `json:"every"`
 	At      string   `json:"at"`
 	Argv    []string `json:"argv"`
+	Step    string   `json:"step"`
 	Cwd     string   `json:"cwd"`
 	Account string   `json:"account"`
 	Timeout Duration `json:"timeout"`
@@ -137,7 +141,17 @@ func (c *Config) checkScheduled(base string, path func(field, p string) string, 
 		if _, err := time.Parse("15:04", j.At); j.At != "" && err != nil {
 			errs = append(errs, fmt.Errorf("%s.at: %q is not HH:MM", field, j.At))
 		}
-		if len(j.Argv) == 0 || j.Argv[0] == "" {
+		switch {
+		case len(j.Argv) > 0 && j.Step != "":
+			errs = append(errs, fmt.Errorf("%s: set exactly one of argv and step", field))
+		case j.Step != "":
+			j.Step = path(field+".step", j.Step)
+			if _, err := loadStepSpec(j.Step, c); err != nil {
+				errs = append(errs, fmt.Errorf("%s.step: %v", field, err))
+			}
+		case len(j.Argv) == 0:
+			errs = append(errs, fmt.Errorf("%s: set exactly one of argv and step", field))
+		case j.Argv[0] == "":
 			errs = append(errs, fmt.Errorf("%s.argv is empty", field))
 		}
 		if _, ok := c.Accounts[j.Account]; j.Account != "" && !ok {
@@ -202,7 +216,8 @@ func (s *Supervisor) runJobs(now time.Time) {
 			return
 		}
 		j, r := s.cfg.Jobs.Scheduled[name], s.st.Jobs[name]
-		if r.Failures >= scheduledFailures && r.End != nil {
+		// A step job's failure is the step's own card (escalateSteps).
+		if r.Failures >= scheduledFailures && r.End != nil && j.Step == "" {
 			key := jobTrack(name) + ":" + r.FailedSince.UTC().Format(time.RFC3339)
 			s.escalate(jobTrack(name), key, fmt.Sprintf("Scheduled job %s failed %d times in a row since %s; the latest: %s. agentd keeps running it on its schedule.",
 				name, r.Failures, r.FailedSince.Format("2006-01-02 15:04"), jobFailure(r.End)), s.track(jobTrack(name)), now)
@@ -233,6 +248,10 @@ func (s *Supervisor) runJobs(now time.Time) {
 			}
 			acct := s.cfg.Accounts[j.Account]
 			name, slot := name, slot
+			if j.Step != "" {
+				s.runStepJob(key, name, slot, j)
+				continue
+			}
 			s.spawnShared(key, func(w *Supervisor) {
 				end := runScheduled(w.runCtx, j, acct)
 				if w.runCtx.Err() != nil && (end.Exit == nil || *end.Exit != 0) {
@@ -243,6 +262,46 @@ func (s *Supervisor) runJobs(now time.Time) {
 			})
 		}
 	}
+}
+
+// runStepJob runs a step job in a worker: the step's event, then the
+// job's end, which succeeds when the step ran or was skipped. The spec is
+// read again for each run, so an edited spec needs no restart.
+func (s *Supervisor) runStepJob(key, name string, slot time.Time, j ScheduledJob) {
+	var last *StepPayload
+	spec, err := loadStepSpec(j.Step, s.cfg)
+	if err == nil {
+		last = s.st.StepRuns[spec.Pipeline+"/"+spec.Name].LastOK
+		if spec.Account == "" {
+			spec.Account = j.Account
+		}
+		if spec.Timeout.Duration == 0 {
+			spec.Timeout = j.Timeout
+		}
+	}
+	cfg := s.cfg
+	s.spawnShared(key, func(w *Supervisor) {
+		start := time.Now()
+		exit := 1
+		end := JobPayload{Name: name, Phase: JobEnd, Slot: slot, Exit: &exit}
+		if err != nil {
+			end.Error = oneLine(err.Error(), scheduledStderr)
+		} else {
+			p := runStep(w.runCtx, spec, spec.job(cfg), last, false)
+			if w.runCtx.Err() != nil && p.Outcome != StepOK && p.Outcome != StepSkipped {
+				end.Error, end.Stopped = "agentd stopped, and the step was killed", true
+			} else {
+				w.emit("", Event{Kind: KindStep, Mode: ModeShared, Step: &p})
+				if stepFailing(p.Outcome) {
+					end.Error = p.Outcome + ": " + p.Error
+				} else {
+					exit = 0
+				}
+			}
+		}
+		end.DurationMS = time.Since(start).Milliseconds()
+		w.emit("", Event{Kind: KindJob, Job: &end})
+	})
 }
 
 // jobFailure says how a run failed.

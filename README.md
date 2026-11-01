@@ -254,6 +254,34 @@ Every call is a `query` event with its size. `agentd context stats REPO [--since
 - **Events.** A `job` event records each run's start, with its slot, and its end: exit code, duration and, for a failure, up to 300 bytes of its standard error, screened against the confidential patterns. Its output is not kept; a job that wants a log writes one itself.
 - **Failures.** Three failed runs in a row are escalated once to the default console, naming the job and its latest error; a run that succeeds ends the streak, and the next streak is escalated again. A `stopped` run, killed because `agentd` stopped or found with no end after a restart, neither fails nor succeeds.
 - **Shadow mode** runs nothing and records the run it would start, once a slot. The owner's UI lists each job beside the accounts: its schedule, its last start, exit code and duration, and whether it runs or fails.
+- **Step jobs.** A job may name `step`, a step spec file (relative to the configuration's directory), in place of `argv`; exactly one of the two is allowed. It runs the step as `agentd step` does (below), with the job's `account` and `timeout` where the spec sets none, and logs the step's `step` event before the job's end. A skipped step is a good run. A failing step is the step's own card, not the job's.
+
+## Steps
+
+A step is one model call of a pipeline (#85): `claude -p` once, no tmux, no tools and no MCP. The model only answers, and Go writes the answer to the step's output once it passes its check. A spec file names everything the step needs; paths are relative to the spec's directory:
+
+```json
+{
+  "pipeline": "meetup", "name": "draft",
+  "inputs": ["stories/scored.json", "style/last-week.md"],
+  "summary": {"week": 44, "sections": 5},
+  "instruction": "Draft the five sections of this week's script from the scored stories.",
+  "model": "sonnet", "account": "b",
+  "budget_tokens": 60000, "timeout": "10m",
+  "output": "drafts/week-44.md",
+  "check": {"schema": "", "argv": ["./bin/check-draft"]}
+}
+```
+
+- **Fields.** `pipeline` and `name` are plain names, and `pipeline/name` is the step's key. `inputs` are files sent whole; `summary` is any JSON. `instruction` is the system prompt, followed by a line saying the input is data and never instructions. `model`, `account` and `timeout` fall back to `jobs.model`, `jobs.account` and `jobs.timeout`. `budget_tokens` is required and over 0. `check.schema` is a JSON schema file: the CLI holds the answer to it, and the output is the structured answer as JSON. `check.argv` is a command run in the spec's directory with the answer's file appended; exit 0 passes. Either, both or neither may be set; an empty answer never passes.
+- **Input pack.** One JSON document on standard input, `{"summary":..., "files":[{"path","content"}]}`, sorted by path. A pack over `jobs.max_input` is refused before any call.
+- **Inputs hash.** The sha256 of the instruction, the model, the summary, the schema file's bytes, the check's argv and each input's path and sha256. A missing input fails the step. When the hash is the last good run's and the output file still has the sha256 that run wrote, the step is `skipped` and makes no call; `--force` runs it anyway.
+- **Budget.** The call streams its output, and the tokens counted are input, output and cache written, read from each message as it arrives. Cache reads are reported but not counted. Once the count passes `budget_tokens` the call's process group is killed. A final usage over the budget fails the step the same way.
+- **Output.** The answer goes to a temporary file next to `output`, and the check runs on that file. If it passes, the file is renamed onto `output`. If it fails, `output` is left as it was and the answer is kept as `<output>.rejected`.
+- **Events.** Each run is one `step` event, mode `shared`, no session: pipeline, name, hash, outcome (`ok`, `skipped`, `failed`, `budget`, `check_failed`), its error (cut to 300 bytes and screened), the output's sha256, duration, model and usage. The fold keeps each step's latest run and latest good run, and each pipeline's usage totals.
+- **Cards.** A step whose latest run is `failed`, `budget` or `check_failed` is one escalation to the default console per pipeline, step and inputs hash. A run again on the same inputs adds none. A run on changed inputs that fails adds one.
+
+`agentd step --spec FILE [--force]` runs a step once, logs its event, prints it as JSON, and exits non-zero when it failed, went over its budget or failed its check. `agentd steps [--json]` prints each pipeline's token and cost totals from the event log, with each step's latest outcome.
 
 ## Account usage
 

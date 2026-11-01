@@ -65,6 +65,10 @@ type LogState struct {
 	StartedAt map[string]time.Time
 	// Jobs are the scheduled jobs' latest slots and runs (#51).
 	Jobs map[string]JobRecord
+	// StepRuns are each step's latest run, by pipeline/name, and
+	// PipelineUsage what each pipeline's steps cost in all (#85).
+	StepRuns      map[string]StepRun
+	PipelineUsage map[string]JobUsage
 	// Loops are the steps agentd took in each request's loop, by ciKey
 	// (#53).
 	Loops map[string]LoopRecord
@@ -253,6 +257,8 @@ func (st *LogState) apply(e Event) {
 			st.applyAccount(e)
 		case KindJob:
 			st.applyJob(e)
+		case KindStep:
+			st.applyStep(e)
 		case KindFeed:
 			st.applyFeed(e)
 		case KindStart:

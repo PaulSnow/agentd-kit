@@ -257,7 +257,8 @@ func TestScheduledJobConfigRefused(t *testing.T) {
 		{ScheduledJob{Argv: []string{"x"}}, "exactly one of every and at"},
 		{ScheduledJob{Every: Duration{time.Hour}, At: "03:00", Argv: []string{"x"}}, "exactly one of every and at"},
 		{ScheduledJob{At: "3am", Argv: []string{"x"}}, "is not HH:MM"},
-		{ScheduledJob{Every: Duration{time.Hour}}, "argv is empty"},
+		{ScheduledJob{Every: Duration{time.Hour}}, "exactly one of argv and step"},
+		{ScheduledJob{Every: Duration{time.Hour}, Argv: []string{""}}, "argv is empty"},
 		{ScheduledJob{Every: Duration{time.Hour}, Argv: []string{"x"}, Account: "nobody"}, `account "nobody" is not in accounts`},
 		{ScheduledJob{Every: Duration{time.Hour}, Argv: []string{"x"}, Cwd: "missing"}, "does not exist"},
 	} {
