@@ -19,20 +19,20 @@ on, agentd starts nothing on what the laptop holds.
 The node asks; the hub never connects to the laptop. A laptop that is off
 or asleep shows "laptop: last seen <time>".
 
-## On the build host (thelio)
+## On the build host
 
 1. Make one token per host, each the owner's alone:
 
        umask 077
-       head -c 32 /dev/urandom | base64 > ~/.config/agentd-kit/hub-thelio.token
+       head -c 32 /dev/urandom | base64 > ~/.config/agentd-kit/hub-buildhost.token
        head -c 32 /dev/urandom | base64 > ~/.config/agentd-kit/hub-laptop.token
 
 2. In `~/.config/agentd-kit/coord-live.json`, add the hub on the tailnet
    IP, the hosts, and the laptop to each repository it should watch:
 
-       "hub": {"address": "100.75.75.92:8737", "silent_after": "10m", "retry_after": "30m"},
+       "hub": {"address": "100.64.0.1:8737", "silent_after": "10m", "retry_after": "30m"},
        "hosts": {
-         "thelio": {"token_file": "~/.config/agentd-kit/hub-thelio.token"},
+         "buildhost": {"token_file": "~/.config/agentd-kit/hub-buildhost.token"},
          "laptop": {"token_file": "~/.config/agentd-kit/hub-laptop.token", "observe": true}
        },
        "repositories": {
@@ -56,7 +56,7 @@ or asleep shows "laptop: last seen <time>".
        {
          "node": {
            "name": "laptop",
-           "hub": "http://100.75.75.92:8737",
+           "hub": "http://100.64.0.1:8737",
            "token_file": "~/.config/agentd/hub.token",
            "repos_root": "~/repos",
            "more_roots": ["~/go/src"],

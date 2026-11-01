@@ -12,7 +12,7 @@ import (
 )
 
 // coordHarness is the build host's supervisor (sessionsHarness) and a hub
-// two nodes report to: thelio, the build host, and laptop, which only
+// two nodes report to: buildhost, the build host, and laptop, which only
 // observes. The hub logs to its own file, which relay copies into the
 // supervisor's log, as the one log the hub and the supervisor share.
 type coordHarness struct {
@@ -28,7 +28,7 @@ const coordLayout = "gitlab.example.com/example-org/widgets"
 func newCoordHarness(t *testing.T) *coordHarness {
 	t.Helper()
 	h := sessionsHarness(t)
-	h.cfg.Hosts = map[string]HostConfig{"thelio": {}, "laptop": {Observe: true}}
+	h.cfg.Hosts = map[string]HostConfig{"buildhost": {}, "laptop": {Observe: true}}
 	h.cfg.ConfidentialPatterns = append(h.cfg.ConfidentialPatterns, `secret-plan`)
 	h.restart(false)
 	h.sup.worktreePaths = func(dir, target string) []string {
@@ -44,7 +44,7 @@ func newCoordHarness(t *testing.T) *coordHarness {
 	cfg.Hub = HubConfig{Address: "127.0.0.1:0", SilentAfter: Duration{10 * time.Minute}, RetryAfter: Duration{30 * time.Minute}}
 	cfg.ConfidentialPatterns = []string{`secret-plan`}
 	cfg.Hosts = map[string]HostConfig{}
-	for _, name := range []string{"thelio", "laptop"} {
+	for _, name := range []string{"buildhost", "laptop"} {
 		tf := filepath.Join(dir, name+".token")
 		if err := os.WriteFile(tf, []byte("token-of-"+name+"\n"), 0o600); err != nil {
 			t.Fatal(err)
@@ -52,7 +52,7 @@ func newCoordHarness(t *testing.T) *coordHarness {
 		cfg.Hosts[name] = HostConfig{TokenFile: tf, Observe: name == "laptop"}
 	}
 	cfg.Repositories = map[string]Repository{
-		"widgets": {Forge: "gitlab", Host: "gitlab.example.com", Transport: "https", Project: "example-org/widgets", CloneOn: []string{"thelio", "laptop"}},
+		"widgets": {Forge: "gitlab", Host: "gitlab.example.com", Transport: "https", Project: "example-org/widgets", CloneOn: []string{"buildhost", "laptop"}},
 	}
 	log, err := OpenLog(cfg.EventLog)
 	if err != nil {
@@ -61,7 +61,7 @@ func newCoordHarness(t *testing.T) *coordHarness {
 	t.Cleanup(func() { log.Close() })
 	hub := &hubHarness{t: t, cfg: &cfg, log: log, now: h.clock.Now(), nodes: map[string]*Node{}, gits: map[string]*fakeNodeGit{}, tmuxes: map[string]*fakeTmux{}}
 	hub.startHub()
-	for _, name := range []string{"thelio", "laptop"} {
+	for _, name := range []string{"buildhost", "laptop"} {
 		hub.gits[name], hub.tmuxes[name] = &fakeNodeGit{t: t}, newFakeTmux()
 		nc := NodeConfig{Name: name, Hub: hub.srv.URL, ReposRoot: filepath.Join(dir, name, "repos"), Observe: name == "laptop"}
 		hub.nodes[name] = NewNode(nc, "token-of-"+name, hub.gits[name], hub.tmuxes[name], hub.srv.Client(), hub.clock)
@@ -80,7 +80,7 @@ func newCoordHarness(t *testing.T) *coordHarness {
 func (c *coordHarness) report() {
 	c.t.Helper()
 	c.hub.now = c.clock.Now()
-	c.hub.tick("thelio")
+	c.hub.tick("buildhost")
 	c.hub.tick("laptop")
 	events, _, err := ReadLog(c.hub.cfg.EventLog)
 	if err != nil {
@@ -174,8 +174,8 @@ func TestObserveHostGetsAndDoesNoCommands(t *testing.T) {
 	if g := c.hub.gits["laptop"]; len(g.cloned) != 0 {
 		t.Fatalf("the laptop cloned %v", g.cloned)
 	}
-	if g := c.hub.gits["thelio"]; len(g.cloned) != 1 {
-		t.Fatalf("thelio, which does not observe, cloned %v", g.cloned)
+	if g := c.hub.gits["buildhost"]; len(g.cloned) != 1 {
+		t.Fatalf("buildhost, which does not observe, cloned %v", g.cloned)
 	}
 	_, reply := c.hub.hub.take("laptop", nil)
 	if len(reply.Commands) != 0 {
@@ -303,7 +303,7 @@ func TestLaptopWorkIsTheItem(t *testing.T) {
 // W258e3837's brief plans, one card on the staking page.
 func TestStakingOverlapCard(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.Hosts = map[string]HostConfig{"thelio": {}, "laptop": {Observe: true}}
+	cfg.Hosts = map[string]HostConfig{"buildhost": {}, "laptop": {Observe: true}}
 	cfg.Repositories = map[string]Repository{"staking": {Forge: "gitlab", Host: "gitlab.com", Project: "accumulatenetwork/core/staking", CloneOn: []string{"laptop"}}}
 	now := time.Date(2026, 11, 1, 22, 0, 0, 0, time.UTC)
 	st := NewLogState(&cfg, ModeLive)
