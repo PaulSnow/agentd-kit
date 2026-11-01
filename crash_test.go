@@ -172,3 +172,35 @@ func TestRestartPromptPathsAreQuoted(t *testing.T) {
 		t.Fatal("the workdir's name ran as a command")
 	}
 }
+
+// answered is a STATUS.md whose Questions are all marked answered (#81).
+const answered = "# Status\nMerged.\n\n## Questions\n\n(answered at go; the target is the night branch)\n\nWab12cd34 done: merged as abc1234\n"
+
+// A dead session whose Questions are all answered is not parked for the
+// owner: it is failed, as any session gone without DONE (#81).
+func TestDeadSessionWithAnsweredQuestionsIsNotParked(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.status("s1", answered)
+	h.ticks(1, 5*time.Minute)
+	if h.state("s1") == BlockedOnOwner || len(h.runner.calls) != 0 {
+		t.Fatalf("state = %s, escalations = %v", h.state("s1"), h.runner.calls)
+	}
+	tr := &Track{}
+	st, why := Classify(tr, Evidence{Status: ParseStatus(answered)}, Policies{}, time.Now())
+	if st != Failed || strings.Contains(why, "parked") {
+		t.Fatalf("dead: %s, %q", st, why)
+	}
+}
+
+// A live session whose Questions are all answered is not blocked on the
+// owner (#81).
+func TestLiveSessionWithAnsweredQuestionsIsNotBlocked(t *testing.T) {
+	ev := Evidence{Alive: true, PaneHash: "h", Status: ParseStatus(answered)}
+	if st, why := Classify(&Track{}, ev, Policies{}, time.Now()); st == BlockedOnOwner || strings.Contains(why, "Questions") {
+		t.Fatalf("live: %s, %q", st, why)
+	}
+	ev.Status = ParseStatus(blocked)
+	if st, why := Classify(&Track{}, ev, Policies{}, time.Now()); st != BlockedOnOwner || why != "STATUS.md has open Questions" {
+		t.Fatalf("live with an open question: %s, %q", st, why)
+	}
+}

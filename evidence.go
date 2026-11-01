@@ -112,9 +112,35 @@ var listStart = regexp.MustCompile(`^\s*([-*+]\s|\d+[.)]\s)`)
 var noneAsks = regexp.MustCompile(`(?i)\b(but|need|needs|please|must|until|block|blocked|blocking|waiting|approve)\b`)
 
 // noneFirst matches a line whose first word is none, said as an answer:
-// "none. Owner asked ...", "None so far: ...", "- (none, ...". "None of
-// the tests pass" and "none-blocking" say something else.
-var noneFirst = regexp.MustCompile(`(?i)^[-*\s]*\(?\s*none(\s+(yet|open|so\s+far))?\s*([.,;:!)\x{2013}\x{2014}]|\s-\s|$)`)
+// "none. Owner asked ...", "None so far: ...", "- (none, ...", "none (Q1
+// answered at go)" (#81). "None of the tests pass" and "none-blocking" say
+// something else, and "None (which port?)" still asks (noneParagraphAsks).
+var noneFirst = regexp.MustCompile(`(?i)^[-*\s]*\(?\s*none(\s+(yet|open|so\s+far))?\s*([.,;:!()\x{2013}\x{2014}]|\s-\s|$)`)
+
+// answeredSaid matches a line that only reports a question answered:
+// "(answered at go; the target is ...)", "Q1 answered at go.", "Q1:
+// answered at go", "- Q1 and Q2 were answered on the console" (#81). A
+// question mark, or a word that asks the owner for something (noneAsks,
+// noneParagraphAsks), makes it a question whatever it begins with:
+// "(answered in part; please choose ...)".
+var answeredSaid = regexp.MustCompile(`(?i)^[-*\s]*\(?\s*((Q\d+|all|both|and|questions?|the\s+\w+(\s+questions?)?)[.:,]?\s+)*((were|was|is|are|now|all)\s+)*answered\b[^?]*\)?\s*\.?$`)
+
+// answerQuoted starts the owner's answer quoted under a question, as a
+// brief writes the answers given at go: "> Answer: ...". A question with
+// it, or with an answeredSaid line, under it before the next list item
+// or paragraph is settled (#81); "> Not answered at go" leaves it open.
+var answerQuoted = regexp.MustCompile(`(?i)^>\s*answer\s*:`)
+
+// itemDoneSaid matches a line that only marks an item done, "W1a2b3c4d
+// done: merged as ...": the end of a session's work written under its
+// Questions, not a question (#81).
+var itemDoneSaid = regexp.MustCompile(`(?i)^[-*\s]*W[0-9a-f]{8}[ *` + "`" + `]*done:\s*\S`)
+
+// settledSaid is whether a line says a question is answered and asks
+// nothing more.
+func settledSaid(t string) bool {
+	return answeredSaid.MatchString(t) && !noneAsks.MatchString(t) && !noneParagraphAsks.MatchString(t)
+}
 
 // noneParagraphAsks is what makes a none paragraph ask the owner something
 // after all: a question mark, or a request (#69).
@@ -187,8 +213,19 @@ func parseQuestions(text string, fences bool) (questions string, closed bool) {
 					}
 				}
 			}
-			if t == "DONE" || noQuestions.MatchString(t) || noneSaid.MatchString(t) && !noneAsks.MatchString(t) {
+			if t == "DONE" || noQuestions.MatchString(t) || noneSaid.MatchString(t) && !noneAsks.MatchString(t) ||
+				settledSaid(t) || answerQuoted.MatchString(t) || itemDoneSaid.MatchString(t) {
 				i = j
+				continue
+			}
+			// A question with its answer right under it, before the next
+			// list item or paragraph, is settled: it goes with the answer.
+			e, settled := j+1, false
+			for ; e < len(section) && section[e] != "" && !listStart.MatchString(section[e]); e++ {
+				settled = settled || answerQuoted.MatchString(section[e]) || settledSaid(section[e])
+			}
+			if settled {
+				i = e - 1
 				continue
 			}
 			kept = append(kept, section[i])
