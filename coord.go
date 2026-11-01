@@ -209,6 +209,9 @@ func screenNodeReport(cfg *Config, r *NodeReport) {
 	for i := range r.Clones {
 		c := &r.Clones[i]
 		c.Branch, c.Error, c.Root = one(c.Branch), one(c.Error), one(c.Root)
+		for k := range c.Pushed {
+			c.Pushed[k] = one(c.Pushed[k])
+		}
 		all(c.Changed)
 		all(c.Unpushed)
 		all(c.OpenState)
@@ -277,9 +280,9 @@ func laptopWorks(cfg *Config, c *CoordState) []laptopWork {
 			if !cl.Exists || !cl.Git {
 				continue
 			}
-			local := map[string]bool{}
+			local := map[string]bool{} // the local branches that hold something
 			for _, b := range cl.Local {
-				local[b.Name] = true
+				local[b.Name] = local[b.Name] || len(b.Paths) > 0 || b.NoBase
 			}
 			branch := cl.Branch
 			if branch == "" {
@@ -292,8 +295,9 @@ func laptopWorks(cfg *Config, c *CoordState) []laptopWork {
 			for _, b := range cl.Local {
 				// One whose commits the target has, merged, holds
 				// nothing; a squash-merged one is go on's to clear.
-				add(laptopWork{Repository: cl.Repository, Branch: b.Name, Paths: b.Paths, Holds: len(b.Paths) > 0})
+				add(laptopWork{Repository: cl.Repository, Branch: b.Name, Paths: b.Paths, Holds: len(b.Paths) > 0 || b.NoBase})
 			}
+
 		}
 		for _, s := range rep.Claude {
 			if s.Outside || s.Repository == "" || s.Branch == "" {
@@ -687,13 +691,21 @@ func linkedBranch(cfg *Config, st *LogState, item string) string {
 			return ""
 		}
 	}
-	// No longer reported: the laptop checked out another branch, and this
-	// one is not among its local branches the forge lacks, so origin had
-	// it when the laptop last fetched.
+	// Checked out no longer: pushed when its clone says the forge has it
+	// with nothing unpushed.
 	if seen := st.Coord.Seen[o.Host]; seen != nil {
-		return o.Laptop
+		for _, c := range seen.Report.Clones {
+			if c.Repository != o.Repository {
+				continue
+			}
+			for _, b := range c.Pushed {
+				if b == o.Laptop {
+					return o.Laptop
+				}
+			}
+		}
 	}
-	return ""
+	return "" // not reported as pushed: deleted, withheld, unpushed, or its clone unread
 }
 
 // readRequestFiles reads, in a worker, the changed files of each open

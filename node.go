@@ -149,6 +149,11 @@ type LocalBranch struct {
 	Name  string   `json:"name"`
 	Head  string   `json:"head,omitempty"`
 	Paths []string `json:"paths,omitempty"`
+	// OnForge marks a branch the forge has, with commits it lacks: its
+	// paths are those commits'. NoBase says its paths could not be read
+	// (no origin/target as last fetched): it may hold anything.
+	OnForge bool `json:"on_forge,omitempty"`
+	NoBase  bool `json:"no_base,omitempty"`
 }
 
 // CloneState is one watched clone. Path is relative to the node's repos
@@ -180,6 +185,9 @@ type CloneState struct {
 	Unpushed  []string      `json:"unpushed,omitempty"`
 	Local     []LocalBranch `json:"local,omitempty"`
 	Truncated bool          `json:"truncated,omitempty"`
+	// Pushed are its local branches the forge has with nothing unpushed,
+	// as origin was last fetched.
+	Pushed []string `json:"pushed,omitempty"`
 }
 
 // nodePathsMax bounds the paths one clone reports, so a report stays
@@ -684,7 +692,7 @@ func (g ExecNodeGit) Scan(dir, target string) (CloneState, error) {
 			c.Unpushed = nulPaths(out)
 		}
 	}
-	heads, err := run("for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads")
+	heads, err := run("for-each-ref", "--format=%(refname:short) %(objectname) %(upstream:short) %(upstream:track)", "refs/heads")
 	if err != nil {
 		return c, err
 	}
@@ -698,14 +706,44 @@ func (g ExecNodeGit) Scan(dir, target string) (CloneState, error) {
 		base = "refs/remotes/origin/" + target
 	}
 	for _, line := range strings.Split(heads, "\n") {
-		name, head, ok := strings.Cut(line, " ")
-		if !ok || onForge[name] || !plainBranch(name) {
+		f := strings.SplitN(line, " ", 4)
+		if len(f) < 2 || !plainBranch(f[0]) {
 			continue
 		}
-		b := LocalBranch{Name: name, Head: head}
+		name, head, upstream, track := f[0], f[1], "", ""
+		if len(f) > 2 {
+			upstream = f[2]
+		}
+		if len(f) > 3 {
+			track = f[3]
+		}
+		if onForge[name] {
+			// On the forge: pushed, unless it has commits origin's
+			// branch lacks, which are then its paths.
+			ahead := strings.Contains(track, "ahead")
+			if upstream != "origin/"+name {
+				n, err := run("rev-list", "--count", "refs/remotes/origin/"+name+"..refs/heads/"+name)
+				ahead = err != nil || n != "0"
+			}
+			if !ahead {
+				c.Pushed = append(c.Pushed, name)
+				continue
+			}
+			b := LocalBranch{Name: name, Head: head, OnForge: true}
+			if out, err := raw("diff", "--name-only", "-z", "refs/remotes/origin/"+name+"...refs/heads/"+name, "--"); err == nil {
+				b.Paths = nulPaths(out)
+			} else {
+				b.NoBase = true
+			}
+			c.Local = append(c.Local, b)
+			continue
+		}
+		b := LocalBranch{Name: name, Head: head, NoBase: base == ""}
 		if base != "" {
 			if out, err := raw("diff", "--name-only", "-z", base+"..."+"refs/heads/"+name, "--"); err == nil {
 				b.Paths = nulPaths(out)
+			} else {
+				b.NoBase = true
 			}
 		}
 		c.Local = append(c.Local, b)
@@ -927,6 +965,11 @@ func (n *Node) send(ctx context.Context) (nodeReply, error) {
 // ack records that the hub holds the host's events up to acked, and drops
 // them.
 func (n *Node) ack(acked int64) {
+	if acked < n.acked {
+		// The hub holds less than it did: a same report would stand on
+		// a report it no longer has.
+		n.held = ""
+	}
 	n.acked = acked
 	kept := n.pending[:0]
 	for _, p := range n.pending {

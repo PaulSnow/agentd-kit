@@ -494,3 +494,64 @@ func TestItemGoOnIsOneCard(t *testing.T) {
 		t.Fatalf("overlaps %+v", got)
 	}
 }
+
+// A linked branch the laptop left counts as pushed only when its clone
+// says the forge has it with nothing unpushed.
+func TestLinkedBranchLeftBehind(t *testing.T) {
+	c := newCoordHarness(t)
+	it := &WorkItem{ID: "W7777bbbb", Repository: "widgets", State: WorkOpen, Designer: true,
+		Design: &WorkDesign{Round: 1, Brief: &DesignBrief{Design: []string{"Change spin.go."}}}}
+	c.sup.st.Work = map[string]*WorkItem{it.ID: it}
+	gitRun(t, c.clone, "checkout", "-q", "-b", "feat-x")
+	writeFile(t, filepath.Join(c.clone, "spin.go"), "package spin\n")
+	gitRun(t, c.clone, "add", "spin.go")
+	gitRun(t, c.clone, "commit", "-q", "-m", "spin")
+	gitRun(t, c.clone, "push", "-q", "-u", "origin", "feat-x")
+	writeFile(t, filepath.Join(c.clone, "spin.go"), "package spin // more\n")
+	c.report()
+	key := overlapKey("laptop", "widgets", "feat-x", it.ID)
+	if err := RecordCoordChoice(NewLogWriter(c.buf), c.logState(), c.clock.Now(), key, CoordIsItem); err != nil {
+		t.Fatal(err)
+	}
+	c.sup.ownerRecords()
+	// A commit the forge lacks, then off to main.
+	gitRun(t, c.clone, "commit", "-q", "-am", "more")
+	gitRun(t, c.clone, "checkout", "-q", "main")
+	c.clock.advance(time.Minute)
+	c.report()
+	if b := linkedBranch(c.cfg, c.sup.st, it.ID); b != "" {
+		t.Fatalf("a branch with unpushed commits was continued: %q", b)
+	}
+	if why := c.sup.laptopWait("widgets", "x", RuntimePayload{Kind: KindWork, Item: it.ID, Branch: "owner/x"}, nil); !strings.Contains(why, "feat-x") {
+		t.Fatalf("the unpushed branch left behind did not hold the item: %q", why)
+	}
+	gitRun(t, c.clone, "push", "-q", "origin", "feat-x")
+	c.clock.advance(time.Minute)
+	c.report()
+	if b := linkedBranch(c.cfg, c.sup.st, it.ID); b != "feat-x" {
+		t.Fatalf("the pushed branch left behind is not the item's: %q", b)
+	}
+}
+
+// A branch the target has merged, still checked out after the forge's
+// branch was pruned, holds nothing.
+func TestMergedCheckedOutBranchHoldsNothing(t *testing.T) {
+	c := newCoordHarness(t)
+	gitRun(t, c.clone, "checkout", "-q", "-b", "issue-12-done")
+	c.report()
+	for _, l := range laptopWorks(c.cfg, c.logState().Coord) {
+		if l.Branch == "issue-12-done" && l.Holds {
+			t.Fatalf("a merged branch holds: %+v", l)
+		}
+	}
+}
+
+// A hub that answers it holds less than before gets a whole report, not
+// a same one.
+func TestHubThatHoldsLessGetsWholeReport(t *testing.T) {
+	n := &Node{acked: 5, held: "abc"}
+	n.ack(0)
+	if n.held != "" || n.acked != 0 {
+		t.Fatalf("node %+v", n)
+	}
+}
