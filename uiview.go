@@ -193,7 +193,8 @@ type uiNeed struct {
 	Src        string
 	Repository string
 	Session    string
-	Kind       string // decision, blocked, usage-limited, crash-looping, stopped, failed
+	Kind       string // decision, blocked, usage-limited, crash-looping, stopped, failed, account
+	Account    string // an account need's account, with no session
 	Since      time.Time
 	Text       string // a session's reason
 	Decision   *UIDecision
@@ -586,6 +587,7 @@ func (src *uiSource) addIndex(v *uiIndex, get func(string) *uiRepo, now time.Tim
 	src.addAccounts(v, cfg, now)
 	src.addJobs(v, cfg)
 	v.Needs = append(v.Needs, src.needs(cfg, rep, src.askedAt)...)
+	src.addAccountNeeds(v, cfg, now)
 	v.PollAlerts = append(v.PollAlerts, src.pollAlerts(cfg, now)...)
 	for _, rr := range rep.Repositories {
 		r := get(uiRepoName(rr))
@@ -1638,6 +1640,41 @@ func (u *UI) serveAccounts(w http.ResponseWriter) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(reps)
+}
+
+// addAccountNeeds adds one card per account whose usage readings have
+// failed for over usageReadingDown (#80). It is the fold's state, so it
+// goes with the next good reading; accounts are shared, so a second
+// source adds no card for an account the first did.
+func (src *uiSource) addAccountNeeds(v *uiIndex, cfg *Config, now time.Time) {
+	if !cfg.Usage.Enabled {
+		return
+	}
+	secret := confidentialMatcher(cfg)
+	for _, name := range sortedKeys(src.st.Accounts) {
+		r := src.st.Accounts[name]
+		if a, ok := cfg.Accounts[name]; !ok || a.Usage == UsageOff || !r.readingDown(now) {
+			continue
+		}
+		dup := false
+		for _, n := range v.Needs {
+			dup = dup || n.Kind == "account" && n.Account == name
+		}
+		if dup {
+			continue
+		}
+		why := r.Error
+		if secret(why) {
+			why = "(withheld: it matched a confidential pattern)"
+		}
+		v.Needs = append(v.Needs, uiNeed{Src: src.Name, Account: name, Kind: "account", Since: r.FailingSince,
+			Text: accountDownText(name, r.FailingSince, why)})
+	}
+}
+
+// accountDownText is an account card's words.
+func accountDownText(name string, since time.Time, why string) string {
+	return fmt.Sprintf("%s's usage readings have failed since %s: %s; placement goes on without a reading", name, since.UTC().Format(time.RFC3339), why)
 }
 
 // addAccounts merges src's account readings into the index: the newest

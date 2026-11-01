@@ -23,8 +23,9 @@
 {{define "need"}}{{$p := .P}}{{with .V}}<article class="card need need-{{.Kind}}">
 <header class="card-head">
 <span class="badge kind-{{.Kind}}">{{if .Decision}}{{if .Decision.Blocking}}blocking{{else}}decision{{end}}{{else}}{{.Kind}}{{end}}</span>
-<a class="session" href="/session/{{.Src}}/{{.Session}}">{{.Session}}</a>
-<span class="muted">{{.Repository}} · waiting {{$p.Ago .Since}}</span>
+{{if .Account}}<strong class="account">{{.Account}}</strong>
+<span class="muted">account · failing {{$p.Ago .Since}}</span>{{else}}<a class="session" href="/session/{{.Src}}/{{.Session}}">{{.Session}}</a>
+<span class="muted">{{.Repository}} · waiting {{$p.Ago .Since}}</span>{{end}}
 </header>
 {{with .Decision}}{{template "decision" (ctx $p $.V)}}{{else}}<div class="md">{{markdown .Text}}</div>{{end}}
 </article>{{end}}{{end}}

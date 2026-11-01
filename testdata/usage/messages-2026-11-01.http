@@ -1,0 +1,20 @@
+HTTP/2 200
+date: Sun, 01 Nov 2026 22:54:06 GMT
+content-type: application/json
+anthropic-ratelimit-unified-overage-status: rejected
+anthropic-ratelimit-unified-representative-claim: seven_day
+anthropic-ratelimit-unified-reset: 1793707200
+anthropic-ratelimit-unified-7d-reset: 1793707200
+anthropic-ratelimit-unified-7d-status: allowed
+anthropic-ratelimit-unified-fallback-percentage: 0.5
+anthropic-ratelimit-unified-overage-disabled-reason: org_level_disabled
+anthropic-ratelimit-unified-7d-utilization: 0.12
+anthropic-ratelimit-unified-status: allowed
+strict-transport-security: max-age=31536000; includeSubDomains; preload
+vary: Accept-Encoding
+content-security-policy: default-src 'none'; frame-ancestors 'none'
+server: cloudflare
+cf-cache-status: DYNAMIC
+x-robots-tag: none
+
+{"model":"claude-haiku-4-5-20251001","id":"msg_[scrubbed]","type":"message","role":"assistant","content":[{"type":"text","text":"#"}],"container":null,"stop_reason":"max_tokens","stop_sequence":null,"stop_details":null,"usage":{"input_tokens":22,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"output_tokens":1,"service_tier":"standard","inference_geo":"not_available","speed":"standard"},"diagnostics":null}
