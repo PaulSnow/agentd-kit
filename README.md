@@ -562,6 +562,7 @@ Every step is a `loop` event (repository, request, case, head, step, session, ro
 
 ```
 host buildbox.example        # a host name, matched as a whole word, any case
+name gizmoworks              # another project's name, as a whole word, any case; reported as "project name"
 email someone@example.invalid
 user someone                 # the path /home/someone
 ip 192.0.2.10                # one address, as a whole word
