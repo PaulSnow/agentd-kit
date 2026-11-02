@@ -122,8 +122,8 @@ var noneFirst = regexp.MustCompile(`(?i)^[-*\s]*\(?\s*(none(\s+(yet|open|so\s+fa
 // answeredSaid matches a line that only reports a question answered:
 // "(answered at go; the target is ...)", "Q1 answered at go.", "Q1:
 // answered at go", "- Q1 and Q2 were answered on the console" (#81). A
-// question mark, or a word that asks the owner for something (noneAsks,
-// noneParagraphAsks), makes it a question whatever it begins with:
+// question mark, or a word that asks the owner for something
+// (answeredAsks), makes it a question whatever it begins with:
 // "(answered in part; please choose ...)".
 var answeredSaid = regexp.MustCompile(`(?i)^[-*\s]*\(?\s*((Q\d+|all|both|and|questions?|the\s+\w+(\s+questions?)?)[.:,]?\s+)*((were|was|is|are|now|all)\s+)*answered\b[^?]*\)?\s*\.?$`)
 
@@ -141,8 +141,14 @@ var itemDoneSaid = regexp.MustCompile(`(?i)^[-*\s]*W[0-9a-f]{8}[ *` + "`" + `]*d
 // settledSaid is whether a line says a question is answered and asks
 // nothing more.
 func settledSaid(t string) bool {
-	return answeredSaid.MatchString(t) && !noneAsks.MatchString(t) && !noneParagraphAsks.MatchString(t)
+	return answeredSaid.MatchString(t) && !answeredAsks.MatchString(t)
 }
+
+// answeredAsks is what makes an answered line ask the owner something
+// after all: a question mark, or a request. Unlike noneAsks it leaves out
+// until, need, waiting and block: inside an answered report those words
+// describe the answer, "(answered at go; Q5: hold until a choice)" (#92).
+var answeredAsks = regexp.MustCompile(`(?i)\?|\b(please|must|choose|say\s+if|tell\s+me)\b|\bowner\s*:`)
 
 // noneParagraphAsks is what makes a none paragraph ask the owner something
 // after all: a question mark, or a request (#69).

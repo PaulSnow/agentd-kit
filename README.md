@@ -270,7 +270,7 @@ A step is one model call of a pipeline (#85): `claude -p` once, no tmux, no tool
 
 ```json
 {
-  "pipeline": "meetup", "name": "draft",
+  "pipeline": "newsletter", "name": "draft",
   "inputs": ["stories/scored.json", "style/last-week.md"],
   "summary": {"week": 44, "sections": 5},
   "instruction": "Draft the five sections of this week's script from the scored stories.",
