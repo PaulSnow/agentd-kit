@@ -865,8 +865,9 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 	pol := s.cfg.Policies
 	// A work session is rotated at the end of its round too, DONE once
 	// its branch is delivered (#48).
-	// Nor while the owner waits on its answer to a message (#56).
-	if (state == Working || state == Idle || state == Done && sess.Kind == KindWork && delivered(name, sess, t)) && !t.Limited && s.st.openSince(name, now).IsZero() && s.rotate(name, sess, t, ev, now) {
+	// Nor while the owner waits on its answer to a message (#56), but
+	// for the hard cap (#87): rotate holds that itself.
+	if (state == Working || state == Idle || state == Done && sess.Kind == KindWork && delivered(name, sess, t)) && !t.Limited && s.rotate(name, sess, t, ev, now) {
 		return Starting
 	}
 	// The limit has cleared. Only a session that can take a line is told to
@@ -954,7 +955,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			return state
 		}
 		answers, ins := t.answersFor(false), s.st.instructionsFor(name, false)
-		err = s.act(name, ActRestart, &ActPayload{Attempt: n + 1, Cwd: sess.Cwd, Respawn: ev.PaneDead, Account: sess.Account, Command: line, Transcript: id, Answers: ids, AnswersAt: at, Instructions: iids, Brief: brief.parts()}, func() error {
+		err = s.act(name, ActRestart, &ActPayload{Attempt: n + 1, Cwd: sess.Cwd, Respawn: ev.PaneDead, Account: sess.Account, Command: line, Transcript: id, Answers: ids, AnswersAt: at, Instructions: iids, Brief: brief.parts(), BriefCut: brief.briefCut()}, func() error {
 			if err := brief.write(sess.Workdir); err != nil {
 				return err
 			}

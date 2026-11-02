@@ -552,6 +552,65 @@ func (s *Supervisor) loopCarries(in *Instruction) (why string, limit int) {
 	return why, 0
 }
 
+// loopFinding is the judge's finding that describes loop-carried work
+// (#87): the request or case it is of, and what the finding says.
+type loopFinding struct {
+	Request     string   `json:"request"`
+	ID          string   `json:"id"`
+	Title       string   `json:"title"`
+	Consequence string   `json:"consequence,omitempty"`
+	Suggestion  string   `json:"suggestion,omitempty"`
+	Paths       []string `json:"paths,omitempty"`
+}
+
+func findingOf(request string, f Finding) *loopFinding {
+	return &loopFinding{Request: request, ID: f.ID, Title: f.Title, Consequence: f.Consequence, Suggestion: f.Suggestion, Paths: f.Paths}
+}
+
+// loopDescribes is why work w of in starts with no designer, because the
+// loop already describes it, and the finding that does, or "" (#87): the
+// item the round's issue answers open (loopCarries gave it limit 1), or
+// work on an issue agentd opened as a finding's follow-up.
+func (s *Supervisor) loopDescribes(in *Instruction, w ThreadWork) (string, *loopFinding) {
+	if len(in.Repositories) == 0 {
+		return "", nil
+	}
+	repo := in.Repositories[0]
+	if q, d, ok := loopDeferral(s.cfg, s.st, in, s.clock.Now()); ok {
+		if why, limit := s.loopCarries(in); why == "" && limit == 1 {
+			return fmt.Sprintf("the owner answered issue on finding %s of %s, which describes the work", d.Finding.ID, q.Ref), findingOf(q.Ref, d.Finding)
+		}
+		return "", nil
+	}
+	scopedIssue(in, &w)
+	r, ok := s.cfg.Repositories[repo]
+	if w.Issue <= 0 || !ok {
+		return "", nil
+	}
+	prefix := "finding:" + repoKey(r.Forge, r.Project)
+	for _, key := range sortedKeys(s.st.IssuesOpened) {
+		rest, found := strings.CutPrefix(key, prefix)
+		if s.st.IssuesOpened[key].Number != w.Issue || !found || rest == "" || rest[0] != '#' && rest[0] != '!' {
+			continue
+		}
+		i := strings.LastIndex(key, ":")
+		cs, id := strings.TrimPrefix(key[:i], "finding:"), key[i+1:]
+		f := &loopFinding{Request: cs, ID: id}
+		if c := s.st.Cases[cs]; c != nil {
+			for k := len(c.Rounds) - 1; k >= 0 && f.Title == ""; k-- {
+				for _, x := range c.Rounds[k].Findings {
+					if x.ID == id {
+						f = findingOf(cs, x)
+						break
+					}
+				}
+			}
+		}
+		return fmt.Sprintf("#%d is agentd's follow-up issue of finding %s of %s, which describes the work", w.Issue, id, cs), f
+	}
+	return "", nil
+}
+
 // workEmit logs a step of an item.
 func (s *Supervisor) workEmit(p WorkPayload) {
 	p.Note = s.withheld(p.Note)
@@ -598,15 +657,22 @@ func (s *Supervisor) driveItems(now time.Time) {
 			if s.st.Work[id] != nil || limit >= 0 && k >= limit {
 				continue
 			}
+			note := ""
 			if k == 0 {
 				handTo = in.Session
 				scopedIssue(in, &w)
+				// Started without the designer: the open says why (#87).
+				if s.designs(in.Repositories[0]) {
+					if why, _ := s.loopDescribes(in, w); why != "" {
+						note = "no designer: " + why
+					}
+				}
 			}
 			if s.issueForWork(id, in.Repositories[0], &w); s.halt != nil {
 				return
 			}
 			s.answerDoneWhen(in, in.Repositories[0], &w)
-			if s.workEmit(WorkPayload{ID: id, Step: WorkStepOpen, Repository: in.Repositories[0], Instruction: in.ID, Work: &w, HandTo: handTo}); s.halt != nil {
+			if s.workEmit(WorkPayload{ID: id, Step: WorkStepOpen, Repository: in.Repositories[0], Instruction: in.ID, Work: &w, HandTo: handTo, Note: note}); s.halt != nil {
 				return
 			}
 		}

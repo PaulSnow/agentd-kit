@@ -278,6 +278,9 @@ type ownerWorkDoc struct {
 	Cards    []threadCard     `json:"cards,omitempty"`
 	Fleets   []threadFleet    `json:"fleets,omitempty"`
 	Releases []threadRelease  `json:"releases,omitempty"`
+	// Finding is the judge's finding that describes loop-carried work,
+	// which starts with no designer (#87).
+	Finding *loopFinding `json:"finding,omitempty"`
 }
 
 // briefOwner heads the BRIEF.md of a session started for the owner's
@@ -307,6 +310,23 @@ func keepOwnerWork(cfg *Config, x threadInput, w ThreadWork, id string) error {
 	return writeAtomic(path, b)
 }
 
+// keepFinding adds the finding f to the owner work facts kept at path.
+func keepFinding(path string, f *loopFinding) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var doc ownerWorkDoc
+	if err := json.Unmarshal(b, &doc); err != nil {
+		return err
+	}
+	doc.Finding = f
+	if b, err = json.Marshal(doc); err != nil {
+		return err
+	}
+	return writeAtomic(path, b)
+}
+
 // workTitleOf is a title for work the owner's text asks for, when no
 // agent named one: its first words.
 func workTitleOf(text string) string {
@@ -325,6 +345,12 @@ func workTitleOf(text string) string {
 // why and, at the repository's max, which sessions hold the places. It
 // says whether it started one.
 func (s *Supervisor) startOwnerWork(in *Instruction, repo string, w ThreadWork) bool {
+	return s.startOwnerWorkWith(in, repo, w, nil)
+}
+
+// startOwnerWorkWith is startOwnerWork with the finding that describes
+// the work, if any, kept in its facts (#87).
+func (s *Supervisor) startOwnerWorkWith(in *Instruction, repo string, w ThreadWork, f *loopFinding) bool {
 	scopedIssue(in, &w)
 	name, branch := ownerWorkName(repo, w.Title, in.ID)
 	if p, ok := s.st.Runtime[name]; ok && p.Owner == in.ID {
@@ -351,6 +377,12 @@ func (s *Supervisor) startOwnerWork(in *Instruction, repo string, w ThreadWork) 
 		x.Cards = s.threadCards(&x, s.keepText)
 		if err := keepOwnerWork(s.cfg, x, w, in.ID); err != nil {
 			s.routeStep(in, RouteFail, "", false, cutUTF8("agentd could not keep the work's brief: "+err.Error(), 300))
+			return false
+		}
+	}
+	if f != nil {
+		if err := keepFinding(ownerWorkPath(s.cfg, repo, in.ID), f); err != nil {
+			s.routeStep(in, RouteFail, "", false, cutUTF8("agentd could not keep the work's finding: "+err.Error(), 300))
 			return false
 		}
 	}

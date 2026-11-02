@@ -427,7 +427,14 @@ func (s *Supervisor) routeInstructions(now time.Time) {
 				}
 			}
 			// Designed first, unless the design step is off (#68).
-			if s.st.Work[workID(in.ID)] != nil || s.designs(repo) {
+			// Work the loop already describes is not designed (#87).
+			why, f := "", (*loopFinding)(nil)
+			if s.st.Work[workID(in.ID)] == nil && s.designs(repo) {
+				why, f = s.loopDescribes(in, in.Works[0])
+			}
+			if why != "" {
+				s.startOwnerWorkWith(in, repo, in.Works[0], f)
+			} else if s.st.Work[workID(in.ID)] != nil || s.designs(repo) {
 				s.openDesigns(in, repo)
 			} else {
 				// The others open once it is routed, and take sessions of

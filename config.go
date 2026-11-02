@@ -89,6 +89,7 @@ type Policies struct {
 	Escalate     EscalatePolicy     `json:"escalate"`
 	Dialog       DialogPolicy       `json:"dialog"`
 	Context      ContextPolicy      `json:"context"`
+	Brief        BriefPolicy        `json:"brief"`
 	Budget       BudgetPolicy       `json:"budget"`
 	Answers      AnswersPolicy      `json:"answers"`
 	Instructions InstructionsPolicy `json:"instructions"`
@@ -157,11 +158,30 @@ type ModelsPolicy struct {
 // Checkpoint, a regular expression, is what a merge's subject must match
 // to be a checkpoint; by default the subject of a merge of an issue's
 // branch, "Merge #12: ...", and not a merge of the base into a branch.
+// HardCap (#87) is a work session's hard limit: one whose context reaches
+// it is cut with a fresh context at once, mid-turn if need be, at most
+// once per transcript, and resumes from its STATUS.md. Zero is off; set, it
+// must be over Threshold.
 type ContextPolicy struct {
 	Enabled    bool     `json:"enabled"`
 	Threshold  int64    `json:"threshold"`
+	HardCap    int64    `json:"hard_cap"`
 	Grace      Duration `json:"grace"`
 	Checkpoint string   `json:"checkpoint"`
+}
+
+// DefaultHardCap is policies.context.hard_cap's default, in tokens (#87).
+const DefaultHardCap = 150000
+
+// DefaultBriefBytes is policies.brief.max_bytes's default (#87): about
+// 8,000 tokens, counted in bytes so no tokenizer is needed.
+const DefaultBriefBytes = 32768
+
+// BriefPolicy caps the BRIEF.md agentd writes for a session (#87): one
+// over MaxBytes has its lower-value parts dropped, or is cut at the end,
+// and ends with a line naming what was dropped. Zero is off.
+type BriefPolicy struct {
+	MaxBytes int `json:"max_bytes"`
 }
 
 // BudgetPolicy stops a session whose spend (input-equivalent tokens, over
@@ -413,7 +433,8 @@ func DefaultConfig() Config {
 			Escalate:     EscalatePolicy{},
 			Dialog:       DialogPolicy{Patterns: []string{`Do you want to`, `❯\s*1\.`, `(?i)enter to confirm`}},
 			PaneCommands: []string{"claude"},
-			Context:      ContextPolicy{Enabled: true, Threshold: 120000, Grace: Duration{5 * time.Minute}, Checkpoint: `^Merge [#!][0-9]+\b`},
+			Context:      ContextPolicy{Enabled: true, Threshold: 120000, HardCap: DefaultHardCap, Grace: Duration{5 * time.Minute}, Checkpoint: `^Merge [#!][0-9]+\b`},
+			Brief:        BriefPolicy{MaxBytes: DefaultBriefBytes},
 		},
 	}
 }
@@ -523,8 +544,14 @@ func (c *Config) finish(base string) error {
 	if x := c.Policies.Context; x.Enabled && (x.Threshold <= 0 || x.Grace.Duration < 0) {
 		errs = append(errs, errors.New("policies.context: threshold must be positive and grace non-negative"))
 	}
+	if x := c.Policies.Context; x.HardCap < 0 || x.HardCap > 0 && x.HardCap <= x.Threshold {
+		errs = append(errs, fmt.Errorf("policies.context.hard_cap %d: 0 is off, otherwise it must be over threshold %d", x.HardCap, x.Threshold))
+	}
 	if _, err := regexp.Compile(c.Policies.Context.Checkpoint); err != nil {
 		errs = append(errs, fmt.Errorf("policies.context.checkpoint: %w", err))
+	}
+	if c.Policies.Brief.MaxBytes < 0 {
+		errs = append(errs, errors.New("policies.brief.max_bytes must not be negative"))
 	}
 	if b := c.Policies.Budget; b.SessionTokens < 0 || b.RunTokens < 0 {
 		errs = append(errs, errors.New("policies.budget: session_tokens and run_tokens must not be negative"))

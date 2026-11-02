@@ -64,13 +64,14 @@ type Track struct {
 	Transcript string
 	Measured   string
 	Usage      map[string]UsagePayload
-	Checkpoint Checkpoint  // the latest merge seen at the worktree's head
-	Launched   time.Time   // the latest restart or rotation started
-	Brief      []BriefPart // a session's brief parts as its latest launch wrote them
-	RotatedFor string      // the merge the latest rotation was at
-	Rotations  int         // rotations, taken or would-be, ever
-	Stopped    string      // why the session was stopped, until the owner clears it
-	SpendBase  int64       // the spend when the owner last cleared it, which its cap counts from
+	Checkpoint Checkpoint   // the latest merge seen at the worktree's head
+	Launched   time.Time    // the latest restart or rotation started
+	Brief      []BriefPart  // a session's brief parts as its latest launch wrote them
+	RotatedFor string       // the merge the latest rotation was at
+	Cuts       []SessionCut // its context and brief cuts, oldest first (#87)
+	Rotations  int          // rotations, taken or would-be, ever
+	Stopped    string       // why the session was stopped, until the owner clears it
+	SpendBase  int64        // the spend when the owner last cleared it, which its cap counts from
 
 	Posted    map[string]bool        // escalation keys already posted, or given up on
 	Questions QuestionsEscalation    // the escalation of the Questions section
@@ -430,4 +431,14 @@ func (st *LogState) shownState(name string, t *Track, now time.Time) (State, str
 		return Stale, why
 	}
 	return t.State, t.Reason
+}
+
+// SessionCut is one cut agentd made to a session (#87): its context cut
+// mid-turn at the hard cap, or its BRIEF.md cut to policies.brief.max_bytes.
+type SessionCut struct {
+	At      time.Time
+	Action  string    // the provision, restart or rotate that made it
+	Context int64     // a context cut: the context it left
+	Cap     int64     // and the hard cap it reached
+	Brief   *BriefCut // a brief cut
 }
