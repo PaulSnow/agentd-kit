@@ -48,6 +48,8 @@ type Config struct {
 	Ops OpsConfig `json:"ops,omitempty"`
 	// Items bounds how long the owner's work items wait (#66).
 	Items ItemsConfig `json:"items"`
+	// Digest is the owner's daily digest of what waits on them (#88).
+	Digest DigestConfig `json:"digest"`
 	// Hub, Hosts and Node are agentd on every machine (#29, node.go): the
 	// hub the nodes report to, the hosts it serves, and this machine's
 	// node.
@@ -89,6 +91,7 @@ type Policies struct {
 	Escalate     EscalatePolicy     `json:"escalate"`
 	Dialog       DialogPolicy       `json:"dialog"`
 	Context      ContextPolicy      `json:"context"`
+	Brief        BriefPolicy        `json:"brief"`
 	Budget       BudgetPolicy       `json:"budget"`
 	Answers      AnswersPolicy      `json:"answers"`
 	Instructions InstructionsPolicy `json:"instructions"`
@@ -157,11 +160,30 @@ type ModelsPolicy struct {
 // Checkpoint, a regular expression, is what a merge's subject must match
 // to be a checkpoint; by default the subject of a merge of an issue's
 // branch, "Merge #12: ...", and not a merge of the base into a branch.
+// HardCap (#87) is a work session's hard limit: one whose context reaches
+// it is cut with a fresh context at once, mid-turn if need be, at most
+// once per transcript, and resumes from its STATUS.md. Zero is off; set, it
+// must be over Threshold.
 type ContextPolicy struct {
 	Enabled    bool     `json:"enabled"`
 	Threshold  int64    `json:"threshold"`
+	HardCap    int64    `json:"hard_cap"`
 	Grace      Duration `json:"grace"`
 	Checkpoint string   `json:"checkpoint"`
+}
+
+// DefaultHardCap is policies.context.hard_cap's default, in tokens (#87).
+const DefaultHardCap = 150000
+
+// DefaultBriefBytes is policies.brief.max_bytes's default (#87): about
+// 8,000 tokens, counted in bytes so no tokenizer is needed.
+const DefaultBriefBytes = 32768
+
+// BriefPolicy caps the BRIEF.md agentd writes for a session (#87): one
+// over MaxBytes has its lower-value parts dropped, or is cut at the end,
+// and ends with a line naming what was dropped. Zero is off.
+type BriefPolicy struct {
+	MaxBytes int `json:"max_bytes"`
 }
 
 // BudgetPolicy stops a session whose spend (input-equivalent tokens, over
@@ -413,7 +435,8 @@ func DefaultConfig() Config {
 			Escalate:     EscalatePolicy{},
 			Dialog:       DialogPolicy{Patterns: []string{`Do you want to`, `❯\s*1\.`, `(?i)enter to confirm`}},
 			PaneCommands: []string{"claude"},
-			Context:      ContextPolicy{Enabled: true, Threshold: 120000, Grace: Duration{5 * time.Minute}, Checkpoint: `^Merge [#!][0-9]+\b`},
+			Context:      ContextPolicy{Enabled: true, Threshold: 120000, HardCap: DefaultHardCap, Grace: Duration{5 * time.Minute}, Checkpoint: `^Merge [#!][0-9]+\b`},
+			Brief:        BriefPolicy{MaxBytes: DefaultBriefBytes},
 		},
 	}
 }
@@ -488,7 +511,7 @@ func (c *Config) finish(base string) error {
 	if s := c.Jobs.Status; s.Every.Duration < 0 || s.Every.Duration > 0 && s.Every.Duration < time.Minute || s.MaxInput < 0 {
 		errs = append(errs, errors.New("jobs.status.every must be a minute or more, and jobs.status.max_input not negative"))
 	}
-	if k := c.Jobs.Curator; k.Quiet.Duration < 0 || k.MaxWait.Duration < 0 || k.Gap.Duration < 0 || k.Lookback.Duration < 0 || k.MaxInput < 0 || k.PerDay < 0 ||
+	if k := c.Jobs.Curator; k.Quiet.Duration < 0 || k.MaxWait.Duration < 0 || k.Gap.Duration < 0 || k.Lookback.Duration < 0 || k.MaxInput < 0 || k.PerDay < 0 || k.BudgetTokens < 0 ||
 		c.Jobs.Expert.BudgetTokens < 0 || c.Jobs.Expert.Timeout.Duration < 0 {
 		errs = append(errs, errors.New("jobs.curator's and jobs.expert's settings must not be negative"))
 	}
@@ -523,8 +546,14 @@ func (c *Config) finish(base string) error {
 	if x := c.Policies.Context; x.Enabled && (x.Threshold <= 0 || x.Grace.Duration < 0) {
 		errs = append(errs, errors.New("policies.context: threshold must be positive and grace non-negative"))
 	}
+	if x := c.Policies.Context; x.HardCap < 0 || x.HardCap > 0 && x.HardCap <= x.Threshold {
+		errs = append(errs, fmt.Errorf("policies.context.hard_cap %d: 0 is off, otherwise it must be over threshold %d", x.HardCap, x.Threshold))
+	}
 	if _, err := regexp.Compile(c.Policies.Context.Checkpoint); err != nil {
 		errs = append(errs, fmt.Errorf("policies.context.checkpoint: %w", err))
+	}
+	if c.Policies.Brief.MaxBytes < 0 {
+		errs = append(errs, errors.New("policies.brief.max_bytes must not be negative"))
 	}
 	if b := c.Policies.Budget; b.SessionTokens < 0 || b.RunTokens < 0 {
 		errs = append(errs, errors.New("policies.budget: session_tokens and run_tokens must not be negative"))
@@ -689,6 +718,7 @@ func (c *Config) finish(base string) error {
 	// logged, and the UI shows them in their consoles (#42).
 	c.checkOps(path, &errs)
 	c.checkConsoles(&errs)
+	c.checkDigest(&errs)
 	c.checkTurns(&errs)
 	// A bare command name is left for PATH to find; a path is expanded.
 	if cmd := c.Policies.Escalate.Command; len(cmd) > 0 && (strings.HasPrefix(cmd[0], "~") || strings.Contains(cmd[0], "/")) {
@@ -821,7 +851,7 @@ func (c *Config) SessionNames() []string {
 
 // Console returns the console an escalation about session name goes to.
 func (c *Config) Console(name string) string {
-	if strings.HasPrefix(name, jobTrackPrefix) { // a scheduled job's, whose name no console's sessions match
+	if strings.HasPrefix(name, jobTrackPrefix) || strings.HasPrefix(name, stepTrackPrefix) { // a scheduled job's or a step's, whose name no console's sessions match
 		return c.Policies.Escalate.DefaultConsole
 	}
 	if repo, ok := strings.CutPrefix(name, requestsTrackPrefix); ok { // a repository's requests'

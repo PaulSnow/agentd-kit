@@ -23,8 +23,9 @@
 {{define "need"}}{{$p := .P}}{{with .V}}<article class="card need need-{{.Kind}}">
 <header class="card-head">
 <span class="badge kind-{{.Kind}}">{{if .Decision}}{{if .Decision.Blocking}}blocking{{else}}decision{{end}}{{else}}{{.Kind}}{{end}}</span>
-<a class="session" href="/session/{{.Src}}/{{.Session}}">{{.Session}}</a>
-<span class="muted">{{.Repository}} · waiting {{$p.Ago .Since}}</span>
+{{if .Account}}<strong class="account">{{.Account}}</strong>
+<span class="muted">account · failing {{$p.Ago .Since}}</span>{{else}}<a class="session" href="/session/{{.Src}}/{{.Session}}">{{.Session}}</a>
+<span class="muted">{{.Repository}} · waiting {{$p.Ago .Since}}</span>{{end}}
 </header>
 {{with .Decision}}{{template "decision" (ctx $p $.V)}}{{else}}<div class="md">{{markdown .Text}}</div>{{end}}
 </article>{{end}}{{end}}
@@ -96,8 +97,14 @@
 {{if or .ThisWeek.Sessions .ThisWeek.Jobs}}<details class="usage-split" data-key="usage-{{.Account}}"><summary>what used it this week</summary><ul class="meta">{{range .ThisWeek.Sessions}}<li>{{.Name}} {{$.Tokens .Tokens}}</li>{{end}}{{if .ThisWeek.Others}}<li>other sessions {{$.Tokens .ThisWeek.Others}}</li>{{end}}{{range .ThisWeek.Jobs}}<li>{{.Name}} {{$.Tokens .Tokens}}</li>{{end}}</ul></details>{{end}}{{end}}</div>{{end}}
 </li>{{end}}{{range .Jobs}}<li class="chip{{if .Failing}} chip-over{{end}}">
 <strong>{{.Name}}</strong> <span class="badge{{if .Failing}} alert{{else if .Running}} state-working{{else}} kind-stopped{{end}}">{{if .Running}}running{{else if .Failing}}failing{{else}}job{{end}}</span>
-<span class="meta">{{.Schedule}}{{if not .Started.IsZero}} · started {{$.Ago .Started}}{{end}}{{with .End}}{{if .Exit}} · exit {{.Exit}}{{end}} · took {{.Took}}{{end}}{{with .Error}} · {{.}}{{end}}</span>
+<span class="meta">{{.Schedule}}{{if not .Started.IsZero}} · started {{$.Ago .Started}}{{end}}{{with .End}}{{if .Exit}} · exit {{.Exit}}{{end}} · took {{.Took}}{{end}}{{with .Error}} · {{.}}{{end}}{{with .Log}} · log {{.}}{{end}}</span>
 </li>{{end}}</ul>
+</section>
+<section id="digest" data-refresh aria-labelledby="digest-h">
+<h2 id="digest-h">Waiting on you, oldest first <span class="count">{{len .Digest}}</span></h2>
+{{with .Digest}}<ul class="rows">{{range .}}<li class="row digest-{{.Kind}}"><span class="badge">{{.Kind}}</span> <strong>{{if .Repository}}{{.Repository}}{{else}}(no repository){{end}}</strong>: {{if .Href}}<a href="{{.Href}}">{{.Asked}}</a>{{else}}{{.Asked}}{{end}}
+{{with .Recommended}}<span class="meta">Recommended: {{.}}</span>{{end}}
+<span class="meta">waited {{if .Since.IsZero}}-{{else}}{{$.Ago .Since}}{{end}}{{if .DefaultAt}} · default {{.Default}} at {{$.When .DefaultAt}}{{end}}</span></li>{{end}}</ul>{{else}}<p class="empty">Nothing waits on you.</p>{{end}}
 </section>
 <section id="needs" data-refresh aria-labelledby="needs-h">
 <h2 id="needs-h">Needs you{{with .Needs}} <span class="count">{{len .}}</span>{{end}}</h2>
@@ -155,7 +162,7 @@
 {{with .Question}}<p><strong>Asks you:</strong> {{.}}</p>{{end}}{{with .Claim}}<p><strong>Says done:</strong> {{.}}</p>{{end}}
 <p class="muted">Done when {{.DoneWhen}}{{with .LastCheck}} · last check: {{.}}{{end}}</p>{{with .Progress}}<p class="muted">{{.}}</p>{{end}}
 {{if and $.ReplySrc .Entry}}<form class="item-answer" method="post" action="/respond" enctype="multipart/form-data"><input type="hidden" name="token" value="{{$.Token}}"><input type="hidden" name="back" value="{{$.Back}}"><input type="hidden" name="src" value="{{.Src}}"><input type="hidden" name="repository" value="{{$.Repository}}"><input type="hidden" name="entry" value="{{.Entry}}">
-<div class="inline"><input type="text" name="text" maxlength="4000" placeholder="{{if .Question}}Your answer, to {{.Session}}{{else}}Words to {{.Session}}, or a word with an answer{{end}}" aria-label="Your words on {{.ID}}"><button type="submit">Send</button>{{range .Options}}<button type="submit" name="choice" value="{{.}}">{{.}}</button>{{end}}</div></form>{{end}}
+<div class="inline"><textarea name="text" rows="2" maxlength="4000" placeholder="{{if .Question}}Your answer, to {{.Session}}{{else}}Words to {{.Session}}, or a word with an answer{{end}}" aria-label="Your words on {{.ID}}"></textarea><button type="submit">Send</button>{{range .Options}}<button type="submit" name="choice" value="{{.}}">{{.}}</button>{{end}}</div></form>{{end}}
 </li>{{end}}</ol></section>{{end}}{{end}}
 
 {{define "chips"}}<nav id="chips" class="session-chips" aria-label="Sessions">{{range .Panels}}<span class="chip session-chip" data-session="{{.Name}}"><button type="button" class="chip-filter" data-session="{{.Name}}"{{if .MessageTo}} data-to="{{.Name}}"{{end}}><span class="dot state-{{.State}}" title="{{.State}}"></span> {{.Name}}{{with .Doing}} <span class="doing">{{.Text}}</span>{{end}}{{if .Questions}} <span class="badge alert">{{.Questions}}?</span>{{end}}</button><a class="chip-page" href="/session/{{.Src}}/{{.Name}}" aria-label="{{.Name}}'s page">→</a>{{with .Status}}<span class="spark status-graph" role="img" aria-label="Status over the last 6 hours"><svg viewBox="0 0 {{.Width}} 24" preserveAspectRatio="none">{{range .Slots}}<rect x="{{.X}}" y="{{.Y}}" width="3" height="{{.H}}" class="{{.Class}}"><title>{{.Title}}</title></rect>{{end}}</svg><span class="spark-now">{{with .Last}}{{.Phase}} {{$.Percent .Progress}} · risk {{.Risk}}{{if .Blocked}} · <strong>blocked</strong>: {{.Blocker}}{{end}} · {{.Summary}}{{with .Next}} Next: {{.}}{{end}}{{end}}{{if .Gaps}} · {{.Gaps}} failed checks{{end}} · {{$.Tokens .Tokens}} tokens today</span></span>{{end}}</span>{{else}}<span class="muted">No sessions.</span>{{end}}</nav>{{end}}
@@ -263,7 +270,7 @@
 {{with .Checked}}<p class="muted"><strong>What Go checked:</strong> {{.}}</p>{{end}}
 <form method="post" action="/respond" enctype="multipart/form-data"><input type="hidden" name="token" value="{{$p.Token}}"><input type="hidden" name="back" value="{{$p.Back}}"><input type="hidden" name="src" value="{{$p.Src}}"><input type="hidden" name="repository" value="{{$p.Repository}}"><input type="hidden" name="entry" value="{{.Entry}}">
 {{if .Decision}}{{template "decision-inputs" .Decision}}{{else}}<ul class="options">{{range .Options}}<li><button type="submit" name="choice" value="{{.Key}}">{{.Label}}</button>{{with .Consequence}} <span class="muted">{{.}}</span>{{end}}</li>{{end}}</ul>{{end}}
-<div class="inline"><input type="text" name="text" maxlength="4000" placeholder="{{if .Prompt}}{{.Prompt}}{{else}}Or answer in your words{{end}}" aria-label="Your answer"><button type="submit">Send</button></div></form>
+<div class="inline"><textarea name="text" rows="2" maxlength="4000" placeholder="{{if .Prompt}}{{.Prompt}}{{else}}Or answer in your words{{end}}" aria-label="Your answer"></textarea><button type="submit">Send</button></div></form>
 </article>{{end}}{{end}}
 
 {{define "console-box"}}<section class="console-box" id="console-box" data-refresh aria-labelledby="console-h"><h2 id="console-h">Console</h2>

@@ -495,7 +495,12 @@ func (s *Supervisor) measure(name string, sess Session, t *Track, toolsSince tim
 // the owner, and never twice for one merge. Live mode acts only on a
 // transcript it launched; shadow mode also records what it would do on a
 // guess. A rotation is not a crash and not a restart.
-func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, now time.Time) bool {
+// A work session at policies.context.hard_cap with no checkpoint to rotate
+// at is cut at once, mid-turn, once per transcript (#87); its prompt says
+// so and its facts say why "cap". Only a Working or Idle one is cut
+// (capEligible): a finished, waiting, stopped or parked session has
+// nothing to resume.
+func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, state State, now time.Time) bool {
 	pol := s.cfg.Policies.Context
 	if !pol.Enabled || !ev.Alive {
 		return false
@@ -511,7 +516,15 @@ func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, no
 	if !ok || u.Context <= pol.Threshold || u.Guessed && !s.shadow {
 		return false
 	}
+	// Nothing acts while the owner waits on its answer (#56, #87).
+	if !s.st.openSince(name, now).IsZero() {
+		return false
+	}
 	mark, ok := s.rotationPoint(sess, t, ev, now)
+	capped := false
+	if !ok && capEligible(sess, t, ev, state) && s.overCap(sess, t) {
+		mark, ok, capped = capMark(t), true, true
+	}
 	if !ok {
 		return false
 	}
@@ -529,13 +542,20 @@ func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, no
 		return false
 	}
 	id := newSessionID()
-	cmd, facts := s.launchCommandWith(name, sess, t, id, "rotation", nil)
+	why := "rotation"
+	if capped {
+		why = "cap"
+	}
+	cmd, facts := s.launchCommandWith(name, sess, t, id, why, nil)
 	line, err := s.launchLine(sess, cmd)
 	if err != nil {
 		s.skipOnce(name, "account:"+name, "not rotating: "+err.Error(), t, &SkipPayload{Account: sess.Account})
 		return false
 	}
-	a := &ActPayload{Key: key, Cwd: sess.Cwd, Account: sess.Account, Command: line, Transcript: id, Context: u.Context, Checkpoint: mark, Brief: brief.parts()}
+	a := &ActPayload{Key: key, Cwd: sess.Cwd, Account: sess.Account, Command: line, Transcript: id, Context: u.Context, Checkpoint: mark, Brief: brief.parts(), BriefCut: brief.briefCut()}
+	if capped {
+		a.Reason, a.HardCap = fmt.Sprintf("context %d over hard cap %d", u.Context, pol.HardCap), pol.HardCap
+	}
 	replace := func() error {
 		if err := brief.write(sess.Workdir); err != nil {
 			return err
@@ -555,6 +575,29 @@ func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, no
 	}
 	return err == nil && s.halt == nil && !s.shadow
 }
+
+// overCap says whether a work session's measured context has reached the
+// hard cap and it was not yet cut for its transcript (#87). Coordinators
+// and chat sessions are never cut; live mode acts on no guess.
+func (s *Supervisor) overCap(sess Session, t *Track) bool {
+	pol := s.cfg.Policies.Context
+	u, ok := t.current()
+	return pol.Enabled && pol.HardCap > 0 && sess.Kind == KindWork && ok && u.Context >= pol.HardCap &&
+		!(u.Guessed && !s.shadow) && t.RotatedFor != capMark(t)
+}
+
+// capEligible says whether the hard cap may cut the session at all: an
+// agentd work session that is Working or Idle, not DONE, not stopped,
+// parked or usage-limited. A Done session (delivered or not), one blocked
+// on the owner, a failed, starting or usage-limited one has nothing to
+// resume, so a cut would only spend a fresh context on it (#87).
+func capEligible(sess Session, t *Track, ev Evidence, state State) bool {
+	return sess.Kind == KindWork && (state == Working || state == Idle) && !ev.Status.Done &&
+		t.Stopped == "" && !t.Parked && !t.Limited
+}
+
+// capMark is the mark a hard-cap cut is recorded at: once per transcript.
+func capMark(t *Track) string { return "cap:" + t.Transcript }
 
 // rotationPoint is the checkpoint a session may be rotated at, if it has
 // reached one it has not been rotated at: a merge it reached after it was
@@ -629,11 +672,17 @@ func (s *Supervisor) lastInstruction(t *Track) string {
 // threshold and has a merge since its launch it was not rotated at, and
 // the rotation has neither given up nor been refused for the account. A
 // turn it ended there is not continued; the rotation goes on from it.
-func (s *Supervisor) rotationPending(name string, sess Session, t *Track) bool {
+// A pending hard-cap cut counts only for a session the cap may cut
+// (capEligible) and while nothing is open with the owner.
+func (s *Supervisor) rotationPending(name string, sess Session, t *Track, ev Evidence, state State, now time.Time) bool {
 	pol := s.cfg.Policies.Context
 	u, ok := t.current()
 	if !pol.Enabled || !ok || u.Context <= pol.Threshold || u.Guessed && !s.shadow {
 		return false
+	}
+	// Over the hard cap it is about to be cut: nothing is typed into it.
+	if capEligible(sess, t, ev, state) && s.st.openSince(name, now).IsZero() && s.overCap(sess, t) && !s.failed(t, "rotate:"+name+":"+capMark(t)) && !t.Skipped["account:"+name] {
+		return true
 	}
 	if sess.Kind == KindWork && t.lastTurn().Role == TurnSummary && t.lastTurn().At.After(t.Launched) {
 		mark := fmt.Sprintf("turn:%d", t.lastTurn().At.UnixNano())
@@ -788,7 +837,7 @@ func ParseProgress(text string) Progress {
 // restartFacts is what agentd hands a fresh session about where it stands,
 // as one compact JSON document: data, not instructions.
 type restartFacts struct {
-	Why       string   `json:"why"` // rotation, restart, answered (restarted with the owner's answers), ci-fix, fix-round, or continue (typed into a turn that ended)
+	Why       string   `json:"why"` // rotation, cap (cut mid-turn at the hard cap), restart, answered (restarted with the owner's answers), ci-fix, fix-round, or continue (typed into a turn that ended)
 	Brief     string   `json:"brief"`
 	Progress  string   `json:"progress"`
 	Item      string   `json:"item,omitempty"`
@@ -822,7 +871,7 @@ type restartFacts struct {
 // restartPrompt is the fresh session's prompt: the fixed instruction, then
 // the facts agentd recorded, from the progress file and the last merge.
 func (s *Supervisor) restartPrompt(name string, sess Session, t *Track, why string) string {
-	return s.promptWith(s.packFacts(name, sess, t, why), why)
+	return s.promptWith(name, s.packFacts(name, sess, t, why), why)
 }
 
 // packFacts is the facts document a fresh session is handed, its context
@@ -848,7 +897,7 @@ func (s *Supervisor) packFactsWith(name string, sess Session, t *Track, why stri
 	}
 	if sess.Kind == KindWork {
 		f.Branch = sess.Branch
-		if why == "rotation" {
+		if why == "rotation" || why == "cap" {
 			f.Instruction = s.lastInstruction(t)
 		}
 	}
@@ -891,20 +940,37 @@ func encodeFacts(f restartFacts) []byte {
 	return []byte(strings.TrimSuffix(b.String(), "\n"))
 }
 
-// promptWith is the prompt that hands a fresh session facts.
-func (s *Supervisor) promptWith(facts []byte, why string) string {
+// CapPointer opens the prompt of a session cut at the hard cap (#87).
+const CapPointer = "Your last turn was cut mid-way: your context reached agentd's hard cap. " +
+	"Check the worktree for uncommitted work first, then resume from STATUS.md and the instruction in the facts."
+
+// promptWith is the prompt that hands fresh session name facts. The
+// pointer to instructions.json states how many characters the new
+// instructions hold (#77).
+func (s *Supervisor) promptWith(name string, facts []byte, why string) string {
 	prompt := DefaultRestartPrompt + " "
+	instructed := func() string {
+		var fresh []*Instruction
+		for _, id := range s.st.freshInstructions(name, true, s.clock.Now()) {
+			if in := s.st.Instructions[id]; in != nil {
+				fresh = append(fresh, in)
+			}
+		}
+		return instructionsLine(s.cfg.Policies.Instructions.Pointer, fresh)
+	}
 	switch why {
 	case "answered":
 		prompt += s.cfg.Policies.Answers.Pointer + " "
 	case "instructed":
-		prompt += s.cfg.Policies.Instructions.Pointer + " "
+		prompt += instructed() + " "
 	case "answered-instructed":
-		prompt += s.cfg.Policies.Answers.Pointer + " " + s.cfg.Policies.Instructions.Pointer + " "
+		prompt += s.cfg.Policies.Answers.Pointer + " " + instructed() + " "
 	case "ci-fix":
 		prompt += s.cfg.Policies.CI.Pointer + " "
 	case "fix-round":
 		prompt += FixRoundPointer + " "
+	case "cap":
+		prompt += CapPointer + " "
 	}
 	return prompt + string(facts)
 }
@@ -933,7 +999,7 @@ func (s *Supervisor) launchCommandWith(name string, sess Session, t *Track, id, 
 	facts := s.packFactsWith(name, sess, t, why, ci)
 	s.noteTrust(name, sess, t)
 	r := strings.NewReplacer("{brief}", sess.Workdir+"/BRIEF.md", "{status}", sess.Workdir+"/STATUS.md",
-		"{session_id}", id, "{prompt}", s.promptWith(facts, why), "{mcp}", mcpLaunchConfig(s.cfg, name, sess))
+		"{session_id}", id, "{prompt}", s.promptWith(name, facts, why), "{mcp}", mcpLaunchConfig(s.cfg, name, sess))
 	cmd := withModel(s.cfg.Policies.Restart.Command, sessionModel(s.cfg, s.st, sess))
 	for i, part := range cmd {
 		cmd[i] = r.Replace(part)

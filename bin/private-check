@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Fails when a tracked file holds a private value: an address in the
+# tailnet range 100.64.0.0/10 (built in), or a host name, project name,
+# email, ip or /home/<user> path listed in a local, untracked patterns file. The
+# patterns file is looked up as $PRIVATE_PATTERNS, then .private-patterns
+# at the repository root, then
+# ${XDG_CONFIG_HOME:-$HOME/.config}/agentd-kit/private-patterns.
+# Its lines read "host NAME", "name WORD", "email ADDR", "user NAME" or
+# "ip ADDR";
+# blank lines and lines starting with # are skipped. A hit is printed as
+# FILE:LINE and its kind, never the value. A range written with its
+# prefix length, as 100.64.0.0/10, is not an address and passes.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+command -v git >/dev/null || { echo "private-check: git is not installed" >&2; exit 1; }
+
+if [ -n "${PRIVATE_PATTERNS+set}" ]; then
+	patterns=$PRIVATE_PATTERNS
+elif [ -f .private-patterns ]; then
+	patterns=.private-patterns
+else
+	patterns=${XDG_CONFIG_HOME:-${HOME:-}/.config}/agentd-kit/private-patterns
+fi
+
+if [ -n "$(git ls-files -- .private-patterns)" ]; then
+	echo "private-check: .private-patterns is tracked; remove it from the index" >&2
+	exit 1
+fi
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+hits=0
+
+# report KIND: reads git grep -n output on stdin and prints each hit's
+# file and line, dropping the matched text.
+report() {
+	local kind=$1 where
+	while IFS= read -r where; do
+		echo "private-check: $where: $kind"
+		hits=1
+	done < <(cut -d: -f1,2)
+}
+
+# search KIND ARGS...: runs git grep over the tracked files; no match is
+# not an error, anything else from git is.
+search() {
+	local kind=$1 status=0
+	shift
+	git grep -n -I "$@" >"$tmp/out" || status=$?
+	if [ "$status" -gt 1 ]; then
+		echo "private-check: git grep failed for $kind" >&2
+		exit 1
+	fi
+	report "$kind" <"$tmp/out"
+}
+
+search "tailnet address" -E '(^|[^0-9.])100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}($|[^0-9/])'
+
+if [ -f "$patterns" ]; then
+	: >"$tmp/host" ; : >"$tmp/name" ; : >"$tmp/email" ; : >"$tmp/user" ; : >"$tmp/ip"
+	n=0
+	while IFS= read -r line || [ -n "$line" ]; do
+		n=$((n + 1))
+		line=${line%$'\r'}
+		trimmed=${line#"${line%%[![:space:]]*}"}
+		case $trimmed in '' | '#'*) continue ;; esac
+		kind=${trimmed%%[[:space:]]*}
+		value=${trimmed#"$kind"}
+		value=${value#"${value%%[![:space:]]*}"}
+		value=${value%"${value##*[![:space:]]}"}
+		case $kind in
+		host | name | email | ip | user) ;;
+		*) echo "private-check: patterns file line $n: unknown kind" >&2; exit 1 ;;
+		esac
+		if [ -z "$value" ]; then
+			echo "private-check: patterns file line $n: no value" >&2
+			exit 1
+		fi
+		if [ "$kind" = user ]; then
+			# /home/NAME as an extended regex, ended by / or a non-name character.
+			esc=$(printf '%s' "$value" | sed 's/[][\.*^$+?(){}|]/\\&/g')
+			printf '/home/%s([^A-Za-z0-9_.-]|$)\n' "$esc" >>"$tmp/user"
+		else
+			printf '%s\n' "$value" >>"$tmp/$kind"
+		fi
+	done <"$patterns"
+	if [ -s "$tmp/host" ]; then search host -F -i -w -f "$tmp/host"; fi
+	if [ -s "$tmp/name" ]; then search "project name" -F -i -w -f "$tmp/name"; fi
+	if [ -s "$tmp/email" ]; then search email -F -i -w -f "$tmp/email"; fi
+	if [ -s "$tmp/ip" ]; then search ip -F -w -f "$tmp/ip"; fi
+	if [ -s "$tmp/user" ]; then search "home path" -E -f "$tmp/user"; fi
+else
+	echo "private-check: no patterns file; checking built-in rules only" >&2
+fi
+
+if [ "$hits" -ne 0 ]; then
+	echo "private-check: tracked files hold private values; replace them with invented examples" >&2
+	exit 1
+fi

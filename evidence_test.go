@@ -502,3 +502,110 @@ func TestNoneOpenLines(t *testing.T) {
 		}
 	}
 }
+
+// Questions that are all marked answered are not open (#81): a line that
+// only reports an answer, a none with its reason in parentheses, and a
+// question with its answer quoted under it ask nothing; any part that
+// still asks stays a question.
+func TestAnsweredQuestionsAreNotOpen(t *testing.T) {
+	for _, body := range []string{
+		"(answered at go; the target is the night branch)",
+		"none (Q1 answered at go)",
+		"Q1 answered at go.",
+		"Q1: answered at go",
+		"- Q1 and Q2 were answered on the console",
+		"- Q2 answered on the console",
+		"(Q1 answered at go)",
+		"Q1. Which red?\n> Answer: signal red",
+		"Q1. Which red?\n> Answer: signal red\n> on every wall\n\nQ2. Which wall?\n> Answer: the north one",
+		"(answered at go;\nthe target is the night branch)",
+		"(answered at go; the target is the night branch)\n\nWab12cd34 done: merged",
+	} {
+		if ev := ParseStatus("# T\n\n## Questions\n" + body + "\n\n## Next\nwork\n"); ev.Questions != "" {
+			t.Errorf("%q: questions %q", body, ev.Questions)
+		}
+	}
+	// The reported shape: a finished session's last line says its item is
+	// done, under Questions that hold only an answered note.
+	ev := ParseStatus("# Status\n\nNow: Wab12cd34 merged.\n\n## Questions\n\n(answered at go; the target is the night branch)\n\nWab12cd34 done: merged as abc1234\n")
+	if ev.Questions != "" || ev.Done {
+		t.Errorf("reported shape: questions %q, done %v", ev.Questions, ev.Done)
+	}
+	for body, want := range map[string]string{
+		"(answered at go; but which port?)":                       "(answered at go; but which port?)",
+		"(answered in part; please choose the port)":              "(answered in part; please choose the port)",
+		"Q1. Which red?\n> Not answered at go: ask the owner.":    "Q1. Which red?\n> Not answered at go: ask the owner.",
+		"Q1 answered.\n- Which wall?":                             "- Which wall?",
+		"Q1. Which red?\n> Answer: signal red\n\nQ2. Which wall?": "Q2. Which wall?",
+		"None (which port?)":                                      "None (which port?)",
+		"Q1 answered; the owner must approve the release.":        "Q1 answered; the owner must approve the release.",
+	} {
+		if ev := ParseStatus("# T\n\n## Questions\n" + body + "\n"); ev.Questions != want {
+			t.Errorf("%q: questions %q, want %q", body, ev.Questions, want)
+		}
+	}
+}
+
+// A Questions section that opens with none blocking, nothing blocking or
+// no blockers is an answer (#81): status notes after it (waiting on the
+// loop, the review, CI, the merge) ask nothing. A question mark or a
+// request to the owner still asks, and a question on its own line after
+// it counts with the none paragraph as its lead-in.
+func TestNoneBlockingIsAnAnswer(t *testing.T) {
+	for _, body := range []string{
+		"None blocking. Request 12 is mergeable but the loop has not merged it yet; I do not merge it myself.",
+		"- None blocking. Request 34 is ready and open; waiting on the loop's review and the merge.",
+		"Nothing blocking; waiting on CI.",
+		"Nothing is blocking - the review is next.",
+		"No blockers.",
+		"No blocker: the merge is queued.",
+	} {
+		if ev := ParseStatus("# T\n\n## Questions\n\n" + body + "\n\n## Next\nwork\n"); ev.Questions != "" {
+			t.Errorf("%q: questions %q", body, ev.Questions)
+		}
+	}
+	for body, want := range map[string]string{
+		"None blocking, but please choose the port?": "None blocking, but please choose the port?",
+		"No blockers. Please add the deploy key.":    "No blockers. Please add the deploy key.",
+		"None blocking.\n- Which port should I use?": "None blocking.\n- Which port should I use?",
+		"(none-blocking issues remain)":              "(none-blocking issues remain)",
+	} {
+		if ev := ParseStatus("# T\n\n## Questions\n\n" + body + "\n\n## Next\nwork\n"); ev.Questions != want {
+			t.Errorf("%q: questions %q, want %q", body, ev.Questions, want)
+		}
+	}
+}
+
+// Inside a report that a question was answered, until, need, waiting and
+// block describe the answer, so the line is settled; a question mark or a
+// request to the owner keeps it asking (#92).
+func TestAnsweredReportWithUntilIsSettled(t *testing.T) {
+	for _, body := range []string{
+		"(answered at go; Q4 default: X as last fetched counts as Y; Q5: hold until a choice, per point 5)",
+		"(answered at go; Q2: no need to pin the version)",
+		"(answered at go; Q3: keep waiting jobs in the queue)",
+		"(answered at go; Q1: one block per day)",
+		"Q1 answered at go: the step runs until it succeeds.",
+	} {
+		if ev := ParseStatus("# T\n\n## Questions\n\n" + body + "\n\n## Next\nwork\n"); ev.Questions != "" {
+			t.Errorf("%q: questions %q", body, ev.Questions)
+		}
+	}
+	for _, body := range []string{
+		"(answered in part; please choose the port)",
+		"(answered at go; which port?)",
+		"(answered at go; Owner: say if X)",
+		"(answered; tell me the host)",
+		"(answered; you must pick)",
+		"(answered in part; choose a host until Friday)",
+	} {
+		if ev := ParseStatus("# T\n\n## Questions\n\n" + body + "\n\n## Next\nwork\n"); ev.Questions != body {
+			t.Errorf("%q: questions %q", body, ev.Questions)
+		}
+	}
+	status := "# Status\n\nNow: W1a2b3c4d.\n\n## Questions\n\n(answered at go; Q4 default: X as last fetched counts as Y; Q5: hold until a choice, per point 5)\n\n## Next\n\nwork\n"
+	ev := Evidence{Alive: true, PaneHash: "h", Status: ParseStatus(status)}
+	if st, why := Classify(&Track{}, ev, Policies{}, time.Now()); st == BlockedOnOwner || strings.Contains(why, "Questions") {
+		t.Fatalf("live: %s, %q", st, why)
+	}
+}

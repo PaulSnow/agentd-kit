@@ -484,3 +484,29 @@ func TestTmuxErrorShowsUnknown(t *testing.T) {
 		t.Fatalf("row = %+v", r)
 	}
 }
+
+// A host session whose start the node never ran, while it reports, reads
+// gone once the start is older than hub.silent_after; a start just asked
+// still reads starting.
+func TestRemoteSessionNeverRunShowsGone(t *testing.T) {
+	h := placementHarness(t)
+	name, _ := h.start("fix-never", "host-b", "acct-b")
+	report := func(seq int64) {
+		// A node that reports its clones and runs no tmux session.
+		if err := h.log.Append(Event{V: EventVersion, Time: h.now, Kind: KindNode, Mode: ModeShared,
+			Node: &NodePayload{Host: "host-b", Seq: seq, At: h.now, Report: &NodeReport{Clones: []CloneState{}}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.now = h.now.Add(time.Minute)
+	report(1)
+	if r := h.sessionRows()[name]; r.State != SessionStarting {
+		t.Fatalf("just asked: row = %+v", r)
+	}
+	h.now = h.now.Add(h.cfg.Hub.SilentAfter.Duration)
+	report(2)
+	r := h.sessionRows()[name]
+	if r.State != SessionGone || !strings.Contains(r.Error, h.now.UTC().Format(time.RFC3339)) {
+		t.Fatalf("never run: row = %+v", r)
+	}
+}

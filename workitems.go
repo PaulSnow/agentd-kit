@@ -552,6 +552,65 @@ func (s *Supervisor) loopCarries(in *Instruction) (why string, limit int) {
 	return why, 0
 }
 
+// loopFinding is the judge's finding that describes loop-carried work
+// (#87): the request or case it is of, and what the finding says.
+type loopFinding struct {
+	Request     string   `json:"request"`
+	ID          string   `json:"id"`
+	Title       string   `json:"title"`
+	Consequence string   `json:"consequence,omitempty"`
+	Suggestion  string   `json:"suggestion,omitempty"`
+	Paths       []string `json:"paths,omitempty"`
+}
+
+func findingOf(request string, f Finding) *loopFinding {
+	return &loopFinding{Request: request, ID: f.ID, Title: f.Title, Consequence: f.Consequence, Suggestion: f.Suggestion, Paths: f.Paths}
+}
+
+// loopDescribes is why work w of in starts with no designer, because the
+// loop already describes it, and the finding that does, or "" (#87): the
+// item the round's issue answers open (loopCarries gave it limit 1), or
+// work on an issue agentd opened as a finding's follow-up.
+func (s *Supervisor) loopDescribes(in *Instruction, w ThreadWork) (string, *loopFinding) {
+	if len(in.Repositories) == 0 {
+		return "", nil
+	}
+	repo := in.Repositories[0]
+	if q, d, ok := loopDeferral(s.cfg, s.st, in, s.clock.Now()); ok {
+		if why, limit := s.loopCarries(in); why == "" && limit == 1 {
+			return fmt.Sprintf("the owner answered issue on finding %s of %s, which describes the work", d.Finding.ID, q.Ref), findingOf(q.Ref, d.Finding)
+		}
+		return "", nil
+	}
+	scopedIssue(in, &w)
+	r, ok := s.cfg.Repositories[repo]
+	if w.Issue <= 0 || !ok {
+		return "", nil
+	}
+	prefix := "finding:" + repoKey(r.Forge, r.Project)
+	for _, key := range sortedKeys(s.st.IssuesOpened) {
+		rest, found := strings.CutPrefix(key, prefix)
+		if s.st.IssuesOpened[key].Number != w.Issue || !found || rest == "" || rest[0] != '#' && rest[0] != '!' {
+			continue
+		}
+		i := strings.LastIndex(key, ":")
+		cs, id := strings.TrimPrefix(key[:i], "finding:"), key[i+1:]
+		f := &loopFinding{Request: cs, ID: id}
+		if c := s.st.Cases[cs]; c != nil {
+			for k := len(c.Rounds) - 1; k >= 0 && f.Title == ""; k-- {
+				for _, x := range c.Rounds[k].Findings {
+					if x.ID == id {
+						f = findingOf(cs, x)
+						break
+					}
+				}
+			}
+		}
+		return fmt.Sprintf("#%d is agentd's follow-up issue of finding %s of %s, which describes the work", w.Issue, id, cs), f
+	}
+	return "", nil
+}
+
 // workEmit logs a step of an item.
 func (s *Supervisor) workEmit(p WorkPayload) {
 	p.Note = s.withheld(p.Note)
@@ -598,15 +657,22 @@ func (s *Supervisor) driveItems(now time.Time) {
 			if s.st.Work[id] != nil || limit >= 0 && k >= limit {
 				continue
 			}
+			note := ""
 			if k == 0 {
 				handTo = in.Session
 				scopedIssue(in, &w)
+				// Started without the designer: the open says why (#87).
+				if s.designs(in.Repositories[0]) {
+					if why, _ := s.loopDescribes(in, w); why != "" {
+						note = "no designer: " + why
+					}
+				}
 			}
 			if s.issueForWork(id, in.Repositories[0], &w); s.halt != nil {
 				return
 			}
 			s.answerDoneWhen(in, in.Repositories[0], &w)
-			if s.workEmit(WorkPayload{ID: id, Step: WorkStepOpen, Repository: in.Repositories[0], Instruction: in.ID, Work: &w, HandTo: handTo}); s.halt != nil {
+			if s.workEmit(WorkPayload{ID: id, Step: WorkStepOpen, Repository: in.Repositories[0], Instruction: in.ID, Work: &w, HandTo: handTo, Note: note}); s.halt != nil {
 				return
 			}
 		}
@@ -1400,8 +1466,39 @@ type itemDoc struct {
 	Notes       []WorkNote      `json:"notes,omitempty"`
 	Check       *WorkCheck      `json:"last_check,omitempty"`
 	Refuted     string          `json:"refuted_claim,omitempty"`
+	// Answers are the owner's words alone on the item's entry that agentd
+	// handed to this session, whole, oldest first: words that waited for
+	// the session the item was given to among them.
+	Answers []itemAnswer `json:"owner_answers,omitempty"`
 	// Designed: Brief is the design the owner approved (#68).
 	Designed bool `json:"designed,omitempty"`
+}
+
+// itemAnswer is the owner's words alone on an item's entry, as items.json
+// holds them: the instruction, when it came, and its text whole.
+type itemAnswer struct {
+	Instruction string    `json:"instruction"`
+	At          time.Time `json:"at"`
+	Text        string    `json:"text"`
+}
+
+// itemAnswers are the owner's words alone on item id's entry routed to
+// session name, oldest first; none withheld.
+func (s *Supervisor) itemAnswers(name, id string) []itemAnswer {
+	var out []itemAnswer
+	for _, in := range s.st.Instructions {
+		if in.Re == nil || in.Re.ID != entryWork+id || in.Session != name || in.Withheld > 0 || in.Answer != nil && in.Answer.Choice != "" {
+			continue
+		}
+		out = append(out, itemAnswer{Instruction: in.ID, At: in.At, Text: in.Text})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].At.Equal(out[j].At) {
+			return out[i].At.Before(out[j].At)
+		}
+		return out[i].Instruction < out[j].Instruction
+	})
+	return out
 }
 
 // itemProtocol is how a session tells Go of an item, as items.json and
@@ -1415,7 +1512,7 @@ const itemProtocol = "Each item is the owner's work, given to you. Name its id i
 func (s *Supervisor) itemDocs(name, workdir string) []itemDoc {
 	out := []itemDoc{}
 	for _, it := range s.st.itemsOf(name) {
-		d := itemDoc{ID: it.ID, Title: it.Title, Brief: it.Brief, Issue: it.Issue, DoneWhen: it.DoneWhen, State: it.State, Notes: it.Notes, Check: it.Check, Refuted: it.Refuted}
+		d := itemDoc{ID: it.ID, Title: it.Title, Brief: it.Brief, Issue: it.Issue, DoneWhen: it.DoneWhen, State: it.State, Notes: it.Notes, Check: it.Check, Refuted: it.Refuted, Answers: s.itemAnswers(name, it.ID)}
 		if in := s.st.Instructions[it.Instruction]; in != nil {
 			d.Owner, d.Withheld = in.Text, in.Withheld > 0
 			// A designed item's brief is its design (#68).
@@ -1525,7 +1622,9 @@ func (it *WorkItem) workOptions() []string {
 
 // routeWork takes the owner's response on an item's entry, and says
 // whether it was the item's: a choice is carried out by Go and answered
-// with what it did; words alone go to the item's session.
+// with what it did; words alone go to the item's session, and so do the
+// words with not done or re-assign, whole, to the session that works the
+// item next (#77).
 func (s *Supervisor) routeWork(in *Instruction) bool {
 	if in.Re == nil || !strings.HasPrefix(in.Re.ID, entryWork) || !in.Route || in.Failed != "" || !in.Replied.IsZero() || in.Session != "" || in.Agent {
 		return false
@@ -1534,13 +1633,20 @@ func (s *Supervisor) routeWork(in *Instruction) bool {
 	answer := func(text string) {
 		s.emit("", Event{Kind: KindRoute, Route: &RoutePayload{Instruction: in.ID, Step: RouteAnswered, Agent: &AgentPayload{Answer: text, By: "agentd"}}})
 	}
+	// A choice carried out already whose words wait for the item's next
+	// session: from here they are words alone.
+	carried := in.Answer != nil && in.Answer.Choice != "" && in.Waiting != ""
 	switch {
 	case it == nil:
 		s.routeStep(in, RouteFail, "", false, "the log holds no work item "+in.Re.ID)
 		return true
-	case in.Answer == nil || in.Answer.Choice == "":
+	case in.Answer == nil || in.Answer.Choice == "" || carried:
 		if in.Withheld > 0 {
 			return false // routeOne says why it is never delivered
+		}
+		if it.terminal() {
+			s.routeStep(in, RouteFail, "", false, it.ID+" is "+it.State+" already; your words went to no session")
+			return true
 		}
 		if it.Session == "" && it.State == WorkOpen && in.Waiting != "" {
 			return true // it waits for the session the item is given to
@@ -1555,7 +1661,18 @@ func (s *Supervisor) routeWork(in *Instruction) bool {
 			s.routeStep(in, RouteTo, it.Session, false, "")
 			return true
 		}
-		s.routeStep(in, RouteFail, "", false, it.ID+" has no session to take your words now; answer "+strings.Join(it.workOptions(), " or ")+" on it")
+		switch {
+		case it.Session == "" && it.State == WorkOpen:
+			// Open with no session yet: the words wait for the session the
+			// item is given to, which gets them whole, as #77's words with
+			// not done or re-assign do.
+			if s.routeStep(in, RouteWait, "", false, "your words wait for the session "+it.ID+" is given to"); s.halt != nil {
+				return true
+			}
+			s.escalateItem(it, "waiting:"+in.ID, fmt.Sprintf("%s: your words %s on %s wait: %s has no session yet. agentd hands them, whole, to the session %s is given to.", it.ID, in.ID, itemEntry(in), it.ID, it.ID))
+		default:
+			s.routeStep(in, RouteFail, "", false, it.ID+" has no session to take your words now; answer "+strings.Join(it.workOptions(), " or ")+" on it")
+		}
 		return true
 	case it.terminal():
 		answer(it.ID + " is " + it.State + " already; nothing was changed.")
@@ -1564,12 +1681,28 @@ func (s *Supervisor) routeWork(in *Instruction) bool {
 		answer(it.ID + " is " + it.State + ": answer " + it.designAnswers() + " on its design entry, " + entryDesign + it.ID + "; nothing was changed.")
 		return true
 	}
+	// The owner's words are kept whole in the item's note, which
+	// items.json gives its session; only the page cuts them.
 	word := strings.TrimSpace(in.Text)
+	// toSession hands the words with a choice to the item's session, in
+	// instructions.json, whole, and says whether it did; the owner's
+	// answer is then the session's.
+	toSession := func() bool {
+		if word == "" || in.Withheld > 0 {
+			return false
+		}
+		if it.Session != "" && s.takesInstructions(it.Session) && s.reachable(it.Session) && s.losesItem(it.Session) == "" {
+			s.routeStep(in, RouteTo, it.Session, false, "")
+			return true
+		}
+		s.routeStep(in, RouteWait, "", false, "your words wait for the session "+it.ID+" is given to")
+		return true
+	}
 	switch in.Answer.Choice {
 	case WorkAnswerDone:
 		ev := "marked done by the owner"
 		if word != "" {
-			ev += ": " + oneLine(word, 300)
+			ev += ": " + word
 		}
 		s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepDone, Instruction: in.ID, Note: ev, By: "owner"})
 		answer(it.ID + " is done, as you said.")
@@ -1580,25 +1713,36 @@ func (s *Supervisor) routeWork(in *Instruction) bool {
 		}
 		note := "the owner said not done"
 		if word != "" {
-			note += ": " + oneLine(word, 300)
+			note += ": " + word
 		}
 		if t := s.st.Tracks[it.Session]; t != nil && t.State == Done || it.Session == "" {
-			s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepReopen, Session: it.Session, Instruction: in.ID, Note: note})
+			if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepReopen, Session: it.Session, Instruction: in.ID, Note: note}); s.halt != nil || toSession() {
+				return true
+			}
 			answer(it.ID + " is open again; agentd assigns it to a new session.")
 		} else {
-			s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepWorking, Session: it.Session, Instruction: in.ID, Note: note, By: "owner"})
+			if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepWorking, Session: it.Session, Instruction: in.ID, Note: note, By: "owner"}); s.halt != nil {
+				return true
+			}
+			// With words, the line typed for them tells the session; the
+			// item's own line is typed again otherwise.
+			if toSession() {
+				return true
+			}
 			s.dueRetype[it.ID] = true
 			answer(it.ID + " is not done: " + it.Session + " keeps it.")
 		}
 	case WorkAnswerReassign:
 		note := "the owner re-assigned it"
 		if word != "" {
-			note += ": " + oneLine(word, 300)
+			note += ": " + word
 		}
-		s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepReopen, Session: it.Session, Instruction: in.ID, Note: note, By: "owner"})
+		if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepReopen, Session: it.Session, Instruction: in.ID, Note: note, By: "owner"}); s.halt != nil || toSession() {
+			return true
+		}
 		answer(it.ID + " is open again; agentd assigns it to a new session.")
 	case WorkAnswerDecline:
-		if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepDeclined, Instruction: in.ID, Note: oneLine(word, 300), By: "owner"}); s.halt != nil {
+		if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepDeclined, Instruction: in.ID, Note: word, By: "owner"}); s.halt != nil {
 			return true
 		}
 		answer(it.ID + " is declined; agentd drops it.")

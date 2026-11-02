@@ -222,7 +222,9 @@ func (st *LogState) applyCase(e Event) {
 	case p.Call != nil:
 		c.applyCall(e)
 		if d := p.Call.Raised; d != nil && e.Session != "" {
-			st.track(e.Session).raise(*d)
+			t := st.track(e.Session)
+			t.raise(*d)
+			t.noteSeen(*d, e.Time)
 		}
 	}
 	st.Cases[p.Case] = &c

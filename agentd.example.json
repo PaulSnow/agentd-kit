@@ -43,7 +43,11 @@
     "batch": 20,
     "status": {"enabled": false, "every": "5m", "max_input": 20480},
     "designer": {"off": false, "model": "", "max_input": 65536, "timeout": "15m"},
-    "sentences": {"enabled": false, "model": ""}
+    "sentences": {"enabled": false, "model": ""},
+    "scheduled": {
+      "nightly": {"at": "00:30", "argv": ["./scripts/nightly.sh"], "cwd": "~/work-17", "account": "spare", "timeout": "2h",
+        "env": {"PATH": "/usr/local/bin:/usr/bin:/bin"}, "fail_after": 1, "output": "~/.local/state/agentd-kit/jobs", "keep": 14}
+    }
   },
   "policies": {
     "restart": {
@@ -76,7 +80,11 @@
     "context": {
       "enabled": true,
       "threshold": 120000,
+      "hard_cap": 150000,
       "grace": "5m"
+    },
+    "brief": {
+      "max_bytes": 32768
     },
     "budget": {
       "session_tokens": 0,

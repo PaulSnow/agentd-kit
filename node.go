@@ -312,6 +312,8 @@ type NodeRecord struct {
 	Host   string
 	Seq    int64
 	LastAt time.Time // the hub's time of the host's last event
+	// ReportAt is the hub's time of the host's latest report.
+	ReportAt time.Time
 	// ReportSeq is the number of the latest report, which Clones are.
 	ReportSeq int64
 	Clones    map[string]CloneState
@@ -338,9 +340,9 @@ func (r *NodeRecord) apply(e Event) {
 	r.Seq, r.LastAt = p.Seq, e.Time
 	switch {
 	case p.Report != nil && p.Report.Same:
-		r.ReportSeq = p.Seq // what it last reported stands
+		r.ReportSeq, r.ReportAt = p.Seq, e.Time // what it last reported stands
 	case p.Report != nil:
-		r.ReportSeq = p.Seq
+		r.ReportSeq, r.ReportAt = p.Seq, e.Time
 		r.Clones = map[string]CloneState{}
 		for _, c := range p.Report.Clones {
 			if c.Root == "" { // a more root's clone is coordination's alone

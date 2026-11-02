@@ -193,7 +193,8 @@ type uiNeed struct {
 	Src        string
 	Repository string
 	Session    string
-	Kind       string // decision, blocked, usage-limited, crash-looping, stopped, failed
+	Kind       string // decision, blocked, usage-limited, crash-looping, stopped, failed, account
+	Account    string // an account need's account, with no session
 	Since      time.Time
 	Text       string // a session's reason
 	Decision   *UIDecision
@@ -227,6 +228,10 @@ func (src *uiSource) needs(cfg *Config, rep Report, asked map[string]time.Time) 
 		for _, c := range rr.Cases {
 			t := src.st.Tracks[c.Session]
 			if t == nil || t.State == Done {
+				continue
+			}
+			// A session no longer supervised waits on no one.
+			if shown, _ := src.st.shownState(c.Session, t, rep.WrittenAt); shown == Gone {
 				continue
 			}
 			kind := ""
@@ -395,6 +400,8 @@ type uiIndex struct {
 	Accounts []uiAccount
 	Jobs     []uiJob
 	Needs    []uiNeed
+	// Digest is every decision waiting on the owner, oldest first (#88).
+	Digest []uiDigest
 	// PollAlerts are the forge polls failing for more than two intervals
 	// (#75), shown on the home level.
 	PollAlerts []uiPollAlert
@@ -512,6 +519,13 @@ func (u *UI) indexView(now time.Time) (*uiIndex, error) {
 	}
 	sort.Slice(v.Accounts, func(i, j int) bool { return v.Accounts[i].Name < v.Accounts[j].Name })
 	sortNeeds(v.Needs)
+	sort.SliceStable(v.Digest, func(i, j int) bool {
+		a, b := v.Digest[i], v.Digest[j]
+		if !a.Since.Equal(b.Since) {
+			return a.Since.Before(b.Since)
+		}
+		return a.Entry < b.Entry
+	})
 	if err := u.homeLevel(v, now); err != nil {
 		return nil, err
 	}
@@ -586,6 +600,10 @@ func (src *uiSource) addIndex(v *uiIndex, get func(string) *uiRepo, now time.Tim
 	src.addAccounts(v, cfg, now)
 	src.addJobs(v, cfg)
 	v.Needs = append(v.Needs, src.needs(cfg, rep, src.askedAt)...)
+	if !src.echo {
+		v.Digest = append(v.Digest, src.digest(cfg, rep, now)...)
+	}
+	src.addAccountNeeds(v, cfg, now)
 	v.PollAlerts = append(v.PollAlerts, src.pollAlerts(cfg, now)...)
 	for _, rr := range rep.Repositories {
 		r := get(uiRepoName(rr))
@@ -639,6 +657,35 @@ func (src *uiSource) addIndex(v *uiIndex, get func(string) *uiRepo, now time.Tim
 			Outside: true, Author: rec.Author, Draft: rec.Draft, Unresolved: rec.Unresolved})
 	}
 	return nil
+}
+
+// uiDigest is one line of the owner's digest as the home page shows it:
+// its source, and the console entry it links to.
+type uiDigest struct {
+	DigestEntry
+	Src  string
+	Href string
+}
+
+// digest is src's digest: every decision waiting on the owner, each
+// linked to its entry on its console.
+func (src *uiSource) digest(cfg *Config, rep Report, now time.Time) []uiDigest {
+	var out []uiDigest
+	for _, e := range BuildDigest(cfg, src.st, DecisionsFrom(cfg, src.st, rep), now) {
+		con := cfg.Console(e.Session)
+		switch {
+		case strings.HasPrefix(e.Entry, entryOps):
+			con = cfg.opsConsole()
+		case e.Repository != "":
+			con = cfg.RepositoryConsole(e.Repository)
+		}
+		d := uiDigest{DigestEntry: e, Src: src.Name}
+		if con != "" {
+			d.Href = "/console/" + url.PathEscape(con) + "#e-" + shortHash(HashPane(src.Name + "\n" + e.Entry))[:12]
+		}
+		out = append(out, d)
+	}
+	return out
 }
 
 // noteAsked records when each decision e raises was first seen.
@@ -1185,7 +1232,7 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 					Text: n.Text, Entry: needEntry(n.Session, n.Kind)}, Src: src.Name}, Need: &n, Quick: quickWords("need")})
 			}
 			if !src.echo {
-				for _, p := range src.panels(cfg, repo, needs, secret) {
+				for _, p := range src.panels(cfg, repo, needs, secret, now) {
 					p.Status = statusGraph(src.st.Tracks[p.Name], cfg.Jobs.Status.every(), now, u.loc, secret)
 					if p.Status != nil {
 						v.StatusTokens += p.Status.Tokens
@@ -1344,7 +1391,7 @@ func (src *uiSource) messageView(cfg *Config, m uiMessage, now time.Time, secret
 // panels are the sessions of src that console repo shows: a repository's,
 // or those a console without one takes; each with what it does now, read
 // from its transcript, and its last reply.
-func (src *uiSource) panels(cfg *Config, repo string, needs []uiNeed, secret func(...string) bool) []uiPanel {
+func (src *uiSource) panels(cfg *Config, repo string, needs []uiNeed, secret func(...string) bool, now time.Time) []uiPanel {
 	var out []uiPanel
 	for _, name := range cfg.SessionNames() {
 		sess := cfg.Sessions[name]
@@ -1354,7 +1401,8 @@ func (src *uiSource) panels(cfg *Config, repo string, needs []uiNeed, secret fun
 		p := uiPanel{Src: src.Name, Name: name, Kind: sess.Kind, State: "unknown"}
 		t := src.st.Tracks[name]
 		if t != nil && t.State != "" {
-			p.State, p.Since = string(t.State), t.Since
+			shown, _ := src.st.shownState(name, t, now)
+			p.State, p.Since = string(shown), t.Since
 		}
 		// A finished session takes no message: one addressed to it fails.
 		if sess.Role == "" && src.st.Mode == ModeLive && (t == nil || t.State != Done) {
@@ -1485,8 +1533,14 @@ func (u *UI) sessionView(src *uiSource, name string, now time.Time) (*uiSessionP
 			}
 		}
 	}
-	if !secret(t.Reason) {
-		v.Reason = t.Reason
+	shown, why := src.st.shownState(name, t, now)
+	if shown == Gone || shown == Stale {
+		// The meta line says gone or stale since when: the reason keeps
+		// what it was last seen as.
+		_, why, _ = strings.Cut(why, "; ")
+	}
+	if !secret(why) {
+		v.Reason = why
 	}
 	var turns []TurnRecord
 	for _, tr := range t.Turns {
@@ -1638,6 +1692,41 @@ func (u *UI) serveAccounts(w http.ResponseWriter) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(reps)
+}
+
+// addAccountNeeds adds one card per account whose usage readings have
+// failed for over usageReadingDown (#80). It is the fold's state, so it
+// goes with the next good reading; accounts are shared, so a second
+// source adds no card for an account the first did.
+func (src *uiSource) addAccountNeeds(v *uiIndex, cfg *Config, now time.Time) {
+	if !cfg.Usage.Enabled {
+		return
+	}
+	secret := confidentialMatcher(cfg)
+	for _, name := range sortedKeys(src.st.Accounts) {
+		r := src.st.Accounts[name]
+		if a, ok := cfg.Accounts[name]; !ok || a.Usage == UsageOff || !r.readingDown(now) {
+			continue
+		}
+		dup := false
+		for _, n := range v.Needs {
+			dup = dup || n.Kind == "account" && n.Account == name
+		}
+		if dup {
+			continue
+		}
+		why := r.Error
+		if secret(why) {
+			why = "(withheld: it matched a confidential pattern)"
+		}
+		v.Needs = append(v.Needs, uiNeed{Src: src.Name, Account: name, Kind: "account", Since: r.FailingSince,
+			Text: accountDownText(name, r.FailingSince, why)})
+	}
+}
+
+// accountDownText is an account card's words.
+func accountDownText(name string, since time.Time, why string) string {
+	return fmt.Sprintf("%s's usage readings have failed since %s: %s; placement goes on without a reading", name, since.UTC().Format(time.RFC3339), why)
 }
 
 // addAccounts merges src's account readings into the index: the newest

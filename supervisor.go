@@ -75,6 +75,9 @@ type Supervisor struct {
 	// cards is the repositories' context the curators keep (#60): the
 	// loop's alone.
 	cards *ContextStore
+	// cappedAt is when agentd posted that a repository's curators reached
+	// a daily limit, until the store folds the post.
+	cappedAt map[string]time.Time
 	// ops is what the ops console's changes run on (#63), nil without an
 	// ops block.
 	ops *opsEnv
@@ -235,6 +238,9 @@ func (s *Supervisor) screen(e *Event) {
 	}
 	if e.Job != nil {
 		e.Job.Error = s.withheld(e.Job.Error)
+	}
+	if e.Step != nil {
+		e.Step.Error = s.withheld(e.Step.Error)
 	}
 	if e.Status != nil {
 		s.screenStatus(e.Status)
@@ -505,6 +511,7 @@ func (s *Supervisor) Pass() error {
 	// delivered in the pass that read it.
 	s.routeInstructions(s.clock.Now())
 	s.driveItems(s.clock.Now())
+	s.driveDigest(s.clock.Now())
 	s.runOps(s.clock.Now())
 	s.watchInstall(s.clock.Now())
 	for _, name := range s.cfg.SessionNames() {
@@ -527,6 +534,7 @@ func (s *Supervisor) Pass() error {
 		s.readAccounts(s.clock.Now())
 		s.noticeAccounts(s.clock.Now())
 		s.runJobs(s.clock.Now())
+		s.escalateSteps(s.clock.Now())
 		s.checkStatuses(s.clock.Now())
 		s.noteFacts(s.clock.Now())
 		s.curateCards(s.clock.Now())
@@ -559,7 +567,7 @@ func (s *Supervisor) ownerRecords() {
 			s.st.apply(e)
 			continue
 		}
-		shared := e.Kind == KindSeen || e.Kind == KindInstruction || e.Kind == KindAttachment || e.Kind == KindAccount || e.Kind == KindTriage || e.Kind == KindError && e.Error.Triage != nil ||
+		shared := e.Kind == KindSeen || e.Kind == KindInstruction || e.Kind == KindAttachment || e.Kind == KindAccount || e.Kind == KindTriage || e.Kind == KindStep || e.Kind == KindError && e.Error.Triage != nil ||
 			e.Kind == KindItem && s.st.itemChanged(*e.Item) || e.Kind == KindCase && e.Mode == ModeOwner ||
 			e.Kind == KindLoop && e.Mode == ModeOwner || e.Kind == KindOps && e.Ops.Step == OpsProposed ||
 			e.Kind == KindRelease && e.Mode == ModeOwner || e.Kind == KindNode && e.Node.Result != nil && e.Node.Result.Action == NodeDeployStep ||
@@ -788,6 +796,12 @@ func (s *Supervisor) crash(name string, t *Track, c Crash, restartError bool) {
 	s.emit(name, Event{Kind: KindCrash, Crash: &p})
 }
 
+// observeHeartbeat is how long an unchanged observation goes unlogged:
+// one is logged again once the last is older, so a quiet session agentd
+// still observes moves its LastSeen, and the views can tell it from a
+// stale one (shownState).
+const observeHeartbeat = 30 * time.Minute
+
 func (s *Supervisor) logObserve(name string, t *Track, ev Evidence, state State, reason string, now time.Time) {
 	o := ObservePayload{
 		State:     string(state),
@@ -820,7 +834,7 @@ func (s *Supervisor) logObserve(name string, t *Track, ev Evidence, state State,
 		n := t.restartsInWindow(now, s.cfg.Policies.Restart.Window.Duration)
 		o.Restarts = &n
 	}
-	if t.LastObs != nil && sameObservation(*t.LastObs, o) {
+	if t.LastObs != nil && sameObservation(*t.LastObs, o) && now.Sub(t.LastSeen) < observeHeartbeat {
 		return
 	}
 	logged := o
@@ -852,8 +866,10 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 	pol := s.cfg.Policies
 	// A work session is rotated at the end of its round too, DONE once
 	// its branch is delivered (#48).
-	// Nor while the owner waits on its answer to a message (#56).
-	if (state == Working || state == Idle || state == Done && sess.Kind == KindWork && delivered(name, sess, t)) && !t.Limited && s.st.openSince(name, now).IsZero() && s.rotate(name, sess, t, ev, now) {
+	// Nor while the owner waits on its answer to a message (#56): rotate
+	// holds that itself. The hard cap cuts only a Working or Idle one
+	// (#87, capEligible).
+	if (state == Working || state == Idle || state == Done && sess.Kind == KindWork && delivered(name, sess, t)) && !t.Limited && s.rotate(name, sess, t, ev, state, now) {
 		return Starting
 	}
 	// The limit has cleared. Only a session that can take a line is told to
@@ -941,7 +957,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			return state
 		}
 		answers, ins := t.answersFor(false), s.st.instructionsFor(name, false)
-		err = s.act(name, ActRestart, &ActPayload{Attempt: n + 1, Cwd: sess.Cwd, Respawn: ev.PaneDead, Account: sess.Account, Command: line, Transcript: id, Answers: ids, AnswersAt: at, Instructions: iids, Brief: brief.parts()}, func() error {
+		err = s.act(name, ActRestart, &ActPayload{Attempt: n + 1, Cwd: sess.Cwd, Respawn: ev.PaneDead, Account: sess.Account, Command: line, Transcript: id, Answers: ids, AnswersAt: at, Instructions: iids, Brief: brief.parts(), BriefCut: brief.briefCut()}, func() error {
 			if err := brief.write(sess.Workdir); err != nil {
 				return err
 			}
@@ -952,6 +968,11 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			}
 			if len(iids) > 0 {
 				if err := writeInstructions(s.cfg, sess.Workdir, ins, now); err != nil {
+					return err
+				}
+				// Words on an item's entry routed to it since its brief
+				// was written go under the item in items.json too.
+				if err := s.answersToItems(name, sess.Workdir, ins); err != nil {
 					return err
 				}
 			}
@@ -1076,7 +1097,7 @@ func (s *Supervisor) continueTurn(name string, sess Session, t *Track, ev Eviden
 		}
 		return false
 	}
-	if now.Sub(t.lastTurn().At) < pol.Settle.Duration || now.Sub(t.HashSince) < pol.Settle.Duration || s.rotationPending(name, sess, t) {
+	if now.Sub(t.lastTurn().At) < pol.Settle.Duration || now.Sub(t.HashSince) < pol.Settle.Duration || s.rotationPending(name, sess, t, ev, Idle, now) { // continueTurn runs only for an Idle session
 		return true
 	}
 	line := pol.ContinueMessage

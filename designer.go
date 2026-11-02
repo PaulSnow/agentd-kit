@@ -907,8 +907,8 @@ func (s *Supervisor) routeDesign(in *Instruction) bool {
 	case DesignGo, DesignGoMine:
 		note, words := "the owner said go", ""
 		if word != "" && in.Withheld == 0 {
-			note += ": " + oneLine(word, 300)
-			words = cutUTF8(word, workBrief)
+			note += ": " + word
+			words = word
 		}
 		// Go, done by me, chosen or in the words: only the owner's done
 		// closes it (#73).
@@ -927,12 +927,12 @@ func (s *Supervisor) routeDesign(in *Instruction) bool {
 			answer("A change needs your words on what to change, which agentd can pass to the designer; nothing was changed.")
 			return true
 		}
-		if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepChange, Instruction: in.ID, Note: cutUTF8(word, workBrief), By: "owner"}); s.halt != nil {
+		if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepChange, Instruction: in.ID, Note: word, By: "owner"}); s.halt != nil {
 			return true
 		}
 		answer(fmt.Sprintf("agentd's designer takes your words for round %d of %s.", it.Round, it.ID))
 	case DesignDecline:
-		if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepDeclined, Instruction: in.ID, Note: oneLine(word, 300), By: "owner"}); s.halt != nil {
+		if s.workEmit(WorkPayload{ID: it.ID, Step: WorkStepDeclined, Instruction: in.ID, Note: word, By: "owner"}); s.halt != nil {
 			return true
 		}
 		answer(it.ID + " is declined; nothing starts.")
