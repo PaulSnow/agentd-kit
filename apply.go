@@ -521,6 +521,16 @@ func (st *LogState) apply(e Event) {
 // which started nothing that can be observed; counted is false for an
 // action cut short, which the views list apart rather than count.
 func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
+	if taken && (a.Action == ActProvision || a.Action == ActRestart || a.Action == ActRotate) {
+		// A cut made (#87): the context at the hard cap, the brief to its
+		// size; a would-be one cut nothing.
+		if a.Action == ActRotate && a.HardCap > 0 {
+			t.Cuts = append(t.Cuts[:len(t.Cuts):len(t.Cuts)], SessionCut{At: at, Action: a.Action, Context: a.Context, Cap: a.HardCap})
+		}
+		if a.BriefCut != nil {
+			t.Cuts = append(t.Cuts[:len(t.Cuts):len(t.Cuts)], SessionCut{At: at, Action: a.Action, Brief: a.BriefCut})
+		}
+	}
 	n := 0
 	if counted {
 		n = 1

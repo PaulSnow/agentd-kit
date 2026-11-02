@@ -31,6 +31,7 @@ type SessionStatus struct {
 	Guessed     bool     // a figure rests on a transcript agentd did not launch
 	Rotations   int
 	Stopped     string // why the budget stopped it
+	LastCut     string `json:",omitempty"` // its latest context or brief cut, as the console said it (#87)
 	Model       string // the model its launches run, "default" the command's own; "" a session not configured
 }
 
@@ -111,6 +112,9 @@ func summarizeState(cfg *Config, st *LogState, now time.Time) ([]SessionStatus, 
 			Context: -1, Spend: -1, Guessed: t.guessed(), Rotations: t.Rotations, Stopped: t.Stopped}
 		if u, ok := t.current(); ok {
 			r.Context = u.Context
+		}
+		if n := len(t.Cuts); n > 0 {
+			r.LastCut = cutLine(name, t.Cuts[n-1])
 		}
 		if sp, ok := t.spend(mode == ModeLive); ok {
 			r.Spend = sp
@@ -233,6 +237,9 @@ func PrintStatus(w io.Writer, rows []SessionStatus, meta map[string]any, now tim
 		}
 		for _, c := range r.CutShort {
 			why += "; no outcome: " + c
+		}
+		if r.LastCut != "" {
+			why += "; last cut: " + r.LastCut
 		}
 		if r.Guessed {
 			why += "; tokens from the newest transcript in its directory, a guess"

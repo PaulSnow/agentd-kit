@@ -327,8 +327,9 @@ func (s *Supervisor) provision(name string, sess Session, t *Track, now time.Tim
 	}
 	standard := s.st.standardFor(p)
 	s.spawn(name, key, func(w *Supervisor, wt *Track) {
-		w.act(name, ActProvision, &ActPayload{Key: key, Cwd: sess.Cwd, Repository: sess.Repository, Ref: p.Branch}, func() error {
-			return w.provisionFiles(sess, p, pol, owner, items, standard)
+		a := &ActPayload{Key: key, Cwd: sess.Cwd, Repository: sess.Repository, Ref: p.Branch}
+		w.act(name, ActProvision, a, func() error {
+			return w.provisionFiles(sess, p, pol, owner, items, standard, a)
 		})
 	})
 }
@@ -339,7 +340,7 @@ func provisionKey(name string, p RuntimePayload) string {
 	return "provision:" + name + ":" + p.ID
 }
 
-func (s *Supervisor) provisionFiles(sess Session, p RuntimePayload, pol SessionsPolicy, owner *ownerProvision, items []itemDoc, standard string) error {
+func (s *Supervisor) provisionFiles(sess Session, p RuntimePayload, pol SessionsPolicy, owner *ownerProvision, items []itemDoc, standard string, a *ActPayload) error {
 	if err := os.MkdirAll(sess.Workdir, 0o755); err != nil {
 		return err
 	}
@@ -379,9 +380,11 @@ func (s *Supervisor) provisionFiles(sess Session, p RuntimePayload, pol Sessions
 	if standard != "" {
 		facts["standard"] = standard
 	}
-	if err := writeStartFiles(sess.Workdir, p.Kind, head, facts); err != nil {
+	cut, err := writeStartFiles(sess.Workdir, p.Kind, head, facts, s.cfg.Policies.Brief.MaxBytes)
+	if err != nil {
 		return err
 	}
+	a.BriefCut = cut
 	if owner != nil && len(owner.attachments) > 0 {
 		if _, missing := copyAttachments(s.cfg, sess.Workdir, owner.attachments); len(missing) > 0 {
 			fmt.Fprintf(os.Stderr, "agentd: %s: attachments %s could not be copied into the workdir\n", sess.Workdir, strings.Join(missing, ", "))
@@ -396,8 +399,9 @@ func (s *Supervisor) provisionFiles(sess Session, p RuntimePayload, pol Sessions
 // writeStartFiles writes a started session's BRIEF.md from facts, under
 // head or its kind's instruction, and its STATUS.md unless there is one.
 // The progress an earlier session of the name left stays; only its DONE
-// goes, since a new start has work to do.
-func writeStartFiles(workdir, kind, head string, facts map[string]any) error {
+// goes, since a new start has work to do. A brief over max bytes is cut
+// to fit (#87), and the cut returned.
+func writeStartFiles(workdir, kind, head string, facts map[string]any, max int) (*BriefCut, error) {
 	switch {
 	case head != "":
 	case kind == KindChat:
@@ -405,8 +409,9 @@ func writeStartFiles(workdir, kind, head string, facts map[string]any) error {
 	default:
 		head = briefInstruction
 	}
-	if err := writeAtomic(filepath.Join(workdir, "BRIEF.md"), []byte(head+"\n\n"+compact(facts)+"\n")); err != nil {
-		return err
+	text, cut := fitBrief(head, facts, max)
+	if err := writeAtomic(filepath.Join(workdir, "BRIEF.md"), text); err != nil {
+		return nil, err
 	}
 	status := filepath.Join(workdir, "STATUS.md")
 	b, err := os.ReadFile(status)
@@ -416,7 +421,7 @@ func writeStartFiles(workdir, kind, head string, facts map[string]any) error {
 	case err == nil && ParseStatus(string(b)).Done:
 		err = writeAtomic(status, []byte(undone(string(b))))
 	}
-	return err
+	return cut, err
 }
 
 // undone is STATUS.md text without its last DONE line, noting the new start.

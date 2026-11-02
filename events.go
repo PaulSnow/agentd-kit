@@ -228,9 +228,14 @@ type ActPayload struct {
 	Transcript string `json:"transcript,omitempty"`
 	Context    int64  `json:"context,omitempty"`
 	Checkpoint string `json:"checkpoint,omitempty"`
+	// A rotation at the hard cap (#87): the cap it reached.
+	HardCap int64 `json:"hard_cap,omitempty"`
 	// A restart or rotation of a session with brief parts: the parts it
 	// wrote (#50).
 	Brief []BriefPart `json:"brief,omitempty"`
+	// A provision, restart or rotation whose BRIEF.md was cut to
+	// policies.brief.max_bytes (#87).
+	BriefCut *BriefCut `json:"brief_cut,omitempty"`
 	// A stop: why. An earlier version's wake: what was due.
 	Reason string `json:"reason,omitempty"`
 	// An earlier version's wake: the coordinator's spend when it was

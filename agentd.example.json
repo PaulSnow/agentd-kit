@@ -80,7 +80,11 @@
     "context": {
       "enabled": true,
       "threshold": 120000,
+      "hard_cap": 150000,
       "grace": "5m"
+    },
+    "brief": {
+      "max_bytes": 32768
     },
     "budget": {
       "session_tokens": 0,
