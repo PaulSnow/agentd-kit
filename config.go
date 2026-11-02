@@ -821,7 +821,7 @@ func (c *Config) SessionNames() []string {
 
 // Console returns the console an escalation about session name goes to.
 func (c *Config) Console(name string) string {
-	if strings.HasPrefix(name, jobTrackPrefix) { // a scheduled job's, whose name no console's sessions match
+	if strings.HasPrefix(name, jobTrackPrefix) || strings.HasPrefix(name, stepTrackPrefix) { // a scheduled job's or a step's, whose name no console's sessions match
 		return c.Policies.Escalate.DefaultConsole
 	}
 	if repo, ok := strings.CutPrefix(name, requestsTrackPrefix); ok { // a repository's requests'

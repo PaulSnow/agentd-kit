@@ -239,6 +239,9 @@ func (s *Supervisor) screen(e *Event) {
 	if e.Job != nil {
 		e.Job.Error = s.withheld(e.Job.Error)
 	}
+	if e.Step != nil {
+		e.Step.Error = s.withheld(e.Step.Error)
+	}
 	if e.Status != nil {
 		s.screenStatus(e.Status)
 	}
@@ -530,6 +533,7 @@ func (s *Supervisor) Pass() error {
 		s.readAccounts(s.clock.Now())
 		s.noticeAccounts(s.clock.Now())
 		s.runJobs(s.clock.Now())
+		s.escalateSteps(s.clock.Now())
 		s.checkStatuses(s.clock.Now())
 		s.noteFacts(s.clock.Now())
 		s.curateCards(s.clock.Now())
@@ -562,7 +566,7 @@ func (s *Supervisor) ownerRecords() {
 			s.st.apply(e)
 			continue
 		}
-		shared := e.Kind == KindSeen || e.Kind == KindInstruction || e.Kind == KindAttachment || e.Kind == KindAccount || e.Kind == KindTriage || e.Kind == KindError && e.Error.Triage != nil ||
+		shared := e.Kind == KindSeen || e.Kind == KindInstruction || e.Kind == KindAttachment || e.Kind == KindAccount || e.Kind == KindTriage || e.Kind == KindStep || e.Kind == KindError && e.Error.Triage != nil ||
 			e.Kind == KindItem && s.st.itemChanged(*e.Item) || e.Kind == KindCase && e.Mode == ModeOwner ||
 			e.Kind == KindLoop && e.Mode == ModeOwner || e.Kind == KindOps && e.Ops.Step == OpsProposed ||
 			e.Kind == KindRelease && e.Mode == ModeOwner || e.Kind == KindNode && e.Node.Result != nil && e.Node.Result.Action == NodeDeployStep ||
