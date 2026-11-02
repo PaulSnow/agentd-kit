@@ -78,7 +78,7 @@ func privateCheck(t *testing.T, patterns string, tracked, untracked map[string]s
 	return "", 0
 }
 
-const testPatterns = "# invented values\n\nhost buildbox-zz.example\nemail someone@example.invalid\nuser zzuser\nip 10.9.8.7\n"
+const testPatterns = "# invented values\n\nhost buildbox-zz.example\nname gizmoworks\nemail someone@example.invalid\nuser zzuser\nip 10.9.8.7\n"
 
 // Each kind in the patterns file, and the built-in tailnet range, fails
 // the check and names the file, the line and the kind, never the value.
@@ -87,6 +87,8 @@ func TestPrivateCheckFails(t *testing.T) {
 		name, text, kind, value string
 	}{
 		{"host", "ssh BuildBox-ZZ.example to deploy\n", "host", "buildbox-zz"},
+		{"name", "clone GizmoWorks/core here\n", "project name", "gizmoworks"},
+		{"name upper", "see GIZMOWORKS.\n", "project name", "gizmoworks"},
 		{"email", "mail someone@example.invalid\n", "email", "someone@example"},
 		{"user", "cd /home/zzuser/repos\n", "home path", "zzuser"},
 		{"user at end", "HOME=/home/zzuser\n", "home path", "zzuser"},
@@ -123,7 +125,7 @@ func TestPrivateCheckPasses(t *testing.T) {
 		"a.md": strings.Join([]string{
 			belowRange, aboveRange, "1" + tailnetIP, "v" + "1.100.64", tailnetLow + "/10",
 			"/home/someone/private", "/home/zzuserx/a", "notbuildbox-zz.examples",
-			"someone@example.invalidx", "110.9.8.7",
+			"someone@example.invalidx", "110.9.8.7", "gizmoworksx", "megagizmoworks",
 		}, "\n") + "\n",
 	}
 	untracked := map[string]string{
@@ -135,6 +137,25 @@ func TestPrivateCheckPasses(t *testing.T) {
 	}
 	out, code := privateCheck(t, "", tracked, untracked)
 	if code != 0 || !strings.Contains(out, "no patterns file; checking built-in rules only") {
+		t.Fatalf("exit %d, output:\n%s", code, out)
+	}
+}
+
+// A patterns file of name lines alone checks those names, and an empty
+// name is refused.
+func TestPrivateCheckNameOnly(t *testing.T) {
+	out, code := privateCheck(t, "name gizmoworks\n  name  sprocketry  \n", map[string]string{
+		"a.md": "ok\nthe Sprocketry repo\n",
+		"b.md": "sprocketryish gizmoworks_x\n",
+	}, nil)
+	if code != 1 || out != "private-check: a.md:2: project name\nprivate-check: tracked files hold private values; replace them with invented examples\n" {
+		t.Fatalf("exit %d, output:\n%s", code, out)
+	}
+	if strings.Contains(strings.ToLower(out), "sprocketry") {
+		t.Fatalf("the output holds the matched value:\n%s", out)
+	}
+	out, code = privateCheck(t, "name\n", map[string]string{"a.md": "x\n"}, nil)
+	if code != 1 || !strings.Contains(out, "patterns file line 1: no value") {
 		t.Fatalf("exit %d, output:\n%s", code, out)
 	}
 }

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Fails when a tracked file holds a private value: an address in the
-# tailnet range 100.64.0.0/10 (built in), or a host name, email, ip or
-# /home/<user> path listed in a local, untracked patterns file. The
+# tailnet range 100.64.0.0/10 (built in), or a host name, project name,
+# email, ip or /home/<user> path listed in a local, untracked patterns file. The
 # patterns file is looked up as $PRIVATE_PATTERNS, then .private-patterns
 # at the repository root, then
 # ${XDG_CONFIG_HOME:-$HOME/.config}/agentd-kit/private-patterns.
-# Its lines read "host NAME", "email ADDR", "user NAME" or "ip ADDR";
+# Its lines read "host NAME", "name WORD", "email ADDR", "user NAME" or
+# "ip ADDR";
 # blank lines and lines starting with # are skipped. A hit is printed as
 # FILE:LINE and its kind, never the value. A range written with its
 # prefix length, as 100.64.0.0/10, is not an address and passes.
@@ -56,7 +57,7 @@ search() {
 search "tailnet address" -E '(^|[^0-9.])100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}($|[^0-9/])'
 
 if [ -f "$patterns" ]; then
-	: >"$tmp/host" ; : >"$tmp/email" ; : >"$tmp/user" ; : >"$tmp/ip"
+	: >"$tmp/host" ; : >"$tmp/name" ; : >"$tmp/email" ; : >"$tmp/user" ; : >"$tmp/ip"
 	n=0
 	while IFS= read -r line || [ -n "$line" ]; do
 		n=$((n + 1))
@@ -68,7 +69,7 @@ if [ -f "$patterns" ]; then
 		value=${value#"${value%%[![:space:]]*}"}
 		value=${value%"${value##*[![:space:]]}"}
 		case $kind in
-		host | email | ip | user) ;;
+		host | name | email | ip | user) ;;
 		*) echo "private-check: patterns file line $n: unknown kind" >&2; exit 1 ;;
 		esac
 		if [ -z "$value" ]; then
@@ -84,6 +85,7 @@ if [ -f "$patterns" ]; then
 		fi
 	done <"$patterns"
 	if [ -s "$tmp/host" ]; then search host -F -i -w -f "$tmp/host"; fi
+	if [ -s "$tmp/name" ]; then search "project name" -F -i -w -f "$tmp/name"; fi
 	if [ -s "$tmp/email" ]; then search email -F -i -w -f "$tmp/email"; fi
 	if [ -s "$tmp/ip" ]; then search ip -F -w -f "$tmp/ip"; fi
 	if [ -s "$tmp/user" ]; then search "home path" -E -f "$tmp/user"; fi

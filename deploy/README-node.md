@@ -36,7 +36,7 @@ or asleep shows "laptop: last seen <time>".
          "laptop": {"token_file": "~/.config/agentd-kit/hub-laptop.token", "observe": true}
        },
        "repositories": {
-         "staking": {..., "clone_on": ["laptop"]},
+         "widgets": {..., "clone_on": ["laptop"]},
          "agentd-kit": {..., "clone_on": ["laptop"]}
        }
 
@@ -70,7 +70,7 @@ or asleep shows "laptop: last seen <time>".
 
    `HUB_ADDRESS` is the build host's tailnet address, as above.
    Clones are found at `<root>/<forge host>/<project>`, as
-   `~/repos/gitlab.com/accumulatenetwork/core/staking`.
+   `~/repos/gitlab.example.com/example-group/widgets`.
 
 3. Install agentd and the unit, then start it:
 
