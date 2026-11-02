@@ -833,14 +833,8 @@ func (s *Supervisor) deliverInstructions(name string, sess Session, t *Track, ev
 		if err := writeInstructions(s.cfg, sess.Workdir, ins, s.clock.Now()); err != nil {
 			return fmt.Errorf("%w: %v", errWrite, err)
 		}
-		// An answer on an item's entry may have changed the item, its
-		// note holding the owner's words: items.json says so too.
-		if newest != nil && itemEntry(newest) != "" {
-			if docs := s.itemDocs(name, sess.Workdir); len(docs) > 0 {
-				if err := writeItems(sess.Workdir, docs); err != nil {
-					return fmt.Errorf("%w: items.json: %v", errWrite, err)
-				}
-			}
+		if err := s.answersToItems(name, sess.Workdir, fresh); err != nil {
+			return fmt.Errorf("%w: %v", errWrite, err)
 		}
 		if err := s.tmux.Type(name, line); err != nil {
 			return err
@@ -886,6 +880,24 @@ func itemEntry(in *Instruction) string {
 		return in.Re.ID
 	}
 	return ""
+}
+
+// answersToItems writes session name's items.json again when one of ins
+// answers on an item's entry: the answer may have changed the item, its
+// note holding the owner's words, and words alone are quoted under it.
+func (s *Supervisor) answersToItems(name, workdir string, ins []*Instruction) error {
+	for _, in := range ins {
+		if itemEntry(in) == "" {
+			continue
+		}
+		if docs := s.itemDocs(name, workdir); len(docs) > 0 {
+			if err := writeItems(workdir, docs); err != nil {
+				return fmt.Errorf("items.json: %v", err)
+			}
+		}
+		return nil
+	}
+	return nil
 }
 
 // answeredLine is the fixed line typed for the owner's answer in on an

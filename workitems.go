@@ -1466,8 +1466,39 @@ type itemDoc struct {
 	Notes       []WorkNote      `json:"notes,omitempty"`
 	Check       *WorkCheck      `json:"last_check,omitempty"`
 	Refuted     string          `json:"refuted_claim,omitempty"`
+	// Answers are the owner's words alone on the item's entry that agentd
+	// handed to this session, whole, oldest first: words that waited for
+	// the session the item was given to among them.
+	Answers []itemAnswer `json:"owner_answers,omitempty"`
 	// Designed: Brief is the design the owner approved (#68).
 	Designed bool `json:"designed,omitempty"`
+}
+
+// itemAnswer is the owner's words alone on an item's entry, as items.json
+// holds them: the instruction, when it came, and its text whole.
+type itemAnswer struct {
+	Instruction string    `json:"instruction"`
+	At          time.Time `json:"at"`
+	Text        string    `json:"text"`
+}
+
+// itemAnswers are the owner's words alone on item id's entry routed to
+// session name, oldest first; none withheld.
+func (s *Supervisor) itemAnswers(name, id string) []itemAnswer {
+	var out []itemAnswer
+	for _, in := range s.st.Instructions {
+		if in.Re == nil || in.Re.ID != entryWork+id || in.Session != name || in.Withheld > 0 || in.Answer != nil && in.Answer.Choice != "" {
+			continue
+		}
+		out = append(out, itemAnswer{Instruction: in.ID, At: in.At, Text: in.Text})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].At.Equal(out[j].At) {
+			return out[i].At.Before(out[j].At)
+		}
+		return out[i].Instruction < out[j].Instruction
+	})
+	return out
 }
 
 // itemProtocol is how a session tells Go of an item, as items.json and
@@ -1481,7 +1512,7 @@ const itemProtocol = "Each item is the owner's work, given to you. Name its id i
 func (s *Supervisor) itemDocs(name, workdir string) []itemDoc {
 	out := []itemDoc{}
 	for _, it := range s.st.itemsOf(name) {
-		d := itemDoc{ID: it.ID, Title: it.Title, Brief: it.Brief, Issue: it.Issue, DoneWhen: it.DoneWhen, State: it.State, Notes: it.Notes, Check: it.Check, Refuted: it.Refuted}
+		d := itemDoc{ID: it.ID, Title: it.Title, Brief: it.Brief, Issue: it.Issue, DoneWhen: it.DoneWhen, State: it.State, Notes: it.Notes, Check: it.Check, Refuted: it.Refuted, Answers: s.itemAnswers(name, it.ID)}
 		if in := s.st.Instructions[it.Instruction]; in != nil {
 			d.Owner, d.Withheld = in.Text, in.Withheld > 0
 			// A designed item's brief is its design (#68).
@@ -1613,6 +1644,10 @@ func (s *Supervisor) routeWork(in *Instruction) bool {
 		if in.Withheld > 0 {
 			return false // routeOne says why it is never delivered
 		}
+		if it.terminal() {
+			s.routeStep(in, RouteFail, "", false, it.ID+" is "+it.State+" already; your words went to no session")
+			return true
+		}
 		if it.Session == "" && it.State == WorkOpen && in.Waiting != "" {
 			return true // it waits for the session the item is given to
 		}
@@ -1626,7 +1661,18 @@ func (s *Supervisor) routeWork(in *Instruction) bool {
 			s.routeStep(in, RouteTo, it.Session, false, "")
 			return true
 		}
-		s.routeStep(in, RouteFail, "", false, it.ID+" has no session to take your words now; answer "+strings.Join(it.workOptions(), " or ")+" on it")
+		switch {
+		case it.Session == "" && it.State == WorkOpen:
+			// Open with no session yet: the words wait for the session the
+			// item is given to, which gets them whole, as #77's words with
+			// not done or re-assign do.
+			if s.routeStep(in, RouteWait, "", false, "your words wait for the session "+it.ID+" is given to"); s.halt != nil {
+				return true
+			}
+			s.escalateItem(it, "waiting:"+in.ID, fmt.Sprintf("%s: your words %s on %s wait: %s has no session yet. agentd hands them, whole, to the session %s is given to.", it.ID, in.ID, itemEntry(in), it.ID, it.ID))
+		default:
+			s.routeStep(in, RouteFail, "", false, it.ID+" has no session to take your words now; answer "+strings.Join(it.workOptions(), " or ")+" on it")
+		}
 		return true
 	case it.terminal():
 		answer(it.ID + " is " + it.State + " already; nothing was changed.")

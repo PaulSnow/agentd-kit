@@ -970,6 +970,11 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 				if err := writeInstructions(s.cfg, sess.Workdir, ins, now); err != nil {
 					return err
 				}
+				// Words on an item's entry routed to it since its brief
+				// was written go under the item in items.json too.
+				if err := s.answersToItems(name, sess.Workdir, ins); err != nil {
+					return err
+				}
 			}
 			if ev.PaneDead {
 				return s.tmux.Respawn(name, sess.Cwd, line)
