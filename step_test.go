@@ -36,7 +36,7 @@ func stepFixture(t *testing.T, edit func(spec map[string]any)) (dir, specPath, c
 	writeFile(t, filepath.Join(dir, "in", "a.md"), "story one\n")
 	writeFile(t, filepath.Join(dir, "in", "b.md"), "story two\n")
 	spec := map[string]any{
-		"pipeline": "meetup", "name": "draft", "inputs": []string{"in/b.md", "in/a.md"},
+		"pipeline": "newsletter", "name": "draft", "inputs": []string{"in/b.md", "in/a.md"},
 		"summary": map[string]any{"week": 44}, "instruction": "Draft the section from the stories.",
 		"budget_tokens": 5000, "timeout": "10s", "output": "out/draft.md",
 	}
@@ -211,12 +211,12 @@ func TestStepCommandRunsAndSkips(t *testing.T) {
 			Name, Outcome string
 		} `json:"steps"`
 	}
-	if err := json.Unmarshal(out.Bytes(), &got); err != nil || len(got) != 1 || got[0].Name != "meetup" || got[0].Usage != want ||
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil || len(got) != 1 || got[0].Name != "newsletter" || got[0].Usage != want ||
 		want.InputTokens != 4000 || len(got[0].Steps) != 1 || got[0].Steps[0].Outcome != StepOK {
 		t.Fatalf("steps = %s (%v), want usage %+v", out.String(), err, want)
 	}
 	out.Reset()
-	if err := stepsCmd([]string{"--config", cfgPath}, &out); err != nil || !strings.Contains(out.String(), "meetup: 4000 input, 800 output") {
+	if err := stepsCmd([]string{"--config", cfgPath}, &out); err != nil || !strings.Contains(out.String(), "newsletter: 4000 input, 800 output") {
 		t.Fatalf("steps printed %q (%v)", out.String(), err)
 	}
 }
@@ -282,7 +282,7 @@ func TestStepCheckFailedKeepsOutput(t *testing.T) {
 	}
 
 	writeFile(t, filepath.Join(dir, "schema.json"), `{"type":"object","properties":{"stories":{"type":"array"}},"required":["stories"]}`)
-	b, _ := json.Marshal(map[string]any{"pipeline": "meetup", "name": "rank", "inputs": []string{"in/a.md"}, "instruction": "Rank.",
+	b, _ := json.Marshal(map[string]any{"pipeline": "newsletter", "name": "rank", "inputs": []string{"in/a.md"}, "instruction": "Rank.",
 		"budget_tokens": 5000, "output": "out/rank.json", "check": map[string]any{"schema": "schema.json"}})
 	specPath2 := filepath.Join(dir, "rank.json")
 	writeFile(t, specPath2, string(b))
@@ -364,31 +364,31 @@ func stepEscalations(h *harness, key string) []string {
 func TestStepFailureEscalatedOncePerHash(t *testing.T) {
 	h := newHarness(t, false)
 	fail := func(hash, outcome string) {
-		h.appendEvent(Event{Kind: KindStep, Mode: ModeShared, Step: &StepPayload{Pipeline: "meetup", Name: "draft", Hash: hash, Outcome: outcome,
+		h.appendEvent(Event{Kind: KindStep, Mode: ModeShared, Step: &StepPayload{Pipeline: "newsletter", Name: "draft", Hash: hash, Outcome: outcome,
 			Error: "no stories", Usage: &JobUsage{InputTokens: 900, OutputTokens: 100, CostUSD: 0.01}}})
 	}
 	fail("h1", StepCheckFailed)
 	h.ticks(2, time.Minute)
-	got := stepEscalations(h, "meetup/draft")
-	if len(got) != 1 || !strings.Contains(got[0], "Step draft of pipeline meetup gave an answer that failed its check: no stories") || !strings.Contains(got[0], "1000 tokens") {
+	got := stepEscalations(h, "newsletter/draft")
+	if len(got) != 1 || !strings.Contains(got[0], "Step draft of pipeline newsletter gave an answer that failed its check: no stories") || !strings.Contains(got[0], "1000 tokens") {
 		t.Fatalf("escalations after one failure: %q", got)
 	}
 	fail("h1", StepBudget)
 	h.ticks(2, time.Minute)
-	if got := stepEscalations(h, "meetup/draft"); len(got) != 1 {
+	if got := stepEscalations(h, "newsletter/draft"); len(got) != 1 {
 		t.Fatalf("a retry on the same inputs escalated again: %q", got)
 	}
 	fail("h2", StepFailed)
 	h.ticks(2, time.Minute)
-	if got := stepEscalations(h, "meetup/draft"); len(got) != 2 {
+	if got := stepEscalations(h, "newsletter/draft"); len(got) != 2 {
 		t.Fatalf("a failure on new inputs: %q", got)
 	}
 	fail("h3", StepOK)
 	h.ticks(2, time.Minute)
-	if got := stepEscalations(h, "meetup/draft"); len(got) != 2 {
+	if got := stepEscalations(h, "newsletter/draft"); len(got) != 2 {
 		t.Fatalf("a good run escalated: %q", got)
 	}
-	if u := h.sup.st.PipelineUsage["meetup"]; u.InputTokens != 3600 || u.CostUSD < 0.0399 {
+	if u := h.sup.st.PipelineUsage["newsletter"]; u.InputTokens != 3600 || u.CostUSD < 0.0399 {
 		t.Fatalf("pipeline usage = %+v", u)
 	}
 	sameAfterReplay(t, h, "after step failures")
@@ -402,19 +402,19 @@ func TestScheduledStepJob(t *testing.T) {
 	fd := fakeClaude(t)
 	claudeAnswers(t, fd, 0, stepStreamOut("one story\n", "", 100, 10))
 	dir, specPath, _ := stepFixture(t, nil)
-	h := schedHarness(t, false, map[string]ScheduledJob{"meetup-draft": {Every: Duration{time.Hour}, Step: specPath}})
+	h := schedHarness(t, false, map[string]ScheduledJob{"newsletter-draft": {Every: Duration{time.Hour}, Step: specPath}})
 	h.ticks(1, time.Minute)
 	if got := readFake(t, filepath.Join(dir, "out"), "draft.md"); got != "one story\n" {
 		t.Fatalf("output = %q", got)
 	}
-	ends := jobEvents(h, "meetup-draft", JobEnd)
-	if len(ends) != 1 || *ends[0].Exit != 0 || h.sup.st.StepRuns["meetup/draft"].Last.Outcome != StepOK {
-		t.Fatalf("job ends %+v, step %+v", ends, h.sup.st.StepRuns["meetup/draft"])
+	ends := jobEvents(h, "newsletter-draft", JobEnd)
+	if len(ends) != 1 || *ends[0].Exit != 0 || h.sup.st.StepRuns["newsletter/draft"].Last.Outcome != StepOK {
+		t.Fatalf("job ends %+v, step %+v", ends, h.sup.st.StepRuns["newsletter/draft"])
 	}
 	h.clock.advance(time.Hour)
 	h.ticks(1, time.Minute)
-	if ends := jobEvents(h, "meetup-draft", JobEnd); len(ends) != 2 || *ends[1].Exit != 0 || claudeCalls(t, fd) != 1 ||
-		h.sup.st.StepRuns["meetup/draft"].Last.Outcome != StepSkipped {
+	if ends := jobEvents(h, "newsletter-draft", JobEnd); len(ends) != 2 || *ends[1].Exit != 0 || claudeCalls(t, fd) != 1 ||
+		h.sup.st.StepRuns["newsletter/draft"].Last.Outcome != StepSkipped {
 		t.Fatalf("second slot: ends %+v, %d calls", ends, claudeCalls(t, fd))
 	}
 	claudeAnswers(t, fd, 0, stepStreamOut("", "", 100, 10))
@@ -424,11 +424,11 @@ func TestScheduledStepJob(t *testing.T) {
 		h.ticks(1, time.Minute)
 	}
 	h.ticks(1, time.Minute) // the last card is posted on the pass after its step
-	if got := stepEscalations(h, "meetup/draft"); len(got) != 4 {
+	if got := stepEscalations(h, "newsletter/draft"); len(got) != 4 {
 		t.Fatalf("step escalations: %q", got)
 	}
 	for _, e := range h.events() {
-		if e.Kind == KindAction && e.Act.Action == ActEscalate && e.Session == jobTrack("meetup-draft") {
+		if e.Kind == KindAction && e.Act.Action == ActEscalate && e.Session == jobTrack("newsletter-draft") {
 			t.Fatalf("the step job was escalated as a job too: %q", e.Act.Message)
 		}
 	}
