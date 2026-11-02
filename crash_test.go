@@ -204,3 +204,13 @@ func TestLiveSessionWithAnsweredQuestionsIsNotBlocked(t *testing.T) {
 		t.Fatalf("live with an open question: %s, %q", st, why)
 	}
 }
+
+// A live session whose Questions block opens with "None blocking." and a
+// status note is not blocked on the owner (#81).
+func TestLiveSessionWithNoneBlockingIsNotBlocked(t *testing.T) {
+	status := "# Status\n\nNow: request 12 is open.\n\n## Questions\n\nNone blocking. Request 12 is mergeable but the loop has not merged it yet; I do not merge it myself.\n\n## Next\n\nwait for the merge\n"
+	ev := Evidence{Alive: true, PaneHash: "h", Status: ParseStatus(status)}
+	if st, why := Classify(&Track{}, ev, Policies{}, time.Now()); st == BlockedOnOwner || strings.Contains(why, "Questions") {
+		t.Fatalf("live: %s, %q", st, why)
+	}
+}

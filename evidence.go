@@ -113,9 +113,11 @@ var noneAsks = regexp.MustCompile(`(?i)\b(but|need|needs|please|must|until|block
 
 // noneFirst matches a line whose first word is none, said as an answer:
 // "none. Owner asked ...", "None so far: ...", "- (none, ...", "none (Q1
-// answered at go)" (#81). "None of the tests pass" and "none-blocking" say
-// something else, and "None (which port?)" still asks (noneParagraphAsks).
-var noneFirst = regexp.MustCompile(`(?i)^[-*\s]*\(?\s*none(\s+(yet|open|so\s+far))?\s*([.,;:!()\x{2013}\x{2014}]|\s-\s|$)`)
+// answered at go)" (#81), and "None blocking. ...", "Nothing (is) blocking;
+// ..." or "No blockers." with status notes after it (#81). "None of the
+// tests pass" and "none-blocking" say something else, and "None (which
+// port?)" or "None blocking, but please ..." still ask (noneParagraphAsks).
+var noneFirst = regexp.MustCompile(`(?i)^[-*\s]*\(?\s*(none(\s+(yet|open|so\s+far|blocking))?|nothing(\s+is)?\s+blocking|no\s+blockers?)\s*([.,;:!()\x{2013}\x{2014}]|\s-\s|$)`)
 
 // answeredSaid matches a line that only reports a question answered:
 // "(answered at go; the target is ...)", "Q1 answered at go.", "Q1:

@@ -545,3 +545,33 @@ func TestAnsweredQuestionsAreNotOpen(t *testing.T) {
 		}
 	}
 }
+
+// A Questions section that opens with none blocking, nothing blocking or
+// no blockers is an answer (#81): status notes after it (waiting on the
+// loop, the review, CI, the merge) ask nothing. A question mark or a
+// request to the owner still asks, and a question on its own line after
+// it counts with the none paragraph as its lead-in.
+func TestNoneBlockingIsAnAnswer(t *testing.T) {
+	for _, body := range []string{
+		"None blocking. Request 12 is mergeable but the loop has not merged it yet; I do not merge it myself.",
+		"- None blocking. Request 34 is ready and open; waiting on the loop's review and the merge.",
+		"Nothing blocking; waiting on CI.",
+		"Nothing is blocking - the review is next.",
+		"No blockers.",
+		"No blocker: the merge is queued.",
+	} {
+		if ev := ParseStatus("# T\n\n## Questions\n\n" + body + "\n\n## Next\nwork\n"); ev.Questions != "" {
+			t.Errorf("%q: questions %q", body, ev.Questions)
+		}
+	}
+	for body, want := range map[string]string{
+		"None blocking, but please choose the port?": "None blocking, but please choose the port?",
+		"No blockers. Please add the deploy key.":    "No blockers. Please add the deploy key.",
+		"None blocking.\n- Which port should I use?": "None blocking.\n- Which port should I use?",
+		"(none-blocking issues remain)":              "(none-blocking issues remain)",
+	} {
+		if ev := ParseStatus("# T\n\n## Questions\n\n" + body + "\n\n## Next\nwork\n"); ev.Questions != want {
+			t.Errorf("%q: questions %q, want %q", body, ev.Questions, want)
+		}
+	}
+}
