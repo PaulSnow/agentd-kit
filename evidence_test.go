@@ -575,3 +575,37 @@ func TestNoneBlockingIsAnAnswer(t *testing.T) {
 		}
 	}
 }
+
+// Inside a report that a question was answered, until, need, waiting and
+// block describe the answer, so the line is settled; a question mark or a
+// request to the owner keeps it asking (#92).
+func TestAnsweredReportWithUntilIsSettled(t *testing.T) {
+	for _, body := range []string{
+		"(answered at go; Q4 default: X as last fetched counts as Y; Q5: hold until a choice, per point 5)",
+		"(answered at go; Q2: no need to pin the version)",
+		"(answered at go; Q3: keep waiting jobs in the queue)",
+		"(answered at go; Q1: one block per day)",
+		"Q1 answered at go: the step runs until it succeeds.",
+	} {
+		if ev := ParseStatus("# T\n\n## Questions\n\n" + body + "\n\n## Next\nwork\n"); ev.Questions != "" {
+			t.Errorf("%q: questions %q", body, ev.Questions)
+		}
+	}
+	for _, body := range []string{
+		"(answered in part; please choose the port)",
+		"(answered at go; which port?)",
+		"(answered at go; Owner: say if X)",
+		"(answered; tell me the host)",
+		"(answered; you must pick)",
+		"(answered in part; choose a host until Friday)",
+	} {
+		if ev := ParseStatus("# T\n\n## Questions\n\n" + body + "\n\n## Next\nwork\n"); ev.Questions != body {
+			t.Errorf("%q: questions %q", body, ev.Questions)
+		}
+	}
+	status := "# Status\n\nNow: W1a2b3c4d.\n\n## Questions\n\n(answered at go; Q4 default: X as last fetched counts as Y; Q5: hold until a choice, per point 5)\n\n## Next\n\nwork\n"
+	ev := Evidence{Alive: true, PaneHash: "h", Status: ParseStatus(status)}
+	if st, why := Classify(&Track{}, ev, Policies{}, time.Now()); st == BlockedOnOwner || strings.Contains(why, "Questions") {
+		t.Fatalf("live: %s, %q", st, why)
+	}
+}
