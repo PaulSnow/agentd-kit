@@ -400,6 +400,8 @@ type uiIndex struct {
 	Accounts []uiAccount
 	Jobs     []uiJob
 	Needs    []uiNeed
+	// Digest is every decision waiting on the owner, oldest first (#88).
+	Digest []uiDigest
 	// PollAlerts are the forge polls failing for more than two intervals
 	// (#75), shown on the home level.
 	PollAlerts []uiPollAlert
@@ -517,6 +519,13 @@ func (u *UI) indexView(now time.Time) (*uiIndex, error) {
 	}
 	sort.Slice(v.Accounts, func(i, j int) bool { return v.Accounts[i].Name < v.Accounts[j].Name })
 	sortNeeds(v.Needs)
+	sort.SliceStable(v.Digest, func(i, j int) bool {
+		a, b := v.Digest[i], v.Digest[j]
+		if !a.Since.Equal(b.Since) {
+			return a.Since.Before(b.Since)
+		}
+		return a.Entry < b.Entry
+	})
 	if err := u.homeLevel(v, now); err != nil {
 		return nil, err
 	}
@@ -591,6 +600,9 @@ func (src *uiSource) addIndex(v *uiIndex, get func(string) *uiRepo, now time.Tim
 	src.addAccounts(v, cfg, now)
 	src.addJobs(v, cfg)
 	v.Needs = append(v.Needs, src.needs(cfg, rep, src.askedAt)...)
+	if !src.echo {
+		v.Digest = append(v.Digest, src.digest(cfg, rep, now)...)
+	}
 	src.addAccountNeeds(v, cfg, now)
 	v.PollAlerts = append(v.PollAlerts, src.pollAlerts(cfg, now)...)
 	for _, rr := range rep.Repositories {
@@ -645,6 +657,35 @@ func (src *uiSource) addIndex(v *uiIndex, get func(string) *uiRepo, now time.Tim
 			Outside: true, Author: rec.Author, Draft: rec.Draft, Unresolved: rec.Unresolved})
 	}
 	return nil
+}
+
+// uiDigest is one line of the owner's digest as the home page shows it:
+// its source, and the console entry it links to.
+type uiDigest struct {
+	DigestEntry
+	Src  string
+	Href string
+}
+
+// digest is src's digest: every decision waiting on the owner, each
+// linked to its entry on its console.
+func (src *uiSource) digest(cfg *Config, rep Report, now time.Time) []uiDigest {
+	var out []uiDigest
+	for _, e := range BuildDigest(cfg, src.st, DecisionsFrom(cfg, src.st, rep), now) {
+		con := cfg.Console(e.Session)
+		switch {
+		case strings.HasPrefix(e.Entry, entryOps):
+			con = cfg.opsConsole()
+		case e.Repository != "":
+			con = cfg.RepositoryConsole(e.Repository)
+		}
+		d := uiDigest{DigestEntry: e, Src: src.Name}
+		if con != "" {
+			d.Href = "/console/" + url.PathEscape(con) + "#e-" + shortHash(HashPane(src.Name + "\n" + e.Entry))[:12]
+		}
+		out = append(out, d)
+	}
+	return out
 }
 
 // noteAsked records when each decision e raises was first seen.

@@ -9,6 +9,7 @@
 //	agentd clear [--config PATH] [--log PATH] SESSION
 //	agentd inventory [--config PATH]
 //	agentd report [--config PATH] [--log PATH] [--shadow] [--host NAME] --out PATH
+//	agentd digest [--config PATH] [--log PATH] [--shadow] [--json]
 //	agentd page [--config PATH] [--log PATH] [--shadow]
 //	agentd items [--config PATH] [--log PATH] [--new] [--seen ID,...] [--work [--all] [--json]]
 //	agentd cases [--config PATH] [--log PATH] [--shadow] [--json]
@@ -90,6 +91,8 @@ func runCommand(name string, args []string) (handled bool, err error) {
 		return true, inventoryCmd(args, os.Stdout)
 	case "report":
 		return true, reportCmd(args)
+	case "digest":
+		return true, digestCmd(args)
 	case "ui":
 		return true, uiCmd(args)
 	case "accounts":
@@ -174,6 +177,7 @@ const usageLines = `usage:
   agentd issue [--config PATH] [--log PATH] [--all] REPO N
   agentd inventory [--config PATH]
   agentd report [--config PATH] [--log PATH] [--shadow] [--host NAME] --out PATH
+  agentd digest [--config PATH] [--log PATH] [--shadow] [--json]
   agentd ui [--config PATH] [--log PATH]
   agentd accounts [--config PATH] [--report [--json]]
   agentd items [--config PATH] [--log PATH] [--new] [--seen ID,...] | --work [--all] [--json]

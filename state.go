@@ -107,6 +107,10 @@ type Track struct {
 	Raised          []Decision
 	RaisedCount     int
 	Deadlines       map[string]DeadlineRecord
+	// FirstSeen is when each open decision was first seen, by its id and
+	// hash as it was asked (#88): a per-kind default deadline counts
+	// from it, and the digest's wait.
+	FirstSeen map[string]time.Time
 
 	Asked      string // the Questions text last posted, while they stay open
 	AskedAt    time.Time

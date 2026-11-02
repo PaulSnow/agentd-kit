@@ -172,6 +172,7 @@ func (t *Track) clone() *Track {
 	c.Decisions = append([]Decision(nil), t.Decisions...)
 	c.Raised = append([]Decision(nil), t.Raised...)
 	c.Deadlines = copyMap(t.Deadlines)
+	c.FirstSeen = copyMap(t.FirstSeen)
 	c.Failures = make(map[string][]time.Time, len(t.Failures))
 	for k, v := range t.Failures {
 		c.Failures[k] = append([]time.Time(nil), v...)
