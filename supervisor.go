@@ -511,6 +511,7 @@ func (s *Supervisor) Pass() error {
 	// delivered in the pass that read it.
 	s.routeInstructions(s.clock.Now())
 	s.driveItems(s.clock.Now())
+	s.driveDigest(s.clock.Now())
 	s.runOps(s.clock.Now())
 	s.watchInstall(s.clock.Now())
 	for _, name := range s.cfg.SessionNames() {

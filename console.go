@@ -50,6 +50,9 @@ type MessagePayload struct {
 	// Capped is the repository an agentd notice that its curators reached
 	// a daily limit is about (#82): at most one a day.
 	Capped string `json:"capped,omitempty"`
+	// Digest is the local day an agentd digest of what waits on the
+	// owner is for (#88): one a day.
+	Digest string `json:"digest,omitempty"`
 }
 
 // InboxPayload records that Reader read the instructions IDs of Console.

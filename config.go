@@ -48,6 +48,8 @@ type Config struct {
 	Ops OpsConfig `json:"ops,omitempty"`
 	// Items bounds how long the owner's work items wait (#66).
 	Items ItemsConfig `json:"items"`
+	// Digest is the owner's daily digest of what waits on them (#88).
+	Digest DigestConfig `json:"digest"`
 	// Hub, Hosts and Node are agentd on every machine (#29, node.go): the
 	// hub the nodes report to, the hosts it serves, and this machine's
 	// node.
@@ -716,6 +718,7 @@ func (c *Config) finish(base string) error {
 	// logged, and the UI shows them in their consoles (#42).
 	c.checkOps(path, &errs)
 	c.checkConsoles(&errs)
+	c.checkDigest(&errs)
 	c.checkTurns(&errs)
 	// A bare command name is left for PATH to find; a path is expanded.
 	if cmd := c.Policies.Escalate.Command; len(cmd) > 0 && (strings.HasPrefix(cmd[0], "~") || strings.Contains(cmd[0], "/")) {

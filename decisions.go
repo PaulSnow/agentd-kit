@@ -24,6 +24,11 @@ const ToolRaiseDecision = "raise_decision"
 // session knows the owner did not choose it.
 const defaultNote = "the default, applied at the owner's deadline"
 
+// defaultKindNote begins the note of a default applied at the deadline
+// the owner set for the decision's kind (digest.defaults, #88), which
+// names the kind.
+const defaultKindNote = "the default, applied at the owner's deadline for "
+
 // RaisedRecord is a decision raised through the tools, as the case holds
 // it: who raised it and when, and the decision that replaced it.
 type RaisedRecord struct {
@@ -88,6 +93,50 @@ func (t *Track) deadline(d Decision) (DeadlineRecord, bool) {
 	return dl, ok && dl.Asked == decisionHash(d)
 }
 
+// noteSeen records when d, as it is asked, was first seen.
+func (t *Track) noteSeen(d Decision, at time.Time) {
+	if d.ID == "" {
+		return
+	}
+	k := d.ID + " " + decisionHash(d)
+	if _, ok := t.FirstSeen[k]; ok {
+		return
+	}
+	if t.FirstSeen == nil {
+		t.FirstSeen = map[string]time.Time{}
+	}
+	t.FirstSeen[k] = at
+}
+
+// firstSeen is when d, as it is asked, was first seen.
+func (t *Track) firstSeen(d Decision) (time.Time, bool) {
+	at, ok := t.FirstSeen[d.ID+" "+decisionHash(d)]
+	return at, ok
+}
+
+// effectiveDeadline is when d's default is applied, and the kind whose
+// deadline it is ("" for the owner's own on d): the owner's deadline on
+// d when one is set, which wins; else, when d has a default and the
+// owner set one for kind in digest.defaults, that long after d was first
+// seen. ok is false when no default will be applied.
+func (t *Track) effectiveDeadline(d Decision, kind string, cfg *Config) (at time.Time, deadlineKind string, ok bool) {
+	if d.Default == "" {
+		return time.Time{}, "", false
+	}
+	if dl, ok := t.deadline(d); ok {
+		return dl.At, "", true
+	}
+	if cfg == nil {
+		return time.Time{}, "", false
+	}
+	dur, set := cfg.Digest.Defaults[kind]
+	seen, known := t.firstSeen(d)
+	if !set || dur.Duration <= 0 || !known {
+		return time.Time{}, "", false
+	}
+	return seen.Add(dur.Duration), kind, true
+}
+
 // RecordDeadline appends the owner's deadline on the session's decision
 // id. Only an open, unanswered decision with a default takes one, since
 // the default is what the deadline applies, and only a deadline still to
@@ -120,8 +169,8 @@ func RecordDeadline(log *Log, st *LogState, now time.Time, session, id string, a
 func (s *Supervisor) applyDefaults(name string, t *Track) {
 	now := s.clock.Now()
 	for _, d := range t.open() {
-		dl, ok := t.deadline(d)
-		if d.Default == "" || !ok || now.Before(dl.At) {
+		at, kind, ok := t.effectiveDeadline(d, decisionKind(d), s.cfg)
+		if !ok || now.Before(at) {
 			continue
 		}
 		if a, answered := t.Answers[d.ID]; answered && a.Asked == decisionHash(d) {
@@ -132,6 +181,9 @@ func (s *Supervisor) applyDefaults(name string, t *Track) {
 			continue // checked when it was raised; a default that no longer fits waits on the owner
 		}
 		a.Note, a.Asked, a.ByDefault = defaultNote, decisionHash(d), true
+		if kind != "" {
+			a.Note = defaultKindNote + kind
+		}
 		if s.emit(name, Event{Kind: KindAnswer, Answer: &a}); s.halt != nil {
 			return
 		}

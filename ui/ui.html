@@ -100,6 +100,12 @@
 <span class="meta">{{.Schedule}}{{if not .Started.IsZero}} · started {{$.Ago .Started}}{{end}}{{with .End}}{{if .Exit}} · exit {{.Exit}}{{end}} · took {{.Took}}{{end}}{{with .Error}} · {{.}}{{end}}{{with .Log}} · log {{.}}{{end}}</span>
 </li>{{end}}</ul>
 </section>
+<section id="digest" data-refresh aria-labelledby="digest-h">
+<h2 id="digest-h">Waiting on you, oldest first <span class="count">{{len .Digest}}</span></h2>
+{{with .Digest}}<ul class="rows">{{range .}}<li class="row digest-{{.Kind}}"><span class="badge">{{.Kind}}</span> <strong>{{if .Repository}}{{.Repository}}{{else}}(no repository){{end}}</strong>: {{if .Href}}<a href="{{.Href}}">{{.Asked}}</a>{{else}}{{.Asked}}{{end}}
+{{with .Recommended}}<span class="meta">Recommended: {{.}}</span>{{end}}
+<span class="meta">waited {{if .Since.IsZero}}-{{else}}{{$.Ago .Since}}{{end}}{{if .DefaultAt}} · default {{.Default}} at {{$.When .DefaultAt}}{{end}}</span></li>{{end}}</ul>{{else}}<p class="empty">Nothing waits on you.</p>{{end}}
+</section>
 <section id="needs" data-refresh aria-labelledby="needs-h">
 <h2 id="needs-h">Needs you{{with .Needs}} <span class="count">{{len .}}</span>{{end}}</h2>
 {{range .Needs}}{{template "need" (ctx $ .)}}{{else}}<p class="empty">Nothing waits on you.</p>{{end}}

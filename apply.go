@@ -104,6 +104,9 @@ type LogState struct {
 	// Coord is coordination with the owner's laptop (coord.go): nil
 	// until a node reports or an overlap is logged.
 	Coord *CoordState
+	// DigestDay is the local day the owner's digest was last posted for
+	// (#88), YYYY-MM-DD, so a day's is posted once.
+	DigestDay string
 
 	cfg *Config // its policies, read as each event is applied
 }
@@ -259,6 +262,10 @@ func (st *LogState) apply(e Event) {
 			st.applyJob(e)
 		case KindStep:
 			st.applyStep(e)
+		case KindMessage:
+			if e.Message.Digest > st.DigestDay {
+				st.DigestDay = e.Message.Digest
+			}
 		case KindFeed:
 			st.applyFeed(e)
 		case KindStart:
@@ -362,6 +369,9 @@ func (st *LogState) apply(e Event) {
 		}
 		t.Dialog.Showing = o.Dialog
 		t.StatusQuestions = o.StatusQuestions
+		if o.StatusQuestions != "" {
+			t.noteSeen(statusDecisionFor(o.StatusQuestions), e.Time)
+		}
 		t.Questions.observeQuestions(o.Questions, o.Done)
 		if !o.Questions || o.Done {
 			t.Asked = ""
@@ -395,6 +405,9 @@ func (st *LogState) apply(e Event) {
 		t.DecisionsHash = e.Decision.Hash
 		if e.Decision.Refused == "" {
 			t.Decisions = e.Decision.Decisions
+			for _, d := range t.Decisions {
+				t.noteSeen(d, e.Time)
+			}
 		}
 	case KindAnswer:
 		// The latest answer to a decision stands, to be delivered anew; a
@@ -608,6 +621,7 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 			if !t.hasRaised(a.Raised.ID) {
 				t.Raised = append(t.Raised[:len(t.Raised):len(t.Raised)], *a.Raised)
 			}
+			t.noteSeen(*a.Raised, at)
 		}
 	case ActProvision:
 		t.Provisioned = a.Key
