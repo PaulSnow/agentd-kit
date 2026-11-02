@@ -866,9 +866,10 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 	pol := s.cfg.Policies
 	// A work session is rotated at the end of its round too, DONE once
 	// its branch is delivered (#48).
-	// Nor while the owner waits on its answer to a message (#56), but
-	// for the hard cap (#87): rotate holds that itself.
-	if (state == Working || state == Idle || state == Done && sess.Kind == KindWork && delivered(name, sess, t)) && !t.Limited && s.rotate(name, sess, t, ev, now) {
+	// Nor while the owner waits on its answer to a message (#56): rotate
+	// holds that itself. The hard cap cuts only a Working or Idle one
+	// (#87, capEligible).
+	if (state == Working || state == Idle || state == Done && sess.Kind == KindWork && delivered(name, sess, t)) && !t.Limited && s.rotate(name, sess, t, ev, state, now) {
 		return Starting
 	}
 	// The limit has cleared. Only a session that can take a line is told to
@@ -1091,7 +1092,7 @@ func (s *Supervisor) continueTurn(name string, sess Session, t *Track, ev Eviden
 		}
 		return false
 	}
-	if now.Sub(t.lastTurn().At) < pol.Settle.Duration || now.Sub(t.HashSince) < pol.Settle.Duration || s.rotationPending(name, sess, t) {
+	if now.Sub(t.lastTurn().At) < pol.Settle.Duration || now.Sub(t.HashSince) < pol.Settle.Duration || s.rotationPending(name, sess, t, ev, Idle, now) { // continueTurn runs only for an Idle session
 		return true
 	}
 	line := pol.ContinueMessage

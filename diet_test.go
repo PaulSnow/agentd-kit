@@ -78,6 +78,107 @@ func TestHardCapSparesUndeliveredDone(t *testing.T) {
 	}
 }
 
+// A work session that is DONE with its delivery recorded has nothing to
+// resume: over the hard cap, mid-turn as the transcript reads, it is not
+// cut or relaunched, and no cut is pending for it (#87).
+func TestDoneSessionNotCut(t *testing.T) {
+	h, name, id := workHarness(t)
+	h.status(name, doneStatus)
+	h.alive(name, idleScreen)
+	h.delivered(name)
+	h.workTranscript(name, id, promptLine("u1", "Fix the spin test.", h.clock.Now())+usageLine("m1", 1, 200000, 0, 5, false))
+	h.ticks(4, time.Minute)
+	if rots := h.rotations(name); len(rots) != 0 {
+		t.Fatalf("cut a DONE, delivered session: %+v", rots)
+	}
+	for _, c := range h.tmux.calls {
+		if c.op == "replace" && c.name == name {
+			t.Fatalf("relaunched a DONE session: %+v", c)
+		}
+	}
+	tr := h.sup.Tracks()[name]
+	if tr.State != Done || len(tr.Cuts) != 0 {
+		t.Fatalf("state %s, cuts %+v", tr.State, tr.Cuts)
+	}
+	if u, _ := tr.current(); u.Context != 200001 {
+		t.Fatalf("context = %d, want 200001", u.Context)
+	}
+	sess := h.sup.cfg.Sessions[name]
+	ev := Evidence{Alive: true, Status: StatusEvidence{Exists: true, Done: true}}
+	if h.sup.rotationPending(name, sess, tr, ev, Done, h.clock.Now()) {
+		t.Fatal("a cut is pending for a DONE session")
+	}
+}
+
+// A Working work session just over the hard cap is still cut, once, with
+// the cap prompt.
+func TestWorkingSessionCut(t *testing.T) {
+	h, name, id := workHarness(t)
+	h.status(name, workLeft)
+	h.alive(name, runningScreen)
+	h.workTranscript(name, id, promptLine("u1", "Fix the flake.", h.clock.Now())+usageLine("m1", 1, 150000, 0, 1, false))
+	h.ticks(4, time.Minute)
+	rots := h.rotations(name)
+	if len(rots) != 1 || rots[0].Context != 150001 || rots[0].HardCap != 150000 || rots[0].Checkpoint != "cap:"+id {
+		t.Fatalf("rotations = %+v, want one cut at 150001", rots)
+	}
+	if f := h.replacedFacts(name); f.Why != "cap" {
+		t.Fatalf("facts = %+v, want why cap", f)
+	}
+	h.ticks(4, time.Minute)
+	if n := len(h.rotations(name)); n != 1 {
+		t.Fatalf("rotations = %d after the cut, want 1", n)
+	}
+}
+
+// Only a Working or Idle work session is cut: one blocked on the owner,
+// stopped, parked, failed, starting, usage-limited or DONE over the cap is
+// not, and no cut is pending for it (#87).
+func TestHardCapOnlyWorkingOrIdle(t *testing.T) {
+	h, name, _ := workHarness(t)
+	sess := h.sup.cfg.Sessions[name]
+	now := h.clock.Now()
+	for _, c := range []struct {
+		why   string
+		state State
+		set   func(*Track, *Evidence)
+		cut   bool
+	}{
+		{"working", Working, nil, true},
+		{"idle", Idle, nil, true},
+		{"blocked on the owner", BlockedOnOwner, nil, false},
+		{"stopped", Stopped, func(t *Track, _ *Evidence) { t.Stopped = "budget reached" }, false},
+		{"stopped, still read idle", Idle, func(t *Track, _ *Evidence) { t.Stopped = "budget reached" }, false},
+		{"parked", CrashLooping, func(t *Track, _ *Evidence) { t.Parked = true }, false},
+		{"parked, still read idle", Idle, func(t *Track, _ *Evidence) { t.Parked = true }, false},
+		{"failed", Failed, nil, false},
+		{"starting", Starting, nil, false},
+		{"usage-limited", UsageLimited, func(t *Track, _ *Evidence) { t.Limited = true }, false},
+		{"done", Done, func(_ *Track, ev *Evidence) { ev.Status.Done = true }, false},
+		{"DONE in STATUS.md, read idle", Idle, func(_ *Track, ev *Evidence) { ev.Status.Done = true }, false},
+	} {
+		tr := newTrack()
+		tr.Transcript, tr.Measured, tr.Launched = "launched", "launched", now.Add(-time.Hour)
+		tr.Usage = map[string]UsagePayload{"launched": {Context: 200000}}
+		ev := Evidence{Alive: true}
+		if c.set != nil {
+			c.set(tr, &ev)
+		}
+		if got := capEligible(sess, tr, ev, c.state); got != c.cut {
+			t.Errorf("%s: capEligible = %v, want %v", c.why, got, c.cut)
+		}
+		if got := h.sup.rotationPending(name, sess, tr, ev, c.state, now); got != c.cut {
+			t.Errorf("%s: rotationPending = %v, want %v", c.why, got, c.cut)
+		}
+		if !c.cut && h.sup.rotate(name, sess, tr, ev, c.state, now) {
+			t.Errorf("%s: cut", c.why)
+		}
+	}
+	if n := len(h.rotations(name)); n != 0 {
+		t.Fatalf("rotations = %d, want 0", n)
+	}
+}
+
 // Live mode never cuts on a guessed transcript, and a coordinator or chat
 // session is never cut.
 func TestHardCapSparesGuessAndCoordinator(t *testing.T) {

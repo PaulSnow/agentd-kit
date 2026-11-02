@@ -496,9 +496,11 @@ func (s *Supervisor) measure(name string, sess Session, t *Track, toolsSince tim
 // transcript it launched; shadow mode also records what it would do on a
 // guess. A rotation is not a crash and not a restart.
 // A work session at policies.context.hard_cap with no checkpoint to rotate
-// at is cut at once, mid-turn and while the owner waits on it too, once
-// per transcript (#87); its prompt says so and its facts say why "cap".
-func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, now time.Time) bool {
+// at is cut at once, mid-turn, once per transcript (#87); its prompt says
+// so and its facts say why "cap". Only a Working or Idle one is cut
+// (capEligible): a finished, waiting, stopped or parked session has
+// nothing to resume.
+func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, state State, now time.Time) bool {
 	pol := s.cfg.Policies.Context
 	if !pol.Enabled || !ev.Alive {
 		return false
@@ -514,13 +516,13 @@ func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, no
 	if !ok || u.Context <= pol.Threshold || u.Guessed && !s.shadow {
 		return false
 	}
-	// While the owner waits on its answer only the hard cap acts (#87).
-	mark, ok := "", false
-	if s.st.openSince(name, now).IsZero() {
-		mark, ok = s.rotationPoint(sess, t, ev, now)
+	// Nothing acts while the owner waits on its answer (#56, #87).
+	if !s.st.openSince(name, now).IsZero() {
+		return false
 	}
+	mark, ok := s.rotationPoint(sess, t, ev, now)
 	capped := false
-	if !ok && s.overCap(sess, t) {
+	if !ok && capEligible(sess, t, ev, state) && s.overCap(sess, t) {
 		mark, ok, capped = capMark(t), true, true
 	}
 	if !ok {
@@ -582,6 +584,16 @@ func (s *Supervisor) overCap(sess Session, t *Track) bool {
 	u, ok := t.current()
 	return pol.Enabled && pol.HardCap > 0 && sess.Kind == KindWork && ok && u.Context >= pol.HardCap &&
 		!(u.Guessed && !s.shadow) && t.RotatedFor != capMark(t)
+}
+
+// capEligible says whether the hard cap may cut the session at all: an
+// agentd work session that is Working or Idle, not DONE, not stopped,
+// parked or usage-limited. A Done session (delivered or not), one blocked
+// on the owner, a failed, starting or usage-limited one has nothing to
+// resume, so a cut would only spend a fresh context on it (#87).
+func capEligible(sess Session, t *Track, ev Evidence, state State) bool {
+	return sess.Kind == KindWork && (state == Working || state == Idle) && !ev.Status.Done &&
+		t.Stopped == "" && !t.Parked && !t.Limited
 }
 
 // capMark is the mark a hard-cap cut is recorded at: once per transcript.
@@ -660,14 +672,16 @@ func (s *Supervisor) lastInstruction(t *Track) string {
 // threshold and has a merge since its launch it was not rotated at, and
 // the rotation has neither given up nor been refused for the account. A
 // turn it ended there is not continued; the rotation goes on from it.
-func (s *Supervisor) rotationPending(name string, sess Session, t *Track) bool {
+// A pending hard-cap cut counts only for a session the cap may cut
+// (capEligible) and while nothing is open with the owner.
+func (s *Supervisor) rotationPending(name string, sess Session, t *Track, ev Evidence, state State, now time.Time) bool {
 	pol := s.cfg.Policies.Context
 	u, ok := t.current()
 	if !pol.Enabled || !ok || u.Context <= pol.Threshold || u.Guessed && !s.shadow {
 		return false
 	}
 	// Over the hard cap it is about to be cut: nothing is typed into it.
-	if s.overCap(sess, t) && !s.failed(t, "rotate:"+name+":"+capMark(t)) && !t.Skipped["account:"+name] {
+	if capEligible(sess, t, ev, state) && s.st.openSince(name, now).IsZero() && s.overCap(sess, t) && !s.failed(t, "rotate:"+name+":"+capMark(t)) && !t.Skipped["account:"+name] {
 		return true
 	}
 	if sess.Kind == KindWork && t.lastTurn().Role == TurnSummary && t.lastTurn().At.After(t.Launched) {
