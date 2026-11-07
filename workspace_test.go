@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -352,5 +353,58 @@ func TestAllConsole(t *testing.T) {
 	}
 	if home := owner(t, u, "/"); strings.Contains(home, "data-wait") {
 		t.Error("home does not reattach to the running console")
+	}
+}
+
+// Every repository tracking follows is served, once, with its clone and its
+// issues; one it has retired is not, and agentd's own status does not take
+// them on. Two with one name stay apart.
+func TestTrackedRepositories(t *testing.T) {
+	f := newLevelsFixture(t)
+	dir := t.TempDir()
+	clone := filepath.Join(dir, "somewhere", "tracked-one")
+	if err := os.MkdirAll(clone, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	host, _ := os.Hostname()
+	f.cfg.Tracking.Manifest = filepath.Join(dir, "repositories.json")
+	f.cfg.Tracking.Snapshot = filepath.Join(dir, "snapshot.json")
+	writeFile(t, f.cfg.Tracking.Manifest, `[{"name":"tracked-one","platform":"github","path":"example-org/tracked-one","active":true},
+{"name":"retired-one","platform":"github","path":"example-org/retired-one","active":false},
+{"name":"Widgets","platform":"github","path":"Example-Org/Widgets","active":true},
+{"name":"dupe","platform":"gitlab","path":"a/dupe","active":true},
+{"name":"dupe","platform":"gitlab","path":"b/dupe","active":true}]`)
+	writeFile(t, f.cfg.Tracking.Snapshot, fmt.Sprintf(`{"AsOf":"2026-11-01T00:00:00Z","Host":"host-a","Repos":[],"Clones":[{"Host":%q,"Path":%q,"Platform":"github","FullPath":"example-org/tracked-one"}]}`, host, clone))
+	u, _ := testUI(t, UIConfig{}, f.src)
+	u.home = t.TempDir()
+	u.tmuxArgs = []string{"-L", "agentd-test-none", "-f", "/dev/null"}
+	u.loadCatalog()
+	home := owner(t, u, "/")
+	for _, want := range []string{`href="/r/tracked-one"`, `href="/r/widgets"`, `href="/r/dupe"`, `href="/r/b-dupe"`} {
+		if !strings.Contains(home, want) {
+			t.Errorf("home lacks %s", want)
+		}
+	}
+	if strings.Contains(home, "retired-one") || strings.Contains(home, `href="/r/Widgets"`) {
+		t.Error("home lists a retired repository, or one the configuration names twice")
+	}
+	if page := owner(t, u, "/r/tracked-one"); !strings.Contains(page, clone) || !strings.Contains(page, `id="terminal"`) {
+		t.Error("a tracked repository's page lacks its clone or terminal")
+	}
+	var asked []string
+	fail := ""
+	body := `[{"number":7,"title":"A tracked issue","state":"open","user":{"login":"al"},"created_at":"2026-09-01T00:00:00Z","updated_at":"2026-10-02T00:00:00Z"}]`
+	u.readAllIssues(listedAPI{asked: &asked, body: func() string { return body }, fail: &fail})
+	if page := owner(t, u, "/r/tracked-one"); !strings.Contains(page, "A tracked issue") {
+		t.Error("a tracked repository's issues are not listed")
+	}
+	if w := ownerPost(u, "/priority", url.Values{"src": {f.src.Name}, "repository": {"tracked-one"}, "ref": {"#7"}, "level": {"high"}}); w.Code != http.StatusNoContent {
+		t.Errorf("priority: %d %s", w.Code, w.Body.String())
+	}
+	if status := owner(t, u, "/status"); strings.Contains(status, "tracked-one") {
+		t.Error("agentd's status took on a tracked repository")
+	}
+	if w := get(u, "GET", "/r/retired-one", pageAddr, "192.0.2.20:51000"); w.Code != http.StatusNotFound {
+		t.Errorf("a retired repository's page: %d", w.Code)
 	}
 }
