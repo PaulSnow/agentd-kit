@@ -486,6 +486,9 @@ type uiWorkspace struct {
 	ClosedCount int
 	Sorts       []string
 	Reading     issueReading
+	// Next is the next repository, after this one, with a running
+	// session, none when no other has one.
+	Next string
 }
 
 // TerminalURL is the page's WebSocket address, with the UI's token.
@@ -506,7 +509,37 @@ func (u *UI) workspaceView(repo string, now time.Time) (*uiWorkspace, error) {
 	if !ok || err != nil {
 		return nil, err
 	}
+	running := u.runningSessions()
+	var repos []string
+	for name := range u.workspaceRepos() {
+		repos = append(repos, name)
+	}
+	v.Next = nextRunning(repos, func(name string) bool { return running[workspaceSession(name)] }, repo)
 	return v, nil
+}
+
+// nextRunning is the repository after current, by name as the home page
+// orders them, whose session is running, going round from the last to the
+// first; none when no other is running.
+func nextRunning(repos []string, running func(string) bool, current string) string {
+	sort.Slice(repos, func(a, b int) bool {
+		la, lb := strings.ToLower(repos[a]), strings.ToLower(repos[b])
+		if la != lb {
+			return la < lb
+		}
+		return repos[a] < repos[b]
+	})
+	at := sort.Search(len(repos), func(i int) bool {
+		l, lc := strings.ToLower(repos[i]), strings.ToLower(current)
+		return l > lc || (l == lc && repos[i] >= current)
+	})
+	for i := 0; i < len(repos); i++ {
+		name := repos[(at+i)%len(repos)]
+		if name != current && running(name) {
+			return name
+		}
+	}
+	return ""
 }
 
 // loadCatalog reads which repositories the tracking system follows, those

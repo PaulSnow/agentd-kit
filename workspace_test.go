@@ -186,6 +186,50 @@ func TestTerminalFiles(t *testing.T) {
 	}
 }
 
+// Next is the following repository with a running session, by name in
+// any case, going round; never the page's own, and none when no other
+// runs. The page links back to the repositories either way.
+func TestNextRunning(t *testing.T) {
+	repos := []string{"staking", "AccNet", "accumulate", "book", "zeta"}
+	on := func(names ...string) func(string) bool {
+		return func(n string) bool {
+			for _, m := range names {
+				if m == n {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	for _, c := range []struct {
+		current string
+		running []string
+		want    string
+	}{
+		{"accumulate", []string{"accumulate", "staking"}, "staking"},
+		{"staking", []string{"accumulate", "staking"}, "accumulate"},
+		{"AccNet", []string{"accumulate", "zeta"}, "accumulate"},
+		{"book", []string{"AccNet"}, "AccNet"},
+		{"staking", []string{"staking"}, ""},
+		{"zeta", nil, ""},
+		{"not-listed", []string{"book"}, "book"},
+	} {
+		if got := nextRunning(append([]string(nil), repos...), on(c.running...), c.current); got != c.want {
+			t.Errorf("after %s with %v running: %q, want %q", c.current, c.running, got, c.want)
+		}
+	}
+	f := newLevelsFixture(t)
+	u, _ := testUI(t, UIConfig{}, f.src)
+	u.home = t.TempDir()
+	u.tmuxArgs = []string{"-L", "agentd-test-none", "-f", "/dev/null"}
+	page := owner(t, u, "/r/widgets")
+	for _, want := range []string{`id="repo-nav"`, `<a href="/">`, "No other session running"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page lacks %s", want)
+		}
+	}
+}
+
 // wsClient is the browser's end of a terminal, for the test.
 type wsClient struct {
 	conn net.Conn
