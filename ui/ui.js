@@ -158,6 +158,7 @@
   function run(row) { return num(row, "run") || Infinity; }
   function closedAt(row) { return num(row, "closed") || Infinity; }
   function order(x, y) { return x < y ? -1 : x > y ? 1 : 0; }
+  function repoName(a, b) { return cmp(text(a, "name"), text(b, "name")); }
   var sorts = {
     "needs-me": function (a, b) { return rank(a) - rank(b); },
     "last-change": function () { return 0; },
@@ -179,6 +180,12 @@
     "milestone": function (a, b) { return cmp(text(a, "milestone"), text(b, "milestone")); },
     "author": function (a, b) { return cmp(text(a, "author"), text(b, "author")); },
     "loop": function (a, b) { return num(a, "rank") - num(b, "rank"); },
+    "repo-session": function (a, b) { return (b.dataset.running ? 1 : 0) - (a.dataset.running ? 1 : 0) || repoName(a, b); },
+    "repo-name": function (a, b) { return repoName(a, b); },
+    "repo-open": function (a, b) { return num(b, "open") - num(a, "open") || repoName(a, b); },
+    "repo-closed": function (a, b) { return num(b, "closedcount") - num(a, "closedcount") || repoName(a, b); },
+    "repo-tokens": function (a, b) { return num(b, "tokens") - num(a, "tokens") || repoName(a, b); },
+    "repo-changed": function (a, b) { return num(b, "changed") - num(a, "changed") || repoName(a, b); },
     "ci-failing": function (a, b) { return (b.dataset.failing ? 1 : 0) - (a.dataset.failing ? 1 : 0); }
   };
   function compareRows(by, a, b) {

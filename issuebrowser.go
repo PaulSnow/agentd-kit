@@ -544,6 +544,8 @@ var sortLabels = map[string]string{
 	"working": "Being worked first", "has-mr": "With a request first",
 	"label": "Label", "milestone": "Milestone", "author": "Author",
 	"loop": "Where it stands in the loop", "ci-failing": "CI failing first",
+	"repo-session": "Running sessions first", "repo-name": "Name", "repo-open": "Most open issues", "repo-closed": "Most closed issues",
+	"repo-tokens": "Most tokens", "repo-changed": "Recently changed",
 }
 
 // SortLabel is sort s as the owner reads it.

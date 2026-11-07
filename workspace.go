@@ -645,13 +645,27 @@ type workspaceRepo struct {
 	Closed     int
 	Running    bool
 	Tokens     int64
+	// Changed is the latest change on any of its issues.
+	Changed time.Time
 }
+
+// ChangedUnix is Changed for the page's script, 0 for none.
+func (r workspaceRepo) ChangedUnix() int64 {
+	if r.Changed.IsZero() {
+		return 0
+	}
+	return r.Changed.Unix()
+}
+
+// RepoSorts are the repository list's sorts, the first the default.
+var RepoSorts = []string{"repo-session", "repo-name", "repo-open", "repo-closed", "repo-tokens", "repo-changed"}
 
 // uiHome lists the repositories.
 type uiHome struct {
 	uiPage
 	Host  string
 	Repos []workspaceRepo
+	Sorts []string
 	// ConsoleRunning and ConsoleTokens are the console's session.
 	ConsoleRunning bool
 	ConsoleTokens  int64
@@ -668,7 +682,7 @@ func (p *uiHome) TerminalURL() string {
 // homeView is the home page.
 func (u *UI) homeView(now time.Time) *uiHome {
 	host, _ := os.Hostname()
-	v := &uiHome{uiPage: uiPage{Title: "Repositories", Token: u.token, Back: "/", Now: now, loc: u.loc}, Host: host}
+	v := &uiHome{uiPage: uiPage{Title: "Repositories", Token: u.token, Back: "/", Now: now, loc: u.loc}, Host: host, Sorts: RepoSorts}
 	running := u.runningSessions()
 	for _, repo := range sortedKeys(u.workspaceRepos()) {
 		src, r, ok := u.workspacePick(repo)
@@ -677,6 +691,11 @@ func (u *UI) homeView(now time.Time) *uiHome {
 		}
 		src.mu.Lock()
 		row := workspaceRepo{Repository: repo, URL: webURL(r, 0, 0), Open: openCount(src.st, repo), Closed: closedCount(src.st, repo)}
+		for _, l := range src.st.ListedIssues[repo] {
+			if l.Changed.After(row.Changed) {
+				row.Changed = l.Changed
+			}
+		}
 		cfg := src.cfg
 		src.mu.Unlock()
 		if running[workspaceSession(repo)] {

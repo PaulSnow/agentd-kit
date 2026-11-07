@@ -408,3 +408,34 @@ func TestTrackedRepositories(t *testing.T) {
 		t.Errorf("a retired repository's page: %d", w.Code)
 	}
 }
+
+// The repository list's sorts order as they say, with the name breaking ties.
+func TestRepoSorts(t *testing.T) {
+	for _, s := range RepoSorts {
+		if sortLabels[s] == "" {
+			t.Errorf("sort %s has no label", s)
+		}
+	}
+	row := func(name, open, closed, tokens, running, changed string) map[string]string {
+		return map[string]string{"ref": name, "name": name, "open": open, "closedcount": closed, "tokens": tokens, "running": running, "changed": changed}
+	}
+	rows := []map[string]string{
+		row("beta", "5", "1", "0", "", "100"),
+		row("Alpha", "5", "9", "0", "", "300"),
+		row("gamma", "1", "2", "700", "1", "200"),
+		row("delta", "0", "0", "900", "1", "0"),
+	}
+	got := scriptOrder(t, rows, RepoSorts)
+	for by, want := range map[string]string{
+		"repo-session": "delta gamma Alpha beta",
+		"repo-name":    "Alpha beta delta gamma",
+		"repo-open":    "Alpha beta gamma delta",
+		"repo-closed":  "Alpha gamma beta delta",
+		"repo-tokens":  "delta gamma Alpha beta",
+		"repo-changed": "Alpha gamma beta delta",
+	} {
+		if s := strings.Join(got[by], " "); s != want {
+			t.Errorf("%s: %s, want %s", by, s, want)
+		}
+	}
+}
