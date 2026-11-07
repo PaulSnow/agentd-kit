@@ -47,7 +47,7 @@ func TestWorkspacePage(t *testing.T) {
 	if strings.Contains(home, "Waits on you") {
 		t.Error("home still reads status")
 	}
-	if strings.Contains(home, `class="badge session-running"`) {
+	if strings.Contains(home, `class="session-dot"`) {
 		t.Error("home marks a repository with no session as running")
 	}
 	rows := []workspaceRepo{{Repository: "a"}, {Repository: "z", Running: true}, {Repository: "b"}, {Repository: "m", Running: true}}
@@ -248,7 +248,7 @@ func TestTerminal(t *testing.T) {
 	if !u.sessionExists(name) {
 		t.Fatal("no session")
 	}
-	if home := owner(t, u, "/"); !strings.Contains(home, "session-running") {
+	if home := owner(t, u, "/"); !strings.Contains(home, `class="session-dot"`) {
 		t.Error("home does not mark the repository with a running session")
 	}
 	if out, err := u.tmux("show-options", "-t", "="+name+":", "status"); err != nil || !strings.Contains(out, "off") {
