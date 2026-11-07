@@ -457,6 +457,9 @@ type UI struct {
 	// catalog is what the tracking system follows beyond the configuration,
 	// by name, under mu.
 	catalog map[string]Repository
+	// about is each tracked repository's description, by platform/path,
+	// configured ones too, under mu.
+	about map[string]string
 }
 
 // NewUI builds the UI's handler over sources, the first the main config's.

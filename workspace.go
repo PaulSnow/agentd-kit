@@ -533,8 +533,11 @@ func (u *UI) loadCatalog() {
 		return
 	}
 	host, _ := os.Hostname()
-	catalog := map[string]Repository{}
+	catalog, about := map[string]Repository{}, map[string]string{}
 	for _, rec := range inv.Repos {
+		if rec.Description != "" {
+			about[rec.Key] = rec.Description
+		}
 		if !rec.Active || known[rec.Key] {
 			continue
 		}
@@ -553,7 +556,7 @@ func (u *UI) loadCatalog() {
 		catalog[name] = r
 	}
 	u.mu.Lock()
-	u.catalog = catalog
+	u.catalog, u.about = catalog, about
 	u.mu.Unlock()
 }
 
@@ -641,12 +644,28 @@ func (u *UI) serveTokens(w http.ResponseWriter, repo string) {
 type workspaceRepo struct {
 	Repository string
 	URL        string
-	Open       int
-	Closed     int
-	Running    bool
-	Tokens     int64
+	// Forge is GitHub or GitLab, Project its path there, and About what
+	// tracking says the repository is for.
+	Forge   string
+	Project string
+	About   string
+	Open    int
+	Closed  int
+	Running bool
+	Tokens  int64
 	// Changed is the latest change on any of its issues.
 	Changed time.Time
+}
+
+// forgeName is how the page names a forge.
+func forgeName(forge string) string {
+	switch forge {
+	case "github":
+		return "GitHub"
+	case "gitlab":
+		return "GitLab"
+	}
+	return forge
 }
 
 // ChangedUnix is Changed for the page's script, 0 for none.
@@ -684,13 +703,16 @@ func (u *UI) homeView(now time.Time) *uiHome {
 	host, _ := os.Hostname()
 	v := &uiHome{uiPage: uiPage{Title: "Repositories", Token: u.token, Back: "/", Now: now, loc: u.loc}, Host: host, Sorts: RepoSorts}
 	running := u.runningSessions()
+	u.mu.Lock()
+	about := u.about
+	u.mu.Unlock()
 	for _, repo := range sortedKeys(u.workspaceRepos()) {
 		src, r, ok := u.workspacePick(repo)
 		if !ok {
 			continue
 		}
 		src.mu.Lock()
-		row := workspaceRepo{Repository: repo, URL: webURL(r, 0, 0), Open: openCount(src.st, repo), Closed: closedCount(src.st, repo)}
+		row := workspaceRepo{Repository: repo, URL: webURL(r, 0, 0), Forge: forgeName(r.Forge), Project: r.Project, About: about[repoKey(r.Forge, r.Project)], Open: openCount(src.st, repo), Closed: closedCount(src.st, repo)}
 		for _, l := range src.st.ListedIssues[repo] {
 			if l.Changed.After(row.Changed) {
 				row.Changed = l.Changed
