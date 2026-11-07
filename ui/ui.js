@@ -296,6 +296,7 @@
     term.open(el);
     var encoder = new TextEncoder();
     var ws = null;
+    var failed = 0;
     function sendSize() {
       if (ws && ws.readyState === 1) {
         ws.send(JSON.stringify({ cols: term.cols, rows: term.rows }));
@@ -307,6 +308,7 @@
       ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + el.dataset.ws);
       ws.binaryType = "arraybuffer";
       ws.onopen = function () {
+        failed = 0;
         status.textContent = "";
         document.dispatchEvent(new Event("terminal-open"));
         fit.fit();
@@ -322,7 +324,10 @@
           again.hidden = false;
           return;
         }
-        status.textContent = "Disconnected; trying again.";
+        // The page's token is refused once the UI has restarted, and only
+        // a reload brings a new one; the session is still there.
+        failed++;
+        status.textContent = failed < 3 ? "Disconnected; trying again." : "Disconnected; if this lasts, reload the page. The session is still running.";
         setTimeout(connect, 3000);
       };
     }

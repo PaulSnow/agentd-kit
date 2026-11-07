@@ -128,7 +128,9 @@ func (u *UI) ensureSession(name, dir string) error {
 		return fmt.Errorf("starting the session: %w: %s", err, strings.TrimSpace(out))
 	}
 	// The page says what tmux's status line would.
-	u.tmux("set-option", "-t", "="+name, "status", "off")
+	if out, err := u.tmux("set-option", "-t", "="+name+":", "status", "off"); err != nil {
+		fmt.Fprintf(os.Stderr, "agentd ui: hiding %s's status line: %v: %s\n", name, err, strings.TrimSpace(out))
+	}
 	return nil
 }
 
