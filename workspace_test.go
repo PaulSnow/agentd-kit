@@ -310,3 +310,46 @@ func TestVendoredTerminalLibrary(t *testing.T) {
 		t.Fatalf("ui/xterm.js changed: %s", got)
 	}
 }
+
+// The console for all the work opens from home, lists the open sessions,
+// takes the same checks as any terminal, and home marks it once it runs.
+func TestAllConsole(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("no tmux")
+	}
+	f := newLevelsFixture(t)
+	u, _ := testUI(t, UIConfig{SessionCommand: []string{"cat"}}, f.src)
+	u.home = t.TempDir()
+	u.tmuxArgs = []string{"-L", fmt.Sprintf("agentd-test-all-%d", time.Now().UnixNano()), "-f", "/dev/null"}
+	t.Cleanup(func() { u.tmux("kill-server") })
+	if home := owner(t, u, "/"); !strings.Contains(home, `href="/all"`) || strings.Contains(home, "tokens</span>") {
+		t.Error("home does not offer a console that is not running")
+	}
+	if page := owner(t, u, "/all"); !strings.Contains(page, `/all/terminal?token=`) || !strings.Contains(page, "No repository has a session open") {
+		t.Error("the console page lacks its terminal or its list")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.RemoteAddr, r.Host = "192.0.2.20:51000", pageAddr
+		u.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	if _, code := dialTerminal(t, addr, "/all/terminal?token=wrong", "http://"+pageAddr); code != http.StatusForbidden {
+		t.Errorf("wrong token: %d", code)
+	}
+	if _, code := dialTerminal(t, addr, "/all/terminal?token="+u.token, "http://evil.example"); code != http.StatusForbidden {
+		t.Errorf("another origin: %d", code)
+	}
+	if u.sessionExists(allConsoleSession) {
+		t.Fatal("a refused terminal started the console")
+	}
+	if _, code := dialTerminal(t, addr, "/all/terminal?token="+u.token, "http://"+pageAddr); code != http.StatusSwitchingProtocols {
+		t.Fatalf("upgrade: %d", code)
+	}
+	if !u.sessionExists(allConsoleSession) {
+		t.Fatal("the console did not start")
+	}
+	if home := owner(t, u, "/"); !strings.Contains(home, "session-running") {
+		t.Error("home does not mark the running console")
+	}
+}
