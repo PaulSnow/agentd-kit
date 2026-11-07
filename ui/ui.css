@@ -301,6 +301,10 @@ body:has(.workspace) > main { max-width: none; padding: 0; }
 .repos-scroll .home-table { margin: 0; }
 .repos-scroll thead th { position: sticky; top: 0; z-index: 1; background: var(--surface); }
 .repos-scroll .box-row { content-visibility: visible; padding: 0; }
+#repo-card { position: fixed; z-index: 10; max-width: 26rem; padding: var(--space-2) var(--space-3); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 .25rem 1rem rgba(0, 0, 0, .18); pointer-events: none; }
+#repo-card p { margin: 0 0 var(--space-1); }
+#repo-card p:last-child { margin: 0; }
+#repo-card .repo-forge { color: var(--muted); }
 .repos-foot { margin: 0; padding: var(--space-2) var(--space-3); border-top: 1px solid var(--line); }
 .box-check { white-space: nowrap; font-size: var(--size-s); }
 .row-priority { font-size: var(--size-s); padding: 0 var(--space-1, 2px); margin-left: var(--space-2); }

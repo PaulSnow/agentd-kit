@@ -369,9 +369,9 @@ func TestTrackedRepositories(t *testing.T) {
 	host, _ := os.Hostname()
 	f.cfg.Tracking.Manifest = filepath.Join(dir, "repositories.json")
 	f.cfg.Tracking.Snapshot = filepath.Join(dir, "snapshot.json")
-	writeFile(t, f.cfg.Tracking.Manifest, `[{"name":"tracked-one","platform":"github","path":"example-org/tracked-one","active":true},
+	writeFile(t, f.cfg.Tracking.Manifest, `[{"name":"tracked-one","platform":"github","path":"example-org/tracked-one","active":true,"description":"What tracked-one is for."},
 {"name":"retired-one","platform":"github","path":"example-org/retired-one","active":false},
-{"name":"Widgets","platform":"github","path":"Example-Org/Widgets","active":true},
+{"name":"Widgets","platform":"github","path":"Example-Org/Widgets","active":true,"description":"What widgets is for."},
 {"name":"dupe","platform":"gitlab","path":"a/dupe","active":true},
 {"name":"dupe","platform":"gitlab","path":"b/dupe","active":true}]`)
 	writeFile(t, f.cfg.Tracking.Snapshot, fmt.Sprintf(`{"AsOf":"2026-11-01T00:00:00Z","Host":"host-a","Repos":[],"Clones":[{"Host":%q,"Path":%q,"Platform":"github","FullPath":"example-org/tracked-one"}]}`, host, clone))
@@ -381,6 +381,11 @@ func TestTrackedRepositories(t *testing.T) {
 	u.loadCatalog()
 	home := owner(t, u, "/")
 	for _, want := range []string{`href="/r/tracked-one"`, `href="/r/widgets"`, `href="/r/dupe"`, `href="/r/b-dupe"`} {
+		if !strings.Contains(home, want) {
+			t.Errorf("home lacks %s", want)
+		}
+	}
+	for _, want := range []string{`aria-describedby="about-tracked-one"`, "<strong>GitHub</strong> example-org/tracked-one", "What tracked-one is for.", "What widgets is for.", "<strong>GitLab</strong> b/dupe", "No description yet."} {
 		if !strings.Contains(home, want) {
 			t.Errorf("home lacks %s", want)
 		}

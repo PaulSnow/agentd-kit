@@ -1095,6 +1095,53 @@
     }
   });
 
+  // The repository list's card (#repo-card): what a repository is for and
+  // its forge, shown beside the row the pointer is on or that has focus.
+  var card = null;
+  function showCard(row) {
+    var about = row && row.querySelector(".repo-about");
+    if (!about) { return; }
+    if (!card) {
+      card = document.createElement("div");
+      card.id = "repo-card";
+      card.setAttribute("role", "tooltip");
+      document.body.appendChild(card);
+    }
+    card.innerHTML = about.innerHTML;
+    card.hidden = false;
+    var r = row.getBoundingClientRect();
+    var box = row.closest(".repos-box").getBoundingClientRect();
+    var w = card.offsetWidth, h = card.offsetHeight, gap = 8;
+    var left = box.left - w - gap;
+    var top = r.top;
+    if (left < gap) {
+      left = Math.max(gap, Math.min(r.left, window.innerWidth - w - gap));
+      top = r.bottom + gap;
+      if (top + h > window.innerHeight - gap) { top = r.top - h - gap; }
+    }
+    card.style.left = left + "px";
+    card.style.top = Math.max(gap, Math.min(top, window.innerHeight - h - gap)) + "px";
+  }
+  function hideCard() {
+    if (card) { card.hidden = true; }
+  }
+  function cardRow(e) {
+    var t = e.target;
+    return t && t.closest ? t.closest("#repositories .box-row") : null;
+  }
+  document.addEventListener("mouseover", function (e) {
+    var row = cardRow(e);
+    if (row) { showCard(row); } else { hideCard(); }
+  });
+  document.addEventListener("focusin", function (e) {
+    var row = cardRow(e);
+    if (row) { showCard(row); } else { hideCard(); }
+  });
+  document.addEventListener("scroll", hideCard, true);
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") { hideCard(); }
+  });
+
   document.addEventListener("dragover", function (e) {
     var form = e.target.closest ? e.target.closest("form") : null;
     if (inputOf(form) && e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types, "Files") >= 0) {
