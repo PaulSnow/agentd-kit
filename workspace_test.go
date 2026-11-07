@@ -39,7 +39,7 @@ func TestWorkspacePage(t *testing.T) {
 	u.home = t.TempDir()
 	u.tmuxArgs = []string{"-L", "agentd-test-none", "-f", "/dev/null"}
 	home := owner(t, u, "/")
-	for _, want := range []string{`href="/r/widgets"`, "no session", `href="/status"`} {
+	for _, want := range []string{`href="/r/widgets"`, `href="/status"`} {
 		if !strings.Contains(home, want) {
 			t.Errorf("home lacks %q", want)
 		}
@@ -311,8 +311,8 @@ func TestVendoredTerminalLibrary(t *testing.T) {
 	}
 }
 
-// The console for all the work opens from home, lists the open sessions,
-// takes the same checks as any terminal, and home marks it once it runs.
+// The console for all the work is on the home page: it waits to be opened,
+// takes the same checks as any terminal, and home reattaches once it runs.
 func TestAllConsole(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("no tmux")
@@ -322,11 +322,12 @@ func TestAllConsole(t *testing.T) {
 	u.home = t.TempDir()
 	u.tmuxArgs = []string{"-L", fmt.Sprintf("agentd-test-all-%d", time.Now().UnixNano()), "-f", "/dev/null"}
 	t.Cleanup(func() { u.tmux("kill-server") })
-	if home := owner(t, u, "/"); !strings.Contains(home, `href="/all"`) || strings.Contains(home, "tokens</span>") {
-		t.Error("home does not offer a console that is not running")
+	home := owner(t, u, "/")
+	if !strings.Contains(home, `/all/terminal?token=`) || !strings.Contains(home, `data-wait="Open the console"`) {
+		t.Error("home does not offer the console")
 	}
-	if page := owner(t, u, "/all"); !strings.Contains(page, `/all/terminal?token=`) || !strings.Contains(page, "No repository has a session open") {
-		t.Error("the console page lacks its terminal or its list")
+	if w := get(u, "GET", "/all", pageAddr, "192.0.2.20:51000"); w.Code != http.StatusNotFound {
+		t.Errorf("the console has a page of its own: %d", w.Code)
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.RemoteAddr, r.Host = "192.0.2.20:51000", pageAddr
@@ -349,7 +350,7 @@ func TestAllConsole(t *testing.T) {
 	if !u.sessionExists(allConsoleSession) {
 		t.Fatal("the console did not start")
 	}
-	if home := owner(t, u, "/"); !strings.Contains(home, "session-running") {
-		t.Error("home does not mark the running console")
+	if home := owner(t, u, "/"); strings.Contains(home, "data-wait") {
+		t.Error("home does not reattach to the running console")
 	}
 }

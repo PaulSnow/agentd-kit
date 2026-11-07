@@ -593,7 +593,7 @@ func (u *UI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		u.serveAttachment(w, r)
 	case strings.HasPrefix(path, "/r/"):
 		u.serveWorkspace(w, r)
-	case path == "/all" || strings.HasPrefix(path, "/all/"):
+	case strings.HasPrefix(path, "/all/"):
 		u.serveAllConsole(w, r)
 	case path == "/" || path == "/status" || strings.HasPrefix(path, "/console/") || strings.HasPrefix(path, "/session/") || strings.HasPrefix(path, "/repo/"):
 		if !get {
@@ -614,6 +614,7 @@ func (u *UI) serveView(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch path := r.URL.Path; {
 	case path == "/":
+		w.Header().Set("Content-Security-Policy", workspaceCSP)
 		name = "home"
 		view = u.homeView(now)
 	case path == "/status":
