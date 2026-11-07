@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -124,6 +126,63 @@ func TestWorkspaceClone(t *testing.T) {
 	}
 	if got := workspaceClone(Repository{Forge: "github", Project: "x/y", Sessions: &SessionsPolicy{Clone: "/the/clone"}}, home); got != "/the/clone" {
 		t.Fatalf("sessions' clone: %q", got)
+	}
+}
+
+// A terminal's files are stored by their bytes and answered by path, for
+// the page to paste into the session; one that is not a file agentd takes,
+// one without the token or from another page, and a GET are refused.
+func TestTerminalFiles(t *testing.T) {
+	f := newLevelsFixture(t)
+	u, _ := testUI(t, UIConfig{}, f.src)
+	u.home = t.TempDir()
+	u.tmuxArgs = []string{"-L", "agentd-test-none", "-f", "/dev/null"}
+	if err := os.MkdirAll(filepath.Join(u.home, "repos", "github.com", "example-org", "widgets", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	page := owner(t, u, "/r/widgets")
+	for _, want := range []string{`data-files="/r/widgets/files"`, `id="term-image"`, `data-token="` + u.token + `"`} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page lacks %s", want)
+		}
+	}
+	if home := owner(t, u, "/"); !strings.Contains(home, `data-files="/all/files"`) {
+		t.Error("the console takes no files")
+	}
+	shot := testPNG(t)
+	for _, path := range []string{"/r/widgets/files", "/all/files"} {
+		w := multipartTo(u, path, u.token, nil, upload{name: "shot.png", body: shot})
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
+		}
+		var got struct{ Paths []string }
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || len(got.Paths) != 1 {
+			t.Fatalf("%s: %s", path, w.Body.String())
+		}
+		if !strings.HasSuffix(got.Paths[0], ".png") || !strings.HasPrefix(got.Paths[0], filepath.Dir(f.cfg.EventLog)) {
+			t.Errorf("%s stored at %s", path, got.Paths[0])
+		}
+		if b, err := os.ReadFile(got.Paths[0]); err != nil || !bytes.Equal(b, shot) {
+			t.Errorf("%s: the stored file is not the image: %v", path, err)
+		}
+	}
+	if w := multipartTo(u, "/r/widgets/files", u.token, nil, upload{name: "x.png", body: []byte("PK\x03\x04 not an image")}); w.Code != http.StatusBadRequest {
+		t.Errorf("not an image: %d", w.Code)
+	}
+	if w := multipartTo(u, "/r/widgets/files", "wrong", nil, upload{name: "shot.png", body: shot}); w.Code != http.StatusForbidden {
+		t.Errorf("wrong token: %d", w.Code)
+	}
+	if w := multipartFrom(u, "/r/widgets/files", "http://evil.example", u.token, nil, upload{name: "shot.png", body: shot}); w.Code != http.StatusForbidden {
+		t.Errorf("another origin: %d", w.Code)
+	}
+	if w := multipartTo(u, "/r/widgets/files", u.token, nil); w.Code != http.StatusBadRequest {
+		t.Errorf("no file: %d", w.Code)
+	}
+	if w := get(u, "GET", "/r/widgets/files", pageAddr, "192.0.2.20:51000"); w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET: %d", w.Code)
+	}
+	if w := multipartTo(u, "/r/no-such/files", u.token, nil, upload{name: "shot.png", body: shot}); w.Code != http.StatusNotFound {
+		t.Errorf("no such repository: %d", w.Code)
 	}
 }
 

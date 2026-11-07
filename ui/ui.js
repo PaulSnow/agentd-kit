@@ -344,6 +344,75 @@
       }
     });
     term.onResize(sendSize);
+    // Images for the session: pasted or dropped on the terminal, or picked
+    // with the button. agentd stores each on its machine and answers its
+    // path, which is pasted into the session as a path is pasted by hand;
+    // Claude Code takes it as the image.
+    function give(list) {
+      var files = Array.prototype.filter.call(list || [], function (f) { return f.size > 0; });
+      if (!files.length || !el.dataset.files) {
+        return;
+      }
+      if (!ws || ws.readyState !== 1) {
+        status.textContent = "Open the session first, then add the image.";
+        return;
+      }
+      var form = new FormData();
+      form.append("token", el.dataset.token);
+      files.forEach(function (f) { form.append("file", f, f.name || "pasted.png"); });
+      status.textContent = files.length === 1 ? "Sending the image" : "Sending " + files.length + " files";
+      fetch(el.dataset.files, { method: "POST", body: form, credentials: "same-origin" })
+        .then(function (r) {
+          return r.ok ? r.json() : r.text().then(function (t) { return Promise.reject(t); });
+        })
+        .then(function (d) {
+          status.textContent = "";
+          d.paths.forEach(function (p, i) {
+            if (i > 0) { ws.send(encoder.encode(" ")); }
+            term.paste(p);
+          });
+          term.focus();
+        })
+        .catch(function (t) {
+          status.textContent = "Not sent: " + String(t).trim();
+        });
+    }
+    function hasFiles(e) {
+      var types = e.dataTransfer ? e.dataTransfer.types : [];
+      return Array.prototype.indexOf.call(types, "Files") >= 0;
+    }
+    // Before the terminal's own paste, which takes only text.
+    el.addEventListener("paste", function (e) {
+      var files = e.clipboardData ? e.clipboardData.files : null;
+      if (files && files.length) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        give(files);
+      }
+    }, true);
+    el.addEventListener("dragover", function (e) {
+      if (hasFiles(e)) {
+        e.preventDefault();
+        el.classList.add("drop-over");
+      }
+    });
+    el.addEventListener("dragleave", function () { el.classList.remove("drop-over"); });
+    el.addEventListener("drop", function (e) {
+      el.classList.remove("drop-over");
+      if (hasFiles(e)) {
+        e.preventDefault();
+        give(e.dataTransfer.files);
+      }
+    });
+    var picker = document.getElementById("term-file");
+    var pick = document.getElementById("term-image");
+    if (picker && pick) {
+      pick.addEventListener("click", function () { picker.click(); });
+      picker.addEventListener("change", function () {
+        give(picker.files);
+        picker.value = "";
+      });
+    }
     new ResizeObserver(function () { fit.fit(); }).observe(el);
     again.addEventListener("click", function () {
       term.reset();

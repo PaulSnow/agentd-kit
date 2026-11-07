@@ -747,6 +747,10 @@ func (u *UI) allConsoleDir() string {
 
 // serveAllConsole serves the home page's console: its terminal and tokens.
 func (u *UI) serveAllConsole(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/all/files" {
+		u.serveTerminalFiles(w, r, u.sources[0].cfg, allConsoleSession)
+		return
+	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -782,9 +786,59 @@ func sortWorkspaceRepos(rows []workspaceRepo) {
 	})
 }
 
+// serveTerminalFiles takes the files the owner pastes, drops or picks on a
+// terminal, an image mostly, and answers where each is stored. The page
+// pastes each path into the session, and Claude Code takes a pasted
+// image's path as the image. They are checked as a console message's are,
+// by what their bytes are, and stored the same way, by their SHA-256, under
+// the state directory's attachments/NAME.
+func (u *UI) serveTerminalFiles(w http.ResponseWriter, r *http.Request, cfg *Config, name string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	staged, ok := u.checkPostFiles(w, r)
+	if !ok {
+		return
+	}
+	if len(staged) == 0 {
+		http.Error(w, "refused: no file", http.StatusBadRequest)
+		return
+	}
+	if cfg.EventLog == "" {
+		http.Error(w, "agentd has no state directory to keep files in: event_log is not set", http.StatusInternalServerError)
+		return
+	}
+	dir := attachmentsDir(cfg, name)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var paths []string
+	for _, s := range staged {
+		hash, _, err := storeOne(dir, s)
+		if err != nil {
+			http.Error(w, s.name+" was not stored: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		paths = append(paths, filepath.Join(dir, hash+attachmentExts[s.typ]))
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"paths": paths})
+}
+
 // serveWorkspace serves /r/REPO and what belongs to it.
 func (u *UI) serveWorkspace(w http.ResponseWriter, r *http.Request) {
 	repo, rest, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/r/"), "/")
+	if rest == "files" {
+		src, _, ok := u.workspacePick(repo)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		u.serveTerminalFiles(w, r, src.cfg, repo)
+		return
+	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return

@@ -308,8 +308,8 @@
 <link rel="stylesheet" href="/xterm.css"><script src="/xterm.js"></script><script src="/addon-fit.js"></script>
 <div class="workspace">
 <section class="term-pane" aria-label="Console for all sessions">
-<header class="term-head"><strong>Console for all sessions</strong> <span class="muted">Claude Code on {{.Host}}</span> <span id="term-state" class="muted"></span> <button id="term-new" type="button" hidden>Start a new session</button> <span class="term-tokens" id="tokens" data-url="/all/tokens"></span></header>
-<div id="terminal" data-ws="{{.TerminalURL}}"{{if not .ConsoleRunning}} data-wait="Open the console"{{end}}></div>
+<header class="term-head"><strong>Console for all sessions</strong> <span class="muted">Claude Code on {{.Host}}</span> <span id="term-state" class="muted"></span> <button id="term-new" type="button" hidden>Start a new session</button> <button id="term-image" type="button" title="Give the session an image: paste it or drop it on the terminal, or pick it here">Add image</button><input id="term-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/plain" multiple hidden> <span class="term-tokens" id="tokens" data-url="/all/tokens"></span></header>
+<div id="terminal" data-ws="{{.TerminalURL}}" data-files="/all/files" data-token="{{.Token}}"{{if not .ConsoleRunning}} data-wait="Open the console"{{end}}></div>
 </section>
 <aside class="issue-pane" aria-label="Repositories">
 <div class="repos-box" data-box="repos" data-key="home">
@@ -329,8 +329,8 @@
 <link rel="stylesheet" href="/xterm.css"><script src="/xterm.js"></script><script src="/addon-fit.js"></script>
 <div class="workspace">
 <section class="term-pane" aria-label="Claude Code session">
-<header class="term-head"><strong>Claude Code</strong> <span class="muted">on {{.Host}}{{with .Clone}} in {{.}}{{end}}</span> <span id="term-state" class="muted"></span> <button id="term-new" type="button" hidden>Start a new session</button> <span class="term-tokens" id="tokens" data-url="/r/{{path .Repository}}/tokens"></span></header>
-{{if .Clone}}<div id="terminal" data-ws="{{.TerminalURL}}"></div>{{else}}<p class="term-none">No clone of {{.Repository}} was found on {{.Host}}.</p>{{end}}
+<header class="term-head"><strong>Claude Code</strong> <span class="muted">on {{.Host}}{{with .Clone}} in {{.}}{{end}}</span> <span id="term-state" class="muted"></span> <button id="term-new" type="button" hidden>Start a new session</button> {{if .Clone}}<button id="term-image" type="button" title="Give the session an image: paste it or drop it on the terminal, or pick it here">Add image</button><input id="term-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/plain" multiple hidden> {{end}}<span class="term-tokens" id="tokens" data-url="/r/{{path .Repository}}/tokens"></span></header>
+{{if .Clone}}<div id="terminal" data-ws="{{.TerminalURL}}" data-files="/r/{{path .Repository}}/files" data-token="{{.Token}}"></div>{{else}}<p class="term-none">No clone of {{.Repository}} was found on {{.Host}}.</p>{{end}}
 </section>
 <aside class="issue-pane" aria-label="Issues">
 <section id="issues" class="level-box issue-box panel-box" data-refresh data-box="panel" data-key="{{.Repository}}" data-token="{{.Token}}" data-src="{{.Src}}" data-repository="{{.Repository}}">
