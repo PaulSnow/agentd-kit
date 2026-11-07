@@ -39,6 +39,10 @@ const workspaceSessionEnv = "AGENTD_SESSION"
 // replaced. It runs under a login shell, which sets the path.
 var defaultWorkspaceCommand = []string{"bash", "-lc", `exec claude --session-id "$1"`, "agentd", "{session_id}"}
 
+// workspaceCSP is the policy of a page with a terminal: the library writes
+// its colours as a style element.
+const workspaceCSP = "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; img-src 'self' blob:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+
 // terminalEnded is the close code saying the session itself has ended, so
 // the page offers a new one and does not start one by reconnecting.
 const terminalEnded = 4000
@@ -107,7 +111,7 @@ func (u *UI) sessionExists(name string) bool {
 }
 
 // ensureSession starts repo's session in dir if it is not running.
-func (u *UI) ensureSession(name, dir string) error {
+func (u *UI) ensureSession(name, dir string, command []string) error {
 	u.sessionsMu.Lock()
 	defer u.sessionsMu.Unlock()
 	if u.sessionExists(name) {
@@ -117,9 +121,8 @@ func (u *UI) ensureSession(name, dir string) error {
 	if err != nil {
 		return err
 	}
-	command := u.cfg.SessionCommand
-	if len(command) == 0 {
-		command = defaultWorkspaceCommand
+	if len(u.cfg.SessionCommand) > 0 {
+		command = u.cfg.SessionCommand
 	}
 	args := []string{"new-session", "-d", "-s", name, "-c", dir, "-x", "160", "-y", "48", "-e", workspaceSessionEnv + "=" + id, "--"}
 	for _, a := range command {
@@ -138,7 +141,11 @@ func (u *UI) ensureSession(name, dir string) error {
 // sessionTokens is what repo's running session has used, and whether one is
 // running; its transcript may not exist until the first reply.
 func (u *UI) sessionTokens(cfg *Config, repo, dir string) (int64, bool) {
-	name := workspaceSession(repo)
+	return u.namedSessionTokens(cfg, workspaceSession(repo), dir)
+}
+
+// namedSessionTokens is sessionTokens for a tmux session by name.
+func (u *UI) namedSessionTokens(cfg *Config, name, dir string) (int64, bool) {
 	out, err := u.tmux("show-environment", "-t", "="+name, workspaceSessionEnv)
 	if err != nil {
 		return 0, false
@@ -333,12 +340,7 @@ func upgradeWebSocket(w http.ResponseWriter, r *http.Request) (*wsConn, error) {
 // not running. This is a shell on the machine: beyond the owner check every
 // page has, it must come from the UI's own page, with the UI's token.
 func (u *UI) serveTerminal(w http.ResponseWriter, r *http.Request, repo string) {
-	if o := r.Header.Get("Origin"); o == "" || !strings.EqualFold(o, "http://"+r.Host) {
-		http.Error(w, "refused: a terminal must come from the UI", http.StatusForbidden)
-		return
-	}
-	if subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("token")), []byte(u.token)) != 1 {
-		http.Error(w, "refused: stale page; reload it", http.StatusForbidden)
+	if !u.terminalAllowed(w, r) {
 		return
 	}
 	src := u.levelPick(repo)
@@ -351,8 +353,27 @@ func (u *UI) serveTerminal(w http.ResponseWriter, r *http.Request, repo string) 
 		http.Error(w, "no clone of "+repo+" was found", http.StatusNotFound)
 		return
 	}
-	name := workspaceSession(repo)
-	if err := u.ensureSession(name, dir); err != nil {
+	u.connectTerminal(w, r, workspaceSession(repo), dir, defaultWorkspaceCommand)
+}
+
+// terminalAllowed says whether the request comes from the UI's own page,
+// with its token, and refuses it if not.
+func (u *UI) terminalAllowed(w http.ResponseWriter, r *http.Request) bool {
+	if o := r.Header.Get("Origin"); o == "" || !strings.EqualFold(o, "http://"+r.Host) {
+		http.Error(w, "refused: a terminal must come from the UI", http.StatusForbidden)
+		return false
+	}
+	if subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("token")), []byte(u.token)) != 1 {
+		http.Error(w, "refused: stale page; reload it", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+// connectTerminal connects a browser to the tmux session, starting it in
+// dir with command if it is not running.
+func (u *UI) connectTerminal(w http.ResponseWriter, r *http.Request, name, dir string, command []string) {
+	if err := u.ensureSession(name, dir, command); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -514,6 +535,9 @@ type workspaceRepo struct {
 type uiHome struct {
 	uiPage
 	Repos []workspaceRepo
+	// ConsoleRunning and ConsoleTokens are the console's session.
+	ConsoleRunning bool
+	ConsoleTokens  int64
 }
 
 // TokenText is n tokens as the page shows them.
@@ -540,7 +564,75 @@ func (u *UI) homeView(now time.Time) *uiHome {
 		v.Repos = append(v.Repos, row)
 	}
 	sortWorkspaceRepos(v.Repos)
+	v.ConsoleTokens, v.ConsoleRunning = u.namedSessionTokens(u.sources[0].cfg, allConsoleSession, u.allConsoleDir())
 	return v
+}
+
+// allConsoleSession is the tmux session of the console for all the work.
+const allConsoleSession = "console-all"
+
+// allConsolePrompt is what the console is told it is for.
+const allConsolePrompt = `You are the owner's console for all the work on this machine. Each repository's Claude Code session is a tmux session named repo-NAME; other tmux sessions belong to agentd. Run "tmux list-sessions" to see what is open and "tmux capture-pane -p -t NAME -S -200" to read what one shows. When the owner asks where things stand, read the sessions and say, for each, what it is doing and whether it waits on them. Only look: do not type into another session or change anything unless the owner asks you to.`
+
+// allConsoleCommand starts the console's session.
+var allConsoleCommand = []string{"bash", "-lc", `exec claude --session-id "$1" --append-system-prompt "$2"`, "agentd", "{session_id}", allConsolePrompt}
+
+// allConsoleDir is the folder the console runs in: it belongs to no
+// repository.
+func (u *UI) allConsoleDir() string {
+	return filepath.Join(u.home, ".local", "state", "agentd-kit", "console")
+}
+
+// uiAllConsole is the console page: its terminal beside the open sessions.
+type uiAllConsole struct {
+	uiPage
+	Host     string
+	Sessions []workspaceRepo
+}
+
+// TerminalURL is the page's WebSocket address, with the UI's token.
+func (p *uiAllConsole) TerminalURL() string {
+	return "/all/terminal?token=" + url.QueryEscape(p.Token)
+}
+
+// TokenText is n tokens as the page shows them.
+func (p *uiAllConsole) TokenText(n int64) string { return tokens(n) }
+
+// serveAllConsole serves /all and what belongs to it.
+func (u *UI) serveAllConsole(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	switch r.URL.Path {
+	case "/all":
+		w.Header().Set("Content-Security-Policy", workspaceCSP)
+		now := u.now()
+		host, _ := os.Hostname()
+		v := &uiAllConsole{uiPage: uiPage{Title: "All sessions", Token: u.token, Back: "/all", Now: now, loc: u.loc}, Host: host}
+		for _, row := range u.homeView(now).Repos {
+			if row.Running {
+				v.Sessions = append(v.Sessions, row)
+			}
+		}
+		u.render(w, "all-console", v, nil)
+	case "/all/terminal":
+		if !u.terminalAllowed(w, r) {
+			return
+		}
+		dir := u.allConsoleDir()
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		u.connectTerminal(w, r, allConsoleSession, dir, allConsoleCommand)
+	case "/all/tokens":
+		spend, running := u.namedSessionTokens(u.sources[0].cfg, allConsoleSession, u.allConsoleDir())
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"tokens": tokens(spend), "running": running})
+	default:
+		http.NotFound(w, r)
+	}
 }
 
 // sortWorkspaceRepos puts the repositories with a running session first,
@@ -573,8 +665,7 @@ func (u *UI) serveWorkspace(w http.ResponseWriter, r *http.Request) {
 		u.serveTokens(w, repo)
 		return
 	case "":
-		// The terminal library writes its colours as a style element.
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; img-src 'self' blob:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+		w.Header().Set("Content-Security-Policy", workspaceCSP)
 		name = "workspace"
 		var v *uiWorkspace
 		if v, err = u.workspaceView(repo, now); err == nil && v == nil {

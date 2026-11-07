@@ -306,10 +306,26 @@
 
 {{define "home"}}{{template "head" .}}
 <section id="repositories" data-refresh>
+<p class="home-console"><a class="console-open" href="/all">Open the console for all sessions</a>{{if .ConsoleRunning}} <span class="badge session-running">session running</span> <span class="muted">{{.TokenText .ConsoleTokens}} tokens</span>{{end}}</p>
 <table class="home-table"><thead><tr><th scope="col">Repository</th><th scope="col">Open</th><th scope="col">Closed</th><th scope="col">Session tokens</th></tr></thead>
 <tbody>{{range .Repos}}<tr{{if .Running}} class="row-session"{{end}}><th scope="row"><a href="/r/{{path .Repository}}">{{.Repository}}</a>{{if .Running}} <span class="badge session-running">session running</span>{{end}}{{template "forge-link" .URL}}</th><td>{{.Open}}</td><td>{{.Closed}}</td><td>{{if .Running}}{{$.TokenText .Tokens}}{{else}}<span class="muted">no session</span>{{end}}</td></tr>{{end}}</tbody></table>
 </section>
 <p class="muted"><a href="/status">Status and decisions</a></p>
+{{template "foot" .}}{{end}}
+
+{{define "all-console"}}{{template "head" .}}
+<link rel="stylesheet" href="/xterm.css"><script src="/xterm.js"></script><script src="/addon-fit.js"></script>
+<div class="workspace">
+<section class="term-pane" aria-label="Console for all sessions">
+<header class="term-head"><strong>Console for all sessions</strong> <span class="muted">Claude Code on {{.Host}}</span> <span id="term-state" class="muted"></span> <button id="term-new" type="button" hidden>Start a new session</button> <span class="term-tokens" id="tokens" data-url="/all/tokens"></span></header>
+<div id="terminal" data-ws="{{.TerminalURL}}"></div>
+</section>
+<aside class="issue-pane" aria-label="Open sessions">
+<section id="sessions" class="session-list" data-refresh><h2>Open sessions</h2>
+<ul>{{range .Sessions}}<li><a href="/r/{{path .Repository}}">{{.Repository}}</a> <span class="muted">{{$.TokenText .Tokens}} tokens</span></li>{{else}}<li class="muted">No repository has a session open.</li>{{end}}</ul>
+<p><a href="/">All repositories</a></p></section>
+</aside>
+</div>
 {{template "foot" .}}{{end}}
 
 {{define "workspace"}}{{template "head" .}}

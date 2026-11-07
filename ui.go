@@ -593,6 +593,8 @@ func (u *UI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		u.serveAttachment(w, r)
 	case strings.HasPrefix(path, "/r/"):
 		u.serveWorkspace(w, r)
+	case path == "/all" || strings.HasPrefix(path, "/all/"):
+		u.serveAllConsole(w, r)
 	case path == "/" || path == "/status" || strings.HasPrefix(path, "/console/") || strings.HasPrefix(path, "/session/") || strings.HasPrefix(path, "/repo/"):
 		if !get {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
