@@ -47,6 +47,14 @@ func TestWorkspacePage(t *testing.T) {
 	if strings.Contains(home, "Waits on you") {
 		t.Error("home still reads status")
 	}
+	if strings.Contains(home, `class="badge session-running"`) {
+		t.Error("home marks a repository with no session as running")
+	}
+	rows := []workspaceRepo{{Repository: "a"}, {Repository: "z", Running: true}, {Repository: "b"}, {Repository: "m", Running: true}}
+	sortWorkspaceRepos(rows)
+	if got := rows[0].Repository + rows[1].Repository + rows[2].Repository + rows[3].Repository; got != "mzab" {
+		t.Errorf("order %s", got)
+	}
 	if err := os.MkdirAll(filepath.Join(u.home, "repos", "github.com", "example-org", "widgets", ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -239,6 +247,9 @@ func TestTerminal(t *testing.T) {
 	}
 	if !u.sessionExists(name) {
 		t.Fatal("no session")
+	}
+	if home := owner(t, u, "/"); !strings.Contains(home, "session-running") {
+		t.Error("home does not mark the repository with a running session")
 	}
 	if out, err := u.tmux("show-options", "-t", "="+name+":", "status"); err != nil || !strings.Contains(out, "off") {
 		t.Errorf("tmux's status line is not off: %v: %s", err, out)

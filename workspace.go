@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -538,7 +539,19 @@ func (u *UI) homeView(now time.Time) *uiHome {
 		row.Tokens, row.Running = u.sessionTokens(cfg, repo, workspaceClone(cfg.Repositories[repo], u.home))
 		v.Repos = append(v.Repos, row)
 	}
+	sortWorkspaceRepos(v.Repos)
 	return v
+}
+
+// sortWorkspaceRepos puts the repositories with a running session first,
+// each group by name.
+func sortWorkspaceRepos(rows []workspaceRepo) {
+	sort.SliceStable(rows, func(a, b int) bool {
+		if rows[a].Running != rows[b].Running {
+			return rows[a].Running
+		}
+		return rows[a].Repository < rows[b].Repository
+	})
 }
 
 // serveWorkspace serves /r/REPO and what belongs to it.
