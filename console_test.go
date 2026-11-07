@@ -267,7 +267,7 @@ func TestExtraConsoleInUI(t *testing.T) {
 	if err := NewLogWriter(f.nightBuf).Append(esc); err != nil {
 		t.Fatal(err)
 	}
-	body := owner(t, u, "/")
+	body := owner(t, u, "/status")
 	if i, j := strings.Index(body, `href="/console/gadgets"`), strings.Index(body, `href="/console/chat"`); j < 0 || i > j || !strings.Contains(body, "General chat") {
 		t.Fatalf("the console is not listed after the repositories:\n%s", body)
 	}

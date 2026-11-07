@@ -85,7 +85,9 @@ if [ -f "$patterns" ]; then
 		fi
 	done <"$patterns"
 	if [ -s "$tmp/host" ]; then search host -F -i -w -f "$tmp/host"; fi
-	if [ -s "$tmp/name" ]; then search "project name" -F -i -w -f "$tmp/name"; fi
+	# The vendored terminal library is third-party minified code, in which a word
+# may match by chance; a test pins its hash, so it cannot change unseen.
+if [ -s "$tmp/name" ]; then search "project name" -F -i -w -f "$tmp/name" -- . ":(exclude)ui/xterm.js"; fi
 	if [ -s "$tmp/email" ]; then search email -F -i -w -f "$tmp/email"; fi
 	if [ -s "$tmp/ip" ]; then search ip -F -w -f "$tmp/ip"; fi
 	if [ -s "$tmp/user" ]; then search "home path" -E -f "$tmp/user"; fi

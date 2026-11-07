@@ -45,7 +45,7 @@ func TestDigestPageOldestFirst(t *testing.T) {
 	if d := v.Digest[0]; d.Recommended != "b" || d.Waited != 2*time.Hour || !strings.HasPrefix(d.Href, "/console/widgets-console#e-") {
 		t.Fatalf("first %+v", d)
 	}
-	body := owner(t, u, "/")
+	body := owner(t, u, "/status")
 	digest, needs := strings.Index(body, `id="digest"`), strings.Index(body, `id="needs"`)
 	if digest < 0 || needs < digest {
 		t.Fatalf("digest section at %d, needs at %d", digest, needs)
@@ -62,7 +62,7 @@ func TestDigestPageOldestFirst(t *testing.T) {
 func TestDigestPageEmpty(t *testing.T) {
 	h := newHarness(t, false)
 	u, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
-	body := owner(t, u, "/")
+	body := owner(t, u, "/status")
 	i := strings.Index(body, `id="digest"`)
 	if i < 0 || !strings.Contains(body[i:], "Nothing waits on you.") {
 		t.Fatalf("no empty digest section")
@@ -162,7 +162,7 @@ func TestDigestEntryAndCommand(t *testing.T) {
 		t.Fatalf("defaults %+v", es)
 	}
 	u, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
-	if body := owner(t, u, "/"); strings.Contains(body, "embargoed") || !strings.Contains(body, "default no at") {
+	if body := owner(t, u, "/status"); strings.Contains(body, "embargoed") || !strings.Contains(body, "default no at") {
 		t.Fatalf("page leaks or lacks the default")
 	}
 }

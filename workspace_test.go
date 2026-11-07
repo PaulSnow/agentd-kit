@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
@@ -278,5 +280,19 @@ func TestTerminal(t *testing.T) {
 			}
 			break
 		}
+	}
+}
+
+// ui/xterm.js is @xterm/xterm 6.0.0's lib/xterm.js without its source map
+// line. bin/private-check passes over it for project names, so it must not
+// change without this hash changing with it.
+func TestVendoredTerminalLibrary(t *testing.T) {
+	b, err := uiAssets.ReadFile("ui/xterm.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(b)
+	if got := hex.EncodeToString(sum[:]); got != "98d0973151aff2991d335b1adbbdac2e14da26341abe329d677d4c0034402bdf" {
+		t.Fatalf("ui/xterm.js changed: %s", got)
 	}
 }

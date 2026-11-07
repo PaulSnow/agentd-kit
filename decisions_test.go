@@ -342,7 +342,7 @@ func TestUIDecisionTypesAndDeadline(t *testing.T) {
 	h.alive("s1", "working")
 	h.ticks(1, time.Minute)
 	u := harnessUI(t, h)
-	body := owner(t, u, "/")
+	body := owner(t, u, "/status")
 	for _, want := range []string{`type="checkbox" name="choices" value="a"`, `type="number" name="value" aria-label="Your answer" min="1" max="5"`, `type="date" name="value"`,
 		`action="/deadline"`, "suggests 2030-11-01", "<dt>If wrong</dt><dd>A second release"} {
 		if !strings.Contains(body, want) {

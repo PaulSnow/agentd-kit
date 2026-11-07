@@ -141,7 +141,7 @@ func TestLaptopOverlapHoldsAndReleasesStart(t *testing.T) {
 	if !strings.Contains(page, "laptop: laptop-work, 1 changed, 0 ahead") {
 		t.Errorf("the page lacks the laptop's clone:\n%s", page)
 	}
-	if home := owner(t, u, "/"); !strings.Contains(home, "1 laptop overlap") {
+	if home := owner(t, u, "/status"); !strings.Contains(home, "1 laptop overlap") {
 		t.Errorf("the home page lacks the overlap count")
 	}
 
