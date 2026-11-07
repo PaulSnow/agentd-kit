@@ -696,6 +696,26 @@ type workspaceRepo struct {
 	Changed time.Time
 }
 
+// MRTitle explains the row's merge request counts, for its hover.
+func (r workspaceRepo) MRTitle() string {
+	n := r.MRPass + r.MRFail + r.MROther
+	switch {
+	case !r.MRRead:
+		return "Merge requests not read yet"
+	case n == 0:
+		return "No open merge requests"
+	}
+	word := "requests"
+	if n == 1 {
+		word = "request"
+	}
+	s := fmt.Sprintf("%d open merge %s: %d passing CI, %d failing CI", n, word, r.MRPass, r.MRFail)
+	if r.MROther > 0 {
+		s += fmt.Sprintf(", %d with CI running, none or unknown", r.MROther)
+	}
+	return s
+}
+
 // forgeName is how the page names a forge.
 func forgeName(forge string) string {
 	switch forge {

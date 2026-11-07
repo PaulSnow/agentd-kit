@@ -112,7 +112,7 @@ func TestReadRequests(t *testing.T) {
 		t.Error("the page shows a confidential title")
 	}
 	home := owner(t, u, "/")
-	for _, want := range []string{`data-mrpass="1" data-mrfail="2"`, "1 pass</span>", "2 fail</span>", "+2</span>"} {
+	for _, want := range []string{`data-mrpass="1" data-mrfail="2"`, `title="5 open merge requests: 1 passing CI, 2 failing CI, 2 with CI running, none or unknown"`, `<span class="mr-pass">1</span>/<span class="mr-fail">2</span>`} {
 		if !strings.Contains(home, want) {
 			t.Errorf("home lacks %s", want)
 		}
