@@ -294,6 +294,9 @@ body:has(.workspace) > main { max-width: none; padding: 0; }
 .issue-pane { min-height: 0; overflow-y: auto; background: var(--surface); border-left: 1px solid var(--line); }
 .issue-pane .level-box { border: 0; border-radius: 0; margin: 0; max-height: none; overflow: visible; }
 @media (max-width: 60rem) { .workspace { position: static; display: block; } #terminal { height: 70vh; } }
+.badge.session-running { background: #1f7a3d; color: #fff; }
+.badge.session-running::before { content: "● "; }
+.home-table .row-session th, .home-table .row-session td { background: rgba(31, 122, 61, 0.14); }
 .box-check { white-space: nowrap; font-size: var(--size-s); }
 .row-priority { font-size: var(--size-s); padding: 0 var(--space-1, 2px); margin-left: var(--space-2); }
 .badge.umbrella { background: var(--accent); color: var(--surface); }

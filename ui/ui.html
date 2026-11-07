@@ -305,8 +305,10 @@
 {{define "priority"}}<select class="row-priority" data-ref="{{.Ref}}" aria-label="Priority of {{.Ref}}"><option value="">Set priority</option><option value="high"{{if eq .Priority "high"}} selected{{end}}>High</option><option value="medium"{{if eq .Priority "medium"}} selected{{end}}>Medium</option><option value="low"{{if eq .Priority "low"}} selected{{end}}>Low</option></select>{{end}}
 
 {{define "home"}}{{template "head" .}}
+<section id="repositories" data-refresh>
 <table class="home-table"><thead><tr><th scope="col">Repository</th><th scope="col">Open</th><th scope="col">Closed</th><th scope="col">Session tokens</th></tr></thead>
-<tbody>{{range .Repos}}<tr><th scope="row"><a href="/r/{{path .Repository}}">{{.Repository}}</a>{{template "forge-link" .URL}}</th><td>{{.Open}}</td><td>{{.Closed}}</td><td>{{if .Running}}{{$.TokenText .Tokens}}{{else}}<span class="muted">no session</span>{{end}}</td></tr>{{end}}</tbody></table>
+<tbody>{{range .Repos}}<tr{{if .Running}} class="row-session"{{end}}><th scope="row"><a href="/r/{{path .Repository}}">{{.Repository}}</a>{{if .Running}} <span class="badge session-running">session running</span>{{end}}{{template "forge-link" .URL}}</th><td>{{.Open}}</td><td>{{.Closed}}</td><td>{{if .Running}}{{$.TokenText .Tokens}}{{else}}<span class="muted">no session</span>{{end}}</td></tr>{{end}}</tbody></table>
+</section>
 <p class="muted"><a href="/status">Status and decisions</a></p>
 {{template "foot" .}}{{end}}
 
