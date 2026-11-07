@@ -240,6 +240,9 @@ func TestTerminal(t *testing.T) {
 	if !u.sessionExists(name) {
 		t.Fatal("no session")
 	}
+	if out, err := u.tmux("show-options", "-t", "="+name+":", "status"); err != nil || !strings.Contains(out, "off") {
+		t.Errorf("tmux's status line is not off: %v: %s", err, out)
+	}
 	c.send(t, wsText, []byte(`{"cols":100,"rows":30}`))
 	c.send(t, wsBinary, []byte("hello-terminal\r"))
 	c.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
