@@ -533,6 +533,9 @@ func TestRepoSorts(t *testing.T) {
 		row("gamma", "1", "2", "700", "1", "200"),
 		row("delta", "0", "0", "900", "1", "0"),
 	}
+	rows[0]["mrfail"] = "1"
+	rows[2]["mrpass"] = "3"
+	rows[3]["mrpass"] = "1"
 	got := scriptOrder(t, rows, RepoSorts)
 	for by, want := range map[string]string{
 		"repo-session": "delta gamma Alpha beta",
@@ -541,6 +544,7 @@ func TestRepoSorts(t *testing.T) {
 		"repo-closed":  "Alpha gamma beta delta",
 		"repo-tokens":  "delta gamma Alpha beta",
 		"repo-changed": "Alpha gamma beta delta",
+		"repo-mrs":     "beta gamma delta Alpha",
 	} {
 		if s := strings.Join(got[by], " "); s != want {
 			t.Errorf("%s: %s, want %s", by, s, want)

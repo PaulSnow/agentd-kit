@@ -159,6 +159,8 @@ type uiSource struct {
 	// how each repository's listing last went.
 	issuePath  string
 	issueReads map[string]issueReading
+	// requests are each repository's open requests as last read.
+	requests map[string]requestReading
 	// owned is the owner's message each session started for one was
 	// started for, until its first post, which is threaded under it (#65).
 	owned map[string]string

@@ -186,6 +186,7 @@
     "repo-closed": function (a, b) { return num(b, "closedcount") - num(a, "closedcount") || repoName(a, b); },
     "repo-tokens": function (a, b) { return num(b, "tokens") - num(a, "tokens") || repoName(a, b); },
     "repo-changed": function (a, b) { return num(b, "changed") - num(a, "changed") || repoName(a, b); },
+    "repo-mrs": function (a, b) { return num(b, "mrfail") - num(a, "mrfail") || num(b, "mrpass") - num(a, "mrpass") || repoName(a, b); },
     "ci-failing": function (a, b) { return (b.dataset.failing ? 1 : 0) - (a.dataset.failing ? 1 : 0); }
   };
   function compareRows(by, a, b) {
