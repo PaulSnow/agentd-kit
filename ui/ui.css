@@ -295,7 +295,13 @@ body:has(.workspace) > main { max-width: none; padding: 0; }
 .issue-pane .level-box { border: 0; border-radius: 0; margin: 0; max-height: none; overflow: visible; }
 @media (max-width: 60rem) { .workspace { position: static; display: block; } #terminal { height: 70vh; } }
 .session-dot { color: #2fb457; }
-.home-repos { padding: var(--space-2) var(--space-3); }
+.issue-pane:has(.repos-box) { overflow: hidden; }
+.repos-box { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.repos-scroll { flex: 1 1 0; min-height: 0; overflow-y: scroll; }
+.repos-scroll .home-table { margin: 0; }
+.repos-scroll thead th { position: sticky; top: 0; z-index: 1; background: var(--surface); }
+.repos-scroll .box-row { content-visibility: visible; padding: 0; }
+.repos-foot { margin: 0; padding: var(--space-2) var(--space-3); border-top: 1px solid var(--line); }
 .box-check { white-space: nowrap; font-size: var(--size-s); }
 .row-priority { font-size: var(--size-s); padding: 0 var(--space-1, 2px); margin-left: var(--space-2); }
 .badge.umbrella { background: var(--accent); color: var(--surface); }

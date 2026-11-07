@@ -312,11 +312,15 @@
 <div id="terminal" data-ws="{{.TerminalURL}}"{{if not .ConsoleRunning}} data-wait="Open the console"{{end}}></div>
 </section>
 <aside class="issue-pane" aria-label="Repositories">
-<section id="repositories" class="home-repos" data-refresh>
+<div class="repos-box" data-box="repos" data-key="home">
+<header class="box-head"><span class="box-count"><span class="box-shown">{{len .Repos}}</span> repositories</span>
+<label>Sort <select class="box-sort" aria-label="Sort the repositories">{{range .Sorts}}<option value="{{.}}">{{$.SortLabel .}}</option>{{end}}</select></label></header>
+<section id="repositories" class="repos-scroll" data-refresh tabindex="0">
 <table class="home-table"><thead><tr><th scope="col">Repository</th><th scope="col">Open</th><th scope="col">Closed</th><th scope="col">Tokens</th></tr></thead>
-<tbody>{{range .Repos}}<tr><th scope="row">{{if .Running}}<span class="session-dot" role="img" title="Session running" aria-label="Session running">●</span> {{end}}<a href="/r/{{path .Repository}}">{{.Repository}}</a></th><td>{{.Open}}</td><td>{{.Closed}}</td><td>{{if .Running}}{{$.TokenText .Tokens}}{{else}}<span class="muted">none</span>{{end}}</td></tr>{{end}}</tbody></table>
-<p class="muted"><a href="/status">Status and decisions</a></p>
+<tbody class="box-rows">{{range .Repos}}<tr class="box-row" data-ref="{{.Repository}}" data-name="{{.Repository}}" data-open="{{.Open}}" data-closedcount="{{.Closed}}" data-tokens="{{.Tokens}}" data-running="{{if .Running}}1{{end}}" data-changed="{{.ChangedUnix}}"><th scope="row">{{if .Running}}<span class="session-dot" role="img" title="Session running" aria-label="Session running">●</span> {{end}}<a href="/r/{{path .Repository}}">{{.Repository}}</a></th><td>{{.Open}}</td><td>{{.Closed}}</td><td>{{if .Running}}{{$.TokenText .Tokens}}{{else}}<span class="muted">none</span>{{end}}</td></tr>{{end}}</tbody></table>
 </section>
+<p class="repos-foot muted"><a href="/status">Status and decisions</a></p>
+</div>
 </aside>
 </div>
 {{template "foot" .}}{{end}}
