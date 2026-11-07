@@ -135,7 +135,7 @@ func TestRepoLevel(t *testing.T) {
 			t.Errorf("no sort %s", s)
 		}
 	}
-	if len(IssueSorts) != 10 || len(RequestSorts) != 5 {
+	if len(IssueSorts) != 12 || len(RequestSorts) != 5 {
 		t.Fatalf("%d issue sorts, %d request sorts", len(IssueSorts), len(RequestSorts))
 	}
 	i5, i4, i6 := strings.Index(body, `data-ref="#5"`), strings.Index(body, `data-ref="#4"`), strings.Index(body, `data-ref="#6"`)
@@ -339,7 +339,7 @@ func TestHomeLevel(t *testing.T) {
 	body := owner(t, u, "/")
 	for _, want := range []string{
 		"Across 1 repository: 4 issues and 2 requests open, 1 being worked. 1 issue waits on you, in widgets.",
-		`<a href="/repo/widgets">widgets</a> <a class="forge-link" href="https://github.com/example-org/widgets" target="_blank" rel="noopener" title="Open on its forge">github.com/example-org/widgets ↗</a></th><td>4</td><td>1</td><td>2</td><td><a href="/repo/widgets?sort=needs-me"><strong>1</strong></a></td><td>3h</td>`,
+		`<a href="/repo/widgets">widgets</a> <a class="forge-link" href="https://github.com/example-org/widgets" target="_blank" rel="noopener" title="Open on its forge">github.com/example-org/widgets ↗</a></th><td>4</td><td><a href="/repo/widgets/closed">0</a></td><td>1</td><td>2</td><td><a href="/repo/widgets?sort=needs-me"><strong>1</strong></a></td><td>3h</td>`,
 		`class="meter"`,
 	} {
 		if !strings.Contains(body, want) {

@@ -25,6 +25,8 @@ type uiRepoPage struct {
 	// Shown is the count line's last figure before the page's script
 	// filters: every row.
 	Shown int
+	// ClosedCount is the closed issues the log holds.
+	ClosedCount int
 }
 
 // uiIssuePage is level 3.
@@ -69,10 +71,8 @@ func (p *uiIssuePage) ScopeNote() string {
 	return "About " + p.Ref + ": a question is answered from its steps, its session and its requests; a message goes to its session at its next turn."
 }
 
-// levelSource runs fn on the live source that serves repo, the run of its
-// loop first, under its lock, with the config, the fold and the open
-// session decisions; it says whether one serves it.
-func (u *UI) levelSource(repo string, now time.Time, fn func(src *uiSource, cfg *Config, st *LogState, ds []UIDecision)) (bool, error) {
+// levelPick is the live source that serves repo, the run of its loop first.
+func (u *UI) levelPick(repo string) *uiSource {
 	var pick *uiSource
 	for _, src := range u.sources {
 		if _, ok := src.cfg.Repositories[repo]; !ok || src.st.Mode != ModeLive || src.echo {
@@ -82,6 +82,14 @@ func (u *UI) levelSource(repo string, now time.Time, fn func(src *uiSource, cfg 
 			pick = src
 		}
 	}
+	return pick
+}
+
+// levelSource runs fn on the live source that serves repo, the run of its
+// loop first, under its lock, with the config, the fold and the open
+// session decisions; it says whether one serves it.
+func (u *UI) levelSource(repo string, now time.Time, fn func(src *uiSource, cfg *Config, st *LogState, ds []UIDecision)) (bool, error) {
+	pick := u.levelPick(repo)
 	if pick == nil { // only a live run's index is the forge's, and takes a form
 		return false, nil
 	}
@@ -101,7 +109,7 @@ func (u *UI) repoView(repo string, now time.Time) (*uiRepoPage, error) {
 	ok, err := u.levelSource(repo, now, func(src *uiSource, cfg *Config, st *LogState, ds []UIDecision) {
 		v = &uiRepoPage{uiPage: uiPage{Title: repo, Token: u.token, Back: "/repo/" + url.PathEscape(repo), Now: now, loc: u.loc},
 			RepoLevel: BuildRepoLevel(cfg, st, repo, ds, now), Src: src.Name, IssueSorts: IssueSorts, RequestSorts: RequestSorts}
-		v.Shown = len(v.Issues)
+		v.Shown, v.ClosedCount = len(v.Issues), closedCount(st, repo)
 	})
 	if !ok || err != nil {
 		return nil, err

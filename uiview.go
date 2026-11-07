@@ -45,6 +45,8 @@ type uiPage struct {
 	Back  string
 	Now   time.Time
 	loc   *time.Location
+	// Static says the page does not refresh itself.
+	Static bool
 }
 
 // When is t as the owner reads it, or "-".

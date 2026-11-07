@@ -306,6 +306,14 @@ type LevelIssue struct {
 	IDs []string `json:"ids,omitempty"`
 	// URL is the issue's page on its forge, "" when none is configured.
 	URL string `json:"url,omitempty"`
+	// Priority is the owner's, "" for none; Umbrella says it gathers other
+	// issues, Parts and PartsDone its sub-issues or task list; ClosedAt
+	// when it closed, zero for one open.
+	Priority  string    `json:"priority,omitempty"`
+	Umbrella  bool      `json:"umbrella,omitempty"`
+	Parts     int       `json:"parts,omitempty"`
+	PartsDone int       `json:"parts_done,omitempty"`
+	ClosedAt  time.Time `json:"closed_at,omitempty"`
 }
 
 // FilterText is what the filter's words are matched in: title,
@@ -731,6 +739,7 @@ func levelIssue(cfg *Config, st *LogState, repo string, i *IndexIssue, decisions
 	li := LevelIssue{Repository: repo, Ref: i.Ref, Number: n, Title: i.Title, Labels: i.Labels, Milestone: i.Milestone, Author: i.Author,
 		Opened: i.Opened, Changed: i.Changed, Requests: j.Requests, Working: busy[i.Ref], Word: WordOpen, URL: webURL(cfg.Repositories[repo], '#', n),
 		MRRank: len(loopRanks) + 1}
+	li.setBrowserFields(cfg, st, i)
 	for _, it := range j.Work {
 		li.IDs = append(li.IDs, it.ID)
 	}
@@ -942,7 +951,7 @@ func repoSentence(v RepoLevel, now time.Time) string {
 }
 
 // IssueSorts are the issue box's sorts, the first the default.
-var IssueSorts = []string{"needs-me", "last-change", "working", "has-mr", "newest", "oldest", "stale", "label", "milestone", "author"}
+var IssueSorts = []string{"needs-me", "priority", "umbrella", "last-change", "stale", "newest", "oldest", "working", "has-mr", "label", "milestone", "author"}
 
 // RequestSorts are the MR box's sorts, the first the default.
 var RequestSorts = []string{"loop", "last-change", "ci-failing", "newest", "oldest"}
@@ -1017,6 +1026,22 @@ func sortIssues(is []LevelIssue, by string) {
 		case "stale":
 			if !x.Changed.Equal(y.Changed) {
 				return x.Changed.Before(y.Changed)
+			}
+		case "priority":
+			if x.PriorityRank() != y.PriorityRank() {
+				return x.PriorityRank() < y.PriorityRank()
+			}
+		case "umbrella":
+			if x.Umbrella != y.Umbrella {
+				return x.Umbrella
+			}
+		case "recently-closed":
+			if x.ClosedUnix() != y.ClosedUnix() {
+				return x.ClosedUnix() > y.ClosedUnix()
+			}
+		case "oldest-closed":
+			if cx, cy := x.ClosedUnix(), y.ClosedUnix(); cx != cy {
+				return cx != 0 && (cy == 0 || cx < cy) // open ones last
 			}
 		case "label", "milestone", "author":
 			if key(x) != key(y) {
@@ -1100,6 +1125,12 @@ func BuildIssueLevel(cfg *Config, st *LogState, repo string, n int, decisions []
 	if i == nil {
 		i = st.Closed[repo][ref]
 	}
+	if l := st.ListedIssues[repo][ref]; l != nil && l.closed() && st.Index[repo][ref] == nil {
+		i = &IndexIssue{IndexPayload: l.IndexPayload, Closed: l.ClosedAt}
+		if i.Closed.IsZero() {
+			i.Closed = l.Changed
+		}
+	}
 	known := i != nil
 	if i == nil {
 		i = &IndexIssue{IndexPayload: IndexPayload{Repository: repo, Ref: ref}}
@@ -1107,6 +1138,7 @@ func BuildIssueLevel(cfg *Config, st *LogState, repo string, n int, decisions []
 	li, j, ds := levelIssue(cfg, st, repo, i, decisions, busy, secret)
 	if !i.Closed.IsZero() {
 		li.Word = closedWord(i.Closed, now)
+		li.ClosedAt = i.Closed
 	}
 	v := IssueLevel{LevelIssue: li, Known: known, Decisions: ds, Steps: []IssueStep{}, Refs: []LevelRef{}}
 	for _, it := range j.Work {
@@ -1231,6 +1263,8 @@ type HomeRow struct {
 	URL string `json:"url,omitempty"`
 	// Overlaps counts the laptop's work that meets agentd's here.
 	Overlaps int `json:"overlaps,omitempty"`
+	// Closed is the closed issues the log holds.
+	Closed int `json:"closed"`
 }
 
 // homeSentence says where the repositories stand together.
@@ -1284,7 +1318,7 @@ func homeSentence(rows []HomeRow) string {
 // BuildHomeRow is repo's row on the home page, from the fold.
 func BuildHomeRow(cfg *Config, st *LogState, repo string, decisions []UIDecision, now time.Time) HomeRow {
 	v := BuildRepoLevel(cfg, st, repo, decisions, now)
-	return HomeRow{Repository: repo, Tracked: v.Tracked, Listed: v.Tracked && !v.Read.IsZero(), Counts: v.Counts, Sentence: v.Sentence, URL: v.URL, Overlaps: len(v.Overlaps)}
+	return HomeRow{Closed: closedCount(st, repo), Repository: repo, Tracked: v.Tracked, Listed: v.Tracked && !v.Read.IsZero(), Counts: v.Counts, Sentence: v.Sentence, URL: v.URL, Overlaps: len(v.Overlaps)}
 }
 
 // listedRepos is n repositories, in words.

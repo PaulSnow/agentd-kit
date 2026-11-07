@@ -81,7 +81,8 @@
   }
 
   function refresh() {
-    if (document.hidden) {
+    // The closed list is long and barely changes, so it stays as loaded.
+    if (document.hidden || document.querySelector("[data-static]")) {
       return;
     }
     fetch(location.href, { credentials: "same-origin", cache: "no-store" })
@@ -155,11 +156,13 @@
   function rank(row) { return wordRank[row.dataset.word] !== undefined ? wordRank[row.dataset.word] : 3; }
   // run is how long ago a worked row's session started, the longest first.
   function run(row) { return num(row, "run") || Infinity; }
+  function closedAt(row) { return num(row, "closed") || Infinity; }
+  function order(x, y) { return x < y ? -1 : x > y ? 1 : 0; }
   var sorts = {
     "needs-me": function (a, b) { return rank(a) - rank(b); },
     "last-change": function () { return 0; },
     "working": function (a, b) {
-      return (b.dataset.working ? 1 : 0) - (a.dataset.working ? 1 : 0) || (a.dataset.working ? cmp(run(a), run(b)) : 0);
+      return (b.dataset.working ? 1 : 0) - (a.dataset.working ? 1 : 0) || (a.dataset.working ? order(run(a), run(b)) : 0);
     },
     "has-mr": function (a, b) {
       var x = num(a, "mr") > 0, y = num(b, "mr") > 0;
@@ -168,6 +171,10 @@
     "newest": function (a, b) { return num(b, "number") - num(a, "number"); },
     "oldest": function (a, b) { return num(a, "number") - num(b, "number"); },
     "stale": function (a, b) { return num(a, "changed") - num(b, "changed"); },
+    "priority": function (a, b) { return num(a, "priority") - num(b, "priority"); },
+    "umbrella": function (a, b) { return (b.dataset.umbrella ? 1 : 0) - (a.dataset.umbrella ? 1 : 0); },
+    "recently-closed": function (a, b) { return num(b, "closed") - num(a, "closed"); },
+    "oldest-closed": function (a, b) { return order(closedAt(a), closedAt(b)); },
     "label": function (a, b) { return cmp(text(a, "label"), text(b, "label")); },
     "milestone": function (a, b) { return cmp(text(a, "milestone"), text(b, "milestone")); },
     "author": function (a, b) { return cmp(text(a, "author"), text(b, "author")); },
@@ -194,12 +201,19 @@
     }
     return true;
   }
-  function applyBox(section) {
+  function applyBox(section, wordsOnly) {
     var key = "agentd-box:" + section.dataset.key + ":" + section.dataset.box;
     var state = stored(key);
     var select = section.querySelector(".box-sort");
     var filter = section.querySelector(".box-filter");
+    var level = section.querySelector(".box-priority");
+    var umbrella = section.querySelector(".box-umbrella");
     if (select && state.sort && sorts[state.sort]) { select.value = state.sort; }
+    if (level && typeof state.level === "string") { level.value = state.level; }
+    if (umbrella) {
+      umbrella.checked = !!state.umbrella;
+      umbrella.defaultChecked = umbrella.checked;
+    }
     if (filter && typeof state.filter === "string" && document.activeElement !== filter) {
       // As the page's own value, so a refresh does not take the box for
       // one the owner is typing in.
@@ -210,13 +224,18 @@
     var words = filter ? filter.value.toLowerCase().split(/\s+/).filter(Boolean) : [];
     var list = section.querySelector(".box-rows");
     var rows = Array.prototype.slice.call(list.querySelectorAll(".box-row"));
-    rows.sort(function (a, b) { return compareRows(by, a, b); });
+    // Words alone keep the order, so typing stays quick in a long list.
+    if (!wordsOnly) {
+      rows.sort(function (a, b) { return compareRows(by, a, b); });
+    }
     var shown = 0;
+    var moved = document.createDocumentFragment();
     rows.forEach(function (r) {
-      r.hidden = !matches(r, words);
+      r.hidden = !matches(r, words) || !!(level && level.value && r.dataset.priority !== level.value) || !!(umbrella && umbrella.checked && !r.dataset.umbrella);
       if (!r.hidden) { shown++; }
-      list.appendChild(r);
+      moved.appendChild(r);
     });
+    list.appendChild(moved);
     var out = section.querySelector(".box-shown");
     if (out) { out.textContent = String(shown); }
   }
@@ -228,17 +247,57 @@
   }
   function boxInput(e) {
     var section = e.target.closest ? e.target.closest("[data-box]") : null;
-    if (!section || !e.target.matches(".box-sort, .box-filter")) {
+    if (!section || !e.target.matches(".box-sort, .box-filter, .box-priority, .box-umbrella")) {
       return;
     }
     var key = "agentd-box:" + section.dataset.key + ":" + section.dataset.box;
     var select = section.querySelector(".box-sort");
     var filter = section.querySelector(".box-filter");
-    store(key, { sort: select ? select.value : "", filter: filter ? filter.value : "" });
+    var level = section.querySelector(".box-priority");
+    var umbrella = section.querySelector(".box-umbrella");
+    store(key, { sort: select ? select.value : "", filter: filter ? filter.value : "", level: level ? level.value : "", umbrella: !!(umbrella && umbrella.checked) });
     if (filter) { filter.defaultValue = filter.value; }
-    applyBox(section);
+    applyBox(section, e.target === filter);
   }
   document.addEventListener("change", boxInput);
+  // A row's priority is saved as it is chosen; if that fails, the choice
+  // goes back to what is saved and the select says why.
+  document.addEventListener("change", function (e) {
+    var select = e.target;
+    if (!select.matches || !select.matches(".row-priority")) {
+      return;
+    }
+    var host = select.closest("[data-token]");
+    var row = select.closest(".box-row");
+    var saved = function () {
+      for (var i = 0; i < select.options.length; i++) {
+        if (select.options[i].defaultSelected) { return select.options[i].value; }
+      }
+      return "";
+    };
+    var form = new URLSearchParams();
+    form.set("token", host.dataset.token);
+    form.set("src", host.dataset.src);
+    form.set("repository", host.dataset.repository);
+    form.set("ref", select.dataset.ref);
+    form.set("level", select.value);
+    fetch("/priority", { method: "POST", body: form, credentials: "same-origin" })
+      .then(function (r) { return r.ok ? null : r.text().then(function (t) { return Promise.reject(t); }); })
+      .then(function () {
+        select.removeAttribute("title");
+        for (var i = 0; i < select.options.length; i++) {
+          select.options[i].defaultSelected = select.options[i].selected;
+        }
+        if (row) {
+          row.dataset.priority = String(select.value === "high" ? 0 : select.value === "medium" ? 1 : select.value === "low" ? 2 : 3);
+          applyBox(row.closest("[data-box]"));
+        }
+      })
+      .catch(function (why) {
+        select.value = saved();
+        select.title = "Not saved: " + why;
+      });
+  });
   document.addEventListener("input", boxInput);
   // A link may name the issue box's sort, as home's waits-on-you number
   // does (?sort=needs-me): it is taken as the owner's choice.
