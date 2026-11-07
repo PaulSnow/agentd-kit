@@ -190,7 +190,7 @@ func TestTerminalFiles(t *testing.T) {
 // any case, going round; never the page's own, and none when no other
 // runs. The page links back to the repositories either way.
 func TestNextRunning(t *testing.T) {
-	repos := []string{"staking", "AccNet", "accumulate", "book", "zeta"}
+	repos := []string{"sprockets", "Gadgets", "gears", "nuts", "zeta"}
 	on := func(names ...string) func(string) bool {
 		return func(n string) bool {
 			for _, m := range names {
@@ -206,13 +206,13 @@ func TestNextRunning(t *testing.T) {
 		running []string
 		want    string
 	}{
-		{"accumulate", []string{"accumulate", "staking"}, "staking"},
-		{"staking", []string{"accumulate", "staking"}, "accumulate"},
-		{"AccNet", []string{"accumulate", "zeta"}, "accumulate"},
-		{"book", []string{"AccNet"}, "AccNet"},
-		{"staking", []string{"staking"}, ""},
+		{"gears", []string{"gears", "sprockets"}, "sprockets"},
+		{"sprockets", []string{"gears", "sprockets"}, "gears"},
+		{"Gadgets", []string{"gears", "zeta"}, "gears"},
+		{"nuts", []string{"Gadgets"}, "Gadgets"},
+		{"sprockets", []string{"sprockets"}, ""},
 		{"zeta", nil, ""},
-		{"not-listed", []string{"book"}, "book"},
+		{"rivets", []string{"nuts"}, "nuts"},
 	} {
 		if got := nextRunning(append([]string(nil), repos...), on(c.running...), c.current); got != c.want {
 			t.Errorf("after %s with %v running: %q, want %q", c.current, c.running, got, c.want)
