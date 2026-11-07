@@ -454,6 +454,9 @@ type UI struct {
 	tmuxArgs   []string
 	sessionsMu sync.Mutex
 	usage      *usageReader
+	// catalog is what the tracking system follows beyond the configuration,
+	// by name, under mu.
+	catalog map[string]Repository
 }
 
 // NewUI builds the UI's handler over sources, the first the main config's.
@@ -1218,6 +1221,7 @@ func uiCmd(args []string) error {
 			return err
 		}
 	}
+	ui.loadCatalog()
 	srv := &http.Server{Addr: cfg.UI.Address, Handler: ui, ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, MaxHeaderBytes: 1 << 16}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

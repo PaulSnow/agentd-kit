@@ -372,9 +372,8 @@ const issueListTries = 3
 // readIssues brings repo's listed issues up to date from the last change
 // the file holds, recording as it goes, until the forge has no more. What a
 // failed listing read holds, and it carries on from there.
-func (src *uiSource) readIssues(api ForgeAPI, repo string) {
+func (src *uiSource) readIssues(api ForgeAPI, repo string, r Repository) {
 	src.mu.Lock()
-	r := src.cfg.Repositories[repo]
 	secret := confidentialMatcher(src.cfg)
 	src.mu.Unlock()
 	note := func(msg string) {
@@ -442,28 +441,14 @@ func (src *uiSource) readIssues(api ForgeAPI, repo string) {
 	}
 }
 
-// browsed are the repositories whose issues the page lists, each with the
-// source that serves it.
-func (u *UI) browsed() map[string]*uiSource {
-	out := map[string]*uiSource{}
-	for _, src := range u.sources {
-		src.mu.Lock()
-		cfg := src.cfg
-		src.mu.Unlock()
-		for repo, r := range cfg.Repositories {
-			if s := u.levelPick(repo); s == src && indexed(r) && cfg.Poll.Index {
-				out[repo] = src
-			}
-		}
-	}
-	return out
-}
-
-// readAllIssues lists every browsed repository once, one after another.
+// readAllIssues lists every repository the workspace serves once, one after
+// another, starting from what the tracking system follows now.
 func (u *UI) readAllIssues(api ForgeAPI) {
-	repos := u.browsed()
-	for _, repo := range sortedKeys(repos) {
-		repos[repo].readIssues(api, repo)
+	u.loadCatalog()
+	for _, repo := range sortedKeys(u.workspaceRepos()) {
+		if src, r, ok := u.workspacePick(repo); ok && indexed(r) && src.cfg.Poll.Index {
+			src.readIssues(api, repo, r)
+		}
 	}
 }
 
@@ -581,7 +566,7 @@ type uiClosedPage struct {
 // closedView is repo's closed list, nil when no source configures it.
 func (u *UI) closedView(repo string, now time.Time) (*uiClosedPage, error) {
 	var v *uiClosedPage
-	ok, err := u.levelSource(repo, now, func(src *uiSource, cfg *Config, st *LogState, ds []UIDecision) {
+	ok, err := u.withWorkspace(repo, func(src *uiSource, cfg *Config, st *LogState) {
 		v = &uiClosedPage{uiPage: uiPage{Title: repo + " closed issues", Token: u.token, Back: "/r/" + url.PathEscape(repo) + "/closed", Now: now, loc: u.loc, Static: true},
 			Repository: repo, URL: webURL(cfg.Repositories[repo], 0, 0), Src: src.Name, Rows: closedRows(cfg, st, repo, now),
 			OpenCount: openCount(st, repo), ClosedSorts: ClosedSorts, Reading: src.issueReads[repo]}
@@ -602,7 +587,7 @@ func (u *UI) serveIssuePriority(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	repo, ref, level := r.PostForm.Get("repository"), r.PostForm.Get("ref"), r.PostForm.Get("level")
-	if _, ok := src.cfg.Repositories[repo]; !ok {
+	if served, _, ok := u.workspacePick(repo); !ok || served != src {
 		http.Error(w, "no such repository", http.StatusBadRequest)
 		return
 	}

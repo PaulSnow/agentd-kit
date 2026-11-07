@@ -343,12 +343,12 @@ func (u *UI) serveTerminal(w http.ResponseWriter, r *http.Request, repo string) 
 	if !u.terminalAllowed(w, r) {
 		return
 	}
-	src := u.levelPick(repo)
-	if src == nil {
+	_, repository, ok := u.workspacePick(repo)
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}
-	dir := workspaceClone(src.cfg.Repositories[repo], u.home)
+	dir := workspaceClone(repository, u.home)
 	if dir == "" {
 		http.Error(w, "no clone of "+repo+" was found", http.StatusNotFound)
 		return
@@ -496,7 +496,7 @@ func (p *uiWorkspace) TerminalURL() string {
 // workspaceView is repo's page, nil when no source serves it.
 func (u *UI) workspaceView(repo string, now time.Time) (*uiWorkspace, error) {
 	var v *uiWorkspace
-	ok, err := u.levelSource(repo, now, func(src *uiSource, cfg *Config, st *LogState, ds []UIDecision) {
+	ok, err := u.withWorkspace(repo, func(src *uiSource, cfg *Config, st *LogState) {
 		host, _ := os.Hostname()
 		v = &uiWorkspace{uiPage: uiPage{Title: repo, Token: u.token, Back: "/r/" + url.PathEscape(repo), Now: now, loc: u.loc},
 			Repository: repo, URL: webURL(cfg.Repositories[repo], 0, 0), Src: src.Name, Host: host,
@@ -509,14 +509,130 @@ func (u *UI) workspaceView(repo string, now time.Time) (*uiWorkspace, error) {
 	return v, nil
 }
 
+// loadCatalog reads which repositories the tracking system follows, those
+// its manifest calls active: the workspace serves them beside the ones the
+// configuration names, without agentd's loops acting on them. A file that
+// cannot be read leaves the list as it was.
+func (u *UI) loadCatalog() {
+	var tr Tracking
+	known, names := map[string]bool{}, map[string]bool{}
+	for _, src := range u.sources {
+		if tr.Manifest == "" && src.st.Mode == ModeLive && !src.echo {
+			tr = src.cfg.Tracking
+		}
+		for name, r := range src.cfg.Repositories {
+			known[repoKey(r.Forge, r.Project)], names[name] = true, true
+		}
+	}
+	if tr.Manifest == "" {
+		return
+	}
+	inv, err := LoadInventory(tr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentd ui: the tracked repositories: %v\n", err)
+		return
+	}
+	host, _ := os.Hostname()
+	catalog := map[string]Repository{}
+	for _, rec := range inv.Repos {
+		if !rec.Active || known[rec.Key] {
+			continue
+		}
+		name := rec.Name
+		if names[name] {
+			name = strings.ReplaceAll(rec.Path, "/", "-")
+		}
+		names[name] = true
+		r := Repository{Forge: rec.Platform, Project: rec.Path}
+		for _, c := range rec.Clones {
+			if fi, err := os.Stat(c.Path); c.Host == host && err == nil && fi.IsDir() {
+				r.Sessions = &SessionsPolicy{Clone: c.Path}
+				break
+			}
+		}
+		catalog[name] = r
+	}
+	u.mu.Lock()
+	u.catalog = catalog
+	u.mu.Unlock()
+}
+
+// workspacePick is the source that serves repo and the repository itself.
+func (u *UI) workspacePick(repo string) (*uiSource, Repository, bool) {
+	if src := u.levelPick(repo); src != nil {
+		return src, src.cfg.Repositories[repo], true
+	}
+	u.mu.Lock()
+	r, ok := u.catalog[repo]
+	u.mu.Unlock()
+	if !ok {
+		return nil, Repository{}, false
+	}
+	for _, src := range u.sources {
+		if src.st.Mode == ModeLive && !src.echo {
+			return src, r, true
+		}
+	}
+	return nil, Repository{}, false
+}
+
+// workspaceRepos are the names of every repository the workspace serves.
+func (u *UI) workspaceRepos() map[string]bool {
+	out := map[string]bool{}
+	for _, src := range u.sources {
+		for repo := range src.cfg.Repositories {
+			if u.levelPick(repo) != nil {
+				out[repo] = true
+			}
+		}
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	for repo := range u.catalog {
+		out[repo] = true
+	}
+	return out
+}
+
+// withWorkspace runs fn on repo's source, under its lock, with a config that
+// names the repository; it says whether one serves it.
+func (u *UI) withWorkspace(repo string, fn func(src *uiSource, cfg *Config, st *LogState)) (bool, error) {
+	src, r, ok := u.workspacePick(repo)
+	if !ok {
+		return false, nil
+	}
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	if err := src.catchUp(); err != nil {
+		return true, err
+	}
+	c := *src.cfg
+	c.Repositories = map[string]Repository{repo: r}
+	fn(src, &c, src.st)
+	return true, nil
+}
+
+// runningSessions are the tmux sessions now running, by name.
+func (u *UI) runningSessions() map[string]bool {
+	out := map[string]bool{}
+	list, err := u.tmux("list-sessions", "-F", "#{session_name}")
+	if err != nil {
+		return out
+	}
+	for _, name := range strings.Fields(list) {
+		out[name] = true
+	}
+	return out
+}
+
 // serveTokens answers the page's token line.
 func (u *UI) serveTokens(w http.ResponseWriter, repo string) {
-	src := u.levelPick(repo)
-	if src == nil {
+	src, r, ok := u.workspacePick(repo)
+	if !ok {
 		http.Error(w, "no such repository", http.StatusNotFound)
 		return
 	}
-	spend, running := u.sessionTokens(src.cfg, repo, workspaceClone(src.cfg.Repositories[repo], u.home))
+	spend, running := u.sessionTokens(src.cfg, repo, workspaceClone(r, u.home))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"tokens": tokens(spend), "running": running})
 }
@@ -553,21 +669,19 @@ func (p *uiHome) TerminalURL() string {
 func (u *UI) homeView(now time.Time) *uiHome {
 	host, _ := os.Hostname()
 	v := &uiHome{uiPage: uiPage{Title: "Repositories", Token: u.token, Back: "/", Now: now, loc: u.loc}, Host: host}
-	seen := map[string]bool{}
-	for _, src := range u.sources {
-		for _, repo := range sortedKeys(src.cfg.Repositories) {
-			if !seen[repo] && u.levelPick(repo) != nil {
-				seen[repo] = true
-			}
+	running := u.runningSessions()
+	for _, repo := range sortedKeys(u.workspaceRepos()) {
+		src, r, ok := u.workspacePick(repo)
+		if !ok {
+			continue
 		}
-	}
-	for _, repo := range sortedKeys(seen) {
-		src := u.levelPick(repo)
 		src.mu.Lock()
-		row := workspaceRepo{Repository: repo, URL: webURL(src.cfg.Repositories[repo], 0, 0), Open: openCount(src.st, repo), Closed: closedCount(src.st, repo)}
+		row := workspaceRepo{Repository: repo, URL: webURL(r, 0, 0), Open: openCount(src.st, repo), Closed: closedCount(src.st, repo)}
 		cfg := src.cfg
 		src.mu.Unlock()
-		row.Tokens, row.Running = u.sessionTokens(cfg, repo, workspaceClone(cfg.Repositories[repo], u.home))
+		if running[workspaceSession(repo)] {
+			row.Tokens, row.Running = u.sessionTokens(cfg, repo, workspaceClone(r, u.home))
+		}
 		v.Repos = append(v.Repos, row)
 	}
 	sortWorkspaceRepos(v.Repos)
