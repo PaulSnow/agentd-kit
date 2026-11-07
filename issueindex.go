@@ -371,9 +371,6 @@ func (st *LogState) pruneClosed(repo string, now time.Time) {
 // request's branch; GitLab lists them apart.
 func listOpen(api ForgeAPI, r Repository) ([]IndexPayload, bool, error) {
 	truncated := false
-	type label struct {
-		Name string `json:"name"`
-	}
 	var out []IndexPayload
 	page := func(get func(n int) (APIResponse, error), what string, each func([]byte) (int, error)) error {
 		for n := 1; n <= indexPages; n++ {
@@ -400,25 +397,12 @@ func listOpen(api ForgeAPI, r Repository) ([]IndexPayload, bool, error) {
 		err := page(func(n int) (APIResponse, error) {
 			return api.GitLab(fmt.Sprintf("/projects/%s/issues?state=opened&per_page=%d&page=%d", p, indexPerPage, n))
 		}, "GitLab issues", func(b []byte) (int, error) {
-			var is []struct {
-				IID       int                     `json:"iid"`
-				Title     string                  `json:"title"`
-				State     string                  `json:"state"`
-				Labels    []string                `json:"labels"`
-				Milestone *struct{ Title string } `json:"milestone"`
-				Author    struct{ Username string }
-				CreatedAt time.Time `json:"created_at"`
-				UpdatedAt time.Time `json:"updated_at"`
-			}
-			if err := json.Unmarshal(b, &is); err != nil {
+			is, err := parseGitLabIssues(b, "open")
+			if err != nil {
 				return 0, err
 			}
 			for _, i := range is {
-				q := IndexPayload{Ref: "#" + strconv.Itoa(i.IID), Title: i.Title, State: "open", Labels: i.Labels, Author: i.Author.Username, Opened: i.CreatedAt, Changed: i.UpdatedAt}
-				if i.Milestone != nil {
-					q.Milestone = i.Milestone.Title
-				}
-				out = append(out, q)
+				out = append(out, i.IndexPayload)
 			}
 			return len(is), nil
 		})
@@ -459,32 +443,12 @@ func listOpen(api ForgeAPI, r Repository) ([]IndexPayload, bool, error) {
 		err := page(func(n int) (APIResponse, error) {
 			return api.GitHub(fmt.Sprintf("/repos/%s/issues?state=open&per_page=%d&page=%d", r.Project, indexPerPage, n), nil)
 		}, "GitHub issues", func(b []byte) (int, error) {
-			var is []struct {
-				Number      int                     `json:"number"`
-				Title       string                  `json:"title"`
-				Labels      []label                 `json:"labels"`
-				Milestone   *struct{ Title string } `json:"milestone"`
-				User        struct{ Login string }  `json:"user"`
-				Draft       bool                    `json:"draft"`
-				CreatedAt   time.Time               `json:"created_at"`
-				UpdatedAt   time.Time               `json:"updated_at"`
-				PullRequest *struct{}               `json:"pull_request"`
-			}
-			if err := json.Unmarshal(b, &is); err != nil {
+			is, err := parseGitHubIssues(b, "open")
+			if err != nil {
 				return 0, err
 			}
 			for _, i := range is {
-				q := IndexPayload{Ref: "#" + strconv.Itoa(i.Number), Title: i.Title, State: "open", Author: i.User.Login, Opened: i.CreatedAt, Changed: i.UpdatedAt}
-				if i.PullRequest != nil {
-					q.Ref, q.Draft = "!"+strconv.Itoa(i.Number), i.Draft
-				}
-				for _, l := range i.Labels {
-					q.Labels = append(q.Labels, l.Name)
-				}
-				if i.Milestone != nil {
-					q.Milestone = i.Milestone.Title
-				}
-				out = append(out, q)
+				out = append(out, i.IndexPayload)
 			}
 			return len(is), nil
 		})
@@ -515,12 +479,7 @@ func listOpen(api ForgeAPI, r Repository) ([]IndexPayload, bool, error) {
 		}
 	}
 	for i := range out {
-		out[i].Repository = "" // set by the caller
-		out[i].Title = cutUTF8(out[i].Title, indexTitle)
-		if len(out[i].Labels) > indexLabels {
-			out[i].Labels = out[i].Labels[:indexLabels]
-		}
-		sort.Strings(out[i].Labels)
+		trimListed(&out[i])
 	}
 	return out, truncated, nil
 }

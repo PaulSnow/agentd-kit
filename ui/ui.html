@@ -13,7 +13,7 @@
 {{end}}
 
 {{define "foot"}}</main>
-<footer class="foot muted">Shown {{.When .Now}}. The page refreshes every 30 seconds.</footer>
+<footer class="foot muted">Shown {{.When .Now}}. {{if .Static}}This list stays as loaded; reload the page for the latest.{{else}}The page refreshes every 30 seconds.{{end}}</footer>
 </body>
 </html>
 {{end}}
@@ -73,8 +73,8 @@
 <p class="poll-error"><code>{{.Error}}</code></p>
 <p>Still working: {{range $i, $w := .Works}}{{if $i}}, {{end}}{{$w}}{{end}}; no new items from {{.Source}} arrive until it works again.</p>
 </article>
-{{end}}<table class="home-table"><thead><tr><th scope="col">Repository</th><th scope="col">Open</th><th scope="col">Being worked</th><th scope="col">Requests</th><th scope="col">Waits on you</th><th scope="col">Last change</th></tr></thead>
-<tbody>{{range .Home}}<tr{{if .Counts.Waiting}} class="row-alert"{{end}}><th scope="row"><a href="/repo/{{path .Repository}}">{{.Repository}}</a>{{template "forge-link" .URL}}{{if .Overlaps}} <a class="badge overlap" href="/repo/{{path .Repository}}#laptop">{{.Overlaps}} laptop {{if eq .Overlaps 1}}overlap{{else}}overlaps{{end}}</a>{{end}}{{if .Listed}}{{with .Counts.Backfill}} <span class="muted row-fill">{{.}}</span>{{end}}{{end}}</th>{{if .Listed}}<td>{{.Counts.Open}}</td><td>{{.Counts.Working}}</td><td>{{.Counts.Requests}}</td><td>{{if .Counts.Waiting}}<a href="/repo/{{path .Repository}}?sort=needs-me"><strong>{{.Counts.Waiting}}</strong></a>{{else}}0{{end}}</td><td>{{$.Ago .Counts.Last}}</td>{{else}}<td colspan="5" class="muted">{{.Sentence}}</td>{{end}}</tr>{{end}}</tbody></table>
+{{end}}<table class="home-table"><thead><tr><th scope="col">Repository</th><th scope="col">Open</th><th scope="col">Closed</th><th scope="col">Being worked</th><th scope="col">Requests</th><th scope="col">Waits on you</th><th scope="col">Last change</th></tr></thead>
+<tbody>{{range .Home}}<tr{{if .Counts.Waiting}} class="row-alert"{{end}}><th scope="row"><a href="/repo/{{path .Repository}}">{{.Repository}}</a>{{template "forge-link" .URL}}{{if .Overlaps}} <a class="badge overlap" href="/repo/{{path .Repository}}#laptop">{{.Overlaps}} laptop {{if eq .Overlaps 1}}overlap{{else}}overlaps{{end}}</a>{{end}}{{if .Listed}}{{with .Counts.Backfill}} <span class="muted row-fill">{{.}}</span>{{end}}{{end}}</th>{{if .Listed}}<td>{{.Counts.Open}}</td><td><a href="/repo/{{path .Repository}}/closed">{{.Closed}}</a></td><td>{{.Counts.Working}}</td><td>{{.Counts.Requests}}</td><td>{{if .Counts.Waiting}}<a href="/repo/{{path .Repository}}?sort=needs-me"><strong>{{.Counts.Waiting}}</strong></a>{{else}}0{{end}}</td><td>{{$.Ago .Counts.Last}}</td>{{else}}<td colspan="6" class="muted">{{.Sentence}}</td>{{end}}</tr>{{end}}</tbody></table>
 <div class="meter" aria-label="Token meter"><h3>Tokens</h3>
 <ul class="meter-accounts">{{range .Accounts}}{{with .Report}}<li><strong>{{.Account}}</strong> {{if .Weekly}}week {{pct .Weekly}}{{with .WeeklyReset}}, resets {{$.Day .}}{{end}}{{else}}<span class="muted">no reading</span>{{end}}</li>{{end}}{{end}}</ul>
 <details class="meter-today" data-key="home-today"><summary>Today {{.Tokens .Today.Total}} tokens{{range $i, $k := .Today.ByKind}}{{if lt $i 4}} · {{$k.Name}} {{$.Tokens $k.Tokens}}{{end}}{{end}}</summary>
@@ -282,27 +282,42 @@
 
 {{define "forge-link"}}{{with .}} <a class="forge-link" href="{{.}}" target="_blank" rel="noopener" title="Open on its forge">{{site .}} ↗</a>{{end}}{{end}}
 
+{{define "issue-row"}}{{$p := .P}}{{$i := .V}}{{with .V}}<li class="box-row word-{{.WordClass}}" data-ref="{{.Ref}}" data-number="{{.Number}}" data-word="{{.Word}}" data-working="{{if .Working}}1{{end}}" data-run="{{.RunUnix}}" data-mr="{{len .Requests}}" data-mrrank="{{.MRRank}}" data-opened="{{.Opened.Unix}}" data-changed="{{.Changed.Unix}}" data-label="{{range $i, $l := .Labels}}{{if $i}} {{end}}{{$l}}{{end}}" data-milestone="{{.Milestone}}" data-author="{{.Author}}" data-text="{{.FilterText}}" data-refs="{{.Ref}}{{range .Requests}} {{.}}{{end}}" data-priority="{{.PriorityRank}}" data-umbrella="{{if .Umbrella}}1{{end}}" data-closed="{{if .IsClosed}}{{.ClosedUnix}}{{end}}">
+<div class="row-head">{{if .URL}}<a class="forge-ref" href="{{.URL}}" target="_blank" rel="noopener" title="Open {{.Ref}} on its forge">{{.Ref}}</a>{{else}}<a href="/repo/{{path .Repository}}/issue/{{.Number}}">{{.Ref}}</a>{{end}} <strong class="row-title"><a href="/repo/{{path .Repository}}/issue/{{.Number}}">{{.Title}}</a></strong> <span class="badge word">{{.Word}}</span>{{if .Umbrella}} <span class="badge umbrella">umbrella{{if .Parts}} {{.PartsDone}}/{{.Parts}}{{end}}</span>{{end}}{{range .Labels}} <span class="badge label">{{.}}</span>{{end}}{{range .Requests}} <span class="badge mr">{{.}}</span>{{end}} <span class="muted">changed {{$p.Ago .Changed}}</span> {{template "priority" .}}</div>
+{{if not .IsClosed}}<p class="row-sentence">{{if .Sentence}}{{.Sentence}} <span class="muted">({{.Writer}})</span>{{else}}<span class="muted">{{.NoSentence}}</span>{{end}}</p>{{end}}
+{{with .Decision}}<p class="row-options"><a href="/repo/{{path $i.Repository}}/issue/{{$i.Number}}#{{.Anchor}}">{{.Asked}}</a>{{range .Options}} <span class="badge">{{.Label}}</span>{{end}}</p>{{end}}
+</li>{{end}}{{end}}
+
+{{define "closed-issues"}}{{template "head" .}}
+<nav class="crumbs"><a href="/">Home</a> › <a href="/repo/{{path .Repository}}">{{.Repository}}</a> › closed issues{{template "forge-link" .URL}}</nav>
+<section id="closed" class="level-box issue-box" data-static data-box="closed" data-key="{{.Repository}}" data-token="{{.Token}}" data-src="{{.Src}}" data-repository="{{.Repository}}" aria-label="Closed issues">
+<nav class="box-states" aria-label="Open or closed issues"><a href="/repo/{{path .Repository}}">Open <span class="muted">{{.OpenCount}}</span></a> <a href="/repo/{{path .Repository}}/closed" aria-current="true">Closed <span class="muted">{{len .Rows}}</span></a></nav>
+<p class="box-note muted">{{if .Reading.Error}}The last read of the forge failed: {{.Reading.Error}}{{else if .Reading.Read.IsZero}}Still reading them from the forge; reload the page to see more.{{else}}Every closed issue, read from the forge {{.Ago .Reading.Read}} ago.{{end}}</p>
+<header class="box-head"><span class="box-count">{{len .Rows}} closed, <span class="box-shown">{{len .Rows}}</span> shown</span>
+<label>Sort <select class="box-sort" aria-label="Sort the closed issues">{{range .ClosedSorts}}<option value="{{.}}">{{$.SortLabel .}}</option>{{end}}</select></label>
+<label>Priority <select class="box-priority" aria-label="Show issues of one priority"><option value="">Any</option><option value="0">High</option><option value="1">Medium</option><option value="2">Low</option><option value="3">None set</option></select></label>
+<label class="box-check"><input type="checkbox" class="box-umbrella"> Umbrellas only</label>
+<input type="search" class="box-filter" placeholder="Filter: words, a label, an author, #N" aria-label="Filter the closed issues"></header>
+<ol class="box-rows">{{range .Rows}}{{template "issue-row" (ctx $ .)}}{{else}}<li class="empty">No closed issues listed yet: agentd is reading them from the forge.</li>{{end}}</ol>
+</section>
+{{template "foot" .}}{{end}}
+
+{{define "priority"}}<select class="row-priority" data-ref="{{.Ref}}" aria-label="Priority of {{.Ref}}"><option value="">Set priority</option><option value="high"{{if eq .Priority "high"}} selected{{end}}>High</option><option value="medium"{{if eq .Priority "medium"}} selected{{end}}>Medium</option><option value="low"{{if eq .Priority "low"}} selected{{end}}>Low</option></select>{{end}}
+
 {{define "repo"}}{{template "head" .}}
 <nav class="crumbs"><a href="/">Home</a> › {{.Repository}}{{template "forge-link" .URL}} · <a href="/console/{{.Repository}}">history</a></nav>
 <section id="state" data-refresh><p class="state-sentence">{{.Sentence}}</p></section>
-{{if or .Overlaps .Laptop}}<section id="laptop" data-refresh aria-label="Laptop">{{with .Overlaps}}<h2>Your laptop meets agentd's work</h2>
-{{range .}}<article class="card decision-card overlap-card"><p class="asked"><strong>Overlap:</strong> {{.Sentence}}</p>
-<p class="muted">{{if eq .Choice "go-on"}}You said go on: agentd's work goes ahead.{{else if eq .Choice "is-item"}}You said the laptop work is the item: its session continues the laptop branch once it is pushed.{{else}}agentd holds its work on this until you choose.{{end}}</p>
-<form method="post" action="/coord"><input type="hidden" name="token" value="{{$.Token}}"><input type="hidden" name="back" value="{{$.Back}}"><input type="hidden" name="src" value="{{$.Src}}"><input type="hidden" name="repository" value="{{$.Repository}}"><input type="hidden" name="key" value="{{.Key}}">
-<ul class="options"><li><button type="submit" name="choice" value="hold">Hold agentd's work</button></li><li><button type="submit" name="choice" value="go-on">Go on anyway</button></li>{{if .Item}}<li><button type="submit" name="choice" value="is-item">The laptop work is the item</button></li>{{end}}</ul></form></article>{{end}}{{end}}
-{{with .Laptop}}<h2>Laptop</h2><ul class="laptop-clones">{{range .}}<li>{{if .Silent}}{{.Host}}: last seen {{$.When .LastAt}}{{else if .None}}{{.Host}}: no clone reported, seen {{$.When .LastAt}}{{else}}{{.Host}}{{with .Root}} ({{.}}){{end}}: {{.Branch}}, {{.Changed}} changed, {{.Ahead}} ahead{{if .Local}}, {{.Local}} local {{if eq .Local 1}}branch{{else}}branches{{end}}{{end}}, last seen {{$.When .LastAt}}{{end}}</li>{{end}}</ul>{{end}}</section>
-{{end}}<section id="needs" data-refresh aria-label="Also waits on you">{{with .Needs}}<h2>Also waits on you, on no listed issue</h2>
-{{range .}}{{if .Entry}}{{template "level-decision" (ctx $ .)}}{{else}}<article class="card decision-card"><p class="asked"><strong>Waits on you:</strong> {{.Asked}}</p></article>{{end}}{{end}}{{end}}</section>
-<section id="issues" class="level-box issue-box" data-refresh data-box="issues" data-key="{{.Repository}}" aria-label="Issues">
+<section id="issues" class="level-box issue-box" data-refresh data-box="issues" data-key="{{.Repository}}" data-token="{{.Token}}" data-src="{{.Src}}" data-repository="{{.Repository}}" aria-label="Open issues">
+<nav class="box-states" aria-label="Open or closed issues"><a href="/repo/{{path .Repository}}" aria-current="true">Open <span class="muted">{{.Counts.Open}}</span></a> <a href="/repo/{{path .Repository}}/closed">Closed <span class="muted">{{.ClosedCount}}</span></a></nav>
 <header class="box-head"><span class="box-count" data-total="{{.Counts.Open}}" data-need="{{.IssuesWaiting}}" data-working="{{.Counts.Working}}">{{.Counts.Open}} {{if eq .Counts.Open 1}}issue{{else}}issues{{end}}, {{.IssuesWaiting}} {{if eq .IssuesWaiting 1}}needs{{else}}need{{end}} you, {{.Counts.Working}} being worked, <span class="box-shown">{{.Shown}}</span> shown</span>
-<label>Sort <select class="box-sort" aria-label="Sort the issues">{{range .IssueSorts}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
+<label>Sort <select class="box-sort" aria-label="Sort the issues">{{range .IssueSorts}}<option value="{{.}}">{{$.SortLabel .}}</option>{{end}}</select></label>
+<label>Priority <select class="box-priority" aria-label="Show issues of one priority"><option value="">Any</option><option value="0">High</option><option value="1">Medium</option><option value="2">Low</option><option value="3">None set</option></select></label>
+<label class="box-check"><input type="checkbox" class="box-umbrella"> Umbrellas only</label>
 <input type="search" class="box-filter" placeholder="Filter: words, a label, #N or !N" aria-label="Filter the issues"></header>
-<ol class="box-rows">{{range $i := .Issues}}<li class="box-row word-{{.WordClass}}" data-ref="{{.Ref}}" data-number="{{.Number}}" data-word="{{.Word}}" data-working="{{if .Working}}1{{end}}" data-run="{{.RunUnix}}" data-mr="{{len .Requests}}" data-mrrank="{{.MRRank}}" data-opened="{{.Opened.Unix}}" data-changed="{{.Changed.Unix}}" data-label="{{range $i, $l := .Labels}}{{if $i}} {{end}}{{$l}}{{end}}" data-milestone="{{.Milestone}}" data-author="{{.Author}}" data-text="{{.FilterText}}" data-refs="{{.Ref}}{{range .Requests}} {{.}}{{end}}">
-<div class="row-head">{{if .URL}}<a class="forge-ref" href="{{.URL}}" target="_blank" rel="noopener" title="Open {{.Ref}} on its forge">{{.Ref}}</a>{{else}}<a href="/repo/{{path .Repository}}/issue/{{.Number}}">{{.Ref}}</a>{{end}} <strong class="row-title"><a href="/repo/{{path .Repository}}/issue/{{.Number}}">{{.Title}}</a></strong> <span class="badge word">{{.Word}}</span>{{range .Labels}} <span class="badge label">{{.}}</span>{{end}}{{range .Requests}} <span class="badge mr">{{.}}</span>{{end}} <span class="muted">changed {{$.Ago .Changed}}</span></div>
-<p class="row-sentence">{{if .Sentence}}{{.Sentence}} <span class="muted">({{.Writer}})</span>{{else}}<span class="muted">{{.NoSentence}}</span>{{end}}</p>
-{{with .Decision}}<p class="row-options"><a href="/repo/{{path $i.Repository}}/issue/{{$i.Number}}#{{.Anchor}}">{{.Asked}}</a>{{range .Options}} <span class="badge">{{.Label}}</span>{{end}}</p>{{end}}
-</li>{{else}}<li class="empty">No open issues listed.</li>{{end}}</ol>
+<ol class="box-rows">{{range .Issues}}{{template "issue-row" (ctx $ .)}}{{else}}<li class="empty">No open issues listed.</li>{{end}}</ol>
 </section>
+<section id="needs" data-refresh aria-label="Also waits on you">{{with .Needs}}<h2>Also waits on you, on no listed issue</h2>
+{{range .}}{{if .Entry}}{{template "level-decision" (ctx $ .)}}{{else}}<article class="card decision-card"><p class="asked"><strong>Waits on you:</strong> {{.Asked}}</p></article>{{end}}{{end}}{{end}}</section>
 <section id="requests" class="level-box mr-box" data-refresh data-box="requests" data-key="{{.Repository}}" aria-label="Open requests">
 <header class="box-head"><span class="box-count">{{len .Requests}} open {{if eq (len .Requests) 1}}request{{else}}requests{{end}}, <span class="box-shown">{{len .Requests}}</span> shown</span>
 <label>Sort <select class="box-sort" aria-label="Sort the requests">{{range .RequestSorts}}<option value="{{.}}">{{.}}</option>{{end}}</select></label></header>
@@ -311,13 +326,20 @@
 <p class="row-sentence">{{if .Place}}{{.Place}}{{else}}<span class="muted">Outside the loop, or not yet placed.</span>{{end}}</p>
 </li>{{else}}<li class="empty">No open requests.</li>{{end}}</ol>
 </section>
+{{if or .Overlaps .Laptop}}<section id="laptop" data-refresh aria-label="Laptop">{{with .Overlaps}}<h2>Your laptop meets agentd's work</h2>
+{{range .}}<article class="card decision-card overlap-card"><p class="asked"><strong>Overlap:</strong> {{.Sentence}}</p>
+<p class="muted">{{if eq .Choice "go-on"}}You said go on: agentd's work goes ahead.{{else if eq .Choice "is-item"}}You said the laptop work is the item: its session continues the laptop branch once it is pushed.{{else}}agentd holds its work on this until you choose.{{end}}</p>
+<form method="post" action="/coord"><input type="hidden" name="token" value="{{$.Token}}"><input type="hidden" name="back" value="{{$.Back}}"><input type="hidden" name="src" value="{{$.Src}}"><input type="hidden" name="repository" value="{{$.Repository}}"><input type="hidden" name="key" value="{{.Key}}">
+<ul class="options"><li><button type="submit" name="choice" value="hold">Hold agentd's work</button></li><li><button type="submit" name="choice" value="go-on">Go on anyway</button></li>{{if .Item}}<li><button type="submit" name="choice" value="is-item">The laptop work is the item</button></li>{{end}}</ul></form></article>{{end}}{{end}}
+{{with .Laptop}}<h2>Laptop</h2><ul class="laptop-clones">{{range .}}<li>{{if .Silent}}{{.Host}}: last seen {{$.When .LastAt}}{{else if .None}}{{.Host}}: no clone reported, seen {{$.When .LastAt}}{{else}}{{.Host}}{{with .Root}} ({{.}}){{end}}: {{.Branch}}, {{.Changed}} changed, {{.Ahead}} ahead{{if .Local}}, {{.Local}} local {{if eq .Local 1}}branch{{else}}branches{{end}}{{end}}, last seen {{$.When .LastAt}}{{end}}</li>{{end}}</ul>{{end}}</section>
+{{end}}
 {{template "console-box" .}}
 {{template "foot" .}}{{end}}
 
 {{define "issue"}}{{template "head" .}}
 <nav class="crumbs"><a href="/">Home</a> › <a href="/repo/{{path .Repository}}">{{.Repository}}</a> › {{.Ref}} · <a href="?steps=all">history</a> · <a href="/console/{{.Repository}}">console</a></nav>
-<section id="issue-head" data-refresh>
-<h2>{{if .URL}}<a class="forge-ref" href="{{.URL}}" target="_blank" rel="noopener" title="Open {{.Ref}} on its forge">{{.Ref}}</a>{{else}}{{.Ref}}{{end}} {{.LevelIssue.Title}} <span class="badge word">{{.Word}}</span></h2>
+<section id="issue-head" data-refresh data-token="{{.Token}}" data-src="{{.Src}}" data-repository="{{.Repository}}">
+<h2>{{if .URL}}<a class="forge-ref" href="{{.URL}}" target="_blank" rel="noopener" title="Open {{.Ref}} on its forge">{{.Ref}}</a>{{else}}{{.Ref}}{{end}} {{.LevelIssue.Title}} <span class="badge word">{{.Word}}</span>{{if .Umbrella}} <span class="badge umbrella">umbrella{{if .Parts}} {{.PartsDone}}/{{.Parts}}{{end}}</span>{{end}} {{template "priority" .LevelIssue}}</h2>
 <p class="state-sentence">{{if .Sentence}}{{.Sentence}} <span class="muted">— {{.Writer}}, {{.Ago .SentenceAt}} ago</span>{{else}}<span class="muted">{{.NoSentence}}</span>{{end}}</p>
 <p class="refs">{{range .Refs}}<span class="badge ref-{{.Kind}}">{{.Kind}} {{.Name}}{{with .Note}} · {{.}}{{end}}</span> {{end}}{{range .Labels}}<span class="badge label">{{.}}</span> {{end}}{{with .Milestone}}<span class="badge">milestone {{.}}</span> {{end}}{{with .Author}}<span class="muted">opened by {{.}} {{$.Ago $.Opened}} ago</span>{{end}}</p>
 </section>

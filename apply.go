@@ -96,6 +96,11 @@ type LogState struct {
 	// closedKept after they left it.
 	Closed    map[string]map[string]*IndexIssue
 	Sentences map[string]*IndexSentence
+	// ListedIssues and Priorities are the issue browser's, from the page
+	// process's issue file and never the log: each issue as last listed,
+	// open or closed, and the owner's priority on each that has one.
+	ListedIssues map[string]map[string]*ListedIssue
+	Priorities   map[string]map[string]string
 	// Steps are each issue's and request's dated steps, by sentenceKey.
 	Steps map[string][]IssueStep
 	// Swept is when the steps and sentences were last swept of what

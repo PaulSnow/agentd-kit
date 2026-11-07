@@ -152,6 +152,10 @@ type uiSource struct {
 	// echo marks a shadow source over a live source's log: the owner's
 	// records and the shared facts are the live source's to show.
 	echo bool
+	// issuePath is the issue file, "" to keep it in memory, and issueReads
+	// how each repository's listing last went.
+	issuePath  string
+	issueReads map[string]issueReading
 	// owned is the owner's message each session started for one was
 	// started for, until its first post, which is threaded under it (#65).
 	owned map[string]string
@@ -542,7 +546,7 @@ func (u *UI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	get := r.Method == http.MethodGet || r.Method == http.MethodHead
 	posts := map[string]func(http.ResponseWriter, *http.Request){
 		"/seen": u.serveSeen, "/answer": u.serveAnswer, "/deadline": u.serveDeadline, "/reply": u.serveReply, "/respond": u.serveRespond,
-		"/coord": u.serveCoord,
+		"/coord": u.serveCoord, "/priority": u.serveIssuePriority,
 	}
 	switch {
 	case path == "/ui.css" || path == "/ui.js":
@@ -596,6 +600,19 @@ func (u *UI) serveView(w http.ResponseWriter, r *http.Request) {
 	case path == "/":
 		name = "index"
 		view, err = u.indexView(now)
+	case strings.HasPrefix(path, "/repo/") && strings.HasSuffix(path, "/closed") && strings.Count(path, "/") == 3:
+		repo, _, ok := levelPath(strings.TrimSuffix(path, "/closed"))
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		name = "closed-issues"
+		var v *uiClosedPage
+		if v, err = u.closedView(repo, now); err == nil && v == nil {
+			http.NotFound(w, r)
+			return
+		}
+		view = v
 	case strings.HasPrefix(path, "/repo/"):
 		repo, n, ok := levelPath(path)
 		if !ok {
@@ -1184,9 +1201,15 @@ func uiCmd(args []string) error {
 	if _, err := ui.indexView(time.Now()); err != nil {
 		return err
 	}
+	for _, src := range sources {
+		if err := src.loadIssues(issueFile(src.cfg.EventLog)); err != nil {
+			return err
+		}
+	}
 	srv := &http.Server{Addr: cfg.UI.Address, Handler: ui, ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, MaxHeaderBytes: 1 << 16}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	go ui.pollIssues(ctx, ExecForgeAPI{Timeout: cfg.Timeouts.Forge.Duration}, cfg.Poll.Every.Duration)
 	defer stop()
 	go func() {
 		<-ctx.Done()

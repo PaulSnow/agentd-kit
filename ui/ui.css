@@ -279,10 +279,18 @@ form.attach-over { outline: 2px dashed var(--accent); outline-offset: 2px; }
 .box-head { position: sticky; top: 0; z-index: 1; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); background: var(--surface); border-bottom: 1px solid var(--line); }
 .box-count { flex: 1 1 14rem; font-size: var(--size-s); }
 .box-filter { flex: 1 1 12rem; min-width: 0; }
+.box-states { display: flex; gap: var(--space-3); padding: var(--space-2) var(--space-3) 0; }
+.box-states a[aria-current] { font-weight: 600; text-decoration: none; border-bottom: 2px solid var(--accent); }
+.box-note { margin: var(--space-1) var(--space-3) 0; font-size: var(--size-s); }
+.box-check { white-space: nowrap; font-size: var(--size-s); }
+.row-priority { font-size: var(--size-s); padding: 0 var(--space-1, 2px); margin-left: var(--space-2); }
+.badge.umbrella { background: var(--accent); color: var(--surface); }
 .box-rows { list-style: none; margin: 0; padding: 0; }
 .box-row { padding: var(--space-2) var(--space-3); border-top: 1px solid var(--line); }
 .box-row:first-child { border-top: 0; }
 .box-row[hidden] { display: none; }
+.box-row { content-visibility: auto; contain-intrinsic-size: auto 6rem; }
+.home-table thead th { white-space: nowrap; }
 .row-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); }
 .row-title { overflow-wrap: anywhere; }
 .row-title a { color: inherit; }
