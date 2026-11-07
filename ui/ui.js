@@ -343,7 +343,15 @@
       connect();
     });
     fit.fit();
-    connect();
+    // The home page's console waits to be opened; once running, it reconnects.
+    if (el.dataset.wait) {
+      var label = again.textContent;
+      again.textContent = el.dataset.wait;
+      again.hidden = false;
+      again.addEventListener("click", function () { again.textContent = label; }, { once: true });
+    } else {
+      connect();
+    }
   })();
   // The session's tokens, as its transcript counts them.
   (function () {

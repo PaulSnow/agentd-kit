@@ -534,6 +534,7 @@ type workspaceRepo struct {
 // uiHome lists the repositories.
 type uiHome struct {
 	uiPage
+	Host  string
 	Repos []workspaceRepo
 	// ConsoleRunning and ConsoleTokens are the console's session.
 	ConsoleRunning bool
@@ -543,9 +544,15 @@ type uiHome struct {
 // TokenText is n tokens as the page shows them.
 func (p *uiHome) TokenText(n int64) string { return tokens(n) }
 
+// TerminalURL is the console's WebSocket address, with the UI's token.
+func (p *uiHome) TerminalURL() string {
+	return "/all/terminal?token=" + url.QueryEscape(p.Token)
+}
+
 // homeView is the home page.
 func (u *UI) homeView(now time.Time) *uiHome {
-	v := &uiHome{uiPage: uiPage{Title: "Repositories", Token: u.token, Back: "/", Now: now, loc: u.loc}}
+	host, _ := os.Hostname()
+	v := &uiHome{uiPage: uiPage{Title: "Repositories", Token: u.token, Back: "/", Now: now, loc: u.loc}, Host: host}
 	seen := map[string]bool{}
 	for _, src := range u.sources {
 		for _, repo := range sortedKeys(src.cfg.Repositories) {
@@ -583,39 +590,13 @@ func (u *UI) allConsoleDir() string {
 	return filepath.Join(u.home, ".local", "state", "agentd-kit", "console")
 }
 
-// uiAllConsole is the console page: its terminal beside the open sessions.
-type uiAllConsole struct {
-	uiPage
-	Host     string
-	Sessions []workspaceRepo
-}
-
-// TerminalURL is the page's WebSocket address, with the UI's token.
-func (p *uiAllConsole) TerminalURL() string {
-	return "/all/terminal?token=" + url.QueryEscape(p.Token)
-}
-
-// TokenText is n tokens as the page shows them.
-func (p *uiAllConsole) TokenText(n int64) string { return tokens(n) }
-
-// serveAllConsole serves /all and what belongs to it.
+// serveAllConsole serves the home page's console: its terminal and tokens.
 func (u *UI) serveAllConsole(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	switch r.URL.Path {
-	case "/all":
-		w.Header().Set("Content-Security-Policy", workspaceCSP)
-		now := u.now()
-		host, _ := os.Hostname()
-		v := &uiAllConsole{uiPage: uiPage{Title: "All sessions", Token: u.token, Back: "/all", Now: now, loc: u.loc}, Host: host}
-		for _, row := range u.homeView(now).Repos {
-			if row.Running {
-				v.Sessions = append(v.Sessions, row)
-			}
-		}
-		u.render(w, "all-console", v, nil)
 	case "/all/terminal":
 		if !u.terminalAllowed(w, r) {
 			return

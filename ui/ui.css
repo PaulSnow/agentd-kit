@@ -297,11 +297,7 @@ body:has(.workspace) > main { max-width: none; padding: 0; }
 .badge.session-running { background: #1f7a3d; color: #fff; }
 .badge.session-running::before { content: "● "; }
 .home-table .row-session th, .home-table .row-session td { background: rgba(31, 122, 61, 0.14); }
-.home-console { margin: var(--space-2) 0 var(--space-3); }
-.console-open { display: inline-block; padding: var(--space-1) var(--space-3); border-radius: 0.5rem; background: var(--accent); color: var(--surface); font-weight: 600; text-decoration: none; }
-.session-list { padding: var(--space-3); }
-.session-list ul { list-style: none; margin: 0 0 var(--space-3); padding: 0; }
-.session-list li { padding: var(--space-1) 0; border-bottom: 1px solid var(--line); }
+.home-repos { padding: var(--space-2) var(--space-3); }
 .box-check { white-space: nowrap; font-size: var(--size-s); }
 .row-priority { font-size: var(--size-s); padding: 0 var(--space-1, 2px); margin-left: var(--space-2); }
 .badge.umbrella { background: var(--accent); color: var(--surface); }
