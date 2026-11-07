@@ -310,6 +310,7 @@ func trimListed(p *IndexPayload) {
 
 // listIssues lists r's issues of any state changed since since, the oldest
 // change first, at most issueListPages pages; more says there may be others.
+// On an error it returns the pages it read as well, which hold.
 func listIssues(api ForgeAPI, r Repository, since time.Time) (out []ListedIssue, more bool, err error) {
 	after := ""
 	if !since.IsZero() {
@@ -332,10 +333,10 @@ func listIssues(api ForgeAPI, r Repository, since time.Time) (out []ListedIssue,
 			resp, err = api.GitHub(q, nil)
 		}
 		if err != nil {
-			return nil, false, err
+			return out, false, err
 		}
 		if resp.Status != http.StatusOK {
-			return nil, false, statusError("issues", resp)
+			return out, false, statusError("issues", resp)
 		}
 		if r.Forge == "gitlab" {
 			page, err = parseGitLabIssues(resp.Body, "")
@@ -343,7 +344,7 @@ func listIssues(api ForgeAPI, r Repository, since time.Time) (out []ListedIssue,
 			page, err = parseGitHubIssues(resp.Body, "")
 		}
 		if err != nil {
-			return nil, false, fmt.Errorf("issues: %w", err)
+			return out, false, fmt.Errorf("issues: %w", err)
 		}
 		for _, p := range page {
 			if p.Ref[0] == '#' {
@@ -364,8 +365,13 @@ type issueReading struct {
 	Error string    // why the last one failed, "" when it did not
 }
 
+// issueListTries is how many times running a listing may fail without
+// getting further before it waits for the next poll.
+const issueListTries = 3
+
 // readIssues brings repo's listed issues up to date from the last change
-// the file holds, recording as it goes, until the forge has no more.
+// the file holds, recording as it goes, until the forge has no more. What a
+// failed listing read holds, and it carries on from there.
 func (src *uiSource) readIssues(api ForgeAPI, repo string) {
 	src.mu.Lock()
 	r := src.cfg.Repositories[repo]
@@ -384,6 +390,7 @@ func (src *uiSource) readIssues(api ForgeAPI, repo string) {
 		k.Error = msg
 		src.issueReads[repo] = k
 	}
+	failed := 0
 	for {
 		src.mu.Lock()
 		var since time.Time
@@ -397,11 +404,7 @@ func (src *uiSource) readIssues(api ForgeAPI, repo string) {
 		if !since.IsZero() {
 			since = since.Add(-time.Second) // issues changed in the same second as the last
 		}
-		list, more, err := listIssues(api.At(r.Host), r, since)
-		if err != nil {
-			note(oneLine(err.Error(), 300))
-			return
-		}
+		list, more, listErr := listIssues(api.At(r.Host), r, since)
 		var recs []issueRecord
 		src.mu.Lock()
 		for k := range list {
@@ -415,11 +418,21 @@ func (src *uiSource) readIssues(api ForgeAPI, repo string) {
 			}
 			recs = append(recs, issueRecord{At: src.clock().UTC(), Issue: &i})
 		}
-		err = src.recordIssues(recs)
+		err := src.recordIssues(recs)
 		src.mu.Unlock()
 		if err != nil {
 			note(oneLine(err.Error(), 300))
 			return
+		}
+		if listErr != nil {
+			if len(recs) > 0 {
+				failed = 0
+			}
+			if failed++; failed >= issueListTries {
+				note(oneLine(listErr.Error(), 300))
+				return
+			}
+			continue
 		}
 		// A page of issues all at one last change would list the same again.
 		if !more || len(recs) == 0 {
