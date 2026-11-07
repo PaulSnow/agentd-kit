@@ -344,7 +344,14 @@ func TestReadIssues(t *testing.T) {
 		t.Error("an epic label is no umbrella")
 	}
 	u.readAllIssues(api)
-	if last := asked[len(asked)-1]; !strings.Contains(last, "since=2026-10-01T23%3A59%3A59Z") {
+	// The last issue listing: the requests are read after it.
+	last := ""
+	for _, q := range asked {
+		if strings.Contains(q, "/issues?") {
+			last = q
+		}
+	}
+	if !strings.Contains(last, "since=2026-10-01T23%3A59%3A59Z") {
 		t.Fatalf("the next listing does not carry on: %s", last)
 	}
 	fail = "the forge is down"

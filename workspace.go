@@ -486,6 +486,8 @@ type uiWorkspace struct {
 	ClosedCount int
 	Sorts       []string
 	Reading     issueReading
+	// Requests are the repository's open requests as last read.
+	Requests requestReading
 	// Next is the next repository, after this one, with a running
 	// session, none when no other has one.
 	Next string
@@ -504,7 +506,7 @@ func (u *UI) workspaceView(repo string, now time.Time) (*uiWorkspace, error) {
 		v = &uiWorkspace{uiPage: uiPage{Title: repo, Token: u.token, Back: "/r/" + url.PathEscape(repo), Now: now, loc: u.loc},
 			Repository: repo, URL: webURL(cfg.Repositories[repo], 0, 0), Src: src.Name, Host: host,
 			Clone: workspaceClone(cfg.Repositories[repo], u.home), Rows: openRows(cfg, st, repo), ClosedCount: closedCount(st, repo),
-			Sorts: WorkspaceSorts, Reading: src.issueReads[repo]}
+			Sorts: WorkspaceSorts, Reading: src.issueReads[repo], Requests: src.requests[repo]}
 	})
 	if !ok || err != nil {
 		return nil, err
@@ -682,10 +684,14 @@ type workspaceRepo struct {
 	Forge   string
 	Project string
 	About   string
-	Open    int
-	Closed  int
-	Running bool
-	Tokens  int64
+	// MRPass and MRFail count the open requests whose CI passes and
+	// fails, MROther the rest; MRRead says they have been read.
+	MRPass, MRFail, MROther int
+	MRRead                  bool
+	Open                    int
+	Closed                  int
+	Running                 bool
+	Tokens                  int64
 	// Changed is the latest change on any of its issues.
 	Changed time.Time
 }
@@ -710,7 +716,7 @@ func (r workspaceRepo) ChangedUnix() int64 {
 }
 
 // RepoSorts are the repository list's sorts, the first the default.
-var RepoSorts = []string{"repo-session", "repo-name", "repo-open", "repo-closed", "repo-tokens", "repo-changed"}
+var RepoSorts = []string{"repo-session", "repo-name", "repo-open", "repo-closed", "repo-tokens", "repo-changed", "repo-mrs"}
 
 // uiHome lists the repositories.
 type uiHome struct {
@@ -746,6 +752,8 @@ func (u *UI) homeView(now time.Time) *uiHome {
 		}
 		src.mu.Lock()
 		row := workspaceRepo{Repository: repo, URL: webURL(r, 0, 0), Forge: forgeName(r.Forge), Project: r.Project, About: about[repoKey(r.Forge, r.Project)], Open: openCount(src.st, repo), Closed: closedCount(src.st, repo)}
+		row.MRPass, row.MRFail, row.MROther = src.requests[repo].counts()
+		row.MRRead = !src.requests[repo].Read.IsZero()
 		for _, l := range src.st.ListedIssues[repo] {
 			if l.Changed.After(row.Changed) {
 				row.Changed = l.Changed

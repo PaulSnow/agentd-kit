@@ -442,12 +442,14 @@ func (src *uiSource) readIssues(api ForgeAPI, repo string, r Repository) {
 }
 
 // readAllIssues lists every repository the workspace serves once, one after
-// another, starting from what the tracking system follows now.
+// another, starting from what the tracking system follows now: its issues,
+// then its open requests.
 func (u *UI) readAllIssues(api ForgeAPI) {
 	u.loadCatalog()
 	for _, repo := range sortedKeys(u.workspaceRepos()) {
 		if src, r, ok := u.workspacePick(repo); ok && indexed(r) && src.cfg.Poll.Index {
 			src.readIssues(api, repo, r)
+			src.readRequests(api, repo, r)
 		}
 	}
 }
@@ -545,7 +547,7 @@ var sortLabels = map[string]string{
 	"label": "Label", "milestone": "Milestone", "author": "Author",
 	"loop": "Where it stands in the loop", "ci-failing": "CI failing first",
 	"repo-session": "Running sessions first", "repo-name": "Name", "repo-open": "Most open issues", "repo-closed": "Most closed issues",
-	"repo-tokens": "Most tokens", "repo-changed": "Recently changed",
+	"repo-tokens": "Most tokens", "repo-changed": "Recently changed", "repo-mrs": "Failing merge requests first",
 }
 
 // SortLabel is sort s as the owner reads it.
