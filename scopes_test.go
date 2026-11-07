@@ -217,14 +217,14 @@ func TestHomeIsNoRepository(t *testing.T) {
 func TestConsoleBoxPosts(t *testing.T) {
 	f := newLevelsFixture(t)
 	u, _ := testUI(t, UIConfig{}, f.src)
-	for _, page := range []string{"/", "/repo/widgets", "/repo/widgets/issue/4"} {
+	for _, page := range []string{"/status", "/repo/widgets", "/repo/widgets/issue/4"} {
 		if body := owner(t, u, page); !strings.Contains(body, `id="console-box"`) {
 			t.Errorf("%s has no console box", page)
 		}
 	}
 	post := func(scope, text string, now bool) {
 		t.Helper()
-		v := url.Values{"src": {"live"}, "scope": {scope}, "text": {text}, "back": {"/"}}
+		v := url.Values{"src": {"live"}, "scope": {scope}, "text": {text}, "back": {"/status"}}
 		if now {
 			v.Set("now", "1")
 		}
@@ -273,7 +273,7 @@ func TestConsoleBoxPosts(t *testing.T) {
 	if body := owner(t, u, "/repo/widgets"); !strings.Contains(body, "Look at #6 next.") {
 		t.Error("the repository's conversation does not show its message")
 	}
-	if body := owner(t, u, "/"); !strings.Contains(body, "What needs me?") || strings.Contains(body, "Look at #6 next.") {
+	if body := owner(t, u, "/status"); !strings.Contains(body, "What needs me?") || strings.Contains(body, "Look at #6 next.") {
 		t.Error("the home conversation is not its own")
 	}
 	if w := ownerPost(u, "/reply", url.Values{"src": {"live"}, "scope": {"nowhere"}, "text": {"x"}}); w.Code != 400 {

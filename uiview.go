@@ -484,7 +484,7 @@ func (src *uiSource) row(c ReportCase) uiRow {
 // indexView is the index: the runs, what needs the owner, and every
 // repository's card, merged by name across the sources.
 func (u *UI) indexView(now time.Time) (*uiIndex, error) {
-	v := &uiIndex{uiPage: uiPage{Title: "Overview", Token: u.token, Back: "/", Now: now, loc: u.loc}}
+	v := &uiIndex{uiPage: uiPage{Title: "Status", Token: u.token, Back: "/status", Now: now, loc: u.loc}}
 	repos := map[string]*uiRepo{}
 	get := func(name string) *uiRepo {
 		r := repos[name]

@@ -508,20 +508,11 @@ func closedCount(st *LogState, repo string) int {
 }
 
 // closedRows are repo's closed issues as rows, the latest closed first.
-// A row asks nothing of what joins an open issue: sessions, requests,
-// decisions and its last sentence, written while it was open, have the
-// issue's own page.
 func closedRows(cfg *Config, st *LogState, repo string, now time.Time) []LevelIssue {
 	rows := []LevelIssue{}
 	st.eachClosed(repo, func(i IndexPayload, _ *ListedIssue, at time.Time) {
-		x := IndexIssue{IndexPayload: i}
-		li := LevelIssue{Repository: repo, Ref: i.Ref, Number: x.Number(), Title: i.Title, Labels: i.Labels, Milestone: i.Milestone, Author: i.Author,
-			Opened: i.Opened, Changed: i.Changed, ClosedAt: at, Word: closedWord(at, now), URL: webURL(cfg.Repositories[repo], '#', x.Number()),
-			MRRank: len(loopRanks) + 1}
-		li.setBrowserFields(cfg, st, &x)
-		if i.Withheld > 0 {
-			li.Title = "(withheld: it matched a confidential pattern)"
-		}
+		li := plainRow(cfg, st, repo, i)
+		li.ClosedAt, li.Word = at, closedWord(at, now)
 		rows = append(rows, li)
 	})
 	sort.Slice(rows, func(a, b int) bool {
@@ -574,7 +565,7 @@ var sortLabels = map[string]string{
 func (p *uiPage) SortLabel(s string) string { return sortLabels[s] }
 
 // uiClosedPage is a repository's closed issues, a list of its own with
-// its own sorts and filters.
+// its own sorts and filters, shown in the workspace's issue panel.
 type uiClosedPage struct {
 	uiPage
 	Repository  string
@@ -591,9 +582,9 @@ type uiClosedPage struct {
 func (u *UI) closedView(repo string, now time.Time) (*uiClosedPage, error) {
 	var v *uiClosedPage
 	ok, err := u.levelSource(repo, now, func(src *uiSource, cfg *Config, st *LogState, ds []UIDecision) {
-		v = &uiClosedPage{uiPage: uiPage{Title: repo + " closed issues", Token: u.token, Back: "/repo/" + url.PathEscape(repo) + "/closed", Now: now, loc: u.loc, Static: true},
+		v = &uiClosedPage{uiPage: uiPage{Title: repo + " closed issues", Token: u.token, Back: "/r/" + url.PathEscape(repo) + "/closed", Now: now, loc: u.loc, Static: true},
 			Repository: repo, URL: webURL(cfg.Repositories[repo], 0, 0), Src: src.Name, Rows: closedRows(cfg, st, repo, now),
-			OpenCount: indexCounts(cfg, st, repo, func(string) bool { return false }).Open, ClosedSorts: ClosedSorts, Reading: src.issueReads[repo]}
+			OpenCount: openCount(st, repo), ClosedSorts: ClosedSorts, Reading: src.issueReads[repo]}
 	})
 	if !ok || err != nil {
 		return nil, err

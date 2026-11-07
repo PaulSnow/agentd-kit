@@ -314,6 +314,9 @@ type LevelIssue struct {
 	Parts     int       `json:"parts,omitempty"`
 	PartsDone int       `json:"parts_done,omitempty"`
 	ClosedAt  time.Time `json:"closed_at,omitempty"`
+	// Plain marks a row of the workspace's lists: what the forge says, its
+	// title opening the forge.
+	Plain bool `json:"-"`
 }
 
 // FilterText is what the filter's words are matched in: title,
