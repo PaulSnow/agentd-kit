@@ -353,3 +353,42 @@ func TestReadIssues(t *testing.T) {
 		t.Error("a failed read is not told")
 	}
 }
+
+// A listing that fails partway keeps the pages it read and tries again from
+// there, so one hung call costs no more than itself.
+func TestReadIssuesKeepsWhatItRead(t *testing.T) {
+	f := newLevelsFixture(t)
+	u, _ := testUI(t, UIConfig{}, f.src)
+	issue := func(n int, at string) string {
+		return fmt.Sprintf(`{"number":%d,"title":"t","state":"closed","user":{"login":"u"},"created_at":%q,"updated_at":%q,"closed_at":%q}`, n, at, at, at)
+	}
+	fullPage := func() string {
+		var is []string
+		for n := 1; n <= indexPerPage; n++ {
+			is = append(is, issue(n, "2026-09-01T00:00:00Z"))
+		}
+		return "[" + strings.Join(is, ",") + "]"
+	}
+	calls, hung := 0, true
+	api := fakeListAPI{page: func(q string) (APIResponse, error) {
+		calls++
+		if strings.Contains(q, "since=") {
+			if hung {
+				hung = false
+				return APIResponse{}, fmt.Errorf("hung")
+			}
+			return APIResponse{Status: http.StatusOK, Body: []byte("[" + issue(500, "2026-10-01T00:00:00Z") + "]")}, nil
+		}
+		if strings.Contains(q, "page=2") {
+			return APIResponse{}, fmt.Errorf("hung")
+		}
+		return APIResponse{Status: http.StatusOK, Body: []byte(fullPage())}, nil
+	}}
+	u.readAllIssues(api)
+	if n := len(f.src.st.ListedIssues["widgets"]); n != indexPerPage+1 {
+		t.Fatalf("%d issues after %d calls", n, calls)
+	}
+	if page := owner(t, u, "/repo/widgets/closed"); !strings.Contains(page, "Every closed issue") {
+		t.Error("a list read whole after a failure does not say so")
+	}
+}
