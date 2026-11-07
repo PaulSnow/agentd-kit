@@ -321,7 +321,7 @@ func TestUIMergesLogs(t *testing.T) {
 	if len(widgets.Items) != 1 || widgets.Items[0].Src != "night" || widgets.Items[0].Items[0].ID != "gitlab/example-org/widgets#19" {
 		t.Fatalf("widgets items %+v", widgets.Items)
 	}
-	body := owner(t, u, "/")
+	body := owner(t, u, "/status")
 	for _, want := range []string{`href="/session/night/w17"`, `href="/session/coord/g1"`, `href="/console/widgets"`, "1 finished", "context 120k", "spent 450k of 5.0M"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("index lacks %q", want)
@@ -340,7 +340,7 @@ func TestUINeedsFromCurrentState(t *testing.T) {
 		",coord/lim1/usage-limited,coord/g1/decision:Q1"; got != want {
 		t.Fatalf("needs %s\nwant  %s", got, want)
 	}
-	body := owner(t, u, "/")
+	body := owner(t, u, "/status")
 	if strings.Contains(body, "Ship done1?") || strings.Contains(body, "None open.") {
 		t.Fatalf("a done session's decision or no question is listed:\n%s", body)
 	}
@@ -351,7 +351,7 @@ func TestUINeedsFromCurrentState(t *testing.T) {
 // leaves Needs you once answered.
 func TestUIAnswersByButtonAndBox(t *testing.T) {
 	u, f := fixtureUI(t)
-	body := owner(t, u, "/")
+	body := owner(t, u, "/status")
 	for _, want := range []string{
 		`<button type="submit" name="choice" value="b" class="recommended">`,
 		`<button type="submit" name="answer" value="yes">Yes</button>`,
@@ -366,7 +366,7 @@ func TestUIAnswersByButtonAndBox(t *testing.T) {
 	if n := strings.Count(body, `<textarea name="text"`); n != 2 {
 		t.Fatalf("%d text boxes, want the text question's and the console box", n)
 	}
-	if w := ownerPost(u, "/answer", url.Values{"src": {"night"}, "session": {"s-blocked"}, "id": {"Q1"}, "choice": {"b"}, "back": {"/"}}); w.Code != http.StatusSeeOther {
+	if w := ownerPost(u, "/answer", url.Values{"src": {"night"}, "session": {"s-blocked"}, "id": {"Q1"}, "choice": {"b"}, "back": {"/status"}}); w.Code != http.StatusSeeOther {
 		t.Fatalf("choice: %d %s", w.Code, w.Body.String())
 	}
 	if w := ownerPost(u, "/answer", url.Values{"src": {"coord"}, "session": {"g1"}, "id": {"Q1"}, "answer": {"yes"}, "back": {"/console/gadgets"}}); w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/console/gadgets" {
@@ -493,8 +493,8 @@ func TestUISessionStatusWithheld(t *testing.T) {
 // name, is refused with 403, before any of the logs is read.
 func TestUIServesOnlyTheOwner(t *testing.T) {
 	u, _ := fixtureUI(t)
-	owner(t, u, "/")
-	for _, target := range []string{"/", "/console/widgets", "/session/night/w17", "/ui.css"} {
+	owner(t, u, "/status")
+	for _, target := range []string{"/status", "/console/widgets", "/session/night/w17", "/ui.css"} {
 		for _, remote := range []string{"192.0.2.30:51000", "192.0.2.99:51000"} {
 			if w := get(u, "GET", target, pageAddr, remote); w.Code != http.StatusForbidden || strings.Contains(w.Body.String(), "widgets") {
 				t.Errorf("%s from %s: %d\n%s", target, remote, w.Code, w.Body.String())
@@ -522,7 +522,7 @@ func TestUIRefusesOtherHostsAndItself(t *testing.T) {
 		{pageAddr, ""},
 		{pageAddr, "192.0.2.20"},
 	} {
-		if w := get(u, "GET", "/", c.host, c.remote); w.Code != http.StatusForbidden {
+		if w := get(u, "GET", "/status", c.host, c.remote); w.Code != http.StatusForbidden {
 			t.Errorf("host %q from %s: %d", c.host, c.remote, w.Code)
 		}
 	}
@@ -535,10 +535,10 @@ func TestUIRefusesOtherHostsAndItself(t *testing.T) {
 // refusal; and one whois answer serves an address for whoisTTL.
 func TestUIHostCaseAndWhois(t *testing.T) {
 	u, whois := testUI(t, UIConfig{Hosts: []string{"Page.Example:8770"}}, newUIFixture(t).nightSrc)
-	if w := get(u, "GET", "/", "page.example:8770", "192.0.2.20:51000"); w.Code != http.StatusOK {
+	if w := get(u, "GET", "/status", "page.example:8770", "192.0.2.20:51000"); w.Code != http.StatusOK {
 		t.Fatalf("lower-case host: %d", w.Code)
 	}
-	get(u, "GET", "/", "page.example:8770", "192.0.2.20:51001")
+	get(u, "GET", "/status", "page.example:8770", "192.0.2.20:51001")
 	if whois.calls != 1 {
 		t.Fatalf("whois asked %d times within its TTL", whois.calls)
 	}
@@ -546,12 +546,12 @@ func TestUIHostCaseAndWhois(t *testing.T) {
 	u.now = func() time.Time { return now }
 	now = now.Add(whoisTTL + time.Second)
 	whois.fail = errors.New("whois: no answer")
-	if w := get(u, "GET", "/", "page.example:8770", "192.0.2.20:51000"); w.Code != http.StatusForbidden || whois.calls != 2 {
+	if w := get(u, "GET", "/status", "page.example:8770", "192.0.2.20:51000"); w.Code != http.StatusForbidden || whois.calls != 2 {
 		t.Fatalf("whois error for the owner: %d after %d calls", w.Code, whois.calls)
 	}
 	// A failure is not kept: the next request asks again, and gets in.
 	whois.fail = nil
-	if w := get(u, "GET", "/", "page.example:8770", "192.0.2.20:51000"); w.Code != http.StatusOK || whois.calls != 3 {
+	if w := get(u, "GET", "/status", "page.example:8770", "192.0.2.20:51000"); w.Code != http.StatusOK || whois.calls != 3 {
 		t.Fatalf("after a whois error: %d after %d calls", w.Code, whois.calls)
 	}
 }
@@ -576,7 +576,7 @@ func TestUIMethodsAndAssets(t *testing.T) {
 			t.Errorf("%s %s: %d", c.method, c.target, w.Code)
 		}
 	}
-	w := get(u, "GET", "/", pageAddr, "192.0.2.20:51000")
+	w := get(u, "GET", "/status", pageAddr, "192.0.2.20:51000")
 	csp := w.Header().Get("Content-Security-Policy")
 	for _, want := range []string{"default-src 'none'", "style-src 'self'", "script-src 'self'", "form-action 'self'", "base-uri 'none'", "frame-ancestors 'none'"} {
 		if !strings.Contains(csp, want) {
@@ -606,7 +606,7 @@ func TestUIMethodsAndAssets(t *testing.T) {
 // text, never as markup.
 func TestUIEscapesEverything(t *testing.T) {
 	u, _ := fixtureUI(t)
-	for _, target := range []string{"/", "/console/widgets", "/session/night/w17"} {
+	for _, target := range []string{"/status", "/console/widgets", "/session/night/w17"} {
 		body := owner(t, u, target)
 		for _, bad := range []string{"<script>y()", "<b>", "<iframe"} {
 			if strings.Contains(body, bad) {
@@ -614,7 +614,7 @@ func TestUIEscapesEverything(t *testing.T) {
 			}
 		}
 	}
-	body := owner(t, u, "/")
+	body := owner(t, u, "/status")
 	for _, want := range []string{"&lt;iframe src=x&gt;", "&#34;&gt;&lt;b&gt;bold&lt;/b&gt;", "&lt;/pre&gt;&lt;script&gt;y()&lt;/script&gt;"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("index lacks %q", want)
@@ -672,13 +672,13 @@ func TestUIMarksSeen(t *testing.T) {
 func TestUISourceFollowsTheLog(t *testing.T) {
 	f := newUIFixture(t)
 	u, _ := testUI(t, UIConfig{}, f.nightSrc)
-	owner(t, u, "/")
+	owner(t, u, "/status")
 	n := f.nightSrc.st.Events
 	e := Event{V: EventVersion, Time: pageAt, Session: "w18", Kind: KindTransition, Mode: ModeLive, Transition: &TransitionPayload{From: "working", To: string(Failed), Reason: "exited 1"}}
 	if err := NewLogWriter(f.nightBuf).Append(e); err != nil {
 		t.Fatal(err)
 	}
-	if body := owner(t, u, "/"); f.nightSrc.st.Events != n+1 || !strings.Contains(body, "exited 1") {
+	if body := owner(t, u, "/status"); f.nightSrc.st.Events != n+1 || !strings.Contains(body, "exited 1") {
 		t.Fatalf("after one more line: %d events applied, want %d", f.nightSrc.st.Events, n+1)
 	}
 }
@@ -832,7 +832,7 @@ func TestConsoleImport(t *testing.T) {
 // go test -run TestUIGolden -update to rewrite them after a change.
 func TestUIGolden(t *testing.T) {
 	u, _ := fixtureUI(t)
-	for name, target := range map[string]string{"index": "/", "console": "/console/widgets", "session": "/session/night/w17"} {
+	for name, target := range map[string]string{"index": "/status", "console": "/console/widgets", "session": "/session/night/w17"} {
 		body := owner(t, u, target)
 		path := filepath.Join("testdata", "ui", name+".html")
 		if *updateGolden {
@@ -872,7 +872,7 @@ func TestUIAccountsJSON(t *testing.T) {
 // wrapping too, and light and dark colours from one token set.
 func TestUIFitsAPhone(t *testing.T) {
 	u, _ := fixtureUI(t)
-	for _, target := range []string{"/", "/console/widgets", "/session/night/w17"} {
+	for _, target := range []string{"/status", "/console/widgets", "/session/night/w17"} {
 		if body := owner(t, u, target); !strings.Contains(body, `<meta name="viewport" content="width=device-width, initial-scale=1">`) {
 			t.Errorf("%s has no viewport meta", target)
 		}
@@ -911,7 +911,7 @@ func TestUIShadowEcho(t *testing.T) {
 	if body := owner(t, u, "/console/widgets"); strings.Count(body, "Ship it on Friday") != 1 || strings.Count(body, "Old console line") != 1 {
 		t.Fatalf("console repeats the owner's lines:\n%s", body)
 	}
-	if body := owner(t, u, "/"); strings.Count(body, "1 new item") != 1 {
+	if body := owner(t, u, "/status"); strings.Count(body, "1 new item") != 1 {
 		t.Fatalf("items listed twice:\n%s", body)
 	}
 }
@@ -957,7 +957,7 @@ func TestUIQuestionsNotRegular(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := make(chan string, 1)
-	go func() { done <- get(u, "GET", "/", pageAddr, "192.0.2.20:51000").Body.String() }()
+	go func() { done <- get(u, "GET", "/status", pageAddr, "192.0.2.20:51000").Body.String() }()
 	select {
 	case body := <-done:
 		if !strings.Contains(body, "changed since agentd last read them") {
@@ -1002,7 +1002,7 @@ func TestHomeShowsFailingPollCard(t *testing.T) {
 			}
 		}
 		u, _ := testUI(t, UIConfig{}, newUISource("coord", &cfg, NewLogWriter(buf), ModeLive, "host-a"))
-		body := owner(t, u, "/")
+		body := owner(t, u, "/status")
 		i := strings.Index(body, `<section id="home"`)
 		if i < 0 {
 			t.Fatalf("no home section:\n%s", body)

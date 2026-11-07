@@ -233,7 +233,7 @@ func TestUsageReadingsLogged(t *testing.T) {
 	}
 	noToken(t, "the event log", h.buf.String())
 	// The UI shows each account.
-	body := owner(t, harnessUI(t, h), "/")
+	body := owner(t, harnessUI(t, h), "/status")
 	for _, want := range []string{"<strong>a</strong>", "5h 30%", "week 20%", "overage off", "internal error for [token]"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("UI lacks %q", want)
@@ -681,7 +681,7 @@ func (f *fakeUsageAPI) setDown(down bool) {
 // accountCards counts the overview's account cards for name.
 func accountCards(t *testing.T, h *harness, name string) int {
 	t.Helper()
-	return strings.Count(owner(t, harnessUI(t, h), "/"), name+"&#39;s usage readings have failed since")
+	return strings.Count(owner(t, harnessUI(t, h), "/status"), name+"&#39;s usage readings have failed since")
 }
 
 // Readings that fail on every account hold a start for the first hour;

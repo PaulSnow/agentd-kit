@@ -193,7 +193,7 @@ func TestLevelsCLIParity(t *testing.T) {
 func TestLevelPagesSmallThings(t *testing.T) {
 	f := newLevelsFixture(t)
 	u, _ := testUI(t, UIConfig{}, f.src)
-	if body := owner(t, u, "/"); !strings.Contains(body, `<a href="/repo/widgets?sort=needs-me"><strong>1</strong></a>`) {
+	if body := owner(t, u, "/status"); !strings.Contains(body, `<a href="/repo/widgets?sort=needs-me"><strong>1</strong></a>`) {
 		t.Errorf("home's number is no link:\n%s", body)
 	}
 	body := owner(t, u, "/repo/widgets")

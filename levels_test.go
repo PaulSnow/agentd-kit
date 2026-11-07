@@ -243,7 +243,7 @@ func TestLevelPagesCallNoModel(t *testing.T) {
 	dir := fakeClaude(t)
 	f := newLevelsFixture(t)
 	u, _ := testUI(t, UIConfig{}, f.src)
-	for _, target := range []string{"/", "/repo/widgets", "/repo/widgets/issue/4", "/repo/widgets/issue/5", "/repo/widgets/issue/6?steps=all"} {
+	for _, target := range []string{"/status", "/repo/widgets", "/repo/widgets/issue/4", "/repo/widgets/issue/5", "/repo/widgets/issue/6?steps=all"} {
 		owner(t, u, target)
 	}
 	if n := claudeCalls(t, dir); n != 0 {
@@ -316,7 +316,7 @@ func TestLevelForgeLinks(t *testing.T) {
 	r.Project = ""
 	f.cfg.Repositories["widgets"] = r
 	u, _ = testUI(t, UIConfig{}, f.src)
-	for _, path := range []string{"/", "/repo/widgets", "/repo/widgets/issue/5"} {
+	for _, path := range []string{"/status", "/repo/widgets", "/repo/widgets/issue/5"} {
 		body := owner(t, u, path)
 		if path == "/" && !strings.Contains(body, `<a href="/repo/widgets">widgets</a></th>`) {
 			t.Errorf("/: the repository's row is missing:\n%s", body)
@@ -336,10 +336,10 @@ func TestLevelForgeLinks(t *testing.T) {
 func TestHomeLevel(t *testing.T) {
 	f := newLevelsFixture(t)
 	u, _ := testUI(t, UIConfig{}, f.src)
-	body := owner(t, u, "/")
+	body := owner(t, u, "/status")
 	for _, want := range []string{
 		"Across 1 repository: 4 issues and 2 requests open, 1 being worked. 1 issue waits on you, in widgets.",
-		`<a href="/repo/widgets">widgets</a> <a class="forge-link" href="https://github.com/example-org/widgets" target="_blank" rel="noopener" title="Open on its forge">github.com/example-org/widgets ↗</a></th><td>4</td><td><a href="/repo/widgets/closed">0</a></td><td>1</td><td>2</td><td><a href="/repo/widgets?sort=needs-me"><strong>1</strong></a></td><td>3h</td>`,
+		`<a href="/repo/widgets">widgets</a> <a class="forge-link" href="https://github.com/example-org/widgets" target="_blank" rel="noopener" title="Open on its forge">github.com/example-org/widgets ↗</a></th><td>4</td><td><a href="/r/widgets/closed">0</a></td><td>1</td><td>2</td><td><a href="/repo/widgets?sort=needs-me"><strong>1</strong></a></td><td>3h</td>`,
 		`class="meter"`,
 	} {
 		if !strings.Contains(body, want) {

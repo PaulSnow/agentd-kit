@@ -45,6 +45,9 @@ type UIConfig struct {
 	Owner   string   `json:"owner"`
 	Logs    []string `json:"logs"`
 	Shadow  bool     `json:"shadow"`
+	// SessionCommand starts a repository's Claude Code session, in its
+	// clone; {session_id} is replaced. Empty, plain claude under a login shell.
+	SessionCommand []string `json:"session_command"`
 }
 
 // Whois names the login behind a remote address.
@@ -443,6 +446,14 @@ type UI struct {
 	mu      sync.Mutex
 	answers map[string]whoisAnswer // by caller IP
 	slots   chan struct{}
+
+	// The workspace: where clones are looked for, the tmux server's
+	// arguments (a test's own), one start of a session at a time, and what
+	// the sessions' transcripts have used.
+	home       string
+	tmuxArgs   []string
+	sessionsMu sync.Mutex
+	usage      *usageReader
 }
 
 // NewUI builds the UI's handler over sources, the first the main config's.
@@ -468,8 +479,9 @@ func NewUI(cfg UIConfig, whois Whois, sources []*uiSource, now func() time.Time)
 	if _, err := rand.Read(b); err != nil {
 		return nil, err
 	}
+	home, _ := os.UserHomeDir()
 	return &UI{cfg: cfg, whois: whois, sources: sources, self: ip, now: now, loc: time.Local, token: hex.EncodeToString(b),
-		answers: map[string]whoisAnswer{}, slots: make(chan struct{}, whoisSlots)}, nil
+		answers: map[string]whoisAnswer{}, slots: make(chan struct{}, whoisSlots), home: home, usage: newUsageReader()}, nil
 }
 
 // source is the source named name, or nil.
@@ -515,7 +527,7 @@ func (u *UI) login(remote string, ip net.IP) (string, error) {
 	return login, err
 }
 
-//go:embed ui/ui.css ui/ui.js
+//go:embed ui/ui.css ui/ui.js ui/xterm.js ui/xterm.css ui/addon-fit.js
 var uiAssets embed.FS
 
 func (u *UI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -549,13 +561,13 @@ func (u *UI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"/coord": u.serveCoord, "/priority": u.serveIssuePriority,
 	}
 	switch {
-	case path == "/ui.css" || path == "/ui.js":
+	case path == "/ui.css" || path == "/ui.js" || path == "/xterm.js" || path == "/xterm.css" || path == "/addon-fit.js":
 		if !get {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		b, _ := uiAssets.ReadFile("ui" + path)
-		if path == "/ui.css" {
+		if strings.HasSuffix(path, ".css") {
 			h.Set("Content-Type", "text/css; charset=utf-8")
 		} else {
 			h.Set("Content-Type", "text/javascript; charset=utf-8")
@@ -579,7 +591,9 @@ func (u *UI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		u.serveAttachment(w, r)
-	case path == "/" || strings.HasPrefix(path, "/console/") || strings.HasPrefix(path, "/session/") || strings.HasPrefix(path, "/repo/"):
+	case strings.HasPrefix(path, "/r/"):
+		u.serveWorkspace(w, r)
+	case path == "/" || path == "/status" || strings.HasPrefix(path, "/console/") || strings.HasPrefix(path, "/session/") || strings.HasPrefix(path, "/repo/"):
 		if !get {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -598,21 +612,11 @@ func (u *UI) serveView(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch path := r.URL.Path; {
 	case path == "/":
+		name = "home"
+		view = u.homeView(now)
+	case path == "/status":
 		name = "index"
 		view, err = u.indexView(now)
-	case strings.HasPrefix(path, "/repo/") && strings.HasSuffix(path, "/closed") && strings.Count(path, "/") == 3:
-		repo, _, ok := levelPath(strings.TrimSuffix(path, "/closed"))
-		if !ok {
-			http.NotFound(w, r)
-			return
-		}
-		name = "closed-issues"
-		var v *uiClosedPage
-		if v, err = u.closedView(repo, now); err == nil && v == nil {
-			http.NotFound(w, r)
-			return
-		}
-		view = v
 	case strings.HasPrefix(path, "/repo/"):
 		repo, n, ok := levelPath(path)
 		if !ok {
@@ -692,6 +696,11 @@ func (u *UI) serveView(w http.ResponseWriter, r *http.Request) {
 		}
 		view = v
 	}
+	u.render(w, name, view, err)
+}
+
+// render writes page name from view, or says err.
+func (u *UI) render(w http.ResponseWriter, name string, view any, err error) {
 	if err != nil {
 		http.Error(w, "the UI's data could not be read; see agentd's output", http.StatusInternalServerError)
 		fmt.Fprintf(os.Stderr, "agentd ui: %v\n", err)

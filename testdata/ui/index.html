@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Overview</title>
+<title>Status</title>
 <link rel="stylesheet" href="/ui.css">
 <script src="/ui.js" defer></script>
 </head>
 <body>
-<header class="topbar"><a class="brand" href="/">agentd</a><span class="topbar-title">Overview</span></header>
+<header class="topbar"><a class="brand" href="/">agentd</a><span class="topbar-title">Status</span></header>
 <main>
 
 <section id="home" data-refresh aria-labelledby="home-h"><h2 id="home-h" class="visually-hidden">Where things stand</h2>
@@ -26,7 +26,7 @@
 <section class="console-box" id="console-box" data-refresh aria-labelledby="console-h"><h2 id="console-h">Console</h2>
 <p class="muted">About every repository: a question is answered from their issues, requests and the usage ledger; an instruction goes to the repository it names, or to agentd itself. Nothing here interrupts a session.</p>
 
-<form method="post" action="/reply" enctype="multipart/form-data"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/"><input type="hidden" name="src" value="night"><input type="hidden" name="repository" value=""><input type="hidden" name="scope" value="home">
+<form method="post" action="/reply" enctype="multipart/form-data"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/status"><input type="hidden" name="src" value="night"><input type="hidden" name="repository" value=""><input type="hidden" name="scope" value="home">
 <div class="composer-row"><textarea name="text" rows="2" maxlength="4000" aria-label="Your message" required placeholder="Ask, or tell agentd what to do here"></textarea><button type="submit">Send</button></div></form>
 </section>
 <details class="home-detail" data-key="home-detail"><summary>Runs, sessions and requests in detail</summary>
@@ -73,12 +73,12 @@
 
 <dt>Recommended</dt><dd>b</dd>
 </dl>
-<form class="answer" method="post" action="/answer"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/"><input type="hidden" name="src" value="night"><input type="hidden" name="session" value="s-blocked"><input type="hidden" name="id" value="Q1">
+<form class="answer" method="post" action="/answer"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/status"><input type="hidden" name="src" value="night"><input type="hidden" name="session" value="s-blocked"><input type="hidden" name="id" value="Q1">
 <div class="choices"><button type="submit" name="choice" value="a"><span class="option-label">Blue</span><span class="option-note">old logo</span></button><button type="submit" name="choice" value="b" class="recommended"><span class="option-label">Green</span><span class="option-note">new guide</span></button></div>
 
 </form>
 <details class="own-words" data-key="night-s-blocked-Q1-own"><summary>Answer in your own words</summary>
-<form class="answer" method="post" action="/answer"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/"><input type="hidden" name="src" value="night"><input type="hidden" name="session" value="s-blocked"><input type="hidden" name="id" value="Q1">
+<form class="answer" method="post" action="/answer"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/status"><input type="hidden" name="src" value="night"><input type="hidden" name="session" value="s-blocked"><input type="hidden" name="id" value="Q1">
 <textarea name="other" rows="2" maxlength="2000" aria-label="Your own words" required></textarea>
 <p class="muted">Your own words reach the session but do not settle the decision.</p><div class="choices"><button type="submit">Send</button></div></form></details>
 
@@ -95,7 +95,7 @@
 <div class="context md"><p>Which colour should the <strong>logo</strong> be?</p>
 </div>
 
-<form class="answer" method="post" action="/answer"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/"><input type="hidden" name="src" value="night"><input type="hidden" name="session" value="txt1"><input type="hidden" name="id" value="status-920d6f4df245">
+<form class="answer" method="post" action="/answer"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/status"><input type="hidden" name="src" value="night"><input type="hidden" name="session" value="txt1"><input type="hidden" name="id" value="status-920d6f4df245">
 <textarea name="text" rows="3" maxlength="2000" aria-label="Your answer" required></textarea><div class="choices"><button type="submit">Answer</button></div>
 </form>
 
@@ -124,12 +124,12 @@
 
 
 </dl>
-<form class="answer" method="post" action="/answer"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/"><input type="hidden" name="src" value="coord"><input type="hidden" name="session" value="g1"><input type="hidden" name="id" value="Q1">
+<form class="answer" method="post" action="/answer"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/status"><input type="hidden" name="src" value="coord"><input type="hidden" name="session" value="g1"><input type="hidden" name="id" value="Q1">
 <div class="choices"><button type="submit" name="answer" value="yes">Yes</button><button type="submit" name="answer" value="no">No</button></div>
 
 </form>
 <details class="own-words" data-key="coord-g1-Q1-own"><summary>Answer in your own words</summary>
-<form class="answer" method="post" action="/answer"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/"><input type="hidden" name="src" value="coord"><input type="hidden" name="session" value="g1"><input type="hidden" name="id" value="Q1">
+<form class="answer" method="post" action="/answer"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/status"><input type="hidden" name="src" value="coord"><input type="hidden" name="session" value="g1"><input type="hidden" name="id" value="Q1">
 <textarea name="other" rows="2" maxlength="2000" aria-label="Your own words" required></textarea>
 <p class="muted">Your own words reach the session but do not settle the decision.</p><div class="choices"><button type="submit">Send</button></div></form></details>
 
@@ -177,7 +177,7 @@
 <span class="meta">by contributor-c · open discussion</span>
 </li></ul>
 <details class="items" data-key="widgets-night-items"><summary>1 new item</summary>
-<form method="post" action="/seen"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/"><input type="hidden" name="src" value="night"><ul class="rows"><li class="row"><label><input type="checkbox" name="id" value="gitlab/example-org/widgets#19" checked> <span class="badge">issue</span> <a href="https://gitlab.example/example-org/widgets/-/issues/19" rel="noreferrer">&lt;iframe src=x&gt;</a></label></li></ul>
+<form method="post" action="/seen"><input type="hidden" name="token" value="abababababababababababababababababababababababababababababababab"><input type="hidden" name="back" value="/status"><input type="hidden" name="src" value="night"><ul class="rows"><li class="row"><label><input type="checkbox" name="id" value="gitlab/example-org/widgets#19" checked> <span class="badge">issue</span> <a href="https://gitlab.example/example-org/widgets/-/issues/19" rel="noreferrer">&lt;iframe src=x&gt;</a></label></li></ul>
 <div class="choices"><button type="submit">Mark the ticked items seen</button></div></form></details>
 <details class="finished" data-key="widgets-finished"><summary>1 finished</summary><ul class="rows"><li class="row">
 <a class="session" href="/session/night/done1">done1</a>

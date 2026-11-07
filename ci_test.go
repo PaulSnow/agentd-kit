@@ -278,7 +278,7 @@ func TestCIShownOnStatusReportPageAndCase(t *testing.T) {
 	if got == nil || got.CI != CIFailed || got.CIVerdict != CITargetRed || len(got.CIJobs) != 1 {
 		t.Fatalf("report delivery = %+v", got)
 	}
-	if body := owner(t, harnessUI(t, h), "/"); !strings.Contains(body, "CI failed</span>") || !strings.Contains(body, "· target-red · test") {
+	if body := owner(t, harnessUI(t, h), "/status"); !strings.Contains(body, "CI failed</span>") || !strings.Contains(body, "· target-red · test") {
 		t.Fatalf("the UI lacks the request's CI:\n%s", body)
 	}
 	var cv *CaseView

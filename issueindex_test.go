@@ -530,7 +530,7 @@ func TestBackfillIdleSentences(t *testing.T) {
 	u, _ := testUI(t, UIConfig{}, src)
 	before := claudeCalls(t, dir)
 	want := fmt.Sprintf("sentences being written, %d of 400 done", mid)
-	for _, target := range []string{"/", "/repo/widgets", "/repo/widgets/issue/7"} {
+	for _, target := range []string{"/status", "/repo/widgets", "/repo/widgets/issue/7"} {
 		if body := owner(t, u, target); target != "/repo/widgets/issue/7" && !strings.Contains(strings.ToLower(body), want) {
 			t.Fatalf("%s does not say %q", target, want)
 		}

@@ -34,10 +34,10 @@ func TestClosedList(t *testing.T) {
 	if strings.Index(open, `id="issues"`) > strings.Index(open, `id="requests"`) || strings.Index(open, `id="issues"`) > strings.Index(open, `id="needs"`) {
 		t.Errorf("the issue list is not the first thing after the sentence")
 	}
-	if strings.Contains(open, `data-ref="#101"`) || !strings.Contains(open, `data-ref="#4"`) || !strings.Contains(open, `/repo/widgets/closed">Closed <span class="muted">2</span>`) {
+	if strings.Contains(open, `data-ref="#101"`) || !strings.Contains(open, `data-ref="#4"`) || !strings.Contains(open, `/r/widgets/closed">Closed <span class="muted">2</span>`) {
 		t.Errorf("open page: a closed row, no open row, or no closed count")
 	}
-	closed := owner(t, u, "/repo/widgets/closed")
+	closed := owner(t, u, "/r/widgets/closed")
 	if strings.Contains(closed, `data-ref="#4"`) || !strings.Contains(closed, `data-ref="#101"`) || !strings.Contains(closed, "data-static") {
 		t.Errorf("closed page: an open row, no closed row, or it refreshes")
 	}
@@ -60,7 +60,7 @@ func TestClosedList(t *testing.T) {
 	if body := owner(t, u, "/repo/widgets/issue/101"); !strings.Contains(body, "Closed long ago") || !strings.Contains(body, "closed ") {
 		t.Errorf("no page for a closed issue")
 	}
-	if w := get(u, "GET", "/repo/nobody/closed", pageAddr, "192.0.2.20:51000"); w.Code != http.StatusNotFound {
+	if w := get(u, "GET", "/r/nobody/closed", pageAddr, "192.0.2.20:51000"); w.Code != http.StatusNotFound {
 		t.Errorf("unknown repository's closed list: %d", w.Code)
 	}
 	orders := scriptOrder(t, boxRows(t, closed, "closed"), ClosedSorts)
@@ -81,7 +81,7 @@ func TestReopenedIssueIsOpenOnly(t *testing.T) {
 	f := newLevelsFixture(t)
 	closeIssue(t, f, "#4", "Was closed", nil, pageAt.Add(-24*time.Hour))
 	u, _ := testUI(t, UIConfig{}, f.src)
-	if body := owner(t, u, "/repo/widgets/closed"); strings.Contains(body, `data-ref="#4"`) {
+	if body := owner(t, u, "/r/widgets/closed"); strings.Contains(body, `data-ref="#4"`) {
 		t.Fatal("an open issue is listed as closed")
 	}
 }
@@ -111,7 +111,7 @@ func TestIssuePriority(t *testing.T) {
 	}
 	body := owner(t, u, "/repo/widgets")
 	rows := map[string]map[string]string{}
-	for _, r := range append(boxRows(t, body, "issues"), boxRows(t, owner(t, u, "/repo/widgets/closed"), "closed")...) {
+	for _, r := range append(boxRows(t, body, "issues"), boxRows(t, owner(t, u, "/r/widgets/closed"), "closed")...) {
 		rows[r["ref"]] = r
 	}
 	if rows["#6"]["priority"] != "0" || rows["#4"]["priority"] != "2" || rows["#101"]["priority"] != "1" || rows["#5"]["priority"] != "3" {
@@ -333,7 +333,7 @@ func TestReadIssues(t *testing.T) {
 	if s := f.src.st.ListedIssues["widgets"]["#71"]; s == nil || s.Title != "" || s.Withheld == 0 {
 		t.Fatalf("confidential: %+v", s)
 	}
-	page := owner(t, u, "/repo/widgets/closed")
+	page := owner(t, u, "/r/widgets/closed")
 	if strings.Contains(page, "secretword") || !strings.Contains(page, "(withheld") {
 		t.Error("a confidential title shows")
 	}
@@ -349,7 +349,7 @@ func TestReadIssues(t *testing.T) {
 	}
 	fail = "the forge is down"
 	u.readAllIssues(api)
-	if page := owner(t, u, "/repo/widgets/closed"); !strings.Contains(page, "The last read of the forge failed: the forge is down") {
+	if page := owner(t, u, "/r/widgets/closed"); !strings.Contains(page, "The last read of the forge failed: the forge is down") {
 		t.Error("a failed read is not told")
 	}
 }
@@ -388,7 +388,7 @@ func TestReadIssuesKeepsWhatItRead(t *testing.T) {
 	if n := len(f.src.st.ListedIssues["widgets"]); n != indexPerPage+1 {
 		t.Fatalf("%d issues after %d calls", n, calls)
 	}
-	if page := owner(t, u, "/repo/widgets/closed"); !strings.Contains(page, "Every closed issue") {
+	if page := owner(t, u, "/r/widgets/closed"); !strings.Contains(page, "Every closed issue") {
 		t.Error("a list read whole after a failure does not say so")
 	}
 }

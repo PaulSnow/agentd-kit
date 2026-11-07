@@ -208,7 +208,7 @@
     var filter = section.querySelector(".box-filter");
     var level = section.querySelector(".box-priority");
     var umbrella = section.querySelector(".box-umbrella");
-    if (select && state.sort && sorts[state.sort]) { select.value = state.sort; }
+    if (select && state.sort && sorts[state.sort] && select.querySelector('option[value="' + state.sort + '"]')) { select.value = state.sort; }
     if (level && typeof state.level === "string") { level.value = state.level; }
     if (umbrella) {
       umbrella.checked = !!state.umbrella;
@@ -260,6 +260,102 @@
     applyBox(section, e.target === filter);
   }
   document.addEventListener("change", boxInput);
+  // The workspace's issue panel changes between its lists in place, so the
+  // terminal beside it stays connected.
+  document.addEventListener("click", function (e) {
+    var link = e.target.closest ? e.target.closest("a[data-panel]") : null;
+    var pane = document.querySelector(".issue-pane");
+    if (!link || !pane) {
+      return;
+    }
+    e.preventDefault();
+    fetch(link.getAttribute("href"), { credentials: "same-origin", cache: "no-store" })
+      .then(function (r) { return r.ok ? r.text() : Promise.reject(r.status); })
+      .then(function (html) {
+        var box = new DOMParser().parseFromString(html, "text/html").querySelector(".panel-box");
+        if (box) {
+          pane.replaceChildren(document.importNode(box, true));
+          levelBoxes();
+        }
+      })
+      .catch(function () {});
+  });
+  // The workspace's terminal: a window onto the repository's session, which
+  // goes on when the page closes. It reconnects by itself unless the session
+  // has ended; then a new one is the owner's to start.
+  (function () {
+    var el = document.getElementById("terminal");
+    if (!el || !window.Terminal || !window.FitAddon) {
+      return;
+    }
+    var status = document.getElementById("term-state");
+    var again = document.getElementById("term-new");
+    var term = new window.Terminal({ cursorBlink: true, fontSize: 13, scrollback: 10000, theme: { background: "#0f1115" } });
+    var fit = new window.FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.open(el);
+    var encoder = new TextEncoder();
+    var ws = null;
+    function sendSize() {
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ cols: term.cols, rows: term.rows }));
+      }
+    }
+    function connect() {
+      again.hidden = true;
+      status.textContent = "Connecting";
+      ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + el.dataset.ws);
+      ws.binaryType = "arraybuffer";
+      ws.onopen = function () {
+        status.textContent = "";
+        document.dispatchEvent(new Event("terminal-open"));
+        fit.fit();
+        sendSize();
+        term.focus();
+      };
+      ws.onmessage = function (e) {
+        term.write(new Uint8Array(e.data));
+      };
+      ws.onclose = function (e) {
+        if (e.code === 4000) {
+          status.textContent = "The session has ended.";
+          again.hidden = false;
+          return;
+        }
+        status.textContent = "Disconnected; trying again.";
+        setTimeout(connect, 3000);
+      };
+    }
+    term.onData(function (d) {
+      if (ws && ws.readyState === 1) {
+        ws.send(encoder.encode(d));
+      }
+    });
+    term.onResize(sendSize);
+    new ResizeObserver(function () { fit.fit(); }).observe(el);
+    again.addEventListener("click", function () {
+      term.reset();
+      connect();
+    });
+    fit.fit();
+    connect();
+  })();
+  // The session's tokens, as its transcript counts them.
+  (function () {
+    var el = document.getElementById("tokens");
+    if (!el) {
+      return;
+    }
+    function read() {
+      fetch(el.dataset.url, { credentials: "same-origin", cache: "no-store" })
+        .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+        .then(function (d) { el.textContent = d.running ? "Tokens used: " + d.tokens : "No session"; })
+        .catch(function () {});
+    }
+    read();
+    document.addEventListener("terminal-open", read);
+    setInterval(read, 10000);
+  })();
   // A row's priority is saved as it is chosen; if that fails, the choice
   // goes back to what is saved and the select says why.
   document.addEventListener("change", function (e) {
