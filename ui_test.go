@@ -867,7 +867,7 @@ func TestUIAccountsJSON(t *testing.T) {
 	}
 	// The home page shows each account's use, explained on hover.
 	home := owner(t, u, "/")
-	for _, want := range []string{`id="accounts"`, "<strong>a</strong> week <span class=\"account-week\">42%</span>", "a: 42% of the week used, resets ", "450k this week"} {
+	for _, want := range []string{`id="accounts"`, "Week, all models", `aria-label="42% used"`, `width="42"`, "42% used · resets ", "a: 42% of the week used, resets ", "450k this week"} {
 		if !strings.Contains(home, want) {
 			t.Errorf("home lacks %s", want)
 		}
