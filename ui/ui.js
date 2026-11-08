@@ -345,6 +345,27 @@
       }
     });
     term.onResize(sendSize);
+    // Close session ends it, after asking; the terminal sees it end and
+    // offers a new one, which goes on the account whose week resets first.
+    var closer = document.getElementById("term-close");
+    if (closer) {
+      closer.addEventListener("click", function () {
+        if (!window.confirm("Close this session? Claude Code stops here. Start a new one afterwards; it goes on the account whose week resets first.")) {
+          return;
+        }
+        var form = new FormData();
+        form.append("token", el.dataset.token);
+        status.textContent = "Closing";
+        fetch(closer.dataset.close, { method: "POST", body: new URLSearchParams(form), credentials: "same-origin" })
+          .then(function (r) { return r.ok ? "" : r.text(); })
+          .then(function (err) {
+            if (err) {
+              status.textContent = "Not closed: " + err.trim();
+            }
+          })
+          .catch(function (e) { status.textContent = "Not closed: " + e; });
+      });
+    }
     // Images for the session: pasted or dropped on the terminal, or picked
     // with the button. agentd stores each on its machine and answers its
     // path, which is pasted into the session as a path is pasted by hand;
@@ -482,7 +503,13 @@
     function read() {
       fetch(el.dataset.url, { credentials: "same-origin", cache: "no-store" })
         .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
-        .then(function (d) { el.textContent = d.running ? "Tokens used: " + d.tokens : "No session"; })
+        .then(function (d) {
+          el.textContent = d.running ? "Tokens used: " + d.tokens : "No session";
+          var acct = document.getElementById("term-account");
+          if (acct) {
+            acct.textContent = d.account ? ", account " + d.account : "";
+          }
+        })
         .catch(function () {});
     }
     read();

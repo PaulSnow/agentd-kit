@@ -734,7 +734,7 @@ func (u *UI) serveTokens(w http.ResponseWriter, repo string) {
 	}
 	spend, running := u.sessionTokens(src.cfg, repo, workspaceClone(r, u.home))
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"tokens": tokens(spend), "running": running})
+	json.NewEncoder(w).Encode(map[string]any{"tokens": tokens(spend), "running": running, "account": u.sessionAccount(workspaceSession(repo))})
 }
 
 // workspaceRepo is a repository on the home page.
@@ -984,6 +984,10 @@ func (u *UI) serveAllConsole(w http.ResponseWriter, r *http.Request) {
 		u.serveTerminalFiles(w, r, u.sources[0].cfg, allConsoleSession)
 		return
 	}
+	if r.URL.Path == "/all/close" {
+		u.serveCloseSession(w, r, allConsoleSession)
+		return
+	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -1004,7 +1008,7 @@ func (u *UI) serveAllConsole(w http.ResponseWriter, r *http.Request) {
 	case "/all/tokens":
 		spend, running := u.namedSessionTokens(u.sources[0].cfg, allConsoleSession, u.allConsoleDir())
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"tokens": tokens(spend), "running": running})
+		json.NewEncoder(w).Encode(map[string]any{"tokens": tokens(spend), "running": running, "account": u.sessionAccount(allConsoleSession)})
 	default:
 		http.NotFound(w, r)
 	}
@@ -1019,6 +1023,31 @@ func sortWorkspaceRepos(rows []workspaceRepo) {
 		}
 		return rows[a].Repository < rows[b].Repository
 	})
+}
+
+// serveCloseSession ends the page session name, for the owner to start a
+// new one, which goes on the account placement picks then. It takes a
+// POST from the UI's own page with its token; the page's terminal sees
+// the session end and offers the new one.
+func (u *UI) serveCloseSession(w http.ResponseWriter, r *http.Request, name string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !u.checkPost(w, r) {
+		return
+	}
+	u.sessionsMu.Lock()
+	defer u.sessionsMu.Unlock()
+	if !u.sessionExists(name) {
+		http.Error(w, "no session is running", http.StatusNotFound)
+		return
+	}
+	if out, err := u.tmux("kill-session", "-t", "="+name); err != nil {
+		http.Error(w, "closing the session: "+err.Error()+": "+strings.TrimSpace(out), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // serveScreen answers the text on the session's screen now, as plain text,
@@ -1095,6 +1124,14 @@ func (u *UI) serveWorkspace(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		u.serveTerminalFiles(w, r, src.cfg, repo)
+		return
+	}
+	if rest == "close" {
+		if _, _, ok := u.workspacePick(repo); !ok {
+			http.NotFound(w, r)
+			return
+		}
+		u.serveCloseSession(w, r, workspaceSession(repo))
 		return
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {

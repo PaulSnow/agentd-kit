@@ -464,11 +464,32 @@ func TestPageSessionAccount(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(u.home, "repos", "github.com", "example-org", "widgets", ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if page := owner(t, u, "/r/widgets"); !strings.Contains(page, ", account b</span>") {
+	page := owner(t, u, "/r/widgets")
+	if !strings.Contains(page, `<span id="term-account">, account b</span>`) {
 		t.Error("the page does not say the account")
 	}
 	if u.sessionAccount("repo-none") != "" {
 		t.Error("an account for a session not running")
+	}
+	if !strings.Contains(page, `data-close="/r/widgets/close"`) {
+		t.Error("the page has no Close session")
+	}
+
+	// Close session ends it, from the UI's page with its token only.
+	if w := postTo(u, "/r/widgets/close", "http://evil.example", u.token, url.Values{}, "192.0.2.20:51000"); w.Code != http.StatusForbidden || !u.sessionExists(name) {
+		t.Errorf("another origin: %d", w.Code)
+	}
+	if w := postTo(u, "/r/widgets/close", "http://"+pageAddr, "wrong", url.Values{}, "192.0.2.20:51000"); w.Code != http.StatusForbidden || !u.sessionExists(name) {
+		t.Errorf("a wrong token: %d", w.Code)
+	}
+	if w := ownerPost(u, "/r/widgets/close", url.Values{}); w.Code != http.StatusNoContent || u.sessionExists(name) {
+		t.Errorf("close: %d %s", w.Code, w.Body.String())
+	}
+	if w := ownerPost(u, "/r/widgets/close", url.Values{}); w.Code != http.StatusNotFound {
+		t.Errorf("close again: %d", w.Code)
+	}
+	if w := ownerPost(u, "/all/close", url.Values{}); w.Code != http.StatusNotFound {
+		t.Errorf("close the console that is not running: %d", w.Code)
 	}
 }
 
