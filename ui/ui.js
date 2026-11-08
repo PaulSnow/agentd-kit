@@ -512,7 +512,8 @@
           var move = document.getElementById("term-move");
           if (move) {
             move.hidden = !d.move_to;
-            move.textContent = d.move_to ? "Needs a reset: new sessions go on " + d.move_to + ", whose week resets first. Close session and start a new one." : "";
+            move.textContent = d.move_to ? "Needs a reset → " + d.move_to : "";
+            move.title = d.move_to ? "New sessions go on " + d.move_to + ", whose week resets first. Close session and start a new one to move this one there." : "";
           }
         })
         .catch(function () {});
