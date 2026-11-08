@@ -827,6 +827,8 @@ func (u *UI) serveAllConsole(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		u.connectTerminal(w, r, allConsoleSession, dir, allConsoleCommand)
+	case "/all/screen":
+		u.serveScreen(w, r, allConsoleSession)
 	case "/all/tokens":
 		spend, running := u.namedSessionTokens(u.sources[0].cfg, allConsoleSession, u.allConsoleDir())
 		w.Header().Set("Content-Type", "application/json")
@@ -845,6 +847,29 @@ func sortWorkspaceRepos(rows []workspaceRepo) {
 		}
 		return rows[a].Repository < rows[b].Repository
 	})
+}
+
+// serveScreen answers the text on the session's screen now, as plain text,
+// for the page to show where it selects and copies as any text does: the
+// terminal's own selection belongs to Claude Code, which takes the mouse.
+// It asks the page's token, as the terminal does.
+func (u *UI) serveScreen(w http.ResponseWriter, r *http.Request, name string) {
+	if subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("token")), []byte(u.token)) != 1 {
+		http.Error(w, "refused: stale page; reload it", http.StatusForbidden)
+		return
+	}
+	if !u.sessionExists(name) {
+		http.Error(w, "no session is running", http.StatusNotFound)
+		return
+	}
+	out, err := u.tmux("capture-pane", "-p", "-J", "-t", "="+name+":")
+	if err != nil {
+		http.Error(w, "reading the screen: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	io.WriteString(w, strings.TrimRight(out, "\n")+"\n")
 }
 
 // serveTerminalFiles takes the files the owner pastes, drops or picks on a
@@ -914,6 +939,13 @@ func (u *UI) serveWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	case "tokens":
 		u.serveTokens(w, repo)
+		return
+	case "screen":
+		if _, _, ok := u.workspacePick(repo); !ok {
+			http.NotFound(w, r)
+			return
+		}
+		u.serveScreen(w, r, workspaceSession(repo))
 		return
 	case "":
 		w.Header().Set("Content-Security-Policy", workspaceCSP)
