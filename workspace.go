@@ -778,6 +778,8 @@ func (p *uiHome) AccountTitle(a AccountReport) string {
 	}
 	parts = append(parts, tokens(a.Today.Total)+" tokens today, "+tokens(a.ThisWeek.Total)+" this week")
 	switch {
+	case a.ReadAt != nil && p.Ago(*a.ReadAt) == "now":
+		parts = append(parts, "read just now")
 	case a.ReadAt != nil:
 		parts = append(parts, "read "+p.Ago(*a.ReadAt)+" ago")
 	case a.Weekly == nil:

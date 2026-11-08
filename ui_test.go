@@ -872,6 +872,14 @@ func TestUIAccountsJSON(t *testing.T) {
 			t.Errorf("home lacks %s", want)
 		}
 	}
+	if strings.Contains(home, "now ago") {
+		t.Error("home says now ago")
+	}
+	for _, want := range []string{"read "} {
+		if !strings.Contains(home, want) {
+			t.Errorf("home lacks %s", want)
+		}
+	}
 }
 
 // The page is built for a phone: a viewport meta, no fixed width over
