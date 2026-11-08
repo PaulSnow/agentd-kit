@@ -478,7 +478,7 @@ func TestPageSessionAccount(t *testing.T) {
 		t.Error("a session on the right account is said to need a reset")
 	}
 	read("a", 40, pageAt.Add(24*time.Hour))
-	if page := owner(t, u, "/r/widgets"); !strings.Contains(page, "Needs a reset: new sessions go on a, whose week resets first.") {
+	if page := owner(t, u, "/r/widgets"); !strings.Contains(page, `title="New sessions go on a, whose week resets first. Close session and start a new one to move this one there.">Needs a reset → a</span>`) {
 		t.Error("the page does not say the session needs a reset")
 	}
 	if home := owner(t, u, "/"); !strings.Contains(home, `title="Its session is on b; new sessions go on a, whose week resets first. Open it and use Close session.">reset</span>`) {
