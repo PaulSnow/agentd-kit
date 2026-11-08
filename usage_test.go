@@ -404,7 +404,7 @@ func TestUsageSteadyAccountStaysFresh(t *testing.T) {
 	if n < 3 {
 		t.Fatalf("a logged %d times in an hour, want a reading at least every %s", n, relogAfter(h.cfg.Usage))
 	}
-	if a, why, _, _ := placeAccount(h.cfg, h.logState(), "widgets", h.clock.Now(), nil); a != "a" {
+	if a, why, _, _ := placeAccount(h.cfg, h.logState(), "widgets", h.clock.Now(), nil); a != "b" {
 		t.Fatalf("placed on %q: %s", a, why)
 	}
 }
@@ -418,8 +418,49 @@ func TestPlacementNoNoticeBeforeReadings(t *testing.T) {
 	if n := placementNotices(h); len(n) != 0 {
 		t.Fatalf("notices before the readings: %q", n)
 	}
-	if acct := projected(h.cfg, h.events()).Sessions[name].Account; acct != "a" {
+	if acct := projected(h.cfg, h.events()).Sessions[name].Account; acct != "b" {
 		t.Fatalf("placed on %q", acct)
+	}
+}
+
+// Of the accounts with room, a start goes on the one whose week resets
+// first, since what it leaves unused at the reset is lost; one at the
+// limit is passed over however soon it resets, and the fallback order
+// settles a tie.
+func TestPlacementResetsFirst(t *testing.T) {
+	h, _ := usageHarness(t)
+	h.ticks(1, time.Minute)
+	st := h.logState()
+	place := func() string {
+		a, why, _, _ := placeAccount(h.cfg, st, "widgets", h.clock.Now(), nil)
+		if a == "" {
+			t.Fatalf("not placed: %s", why)
+		}
+		return a
+	}
+	a, b := st.Accounts["a"], st.Accounts["b"]
+	if a.WeeklyReset == nil || b.WeeklyReset == nil || !b.WeeklyReset.Before(*a.WeeklyReset) {
+		t.Fatalf("resets a %v, b %v", a.WeeklyReset, b.WeeklyReset)
+	}
+	if got := place(); got != "b" {
+		t.Fatalf("b resets first, placed on %s", got)
+	}
+	sooner := b.WeeklyReset.Add(-time.Hour)
+	a.WeeklyReset = &sooner
+	st.Accounts["a"] = a
+	if got := place(); got != "a" {
+		t.Fatalf("a resets first, placed on %s", got)
+	}
+	full := 95.0
+	a.Weekly = &full
+	st.Accounts["a"] = a
+	if got := place(); got != "b" {
+		t.Fatalf("a is full, placed on %s", got)
+	}
+	a.Weekly, b.WeeklyReset = b.Weekly, a.WeeklyReset
+	st.Accounts["a"], st.Accounts["b"] = a, b
+	if got := place(); got != "a" {
+		t.Fatalf("a tie, placed on %s", got)
 	}
 }
 

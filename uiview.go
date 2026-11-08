@@ -1669,11 +1669,6 @@ func (u *UI) accountReports(now time.Time) []AccountReport {
 				l.Readings[a] = append([]LedgerReading(nil), sl.Readings[a]...)
 			}
 		}
-		for a, f := range sl.Fallback {
-			if f.At.After(l.Fallback[a].At) {
-				l.Fallback[a] = f
-			}
-		}
 		if src.st.Mode == ModeLive && !src.echo {
 			l.Spends = append(l.Spends, sl.Spends...)
 		}
