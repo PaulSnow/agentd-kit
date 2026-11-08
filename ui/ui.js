@@ -509,6 +509,11 @@
           if (acct) {
             acct.textContent = d.account ? ", account " + d.account : "";
           }
+          var move = document.getElementById("term-move");
+          if (move) {
+            move.hidden = !d.move_to;
+            move.textContent = d.move_to ? "Needs a reset: new sessions go on " + d.move_to + ", whose week resets first. Close session and start a new one." : "";
+          }
         })
         .catch(function () {});
     }
