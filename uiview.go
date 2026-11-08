@@ -41,10 +41,13 @@ var uiTemplates = template.Must(template.New("ui").Funcs(template.FuncMap{
 // owner back to.
 type uiPage struct {
 	Title string
-	Token string
-	Back  string
-	Now   time.Time
-	loc   *time.Location
+	// TitleIsRepo says Title is the repository the page is about, which
+	// the top bar shows larger and in the accent colour.
+	TitleIsRepo bool
+	Token       string
+	Back        string
+	Now         time.Time
+	loc         *time.Location
 	// Static says the page does not refresh itself.
 	Static bool
 }

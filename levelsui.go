@@ -107,7 +107,7 @@ func (u *UI) levelSource(repo string, now time.Time, fn func(src *uiSource, cfg 
 func (u *UI) repoView(repo string, now time.Time) (*uiRepoPage, error) {
 	var v *uiRepoPage
 	ok, err := u.levelSource(repo, now, func(src *uiSource, cfg *Config, st *LogState, ds []UIDecision) {
-		v = &uiRepoPage{uiPage: uiPage{Title: repo, Token: u.token, Back: "/repo/" + url.PathEscape(repo), Now: now, loc: u.loc},
+		v = &uiRepoPage{uiPage: uiPage{Title: repo, TitleIsRepo: true, Token: u.token, Back: "/repo/" + url.PathEscape(repo), Now: now, loc: u.loc},
 			RepoLevel: BuildRepoLevel(cfg, st, repo, ds, now), Src: src.Name, IssueSorts: IssueSorts, RequestSorts: RequestSorts}
 		v.Shown, v.ClosedCount = len(v.Issues), closedCount(st, repo)
 	})

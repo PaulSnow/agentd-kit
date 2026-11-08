@@ -474,6 +474,9 @@ func TestPageSessionAccount(t *testing.T) {
 	if !strings.Contains(page, `data-close="/r/widgets/close"`) {
 		t.Error("the page has no Close session")
 	}
+	if !strings.Contains(page, `<span class="topbar-title topbar-repo">widgets</span>`) || strings.Contains(owner(t, u, "/"), "topbar-repo") {
+		t.Error("only the repository page shows its repository in the top bar's repository style")
+	}
 	if strings.Contains(page, "Needs a reset") || strings.Contains(owner(t, u, "/"), ">reset</span>") {
 		t.Error("a session on the right account is said to need a reset")
 	}

@@ -594,7 +594,7 @@ func (u *UI) workspaceView(repo string, now time.Time) (*uiWorkspace, error) {
 	var v *uiWorkspace
 	ok, err := u.withWorkspace(repo, func(src *uiSource, cfg *Config, st *LogState) {
 		host, _ := os.Hostname()
-		v = &uiWorkspace{uiPage: uiPage{Title: repo, Token: u.token, Back: "/r/" + url.PathEscape(repo), Now: now, loc: u.loc},
+		v = &uiWorkspace{uiPage: uiPage{Title: repo, TitleIsRepo: true, Token: u.token, Back: "/r/" + url.PathEscape(repo), Now: now, loc: u.loc},
 			Repository: repo, URL: webURL(cfg.Repositories[repo], 0, 0), Src: src.Name, Host: host,
 			Clone: workspaceClone(cfg.Repositories[repo], u.home), Rows: openRows(cfg, st, repo), ClosedCount: closedCount(st, repo),
 			Sorts: WorkspaceSorts, Reading: src.issueReads[repo], Requests: src.requests[repo]}
