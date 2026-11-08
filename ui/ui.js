@@ -414,6 +414,49 @@
         picker.value = "";
       });
     }
+    // The text on the screen, shown where it selects and copies as any
+    // text does; the terminal's own selection belongs to Claude Code.
+    var textLink = document.getElementById("term-text");
+    var pane = document.getElementById("screen-pane");
+    if (textLink && pane && el.dataset.screen) {
+      var shown = document.getElementById("screen-text");
+      var said = document.getElementById("screen-state");
+      var readScreen = function () {
+        said.textContent = "reading…";
+        fetch(el.dataset.screen + "?token=" + encodeURIComponent(el.dataset.token), { cache: "no-store" })
+          .then(function (r) { return r.text().then(function (t) { return { ok: r.ok, text: t }; }); })
+          .then(function (got) {
+            if (got.ok) {
+              shown.textContent = got.text;
+              said.textContent = "as of " + new Date().toLocaleTimeString();
+            } else {
+              said.textContent = got.text.trim();
+            }
+          })
+          .catch(function (e) { said.textContent = "not read: " + e; });
+      };
+      textLink.addEventListener("click", function () {
+        pane.hidden = false;
+        readScreen();
+        shown.focus();
+      });
+      document.getElementById("screen-refresh").addEventListener("click", readScreen);
+      document.getElementById("screen-close").addEventListener("click", function () { pane.hidden = true; term.focus(); });
+      document.getElementById("screen-copy").addEventListener("click", function () {
+        var range = document.createRange();
+        range.selectNodeContents(shown);
+        var sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        said.textContent = document.execCommand("copy") ? "copied" : "selected: copy it with the keyboard";
+      });
+      pane.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") {
+          pane.hidden = true;
+          term.focus();
+        }
+      });
+    }
     new ResizeObserver(function () { fit.fit(); }).observe(el);
     again.addEventListener("click", function () {
       term.reset();

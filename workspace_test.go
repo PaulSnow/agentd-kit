@@ -371,6 +371,24 @@ func TestTerminal(t *testing.T) {
 			seen.Write(p)
 		}
 	}
+	screen := func(token string) (int, string) {
+		resp, err := http.Get(srv.URL + "/r/widgets/screen?token=" + token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	if code, text := screen(u.token); code != http.StatusOK || !strings.Contains(text, "hello-terminal") {
+		t.Errorf("the screen: %d %q", code, text)
+	}
+	if code, _ := screen("wrong"); code != http.StatusForbidden {
+		t.Errorf("the screen with a wrong token: %d", code)
+	}
+	if !strings.Contains(owner(t, u, "/r/widgets"), `data-screen="/r/widgets/screen"`) {
+		t.Error("the page has no screen to read")
+	}
 	c.conn.Close()
 	if !u.sessionExists(name) {
 		t.Fatal("the session ended with the connection")
