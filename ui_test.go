@@ -865,6 +865,13 @@ func TestUIAccountsJSON(t *testing.T) {
 	if len(reps) != 1 || reps[0].Account != "a" || reps[0].Weekly == nil || *reps[0].Weekly != 42 || reps[0].ThisWeek.Total != 450_000 || len(reps[0].Week) != 3 {
 		t.Fatalf("reports %+v", reps)
 	}
+	// The home page shows each account's use, explained on hover.
+	home := owner(t, u, "/")
+	for _, want := range []string{`id="accounts"`, "<strong>a</strong> week <span class=\"account-week\">42%</span>", "a: 42% of the week used, resets ", "450k this week"} {
+		if !strings.Contains(home, want) {
+			t.Errorf("home lacks %s", want)
+		}
+	}
 }
 
 // The page is built for a phone: a viewport meta, no fixed width over
