@@ -192,6 +192,36 @@ func (u *UI) sessionAccount(name string) string {
 	return "default login"
 }
 
+// moveTo is the account a session on account on should move to: the one
+// a new session would go on (pick), when the session is on another; ""
+// when it is where it should be, or no account is picked. A session on
+// the default login is on the account whose config directory is the
+// default one, if any.
+func (u *UI) moveTo(on, pick string) string {
+	if on == "" || pick == "" {
+		return ""
+	}
+	if on == "default login" {
+		for name, a := range u.sources[0].cfg.Accounts {
+			if a.ConfigDir != "" && filepath.Clean(a.ConfigDir) == filepath.Join(u.home, ".claude") {
+				on = name
+			}
+		}
+	}
+	if on == pick {
+		return ""
+	}
+	return pick
+}
+
+// sessionMove is the account page session name runs on, and the account
+// it should move to, "" when none.
+func (u *UI) sessionMove(name string, now time.Time) (on, to string) {
+	on = u.sessionAccount(name)
+	pick, _ := u.pageAccount(now)
+	return on, u.moveTo(on, pick)
+}
+
 // sessionTokens is what repo's running session has used, and whether one is
 // running; its transcript may not exist until the first reply.
 func (u *UI) sessionTokens(cfg *Config, repo, dir string) (int64, bool) {
@@ -550,8 +580,8 @@ type uiWorkspace struct {
 	// session, none when no other has one.
 	Next string
 	// Account is the account the repository's session runs on, "" with
-	// none running.
-	Account string
+	// none running; MoveTo the one it should move to.
+	Account, MoveTo string
 }
 
 // TerminalURL is the page's WebSocket address, with the UI's token.
@@ -578,7 +608,7 @@ func (u *UI) workspaceView(repo string, now time.Time) (*uiWorkspace, error) {
 		repos = append(repos, name)
 	}
 	v.Next = nextRunning(repos, func(name string) bool { return running[workspaceSession(name)] }, repo)
-	v.Account = u.sessionAccount(workspaceSession(repo))
+	v.Account, v.MoveTo = u.sessionMove(workspaceSession(repo), now)
 	return v, nil
 }
 
@@ -733,8 +763,9 @@ func (u *UI) serveTokens(w http.ResponseWriter, repo string) {
 		return
 	}
 	spend, running := u.sessionTokens(src.cfg, repo, workspaceClone(r, u.home))
+	on, to := u.sessionMove(workspaceSession(repo), u.now())
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"tokens": tokens(spend), "running": running, "account": u.sessionAccount(workspaceSession(repo))})
+	json.NewEncoder(w).Encode(map[string]any{"tokens": tokens(spend), "running": running, "account": on, "move_to": to})
 }
 
 // workspaceRepo is a repository on the home page.
@@ -754,6 +785,9 @@ type workspaceRepo struct {
 	Closed                  int
 	Running                 bool
 	Tokens                  int64
+	// OnAccount is the account its running session is on, MoveTo the one
+	// it should move to, since a new session would go there.
+	OnAccount, MoveTo string
 	// Changed is the latest change on any of its issues.
 	Changed time.Time
 }
@@ -813,8 +847,8 @@ type uiHome struct {
 	// reports it.
 	Accounts []AccountReport
 	// ConsoleAccount is the account the console runs on, "" when it is
-	// not running.
-	ConsoleAccount string
+	// not running; ConsoleMoveTo the one it should move to.
+	ConsoleAccount, ConsoleMoveTo string
 }
 
 // usageBar is one of an account's limits as a bar: its label, percent
@@ -932,6 +966,7 @@ func (u *UI) homeView(now time.Time) *uiHome {
 	host, _ := os.Hostname()
 	v := &uiHome{uiPage: uiPage{Title: "Repositories", Token: u.token, Back: "/", Now: now, loc: u.loc}, Host: host, Sorts: RepoSorts}
 	running := u.runningSessions()
+	pick, _ := u.pageAccount(now)
 	u.mu.Lock()
 	about := u.about
 	u.mu.Unlock()
@@ -953,6 +988,8 @@ func (u *UI) homeView(now time.Time) *uiHome {
 		src.mu.Unlock()
 		if running[workspaceSession(repo)] {
 			row.Tokens, row.Running = u.sessionTokens(cfg, repo, workspaceClone(r, u.home))
+			row.OnAccount = u.sessionAccount(workspaceSession(repo))
+			row.MoveTo = u.moveTo(row.OnAccount, pick)
 		}
 		v.Repos = append(v.Repos, row)
 	}
@@ -960,6 +997,7 @@ func (u *UI) homeView(now time.Time) *uiHome {
 	v.ConsoleTokens, v.ConsoleRunning = u.namedSessionTokens(u.sources[0].cfg, allConsoleSession, u.allConsoleDir())
 	v.Accounts = u.accountReports(now)
 	v.ConsoleAccount = u.sessionAccount(allConsoleSession)
+	v.ConsoleMoveTo = u.moveTo(v.ConsoleAccount, pick)
 	return v
 }
 
@@ -1007,8 +1045,9 @@ func (u *UI) serveAllConsole(w http.ResponseWriter, r *http.Request) {
 		u.serveScreen(w, r, allConsoleSession)
 	case "/all/tokens":
 		spend, running := u.namedSessionTokens(u.sources[0].cfg, allConsoleSession, u.allConsoleDir())
+		on, to := u.sessionMove(allConsoleSession, u.now())
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"tokens": tokens(spend), "running": running, "account": u.sessionAccount(allConsoleSession)})
+		json.NewEncoder(w).Encode(map[string]any{"tokens": tokens(spend), "running": running, "account": on, "move_to": to})
 	default:
 		http.NotFound(w, r)
 	}

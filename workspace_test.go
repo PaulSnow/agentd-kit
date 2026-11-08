@@ -474,6 +474,30 @@ func TestPageSessionAccount(t *testing.T) {
 	if !strings.Contains(page, `data-close="/r/widgets/close"`) {
 		t.Error("the page has no Close session")
 	}
+	if strings.Contains(page, "Needs a reset") || strings.Contains(owner(t, u, "/"), ">reset</span>") {
+		t.Error("a session on the right account is said to need a reset")
+	}
+	read("a", 40, pageAt.Add(24*time.Hour))
+	if page := owner(t, u, "/r/widgets"); !strings.Contains(page, "Needs a reset: new sessions go on a, whose week resets first.") {
+		t.Error("the page does not say the session needs a reset")
+	}
+	if home := owner(t, u, "/"); !strings.Contains(home, `title="Its session is on b; new sessions go on a, whose week resets first. Open it and use Close session.">reset</span>`) {
+		t.Error("home does not mark the session that needs a reset")
+	}
+	var tok struct {
+		Account string `json:"account"`
+		MoveTo  string `json:"move_to"`
+	}
+	if err := json.Unmarshal([]byte(owner(t, u, "/r/widgets/tokens")), &tok); err != nil || tok.Account != "b" || tok.MoveTo != "a" {
+		t.Errorf("tokens %+v %v", tok, err)
+	}
+	if got := u.moveTo("default login", "a"); got != "a" {
+		t.Errorf("default login, no account on it: %q", got)
+	}
+	f.cfg.Accounts["a"] = Account{ConfigDir: filepath.Join(u.home, ".claude")}
+	if got := u.moveTo("default login", "a"); got != "" {
+		t.Errorf("default login is a's: %q", got)
+	}
 
 	// Close session ends it, from the UI's page with its token only.
 	if w := postTo(u, "/r/widgets/close", "http://evil.example", u.token, url.Values{}, "192.0.2.20:51000"); w.Code != http.StatusForbidden || !u.sessionExists(name) {
