@@ -36,6 +36,10 @@ import (
 // Claude Code session id, which finds its transcript.
 const workspaceSessionEnv = "AGENTD_SESSION"
 
+// workspaceAccountEnv names, in a page session's tmux environment, the
+// account it was started on; unset, it runs on the default login.
+const workspaceAccountEnv = "AGENTD_ACCOUNT"
+
 // defaultWorkspaceCommand starts a repository's session; {session_id} is
 // replaced. It runs under a login shell, which sets the path.
 var defaultWorkspaceCommand = []string{"bash", "-lc", `exec claude --session-id "$1"`, "agentd", "{session_id}"}
@@ -125,9 +129,19 @@ func (u *UI) ensureSession(name, dir string, command []string) error {
 	if len(u.cfg.SessionCommand) > 0 {
 		command = u.cfg.SessionCommand
 	}
-	args := []string{"new-session", "-d", "-s", name, "-c", dir, "-x", "160", "-y", "48", "-e", workspaceSessionEnv + "=" + id, "--"}
-	for _, a := range command {
-		args = append(args, strings.ReplaceAll(a, "{session_id}", id))
+	argv := make([]string, len(command))
+	for i, a := range command {
+		argv[i] = strings.ReplaceAll(a, "{session_id}", id)
+	}
+	args := []string{"new-session", "-d", "-s", name, "-c", dir, "-x", "160", "-y", "48", "-e", workspaceSessionEnv + "=" + id}
+	if account, acct := u.pageAccount(u.now()); account != "" {
+		line, err := accountLine(account, acct, shellJoin(argv))
+		if err != nil {
+			return err
+		}
+		args = append(args, "-e", workspaceAccountEnv+"="+account, "--", "sh", "-c", line)
+	} else {
+		args = append(append(args, "--"), argv...)
 	}
 	if out, err := u.tmux(args...); err != nil {
 		return fmt.Errorf("starting the session: %w: %s", err, strings.TrimSpace(out))
@@ -137,6 +151,45 @@ func (u *UI) ensureSession(name, dir string, command []string) error {
 		fmt.Fprintf(os.Stderr, "agentd ui: hiding %s's status line: %v: %s\n", name, err, strings.TrimSpace(out))
 	}
 	return nil
+}
+
+// pageAccount is the account a session the page starts goes on: of every
+// configured account, as placement picks (pickAccount), on the newest
+// readings across the sources; "" when the readings are off or none has
+// room, and the session runs on the default login.
+func (u *UI) pageAccount(now time.Time) (string, Account) {
+	cfg := u.sources[0].cfg
+	if !cfg.Usage.Enabled || len(cfg.Accounts) == 0 {
+		return "", Account{}
+	}
+	merged := NewLogState(nil, ModeLive)
+	merged.Accounts = map[string]AccountRecord{}
+	for _, src := range u.sources {
+		src.mu.Lock()
+		if err := src.catchUp(); err == nil {
+			for a, r := range src.st.Accounts {
+				if old, ok := merged.Accounts[a]; !ok || r.At.After(old.At) || r.ErrorAt.After(old.ErrorAt) && r.At.Equal(old.At) {
+					merged.Accounts[a] = r
+				}
+			}
+		}
+		src.mu.Unlock()
+	}
+	account, _, _, _ := pickAccount(cfg, merged, sortedKeys(cfg.Accounts), now, nil)
+	return account, cfg.Accounts[account]
+}
+
+// sessionAccount is the account the page session name runs on: "" when it
+// is not running, "default login" when it was started on none.
+func (u *UI) sessionAccount(name string) string {
+	if !u.sessionExists(name) {
+		return ""
+	}
+	out, err := u.tmux("show-environment", "-t", "="+name, workspaceAccountEnv)
+	if _, account, ok := strings.Cut(strings.TrimSpace(out), "="); err == nil && ok && account != "" {
+		return account
+	}
+	return "default login"
 }
 
 // sessionTokens is what repo's running session has used, and whether one is
@@ -155,7 +208,11 @@ func (u *UI) namedSessionTokens(cfg *Config, name, dir string) (int64, bool) {
 	if !ok || id == "" {
 		return 0, true
 	}
-	root := transcriptRootOf(cfg, Session{})
+	var account string
+	if out, err := u.tmux("show-environment", "-t", "="+name, workspaceAccountEnv); err == nil {
+		_, account, _ = strings.Cut(strings.TrimSpace(out), "=")
+	}
+	root := transcriptRootOf(cfg, Session{Account: account})
 	if root == "" {
 		return 0, true
 	}
@@ -492,6 +549,9 @@ type uiWorkspace struct {
 	// Next is the next repository, after this one, with a running
 	// session, none when no other has one.
 	Next string
+	// Account is the account the repository's session runs on, "" with
+	// none running.
+	Account string
 }
 
 // TerminalURL is the page's WebSocket address, with the UI's token.
@@ -518,6 +578,7 @@ func (u *UI) workspaceView(repo string, now time.Time) (*uiWorkspace, error) {
 		repos = append(repos, name)
 	}
 	v.Next = nextRunning(repos, func(name string) bool { return running[workspaceSession(name)] }, repo)
+	v.Account = u.sessionAccount(workspaceSession(repo))
 	return v, nil
 }
 
@@ -751,6 +812,9 @@ type uiHome struct {
 	// Accounts are the Claude Code accounts' usage, as /accounts.json
 	// reports it.
 	Accounts []AccountReport
+	// ConsoleAccount is the account the console runs on, "" when it is
+	// not running.
+	ConsoleAccount string
 }
 
 // usageBar is one of an account's limits as a bar: its label, percent
@@ -895,6 +959,7 @@ func (u *UI) homeView(now time.Time) *uiHome {
 	sortWorkspaceRepos(v.Repos)
 	v.ConsoleTokens, v.ConsoleRunning = u.namedSessionTokens(u.sources[0].cfg, allConsoleSession, u.allConsoleDir())
 	v.Accounts = u.accountReports(now)
+	v.ConsoleAccount = u.sessionAccount(allConsoleSession)
 	return v
 }
 

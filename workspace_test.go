@@ -419,6 +419,59 @@ func TestTerminal(t *testing.T) {
 	}
 }
 
+// A session the page starts goes on the account placement would pick of
+// every configured one, the one whose week resets first, under that
+// account's login; the page says which.
+func TestPageSessionAccount(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("no tmux")
+	}
+	f := newLevelsFixture(t)
+	dirA, dirB := t.TempDir(), t.TempDir()
+	f.cfg.Accounts = map[string]Account{"a": {ConfigDir: dirA}, "b": {ConfigDir: dirB}}
+	f.cfg.Usage.Enabled = true
+	read := func(account string, weekly float64, reset time.Time) {
+		five := 1.0
+		if err := f.log.Append(Event{V: EventVersion, Time: pageAt.Add(-time.Minute), Kind: KindAccount, Mode: ModeShared,
+			Account: &AccountPayload{Account: account, Method: UsageEndpoint, FiveHour: &five, Weekly: &weekly, WeeklyReset: &reset}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read("a", 40, pageAt.Add(96*time.Hour))
+	read("b", 5, pageAt.Add(48*time.Hour))
+	u, _ := testUI(t, UIConfig{}, f.src)
+	u.home = t.TempDir()
+	u.tmuxArgs = []string{"-L", fmt.Sprintf("agentd-test-acct-%d", time.Now().UnixNano()), "-f", "/dev/null"}
+	t.Cleanup(func() { u.tmux("kill-server") })
+	if account, _ := u.pageAccount(pageAt); account != "b" {
+		t.Fatalf("picked %q, want b, whose week resets first", account)
+	}
+	name := workspaceSession("widgets")
+	if err := u.ensureSession(name, t.TempDir(), []string{"sh", "-c", `echo "dir=$CLAUDE_CONFIG_DIR"; sleep 60`}); err != nil {
+		t.Fatal(err)
+	}
+	if got := u.sessionAccount(name); got != "b" {
+		t.Errorf("session account %q", got)
+	}
+	var screen string
+	for i := 0; i < 50 && !strings.Contains(screen, "dir="); i++ {
+		time.Sleep(20 * time.Millisecond)
+		screen, _ = u.tmux("capture-pane", "-p", "-t", "="+name+":")
+	}
+	if !strings.Contains(screen, "dir="+dirB) {
+		t.Errorf("not under b's login: %q", screen)
+	}
+	if err := os.MkdirAll(filepath.Join(u.home, "repos", "github.com", "example-org", "widgets", ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if page := owner(t, u, "/r/widgets"); !strings.Contains(page, ", account b</span>") {
+		t.Error("the page does not say the account")
+	}
+	if u.sessionAccount("repo-none") != "" {
+		t.Error("an account for a session not running")
+	}
+}
+
 // ui/xterm.js is @xterm/xterm 6.0.0's lib/xterm.js without its source map
 // line. bin/private-check passes over it for project names, so it must not
 // change without this hash changing with it.
