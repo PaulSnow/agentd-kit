@@ -872,6 +872,9 @@ func TestUIAccountsJSON(t *testing.T) {
 			t.Errorf("home lacks %s", want)
 		}
 	}
+	if strings.Contains(home, "allowance") {
+		t.Error("home names a model window the reading lacks")
+	}
 	if strings.Contains(home, "now ago") {
 		t.Error("home says now ago")
 	}

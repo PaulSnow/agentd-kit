@@ -97,7 +97,13 @@ type AccountPayload struct {
 	Weekly        *float64   `json:"weekly,omitempty"`
 	WeeklyReset   *time.Time `json:"weekly_reset,omitempty"`
 	Overage       *bool      `json:"overage,omitempty"`
-	Error         string     `json:"error,omitempty"`
+	// Model names the model the plan also limits weekly on its own, such
+	// as Fable, when the reading has that window: ModelWeekly is its
+	// percent, ModelWeeklyReset when it resets.
+	Model            string     `json:"model,omitempty"`
+	ModelWeekly      *float64   `json:"model_weekly,omitempty"`
+	ModelWeeklyReset *time.Time `json:"model_weekly_reset,omitempty"`
+	Error            string     `json:"error,omitempty"`
 }
 
 // AccountRecord is an account's latest reading as the fold keeps it: the
@@ -173,8 +179,8 @@ func (r AccountRecord) sameReading(p AccountPayload) bool {
 		return r.Error == p.Error
 	}
 	// After an error, a reading is news.
-	return r.Error == "" && !r.At.IsZero() && near(r.FiveHour, p.FiveHour) && near(r.Weekly, p.Weekly) &&
-		tm(r.FiveHourReset)+tm(r.WeeklyReset)+b(r.Overage)+r.Method == tm(p.FiveHourReset)+tm(p.WeeklyReset)+b(p.Overage)+p.Method
+	return r.Error == "" && !r.At.IsZero() && near(r.FiveHour, p.FiveHour) && near(r.Weekly, p.Weekly) && near(r.ModelWeekly, p.ModelWeekly) &&
+		tm(r.FiveHourReset)+tm(r.WeeklyReset)+tm(r.ModelWeeklyReset)+b(r.Overage)+r.Method+"/"+r.Model == tm(p.FiveHourReset)+tm(p.WeeklyReset)+tm(p.ModelWeeklyReset)+b(p.Overage)+p.Method+"/"+p.Model
 }
 
 // errNoUsageScope is the endpoint refusing the token: a token without
@@ -335,6 +341,8 @@ type usageWindow struct {
 // window is also read from the limits list (group weekly, kind
 // weekly_all) when seven_day has none. Only when neither window can be
 // read does it fail, naming the answer's top-level keys, never values.
+// A weekly window scoped to a model (kind weekly_scoped) is the model's
+// own: its display name, percent and reset.
 func readEndpointAnswer(body []byte, p *AccountPayload) error {
 	var doc struct {
 		FiveHour   *usageWindow `json:"five_hour"`
@@ -347,6 +355,11 @@ func readEndpointAnswer(body []byte, p *AccountPayload) error {
 			Group    string      `json:"group"`
 			Percent  usageNumber `json:"percent"`
 			ResetsAt *string     `json:"resets_at"`
+			Scope    *struct {
+				Model *struct {
+					DisplayName string `json:"display_name"`
+				} `json:"model"`
+			} `json:"scope"`
 		} `json:"limits"`
 	}
 	if err := json.Unmarshal(body, &doc); err != nil {
@@ -372,6 +385,9 @@ func readEndpointAnswer(body []byte, p *AccountPayload) error {
 	for _, l := range doc.Limits {
 		if p.Weekly == nil && l.Kind == "weekly_all" && l.Percent.v != nil {
 			p.Weekly, p.WeeklyReset = l.Percent.v, reset(l.ResetsAt)
+		}
+		if p.ModelWeekly == nil && l.Kind == "weekly_scoped" && l.Percent.v != nil && l.Scope != nil && l.Scope.Model != nil && l.Scope.Model.DisplayName != "" {
+			p.Model, p.ModelWeekly, p.ModelWeeklyReset = l.Scope.Model.DisplayName, l.Percent.v, reset(l.ResetsAt)
 		}
 	}
 	if doc.ExtraUsage != nil {
@@ -444,6 +460,21 @@ func (u planReader) headers(tok string, p *AccountPayload) error {
 	const pre = "anthropic-ratelimit-unified-"
 	p.FiveHour, p.FiveHourReset = pct(pre+"5h-utilization"), at(pre+"5h-reset")
 	p.Weekly, p.WeeklyReset = pct(pre+"7d-utilization"), at(pre+"7d-reset")
+	// A seven-day window of its own (7d_NAME) is the limit on the model
+	// the request was made with, which the plan limits apart.
+	var scoped []string
+	for k := range h {
+		if k = strings.ToLower(k); strings.HasPrefix(k, pre+"7d_") && strings.HasSuffix(k, "-utilization") {
+			scoped = append(scoped, strings.TrimSuffix(k, "-utilization"))
+		}
+	}
+	sort.Strings(scoped)
+	for _, w := range scoped {
+		if v := pct(w + "-utilization"); v != nil {
+			p.Model, p.ModelWeekly, p.ModelWeeklyReset = modelName(u.cfg.Model), v, at(w+"-reset")
+			break
+		}
+	}
 	if o := h.Get(pre + "overage-status"); o != "" {
 		on := o != "rejected" && o != "disabled"
 		p.Overage = &on
@@ -469,6 +500,16 @@ func (u planReader) headers(tok string, p *AccountPayload) error {
 	}
 	idleWindow(p)
 	return nil
+}
+
+// modelName is a model id as people name the model: claude-fable-5-1 is
+// Fable.
+func modelName(id string) string {
+	parts := strings.Split(id, "-")
+	if len(parts) < 2 || parts[0] != "claude" || parts[1] == "" {
+		return id
+	}
+	return strings.ToUpper(parts[1][:1]) + parts[1][1:]
 }
 
 // readAccounts reads each account whose reading is due, in a worker of
@@ -573,6 +614,9 @@ func usageText(p AccountPayload) string {
 		return s
 	}
 	s := part("5h", p.FiveHour, p.FiveHourReset) + ", " + part("weekly", p.Weekly, p.WeeklyReset)
+	if p.ModelWeekly != nil {
+		s += ", " + part(p.Model+" weekly", p.ModelWeekly, p.ModelWeeklyReset)
+	}
 	if p.Overage != nil {
 		if *p.Overage {
 			s += ", overage on"
