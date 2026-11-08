@@ -71,6 +71,7 @@ h4 { font-size: var(--size-s); color: var(--muted); margin: var(--space-3) 0 var
 .topbar { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-3); padding: var(--space-3) var(--space-4); background: var(--surface); border-bottom: 1px solid var(--line); }
 .brand { font-weight: 700; font-size: var(--size-l); text-decoration: none; color: var(--text); }
 .topbar-title { color: var(--muted); }
+.topbar-repo { color: var(--accent); font-size: var(--size-xl); font-weight: 700; }
 .crumbs { margin: 0 0 var(--space-3); font-size: var(--size-s); }
 .foot { max-width: 60rem; margin: 0 auto; padding: var(--space-4); font-size: var(--size-s); }
 

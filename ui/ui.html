@@ -8,7 +8,7 @@
 <script src="/ui.js" defer></script>
 </head>
 <body>
-<header class="topbar"><a class="brand" href="/">agentd</a><span class="topbar-title">{{.Title}}</span></header>
+<header class="topbar"><a class="brand" href="/">agentd</a><span class="topbar-title{{if .TitleIsRepo}} topbar-repo{{end}}">{{.Title}}</span></header>
 <main>
 {{end}}
 
