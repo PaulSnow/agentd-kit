@@ -747,6 +747,49 @@ type uiHome struct {
 	// ConsoleRunning and ConsoleTokens are the console's session.
 	ConsoleRunning bool
 	ConsoleTokens  int64
+	// Accounts are the Claude Code accounts' usage, as /accounts.json
+	// reports it.
+	Accounts []AccountReport
+}
+
+// AccountTitle explains an account's usage, for its hover.
+func (p *uiHome) AccountTitle(a AccountReport) string {
+	var parts []string
+	if a.Weekly != nil {
+		s := fmt.Sprintf("%.0f%% of the week used", *a.Weekly)
+		if a.WeeklyReset != nil {
+			s += ", resets " + p.When(*a.WeeklyReset)
+		}
+		parts = append(parts, s)
+	}
+	if a.FiveHour != nil {
+		s := fmt.Sprintf("%.0f%% of the 5-hour window used", *a.FiveHour)
+		if a.FiveHourReset != nil {
+			s += ", resets " + p.When(*a.FiveHourReset)
+		}
+		parts = append(parts, s)
+	}
+	if a.Projected != nil {
+		s := fmt.Sprintf("on pace for %.0f%% of the week at the reset", *a.Projected)
+		if a.Limit > 0 {
+			s += fmt.Sprintf(" (limit %.0f%%)", a.Limit)
+		}
+		parts = append(parts, s)
+	}
+	parts = append(parts, tokens(a.Today.Total)+" tokens today, "+tokens(a.ThisWeek.Total)+" this week")
+	switch {
+	case a.ReadAt != nil:
+		parts = append(parts, "read "+p.Ago(*a.ReadAt)+" ago")
+	case a.Weekly == nil:
+		parts = append(parts, "not read yet")
+	}
+	if a.Stale {
+		parts = append(parts, "the reading is stale")
+	}
+	if a.Error != "" {
+		parts = append(parts, "last read failed: "+a.Error)
+	}
+	return a.Account + ": " + strings.Join(parts, "; ")
 }
 
 // TokenText is n tokens as the page shows them.
@@ -788,6 +831,7 @@ func (u *UI) homeView(now time.Time) *uiHome {
 	}
 	sortWorkspaceRepos(v.Repos)
 	v.ConsoleTokens, v.ConsoleRunning = u.namedSessionTokens(u.sources[0].cfg, allConsoleSession, u.allConsoleDir())
+	v.Accounts = u.accountReports(now)
 	return v
 }
 
