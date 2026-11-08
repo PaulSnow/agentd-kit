@@ -555,23 +555,27 @@ func (s *Supervisor) readAccounts(now time.Time) {
 	}
 }
 
-// placeAccount picks the account for a start in repo: of its fallback
-// accounts with room, the one whose week resets first, since what it
-// leaves unused at the reset is lost; the fallback order settles a tie,
-// and an account without a reset comes after those with one. An account
-// has room when its reading is fresh and under the limit, or its usage
-// is off. Every fallback account must have been read by this run first,
-// as tried says (nil: all have been), since a placement holds for good.
-// With none with room, one whose readings have been failing for over an
-// hour is used blind; else it answers why it waits, and full when every
-// account was read and is at or over the limit.
+// placeAccount picks the account for a start in repo, of its policy's
+// fallback accounts, as pickAccount does.
 func placeAccount(cfg *Config, st *LogState, repo string, now time.Time, tried func(string) bool) (account, why string, full bool, blind string) {
 	rules, _ := effectivePolicy(cfg, st, repo)
-	u := cfg.Usage
-	fallback := rules.Sessions.Fallback
-	if len(fallback) == 0 {
+	if len(rules.Sessions.Fallback) == 0 {
 		return "", "the repository's policy has no sessions.fallback", false, ""
 	}
+	return pickAccount(cfg, st, rules.Sessions.Fallback, now, tried)
+}
+
+// pickAccount picks, of fallback's accounts with room, the one whose week
+// resets first, since what it leaves unused at the reset is lost; the
+// order settles a tie, and an account without a reset comes after those
+// with one. An account has room when its reading is fresh and under the
+// limit, or its usage is off. Every account must have been read by this
+// run first, as tried says (nil: all have been), since a placement holds
+// for good. With none with room, one whose readings have been failing for
+// over an hour is used blind; else it answers why it waits, and full when
+// every account was read and is at or over the limit.
+func pickAccount(cfg *Config, st *LogState, fallback []string, now time.Time, tried func(string) bool) (account, why string, full bool, blind string) {
+	u := cfg.Usage
 	if !u.Enabled {
 		return fallback[0], "", false, ""
 	}
