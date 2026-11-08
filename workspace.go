@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -750,6 +751,59 @@ type uiHome struct {
 	// Accounts are the Claude Code accounts' usage, as /accounts.json
 	// reports it.
 	Accounts []AccountReport
+}
+
+// usageBar is one of an account's limits as a bar: its label, percent
+// used, the bar's fill out of 100, its colour class and when it resets.
+type usageBar struct {
+	Label string
+	Pct   float64
+	Fill  int
+	Class string
+	Reset string
+}
+
+// AccountBars are an account's limits as bars: the five-hour session, the
+// week for all models, and the week for a model the plan limits apart.
+func (p *uiHome) AccountBars(a AccountReport) []usageBar {
+	var bars []usageBar
+	add := func(label string, v *float64, reset *time.Time) {
+		if v == nil {
+			return
+		}
+		b := usageBar{Label: label, Pct: *v, Fill: int(math.Round(math.Min(math.Max(*v, 0), 100))), Class: "bar-ok"}
+		switch {
+		case *v >= 90:
+			b.Class = "bar-full"
+		case *v >= 75:
+			b.Class = "bar-high"
+		}
+		if reset != nil {
+			b.Reset = p.resetText(*reset)
+		}
+		bars = append(bars, b)
+	}
+	add("Current session", a.FiveHour, a.FiveHourReset)
+	add("Week, all models", a.Weekly, a.WeeklyReset)
+	if a.Model != "" {
+		add("Week, "+a.Model, a.ModelWeekly, a.ModelWeeklyReset)
+	}
+	return bars
+}
+
+// resetText says when a limit resets: in hours and minutes within a day,
+// else the day and time.
+func (p *uiHome) resetText(t time.Time) string {
+	d := t.Sub(p.Now)
+	switch {
+	case d <= 0:
+		return "resets now"
+	case d < time.Hour:
+		return fmt.Sprintf("resets in %d min", int(d/time.Minute))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("resets in %d hr %d min", int(d/time.Hour), int(d%time.Hour/time.Minute))
+	}
+	return "resets " + t.In(p.loc).Format("Mon 15:04")
 }
 
 // AccountTitle explains an account's usage, for its hover.
