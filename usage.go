@@ -555,26 +555,36 @@ func (s *Supervisor) readAccounts(now time.Time) {
 	}
 }
 
-// placeAccount is the account a started session of repo goes on: the
-// first of the repository's sessions.fallback whose latest reading is
-// fresh and under the limit on both windows, or, with the readings off,
-// the first; an account whose usage is off counts as having room once
-// every account before it is known to have none. Tried says whether this
-// run has read an account yet (nil: all have been): an earlier account
-// not yet tried is waited for, never passed over for a later one, since
-// a placement holds for good. When no account is chosen, it is "" and why
-// says each account's state; full says every account was read and is at
-// or over the limit, rather than unread. An account whose readings have
-// failed for over usageReadingDown, with no fresh numbers, counts as
-// having room (#80): blind then says it is placed on without a reading.
+// placeAccount picks the account for a start in repo: of its fallback
+// accounts with room, the one whose week resets first, since what it
+// leaves unused at the reset is lost; the fallback order settles a tie,
+// and an account without a reset comes after those with one. An account
+// has room when its reading is fresh and under the limit, or its usage
+// is off. Every fallback account must have been read by this run first,
+// as tried says (nil: all have been), since a placement holds for good.
+// With none with room, one whose readings have been failing for over an
+// hour is used blind; else it answers why it waits, and full when every
+// account was read and is at or over the limit.
 func placeAccount(cfg *Config, st *LogState, repo string, now time.Time, tried func(string) bool) (account, why string, full bool, blind string) {
 	rules, _ := effectivePolicy(cfg, st, repo)
 	u := cfg.Usage
+	fallback := rules.Sessions.Fallback
+	if len(fallback) == 0 {
+		return "", "the repository's policy has no sessions.fallback", false, ""
+	}
+	if !u.Enabled {
+		return fallback[0], "", false, ""
+	}
 	var states []string
-	full = len(rules.Sessions.Fallback) > 0
-	for _, a := range rules.Sessions.Fallback {
-		if !u.Enabled || cfg.Accounts[a].Usage == UsageOff {
-			return a, "", false, ""
+	var blindWhy string
+	var reset *time.Time
+	full = true
+	for _, a := range fallback {
+		if cfg.Accounts[a].Usage == UsageOff {
+			if account == "" {
+				account = a
+			}
+			continue
 		}
 		if tried != nil && !tried(a) {
 			return "", strings.Join(append(states, a+": not read yet by this run"), "; "), false, ""
@@ -584,19 +594,27 @@ func placeAccount(cfg *Config, st *LogState, repo string, now time.Time, tried f
 		fresh := both && now.Sub(r.At) <= usageStale*u.Every.Duration
 		switch {
 		case !fresh && r.readingDown(now):
-			return a, "", false, fmt.Sprintf("placed on %s without a reading: its usage readings have failed since %s", a, r.FailingSince.UTC().Format(time.RFC3339))
+			if blind == "" {
+				blind, blindWhy = a, fmt.Sprintf("placed on %s without a reading: its usage readings have failed since %s", a, r.FailingSince.UTC().Format(time.RFC3339))
+			}
+			full = false
 		case !ok || !both:
 			states, full = append(states, a+": no reading yet"), false
 		case now.Sub(r.At) > usageStale*u.Every.Duration:
 			states, full = append(states, fmt.Sprintf("%s: no reading since %s", a, r.At.UTC().Format(time.RFC3339))), false
 		case high >= u.Limit:
 			states = append(states, fmt.Sprintf("%s: %s", a, usageText(r.AccountPayload)))
-		default:
-			return a, "", false, ""
+		case r.WeeklyReset != nil && (account == "" || reset == nil || r.WeeklyReset.Before(*reset)):
+			account, reset = a, r.WeeklyReset
+		case account == "":
+			account = a
 		}
 	}
-	if len(states) == 0 {
-		return "", "the repository's policy has no sessions.fallback", false, ""
+	switch {
+	case account != "":
+		return account, "", false, ""
+	case blind != "":
+		return blind, "", false, blindWhy
 	}
 	return "", strings.Join(states, "; "), full, ""
 }
@@ -669,10 +687,10 @@ func (s *Supervisor) place(name string, t *Track, now time.Time) {
 		waited := now.Sub(from)
 		switch {
 		case full:
-			s.escalate(name, key, fmt.Sprintf("%s, started for branch %s of %s, waits for an account: every account of its fallback is at or over %.0f%% (%s). It starts on the first with room.",
+			s.escalate(name, key, fmt.Sprintf("%s, started for branch %s of %s, waits for an account: every account of its fallback is at or over %.0f%% (%s). It starts once one has room.",
 				name, p.Branch, p.Repository, s.cfg.Usage.Limit, why), t, now)
 		case !since.IsZero() && waited >= usageStale*s.cfg.Usage.Every.Duration:
-			s.escalate(name, key, fmt.Sprintf("%s, started for branch %s of %s, has waited %s for an account: %s. It starts on the first fallback account with room once it is read.",
+			s.escalate(name, key, fmt.Sprintf("%s, started for branch %s of %s, has waited %s for an account: %s. It is placed once every fallback account is read.",
 				name, p.Branch, p.Repository, waited.Round(time.Minute), why), t, now)
 		}
 		return

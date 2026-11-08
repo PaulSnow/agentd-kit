@@ -150,7 +150,8 @@ type ScopeRules struct {
 
 // SessionRules are what the repository's started sessions may use:
 // Accounts, Models, at most Max at once, Budget caps on each and on all
-// of them, and a Fallback order of accounts (#39 acts on it). WorkModel
+// of them, and the Fallback accounts placement chooses among (#39): the
+// one whose week resets first, their order settling a tie. WorkModel
 // is the model its work sessions run, over policies.models (#52). With no
 // Accounts, its sessions run under the default login.
 type SessionRules struct {
