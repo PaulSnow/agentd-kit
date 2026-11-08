@@ -269,6 +269,11 @@ type AccountReport struct {
 	FiveHourReset *time.Time `json:"five_hour_reset,omitempty"`
 	Weekly        *float64   `json:"weekly,omitempty"`
 	WeeklyReset   *time.Time `json:"weekly_reset,omitempty"`
+	// Model, ModelWeekly and ModelWeeklyReset are the weekly window the
+	// plan keeps for one model, such as Fable, when the reading has one.
+	Model            string     `json:"model,omitempty"`
+	ModelWeekly      *float64   `json:"model_weekly,omitempty"`
+	ModelWeeklyReset *time.Time `json:"model_weekly_reset,omitempty"`
 	// Week is the weekly percent over the current week, oldest first; a
 	// point without a value is a gap.
 	Week     []WeekPoint `json:"week"`
@@ -364,6 +369,7 @@ func accountReport(cfg *Config, st *LogState, l *AccountLedger, account string, 
 			at := r.At
 			rep.ReadAt = &at
 			rep.FiveHour, rep.FiveHourReset, rep.Weekly, rep.WeeklyReset = r.FiveHour, r.FiveHourReset, r.Weekly, r.WeeklyReset
+			rep.Model, rep.ModelWeekly, rep.ModelWeeklyReset = r.Model, r.ModelWeekly, r.ModelWeeklyReset
 		}
 		rep.Stale = r.At.IsZero() || now.Sub(r.At) > stale
 		if r.ErrorAt.After(r.At) && !confidentialMatcher(cfg)(r.Error) {

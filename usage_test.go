@@ -604,15 +604,15 @@ func readRecorded(t *testing.T, file, method string) AccountPayload {
 	return newPlanReader(cfg.Usage, 5*time.Second).read("a", a)
 }
 
-// The usage endpoint's answer of 2026-11-01 is read: its five-hour window
-// is null while nothing was used in it, which is 0% with no reset, not a
-// failure.
+// The usage endpoint's answer of 2026-11-01 is read, with its Fable
+// window: its five-hour window is null while nothing was used in it,
+// which is 0% with no reset, not a failure.
 func TestUsageEndpointCurrentAnswer(t *testing.T) {
 	p := readRecorded(t, "endpoint-2026-11-01.json", UsageEndpoint)
 	if p.Error != "" {
 		t.Fatalf("error %q", p.Error)
 	}
-	if got := usageText(p); got != "5h 0%, weekly 20% until 2026-11-07 04:59Z, overage off" {
+	if got := usageText(p); got != "5h 0%, weekly 20% until 2026-11-07 04:59Z, Fable weekly 27% until 2026-11-07 04:59Z, overage off" {
 		t.Fatalf("reading %q", got)
 	}
 	if p.FiveHourReset != nil || p.WeeklyReset == nil || p.WeeklyReset.Unix() != time.Date(2026, 11, 7, 4, 59, 59, 0, time.UTC).Unix() {
@@ -639,7 +639,8 @@ func TestUsageEndpointShapes(t *testing.T) {
 	for body, want := range map[string]string{
 		`{"five_hour":{"utilization":"33.5","resets_at":"2026-11-01T20:00:00Z"},"seven_day":null}`:                            "5h 34% until 2026-11-01 20:00Z, weekly 0%",
 		`{"five_hour":null,"seven_day":null,"limits":[{"kind":"weekly_all","group":"weekly","percent":41,"resets_at":null}]}`: "5h 0%, weekly 41%",
-		`{"five_hour":null,"seven_day":null,"secret_field":"value-not-shown"}`:                                                "error: usage endpoint: the answer has no five-hour or weekly utilization; its keys: five_hour, secret_field, seven_day",
+		`{"five_hour":null,"seven_day":{"utilization":37,"resets_at":null},"limits":[{"kind":"weekly_all","group":"weekly","percent":37},{"kind":"weekly_scoped","group":"weekly","percent":57,"resets_at":"2026-11-14T04:59:59Z","scope":{"model":{"id":null,"display_name":"Fable"},"surface":null}}]}`: "5h 0%, weekly 37%, Fable weekly 57% until 2026-11-14 04:59Z",
+		`{"five_hour":null,"seven_day":null,"secret_field":"value-not-shown"}`: "error: usage endpoint: the answer has no five-hour or weekly utilization; its keys: five_hour, secret_field, seven_day",
 	} {
 		var p AccountPayload
 		got := ""
@@ -651,6 +652,38 @@ func TestUsageEndpointShapes(t *testing.T) {
 		if got != want {
 			t.Errorf("%s:\n got %q\nwant %q", body, got, want)
 		}
+	}
+}
+
+// A messages answer with a seven-day window of its own beside the plain
+// one has the limit on the request's model: read with Fable, it is
+// Fable's.
+func TestUsageHeadersModelWindow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("anthropic-ratelimit-unified-7d-utilization", "0.37")
+		h.Set("anthropic-ratelimit-unified-7d-reset", "1794632400")
+		h.Set("anthropic-ratelimit-unified-7d_oi-utilization", "0.56")
+		h.Set("anthropic-ratelimit-unified-7d_oi-reset", "1794632400")
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	cfg := DefaultConfig()
+	cfg.Usage.API = srv.URL
+	cfg.Usage.Model = "claude-fable-5-1"
+	a := usageAccounts(t, t.TempDir())["a"]
+	a.Usage = UsageHeaders
+	p := newPlanReader(cfg.Usage, 5*time.Second).read("a", a)
+	if got := usageText(p); got != "5h 0%, weekly 37% until 2026-11-14 05:00Z, Fable weekly 56% until 2026-11-14 05:00Z" {
+		t.Fatalf("reading %q (%s)", got, p.Error)
+	}
+	var r AccountRecord
+	r.AccountPayload, r.At = p, time.Now()
+	q := p
+	v := 70.0
+	q.ModelWeekly = &v
+	if r.sameReading(p) != true || r.sameReading(q) != false {
+		t.Error("a change in the model's window is not news")
 	}
 }
 

@@ -762,6 +762,13 @@ func (p *uiHome) AccountTitle(a AccountReport) string {
 		}
 		parts = append(parts, s)
 	}
+	if a.ModelWeekly != nil {
+		s := fmt.Sprintf("%.0f%% of the week's %s allowance used", *a.ModelWeekly, a.Model)
+		if a.ModelWeeklyReset != nil {
+			s += ", resets " + p.When(*a.ModelWeeklyReset)
+		}
+		parts = append(parts, s)
+	}
 	if a.FiveHour != nil {
 		s := fmt.Sprintf("%.0f%% of the 5-hour window used", *a.FiveHour)
 		if a.FiveHourReset != nil {
