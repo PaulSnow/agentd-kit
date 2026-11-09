@@ -41,6 +41,12 @@ type HubConfig struct {
 	Address     string   `json:"address"`
 	SilentAfter Duration `json:"silent_after"`
 	RetryAfter  Duration `json:"retry_after"`
+	// Errands (#95): Inbox is where documents from nodes land, Spool
+	// where documents for nodes wait, Socket where agentd send and agentd
+	// prompt reach the hub on its machine.
+	Inbox  string `json:"inbox,omitempty"`
+	Spool  string `json:"spool,omitempty"`
+	Socket string `json:"socket,omitempty"`
 }
 
 // HostConfig is a machine a node runs on. TokenFile holds the token that
@@ -83,6 +89,12 @@ type NodeConfig struct {
 	// MoreRoots are other roots laid out as ReposRoot is, such as
 	// ~/go/src, scanned for the same repositories.
 	MoreRoots []string `json:"more_roots,omitempty"`
+	// Errands lets the hub hand this node documents and prompts (#95),
+	// observe or not. Documents land in Inbox; a prompt runs Prompt
+	// (default DefaultPromptCommand), the model and text after it.
+	Errands bool     `json:"errands,omitempty"`
+	Inbox   string   `json:"inbox,omitempty"`
+	Prompt  []string `json:"prompt,omitempty"`
 }
 
 // Hub and node defaults.
@@ -424,6 +436,8 @@ type Hub struct {
 	// places are the log's started sessions on hosts, read to off.
 	places *placements
 	off    int64
+	// errands are the documents and prompts waiting for nodes (#95).
+	errands *errandQueue
 }
 
 // NewHub is a hub over log, which already holds events. Its address must
@@ -458,7 +472,11 @@ func NewHub(cfg *Config, log *Log, events []Event, now func() time.Time) (*Hub, 
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
 	}
-	h := &Hub{cfg: cfg, log: log, now: now, tokens: tokens, nodes: foldNodes(events), places: newPlacements(cfg)}
+	errands, err := newErrandQueue(hubSpool(cfg), now)
+	if err != nil {
+		return nil, err
+	}
+	h := &Hub{cfg: cfg, log: log, now: now, tokens: tokens, nodes: foldNodes(events), places: newPlacements(cfg), errands: errands}
 	if err := h.refresh(); err != nil {
 		return nil, err
 	}
@@ -496,17 +514,21 @@ func (h *Hub) host(r *http.Request) string {
 }
 
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != nodeReportPath {
+	p := r.URL.Path
+	if p != nodeReportPath && p != errandWaitPath && p != uploadPath && !strings.HasPrefix(p, errandPrefix) {
 		http.NotFound(w, r)
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
 	host := h.host(r)
 	if host == "" {
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		return
+	}
+	if h.serveErrands(w, r, host) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
 	b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, nodeBodyMax))
@@ -851,6 +873,11 @@ type Node struct {
 	// claude lists the working directories of the Claude Code processes
 	// on the machine, nil to report none.
 	claude func() ([]string, error)
+	// open, notify and prompt do errands (#95): open a saved document,
+	// show a notification, run a prompt. open and notify nil do nothing.
+	open   func(path string) error
+	notify func(title, body string) error
+	prompt func(ctx context.Context, dir string, argv []string, timeout time.Duration) (int, string, error)
 
 	known   bool          // acked is the hub's: no post since has failed
 	held    string        // the hash of the latest whole report the hub holds
@@ -863,7 +890,7 @@ type Node struct {
 
 // NewNode is a node reporting to cfg.Hub with token.
 func NewNode(cfg NodeConfig, token string, git NodeGit, tmux Tmux, client *http.Client, now func() time.Time) *Node {
-	return &Node{cfg: cfg, token: token, git: git, tmux: tmux, client: client, now: now, run: execStep}
+	return &Node{cfg: cfg, token: token, git: git, tmux: tmux, client: client, now: now, run: execStep, prompt: execPrompt}
 }
 
 // Tick reports what the node watches and does the commands the hub
@@ -1360,6 +1387,14 @@ func (c *Config) checkNodeConfig(path func(field, p string) string, errs *[]erro
 	}
 	c.checkPlacement(errs)
 	n.TokenFile = path("node.token_file", n.TokenFile)
+	if n.Inbox != "" {
+		n.Inbox = path("node.inbox", n.Inbox)
+	}
+	for field, p := range map[string]*string{"hub.inbox": &c.Hub.Inbox, "hub.spool": &c.Hub.Spool, "hub.socket": &c.Hub.Socket} {
+		if *p != "" {
+			*p = path(field, *p)
+		}
+	}
 	n.ReposRoot = path("node.repos_root", n.ReposRoot)
 	for i, r := range n.MoreRoots {
 		n.MoreRoots[i] = path(fmt.Sprintf("node.more_roots[%d]", i), r)
@@ -1406,15 +1441,27 @@ func hubCmd(args []string) error {
 		return err
 	}
 	srv := &http.Server{Addr: cfg.Hub.Address, Handler: hub, ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout: time.Minute, WriteTimeout: time.Minute}
+		ReadTimeout: 10 * time.Minute, WriteTimeout: 10 * time.Minute}
+	ln, err := net.Listen("tcp", cfg.Hub.Address)
+	if err != nil {
+		return err
+	}
+	sock, err := listenLocal(hubSocket(cfg))
+	if err != nil {
+		ln.Close()
+		return err
+	}
+	local := &http.Server{Handler: hub.localHandler(), ReadHeaderTimeout: 10 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {
 		<-ctx.Done()
 		srv.Shutdown(context.Background())
+		local.Close()
 	}()
+	go local.Serve(sock)
 	fmt.Fprintf(os.Stderr, "agentd hub: serving %d hosts on %s\n", len(cfg.Hosts), cfg.Hub.Address)
-	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
@@ -1428,20 +1475,19 @@ func nodeCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	nc := cfg.Node
-	if nc.Name == "" || nc.Hub == "" {
-		return errors.New("node.name and node.hub must be set")
-	}
-	tok, err := readToken(nc.TokenFile)
+	n, err := nodeFromConfig(cfg)
 	if err != nil {
-		return fmt.Errorf("node.token_file: %w", err)
+		return err
 	}
-	n := NewNode(nc, string(tok), ExecNodeGit{Timeout: cfg.Timeouts.Forge.Duration, CloneTimeout: nc.CloneTimeout.Duration},
-		ExecTmux{Timeout: cfg.Timeouts.Tmux.Duration}, &http.Client{Timeout: time.Minute}, time.Now)
+	nc := cfg.Node
 	n.width, n.height = cfg.Policies.Restart.Width, cfg.Policies.Restart.Height
 	n.claude = procClaude
+	n.open, n.notify = openDetached, desktopNotify
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if !*once {
+		go n.errandLoop(ctx)
+	}
 	for {
 		if err := n.Tick(ctx); err != nil {
 			if *once {
@@ -1457,6 +1503,20 @@ func nodeCmd(args []string) error {
 		case <-time.After(nc.Every.Duration):
 		}
 	}
+}
+
+// nodeFromConfig is this machine's node, as cfg.node has it.
+func nodeFromConfig(cfg *Config) (*Node, error) {
+	nc := cfg.Node
+	if nc.Name == "" || nc.Hub == "" {
+		return nil, errors.New("node.name and node.hub must be set")
+	}
+	tok, err := readToken(nc.TokenFile)
+	if err != nil {
+		return nil, fmt.Errorf("node.token_file: %w", err)
+	}
+	return NewNode(nc, string(tok), ExecNodeGit{Timeout: cfg.Timeouts.Forge.Duration, CloneTimeout: nc.CloneTimeout.Duration},
+		ExecTmux{Timeout: cfg.Timeouts.Tmux.Duration}, &http.Client{Timeout: time.Minute}, time.Now), nil
 }
 
 // nodesCmd prints every host's state from the hub's log.
