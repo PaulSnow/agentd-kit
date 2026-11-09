@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -39,14 +40,24 @@ import (
 
 const (
 	errandWaitPath = "/v1/errand"  // GET: the next errand, held open up to errandWaitMax
-	errandPrefix   = "/v1/errand/" // GET ID/file: a document's bytes; POST ID/done: how it ended
+	errandPrefix   = "/v1/errand/" // GET ID/file: a document's bytes; POST ID/start: a prompt begins; POST ID/done: how it ended
 	uploadPath     = "/v1/upload"  // POST ?name=N: a document for the hub's inbox
 	errandWaitMax  = 40 * time.Second
 	// errandFileMax bounds one document.
 	errandFileMax = 200 << 20
-	// errandLease is how long a document a node fetched may go undone
-	// before it is offered again.
+	// errandLease is how long a document a node began fetching may go
+	// undone before it is offered again.
 	errandLease = 10 * time.Minute
+	// errandClaim is how long an errand handed to a node may go without
+	// the node beginning it (fetching the document, starting the prompt)
+	// before it is offered again: the answer may have gone into a
+	// connection that died, as when a laptop sleeps.
+	errandClaim = time.Minute
+	// errandTries is how many failed fetches drop a document.
+	errandTries = 3
+	// errandTransferMax bounds one document's transfer, past the hub's
+	// usual timeouts.
+	errandTransferMax = 2 * time.Hour
 	// DefaultPromptTimeout bounds a prompt nobody gave a timeout.
 	DefaultPromptTimeout = 30 * time.Minute
 	// DefaultInbox is where documents land, on either side.
@@ -102,10 +113,13 @@ type ErrandDone struct {
 // pendingErrand is an errand the hub holds for a host.
 type pendingErrand struct {
 	Errand
-	host  string
-	data  string    // a document's bytes, in the spool
-	taken time.Time // when a node fetched it; zero until then
-	done  chan ErrandDone
+	host string
+	data string // a document's bytes, in the spool
+	// taken is when it was handed to a node, started when the node began
+	// it; zero until then. tries counts a document's failed fetches.
+	taken, started time.Time
+	tries          int
+	done           chan ErrandDone
 }
 
 // errandQueue is the hub's errands, per host, in the order they came.
@@ -133,16 +147,25 @@ func newErrandQueue(spool string, now func() time.Time) (*errandQueue, error) {
 		if !h.IsDir() {
 			continue
 		}
+		// A document's bytes without its record, or a record without
+		// its bytes, is what a hub stopped mid-spool left: it goes.
+		datas, _ := filepath.Glob(filepath.Join(spool, h.Name(), "*.data"))
+		for _, d := range datas {
+			if _, err := os.Stat(strings.TrimSuffix(d, ".data") + ".json"); errors.Is(err, os.ErrNotExist) {
+				os.Remove(d)
+			}
+		}
 		metas, _ := filepath.Glob(filepath.Join(spool, h.Name(), "*.json"))
 		sort.Strings(metas)
 		for _, m := range metas {
+			data := strings.TrimSuffix(m, ".json") + ".data"
+			if _, err := os.Stat(data); err != nil {
+				os.Remove(m)
+				continue
+			}
 			b, err := os.ReadFile(m)
 			var e Errand
 			if err != nil || json.Unmarshal(b, &e) != nil || e.Kind != ErrandDocument {
-				continue
-			}
-			data := strings.TrimSuffix(m, ".json") + ".data"
-			if _, err := os.Stat(data); err != nil {
 				continue
 			}
 			q.byHost[h.Name()] = append(q.byHost[h.Name()], &pendingErrand{Errand: e, host: h.Name(), data: data, done: make(chan ErrandDone, 1)})
@@ -209,16 +232,22 @@ func (q *errandQueue) add(p *pendingErrand) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.byHost[p.host] = append(q.byHost[p.host], p)
-	if ch, ok := q.wake[p.host]; ok {
+	q.wakeLocked(p.host)
+}
+
+// wakeLocked wakes host's node, waiting in next.
+func (q *errandQueue) wakeLocked(host string) {
+	if ch, ok := q.wake[host]; ok {
 		close(ch)
-		delete(q.wake, p.host)
+		delete(q.wake, host)
 	}
 }
 
 // next is host's first errand no node is doing, waiting for one up to
-// wait; nil when none came. A document fetched over errandLease ago and
-// not done is offered again; a prompt taken and not answered within its
-// timeout and errandLease ends as failed.
+// wait; nil when none came. One handed out and not begun within
+// errandClaim is offered again, and so is a document begun over
+// errandLease ago and not done; a prompt begun and not answered within
+// its timeout and errandLease ends as failed.
 func (q *errandQueue) next(ctx context.Context, host string, wait time.Duration) *pendingErrand {
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
@@ -228,13 +257,15 @@ func (q *errandQueue) next(ctx context.Context, host string, wait time.Duration)
 		var found *pendingErrand
 		for _, p := range append([]*pendingErrand(nil), q.byHost[host]...) {
 			switch {
-			case p.taken.IsZero(), p.Kind == ErrandDocument && now.Sub(p.taken) > errandLease:
+			case p.taken.IsZero(),
+				p.started.IsZero() && now.Sub(p.taken) > errandClaim,
+				p.Kind == ErrandDocument && !p.started.IsZero() && now.Sub(p.started) > errandLease:
 				if found == nil {
-					p.taken = now
+					p.taken, p.started = now, time.Time{}
 					found = p
 				}
-			case p.Kind == ErrandPrompt && now.Sub(p.taken) > time.Duration(p.TimeoutSec)*time.Second+errandLease:
-				q.removeLocked(p, ErrandDone{Error: "the node took the prompt and never answered"})
+			case p.Kind == ErrandPrompt && !p.started.IsZero() && now.Sub(p.started) > time.Duration(p.TimeoutSec)*time.Second+errandLease:
+				q.removeLocked(p, ErrandDone{Error: "the node began the prompt and never answered"})
 			}
 		}
 		if found != nil {
@@ -269,13 +300,43 @@ func (q *errandQueue) get(host, id string) *pendingErrand {
 	return nil
 }
 
+// errStarted is a prompt's second start: another take of it began it.
+var errStarted = errors.New("the errand was begun already")
+
+// begin records that host's node began errand id: fetched the document,
+// or started the prompt. A prompt begins once only, so a node that took
+// it again after a lost answer never runs it twice.
+func (q *errandQueue) begin(host, id string) (*pendingErrand, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, p := range q.byHost[host] {
+		if p.ID == id {
+			if p.Kind == ErrandPrompt && !p.started.IsZero() {
+				return nil, errStarted
+			}
+			p.started = q.now()
+			return p, nil
+		}
+	}
+	return nil, os.ErrNotExist
+}
+
 // finish ends host's errand id with d, for whoever waits on it; false when
-// the hub holds no such errand.
+// the hub holds no such errand. A document the node failed to save stays,
+// offered again, until it has failed errandTries times.
 func (q *errandQueue) finish(host, id string, d ErrandDone) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for _, p := range q.byHost[host] {
 		if p.ID == id {
+			if p.Kind == ErrandDocument && !d.OK {
+				p.tries++
+				if p.tries < errandTries {
+					p.taken, p.started = time.Time{}, time.Time{}
+					q.wakeLocked(host)
+					return true
+				}
+			}
 			q.removeLocked(p, d)
 			return true
 		}
@@ -283,12 +344,12 @@ func (q *errandQueue) finish(host, id string, d ErrandDone) bool {
 	return false
 }
 
-// cancel drops p when no node has taken it yet, for an asker that stopped
+// cancel drops p when no node has begun it yet, for an asker that stopped
 // waiting on a prompt.
 func (q *errandQueue) cancel(p *pendingErrand) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if p.taken.IsZero() {
+	if p.started.IsZero() {
 		q.removeLocked(p, ErrandDone{Error: "cancelled"})
 	}
 }
@@ -330,7 +391,9 @@ func inboxName(name string) string {
 
 // saveInbox saves r as name in dir, a numbered name ("report (2).pdf") when
 // one is there already: nothing is overwritten, and a file appears only
-// whole. When size is not negative, r must be size bytes with SHA-256 sum.
+// whole. When size is not negative, r must be size bytes with SHA-256 sum,
+// and a file of that name or a numbered one holding those very bytes is
+// the one answered, so a document delivered again is not saved twice.
 func saveInbox(dir, name string, r io.Reader, size int64, sum string) (string, error) {
 	name = inboxName(name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -376,8 +439,30 @@ func saveInbox(dir, name string, r io.Reader, size int64, sum string) (string, e
 		if !errors.Is(err, os.ErrExist) {
 			return "", err
 		}
+		if size >= 0 && fileHolds(path, size, sum) {
+			return path, nil
+		}
 	}
 	return "", fmt.Errorf("%s: a thousand copies are there already", name)
+}
+
+// fileHolds says whether the regular file at path is size bytes with
+// SHA-256 sum.
+func fileHolds(path string, size int64, sum string) bool {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() != size {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return false
+	}
+	return hex.EncodeToString(h.Sum(nil)) == sum
 }
 
 // serveErrands answers a node's errand requests, as host: the next
@@ -405,7 +490,20 @@ func (h *Hub) serveErrands(w http.ResponseWriter, r *http.Request, host string) 
 			return true
 		}
 		switch {
-		case what == "file" && r.Method == http.MethodGet && p.Kind == ErrandDocument:
+		case what == "file" && r.Method == http.MethodGet && p.Kind == ErrandDocument,
+			what == "start" && r.Method == http.MethodPost && p.Kind == ErrandPrompt:
+			if _, err := h.errands.begin(host, id); errors.Is(err, errStarted) {
+				http.Error(w, err.Error(), http.StatusConflict)
+				return true
+			} else if err != nil {
+				http.Error(w, "no such errand", http.StatusNotFound)
+				return true
+			}
+			if what == "start" {
+				w.WriteHeader(http.StatusNoContent)
+				return true
+			}
+			http.NewResponseController(w).SetWriteDeadline(time.Now().Add(errandTransferMax))
 			w.Header().Set("Content-Type", "application/octet-stream")
 			http.ServeFile(w, r, p.data)
 		case what == "done" && r.Method == http.MethodPost:
@@ -429,6 +527,7 @@ func (h *Hub) serveErrands(w http.ResponseWriter, r *http.Request, host string) 
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return true
 		}
+		http.NewResponseController(w).SetReadDeadline(time.Now().Add(errandTransferMax))
 		path, err := saveInbox(hubInbox(h.cfg), r.URL.Query().Get("name"), http.MaxBytesReader(w, r.Body, errandFileMax), -1, "")
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -554,7 +653,8 @@ func (h *Hub) localHandler() http.Handler {
 }
 
 // listenLocal listens on the hub's socket, which only its owner may open:
-// a socket left by a hub before is replaced, anything else there refused.
+// a socket a hub that stopped left is replaced; one a running hub answers
+// on, or anything else there, is refused.
 func listenLocal(path string) (net.Listener, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
@@ -563,9 +663,15 @@ func listenLocal(path string) (net.Listener, error) {
 		if info.Mode()&os.ModeSocket == 0 {
 			return nil, fmt.Errorf("hub.socket: %s is there and is not a socket", path)
 		}
+		if c, err := net.DialTimeout("unix", path, time.Second); err == nil {
+			c.Close()
+			return nil, fmt.Errorf("hub.socket: another hub answers on %s", path)
+		}
 		os.Remove(path)
 	}
+	old := syscall.Umask(0o077)
 	l, err := net.Listen("unix", path)
+	syscall.Umask(old)
 	if err != nil {
 		return nil, fmt.Errorf("hub.socket: %w", err)
 	}
@@ -598,7 +704,14 @@ func (n *Node) errandLoop(ctx context.Context) {
 		if e != nil {
 			go func(e Errand) {
 				d := n.doErrand(ctx, e)
-				if err := n.errandDone(ctx, e.ID, d); err != nil {
+				if d == nil {
+					return
+				}
+				// Told even as the node stops, so the hub need not offer
+				// it again.
+				dctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := n.errandDone(dctx, e.ID, *d); err != nil {
 					fmt.Fprintln(os.Stderr, "agentd node: errand", e.ID+":", err)
 				}
 			}(*e)
@@ -647,15 +760,28 @@ func (n *Node) nextErrand(ctx context.Context) (*Errand, error) {
 	return nil, fmt.Errorf("hub: %s: %s", resp.Status, strings.TrimSpace(string(b)))
 }
 
-// doErrand does e.
-func (n *Node) doErrand(ctx context.Context, e Errand) ErrandDone {
+// doErrand does e, and answers how it ended; nil when the hub had it begun
+// already, by an earlier take, so the node neither does nor reports it.
+func (n *Node) doErrand(ctx context.Context, e Errand) *ErrandDone {
+	var d ErrandDone
 	switch e.Kind {
 	case ErrandDocument:
-		return n.fetchDocument(ctx, e)
+		d = n.fetchDocument(ctx, e)
 	case ErrandPrompt:
-		return n.runPrompt(ctx, e)
+		resp, err := n.hubRequest(ctx, http.MethodPost, errandPrefix+url.PathEscape(e.ID)+"/start", nil)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "agentd node: errand", e.ID+":", err)
+			return nil
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNoContent {
+			return nil
+		}
+		d = n.runPrompt(ctx, e)
+	default:
+		d = ErrandDone{Error: "this node does not know errands of kind " + strconv.Quote(e.Kind)}
 	}
-	return ErrandDone{Error: "this node does not know errands of kind " + strconv.Quote(e.Kind)}
+	return &d
 }
 
 // fetchDocument saves e's document in the node's inbox, then opens it or
@@ -681,7 +807,7 @@ func (n *Node) fetchDocument(ctx context.Context, e Errand) ErrandDone {
 		}
 	}
 	if e.Notify && n.notify != nil {
-		if err := n.notify(e.Name+" arrived", path); err != nil {
+		if err := n.notify("Arrived: "+e.Name, path); err != nil {
 			after = append(after, "the notification failed: "+err.Error())
 		}
 	}
@@ -732,13 +858,16 @@ func (n *Node) runPrompt(ctx context.Context, e Errand) ErrandDone {
 // execPrompt runs argv in dir, in a process group of its own killed at
 // timeout, with no input; it keeps the last GateOutputMax bytes of its
 // output.
-func execPrompt(ctx context.Context, dir string, argv []string, timeout time.Duration) (int, string, error) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+func execPrompt(parent context.Context, dir string, argv []string, timeout time.Duration) (int, string, error) {
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	cmd := groupCommand(ctx, dir, argv[0], argv[1:]...)
 	out := &tailBuffer{max: GateOutputMax}
 	cmd.Stdout, cmd.Stderr = out, out
 	err := cmd.Run()
+	if err != nil && parent.Err() != nil {
+		return 0, string(out.b), errors.New("the node stopped before the prompt ended")
+	}
 	if err != nil && ctx.Err() != nil {
 		return 0, string(out.b), fmt.Errorf("the prompt was stopped after %s", timeout)
 	}
@@ -801,7 +930,7 @@ func openDetached(path string) error {
 // machine has it, else by the notification service on the session bus.
 func desktopNotify(title, body string) error {
 	if _, err := exec.LookPath("notify-send"); err == nil {
-		return exec.Command("notify-send", "-a", "agentd", title, body).Run()
+		return exec.Command("notify-send", "-a", "agentd", "--", title, body).Run()
 	}
 	return exec.Command("gdbus", "call", "--session", "--dest", "org.freedesktop.Notifications",
 		"--object-path", "/org/freedesktop/Notifications", "--method", "org.freedesktop.Notifications.Notify",
@@ -823,7 +952,7 @@ func localAnswer(resp *http.Response, err error, socket string) ([]byte, error) 
 		return nil, fmt.Errorf("the hub's socket %s: %w (is agentd hub running here?)", socket, err)
 	}
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4*GateOutputMax))
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, nodeBodyMax))
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("hub: %s: %s", resp.Status, strings.TrimSpace(string(b)))
 	}
@@ -905,6 +1034,20 @@ func sendCmd(args []string, w io.Writer) error {
 	return nil
 }
 
+// flagAfterHost refuses a prompt whose text starts with one of fs's
+// flags: it was meant as the flag, written after the host, and would run
+// as the prompt's text.
+func flagAfterHost(fs *flag.FlagSet, text []string) error {
+	if len(text) == 0 {
+		return nil
+	}
+	name := strings.TrimLeft(strings.SplitN(text[0], "=", 2)[0], "-")
+	if strings.HasPrefix(text[0], "-") && fs.Lookup(name) != nil {
+		return fmt.Errorf("%s comes after the host, where it would be the prompt's text; put it before the host", text[0])
+	}
+	return nil
+}
+
 // promptCmd runs a prompt on a host and prints its answer; a prompt that
 // exits non-zero is an error.
 func promptCmd(args []string, w io.Writer) error {
@@ -924,6 +1067,9 @@ func promptCmd(args []string, w io.Writer) error {
 		fs.Usage()
 		return errors.New("prompt names a host and the prompt's text")
 	}
+	if err := flagAfterHost(fs, fs.Args()[1:]); err != nil {
+		return err
+	}
 	host, text := fs.Arg(0), strings.Join(fs.Args()[1:], " ")
 	if text == "-" {
 		b, err := io.ReadAll(os.Stdin)
@@ -932,8 +1078,8 @@ func promptCmd(args []string, w io.Writer) error {
 		}
 		text = string(b)
 	}
-	if *timeout <= 0 {
-		return errors.New("-timeout must be positive")
+	if *timeout < time.Second {
+		return errors.New("-timeout must be a second or more")
 	}
 	body, _ := json.Marshal(map[string]any{"host": host, "text": text, "dir": *dir, "model": *model, "timeout_sec": int64(timeout.Seconds())})
 	socket := hubSocket(cfg)

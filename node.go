@@ -1442,8 +1442,13 @@ func hubCmd(args []string) error {
 	}
 	srv := &http.Server{Addr: cfg.Hub.Address, Handler: hub, ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout: 10 * time.Minute, WriteTimeout: 10 * time.Minute}
+	ln, err := net.Listen("tcp", cfg.Hub.Address)
+	if err != nil {
+		return err
+	}
 	sock, err := listenLocal(hubSocket(cfg))
 	if err != nil {
+		ln.Close()
 		return err
 	}
 	local := &http.Server{Handler: hub.localHandler(), ReadHeaderTimeout: 10 * time.Second}
@@ -1456,7 +1461,7 @@ func hubCmd(args []string) error {
 	}()
 	go local.Serve(sock)
 	fmt.Fprintf(os.Stderr, "agentd hub: serving %d hosts on %s\n", len(cfg.Hosts), cfg.Hub.Address)
-	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil

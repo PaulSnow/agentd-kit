@@ -3,7 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"flag"
 	"io"
 	"net"
 	"net/http"
@@ -347,6 +351,156 @@ func TestInboxName(t *testing.T) {
 	for in, want := range map[string]string{"report.pdf": "report.pdf", "../../etc/passwd": "passwd", "a/b/c.txt": "c.txt", "": "document", "..": "document", `..\..\x.doc`: "x.doc"} {
 		if got := inboxName(in); got != want {
 			t.Errorf("inboxName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A document the node failed to save stays in the spool and is offered
+// again, up to errandTries; then it is dropped and its asker told.
+func TestFailedFetchIsOfferedAgain(t *testing.T) {
+	now := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	q, err := newErrandQueue(t.TempDir(), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := q.addDocument("laptop", "big.pdf", strings.NewReader("bytes"), false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for try := 1; try <= errandTries; try++ {
+		got := q.next(context.Background(), "laptop", 0)
+		if got != p {
+			t.Fatalf("try %d: offered %v", try, got)
+		}
+		if _, err := q.begin("laptop", p.ID); err != nil {
+			t.Fatal(err)
+		}
+		q.finish("laptop", p.ID, ErrandDone{Error: "disk full"})
+		if try < errandTries {
+			if _, err := os.Stat(p.data); err != nil || q.pending("laptop") != 1 {
+				t.Fatalf("try %d: the document went: %v", try, err)
+			}
+		}
+	}
+	if q.pending("laptop") != 0 {
+		t.Fatal("kept after its last try")
+	}
+	if _, err := os.Stat(p.data); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the spool keeps it: %v", err)
+	}
+	if d := <-p.done; d.OK || d.Error != "disk full" {
+		t.Errorf("told %+v", d)
+	}
+}
+
+// An errand handed to a node that never begins it, its answer lost in a
+// dead connection, is offered again after errandClaim; a prompt begins
+// once only, and one begun and never answered fails after its timeout
+// and errandLease.
+func TestUnbegunErrandIsOfferedAgain(t *testing.T) {
+	now := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	q, err := newErrandQueue(t.TempDir(), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := q.addPrompt("laptop", Errand{Text: "hi", TimeoutSec: 60})
+	if got := q.next(context.Background(), "laptop", 0); got != p {
+		t.Fatalf("offered %v", got)
+	}
+	if got := q.next(context.Background(), "laptop", 0); got != nil {
+		t.Fatal("offered again at once")
+	}
+	now = now.Add(errandClaim + time.Second)
+	if got := q.next(context.Background(), "laptop", 0); got != p {
+		t.Fatal("not offered again once its claim passed")
+	}
+	if _, err := q.begin("laptop", p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.begin("laptop", p.ID); !errors.Is(err, errStarted) {
+		t.Fatalf("begun twice: %v", err)
+	}
+	now = now.Add(errandClaim + time.Second)
+	if got := q.next(context.Background(), "laptop", 0); got != nil {
+		t.Fatal("a begun prompt offered again")
+	}
+	now = now.Add(time.Minute + errandLease)
+	q.next(context.Background(), "laptop", 0)
+	if q.pending("laptop") != 0 {
+		t.Fatal("a prompt begun and never answered is kept")
+	}
+	if d := <-p.done; d.OK || !strings.Contains(d.Error, "never answered") {
+		t.Errorf("told %+v", d)
+	}
+}
+
+// A document delivered again whose bytes are in the inbox already is not
+// saved twice; other bytes under the name get a numbered copy.
+func TestInboxKeepsOneCopyOfTheSameBytes(t *testing.T) {
+	dir := t.TempDir()
+	save := func(body string) string {
+		t.Helper()
+		sum := sha256.Sum256([]byte(body))
+		p, err := saveInbox(dir, "report.pdf", strings.NewReader(body), int64(len(body)), hex.EncodeToString(sum[:]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	first := save("one")
+	if again := save("one"); again != first {
+		t.Errorf("the same bytes saved again as %s", again)
+	}
+	if other := save("two"); other != filepath.Join(dir, "report (2).pdf") {
+		t.Errorf("other bytes saved as %s", other)
+	}
+	if again := save("two"); again != filepath.Join(dir, "report (2).pdf") {
+		t.Errorf("the numbered copy's bytes saved again as %s", again)
+	}
+	if m, _ := filepath.Glob(filepath.Join(dir, "*")); len(m) != 2 {
+		t.Errorf("inbox holds %v", m)
+	}
+}
+
+// A second hub never takes the socket a running hub answers on.
+func TestHubSocketOfARunningHub(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "hub.sock")
+	l, err := listenLocal(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	if _, err := listenLocal(sock); err == nil || !strings.Contains(err.Error(), "another hub answers") {
+		t.Fatalf("a second hub: %v", err)
+	}
+	if _, err := os.Lstat(sock); err != nil {
+		t.Errorf("the running hub's socket went: %v", err)
+	}
+}
+
+// agentd prompt refuses its own flags written after the host, which would
+// run as the prompt's text.
+func TestPromptFlagAfterHost(t *testing.T) {
+	fs := flag.NewFlagSet("prompt", flag.ContinueOnError)
+	fs.String("dir", "", "")
+	fs.String("model", "", "")
+	for _, text := range [][]string{{"-dir", "~/x", "fix it"}, {"--model=opus", "hi"}} {
+		if err := flagAfterHost(fs, text); err == nil {
+			t.Errorf("%q taken as text", text)
+		}
+	}
+	for _, text := range [][]string{{"fix", "it"}, {"-x", "is", "a", "flag", "of", "another", "tool"}, nil} {
+		if err := flagAfterHost(fs, text); err != nil {
+			t.Errorf("%q: %v", text, err)
 		}
 	}
 }
