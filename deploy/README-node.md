@@ -84,3 +84,27 @@ or asleep shows "laptop: last seen <time>".
 
 4. On the build host, `agentd nodes -config ~/.config/agentd-kit/coord-live.json`
    shows the laptop reporting within one `every`.
+
+## Documents and prompts (#95)
+
+To let the build host send the laptop documents and run prompts there,
+add `"errands": true` to the laptop's `node.json` and restart its node:
+
+       systemctl --user restart agentd-node
+
+`observe` stays: the laptop still takes no clone, session or deploy
+command. Then, on the build host:
+
+       agentd send laptop report.pdf
+       agentd send -open laptop report.pdf
+       agentd prompt laptop "What is in ~/Downloads?"
+
+The first saves the file in the laptop's `~/agentd-inbox`, the second
+opens it there as well. A prompt runs `claude -p` on the laptop with its
+permission checks skipped, so it may do anything there, under the
+laptop's Claude Code login. On the laptop,
+`agentd send -config ~/.config/agentd/node.json hub notes.md` sends a
+file to the build host's `~/agentd-inbox`. The unit needs the desktop
+session's environment (`DISPLAY`, `DBUS_SESSION_BUS_ADDRESS`) for
+`-open` and `-notify`; a desktop login imports it into the user's
+systemd manager.

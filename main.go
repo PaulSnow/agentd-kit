@@ -121,6 +121,10 @@ func runCommand(name string, args []string) (handled bool, err error) {
 		return true, nodeCmd(args)
 	case "nodes":
 		return true, nodesCmd(args, os.Stdout)
+	case "send":
+		return true, sendCmd(args, os.Stdout)
+	case "prompt":
+		return true, promptCmd(args, os.Stdout)
 	case "releases":
 		return true, releasesCmd(args, os.Stdout)
 	}
@@ -194,6 +198,8 @@ const usageLines = `usage:
   agentd context [--config PATH] [--log PATH] stats REPO [--since 24h] | card REPO [TOPIC]
   agentd hub [--config PATH] [--log PATH]
   agentd node [--config PATH] [--once]
+  agentd send [-open] [-notify] [-wait D] [--config PATH] HOST FILE...
+  agentd prompt [-dir D] [-model M] [-timeout D] [--config PATH] HOST TEXT...
   agentd nodes [--config PATH] [--log PATH]
   agentd version
 
