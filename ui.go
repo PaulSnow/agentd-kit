@@ -462,6 +462,15 @@ type UI struct {
 	// about is each tracked repository's description, by platform/path,
 	// configured ones too, under mu.
 	about map[string]string
+	// clones are the repositories cloned under cloneRoots, by
+	// platform/path, as the last scan found them, under mu; cloneFile
+	// keeps that scan, "" in memory only. One scan at a time (#96).
+	clones     map[string]scannedClone
+	cloneRoots []string
+	cloneFile  string
+	cloneGit   cloneGit
+	cloneAPI   ForgeAPI
+	scanMu     sync.Mutex
 }
 
 // NewUI builds the UI's handler over sources, the first the main config's.
@@ -566,7 +575,7 @@ func (u *UI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	get := r.Method == http.MethodGet || r.Method == http.MethodHead
 	posts := map[string]func(http.ResponseWriter, *http.Request){
 		"/seen": u.serveSeen, "/answer": u.serveAnswer, "/deadline": u.serveDeadline, "/reply": u.serveReply, "/respond": u.serveRespond,
-		"/coord": u.serveCoord, "/priority": u.serveIssuePriority,
+		"/coord": u.serveCoord, "/priority": u.serveIssuePriority, "/refresh": u.serveRefresh,
 	}
 	switch {
 	case path == "/ui.css" || path == "/ui.js" || path == "/xterm.js" || path == "/xterm.css" || path == "/addon-fit.js":
@@ -1226,7 +1235,16 @@ func uiCmd(args []string) error {
 			return err
 		}
 	}
+	ui.cloneRoots = []string{expandPath(cfg.Node.ReposRoot, "")}
+	for _, r := range cfg.Node.MoreRoots {
+		ui.cloneRoots = append(ui.cloneRoots, expandPath(r, ""))
+	}
+	ui.cloneFile = cloneFile(cfg.EventLog)
+	ui.cloneGit = execCloneGit{Timeout: cfg.Timeouts.Forge.Duration}
+	ui.cloneAPI = ExecForgeAPI{Timeout: cfg.Timeouts.Forge.Duration}
+	ui.clones = loadClones(ui.cloneFile)
 	ui.loadCatalog()
+	go ui.rescan()
 	srv := &http.Server{Addr: cfg.UI.Address, Handler: ui, ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, MaxHeaderBytes: 1 << 16}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

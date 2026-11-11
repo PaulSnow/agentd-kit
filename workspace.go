@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -651,23 +652,26 @@ func (u *UI) loadCatalog() {
 			known[repoKey(r.Forge, r.Project)], names[name] = true, true
 		}
 	}
-	if tr.Manifest == "" {
-		return
-	}
-	inv, err := LoadInventory(tr)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "agentd ui: the tracked repositories: %v\n", err)
-		return
-	}
 	host, _ := os.Hostname()
 	catalog, about := map[string]Repository{}, map[string]string{}
-	for _, rec := range inv.Repos {
+	var inv *Inventory
+	if tr.Manifest != "" {
+		var err error
+		if inv, err = LoadInventory(tr); err != nil {
+			fmt.Fprintf(os.Stderr, "agentd ui: the tracked repositories: %v\n", err)
+			inv = nil
+		}
+	}
+	for _, rec := range inventoryRepos(inv) {
 		if rec.Description != "" {
 			about[rec.Key] = rec.Description
 		}
 		if !rec.Active || known[rec.Key] {
+			// One tracking retired stays off the list, cloned or not.
+			known[rec.Key] = true
 			continue
 		}
+		known[rec.Key] = true
 		name := rec.Name
 		if names[name] {
 			name = strings.ReplaceAll(rec.Path, "/", "-")
@@ -683,8 +687,67 @@ func (u *UI) loadCatalog() {
 		catalog[name] = r
 	}
 	u.mu.Lock()
+	clones := u.clones
+	u.mu.Unlock()
+	for _, k := range sortedKeys(clones) {
+		c := clones[k]
+		if known[k] {
+			continue
+		}
+		name := strings.ToLower(filepath.Base(c.Project))
+		if names[name] {
+			name = strings.ToLower(strings.ReplaceAll(c.Project, "/", "-"))
+		}
+		for i := 2; names[name]; i++ {
+			name = strings.ToLower(strings.ReplaceAll(c.Project, "/", "-")) + "-" + strconv.Itoa(i)
+		}
+		names[name] = true
+		catalog[name] = Repository{Forge: c.Forge, Project: c.Project, Sessions: &SessionsPolicy{Clone: c.Path}}
+	}
+	u.mu.Lock()
 	u.catalog, u.about = catalog, about
 	u.mu.Unlock()
+}
+
+// inventoryRepos are inv's records, none when there is no inventory.
+func inventoryRepos(inv *Inventory) []*RepoRecord {
+	if inv == nil {
+		return nil
+	}
+	return inv.Repos
+}
+
+// rescan looks under the roots again, keeps what it found, and lists the
+// repositories anew (#96).
+func (u *UI) rescan() {
+	if len(u.cloneRoots) == 0 || u.cloneGit == nil {
+		return
+	}
+	u.scanMu.Lock()
+	defer u.scanMu.Unlock()
+	u.mu.Lock()
+	was := u.clones
+	u.mu.Unlock()
+	got := scanClones(u.cloneRoots, u.cloneGit, u.cloneAPI, was)
+	if u.cloneFile != "" {
+		if err := saveClones(u.cloneFile, got); err != nil {
+			fmt.Fprintf(os.Stderr, "agentd ui: keeping the scan of the clones: %v\n", err)
+		}
+	}
+	u.mu.Lock()
+	u.clones = got
+	u.mu.Unlock()
+	u.loadCatalog()
+}
+
+// serveRefresh is the home page's Refresh: it looks for clones again and
+// shows the list.
+func (u *UI) serveRefresh(w http.ResponseWriter, r *http.Request) {
+	if !u.checkPost(w, r) {
+		return
+	}
+	u.rescan()
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 // workspacePick is the source that serves repo and the repository itself.
@@ -790,6 +853,35 @@ type workspaceRepo struct {
 	OnAccount, MoveTo string
 	// Changed is the latest change on any of its issues.
 	Changed time.Time
+	// Created and Last are its clone's first and latest commits. Fork
+	// and Stale mark one the page hides by default; a configured
+	// repository is neither (#96).
+	Created, Last time.Time
+	Fork, Stale   bool
+	now           time.Time
+}
+
+// CreatedUnix is the row's first commit for the age sorts, 0 unknown.
+func (r workspaceRepo) CreatedUnix() int64 {
+	if r.Created.IsZero() {
+		return 0
+	}
+	return r.Created.Unix()
+}
+
+// Age is how old the repository is, by its first commit.
+func (r workspaceRepo) Age() string { return shortAge(r.Created, r.now) }
+
+// AgeTitle says the row's commit dates, for the hover.
+func (r workspaceRepo) AgeTitle() string {
+	if r.Created.IsZero() {
+		return "No clone was found to date it"
+	}
+	s := "First commit " + r.Created.Format("2006-01-02") + ", last " + r.Last.Format("2006-01-02")
+	if r.Stale {
+		s += ": stale"
+	}
+	return s
 }
 
 // MRTitle explains the row's merge request counts, for its hover.
@@ -832,7 +924,7 @@ func (r workspaceRepo) ChangedUnix() int64 {
 }
 
 // RepoSorts are the repository list's sorts, the first the default.
-var RepoSorts = []string{"repo-session", "repo-name", "repo-open", "repo-closed", "repo-tokens", "repo-changed", "repo-mrs"}
+var RepoSorts = []string{"repo-session", "repo-name", "repo-open", "repo-closed", "repo-tokens", "repo-changed", "repo-mrs", "repo-newest", "repo-oldest"}
 
 // uiHome lists the repositories.
 type uiHome struct {
@@ -975,8 +1067,19 @@ func (u *UI) homeView(now time.Time) *uiHome {
 		if !ok {
 			continue
 		}
+		managed := u.levelPick(repo) != nil
+		u.mu.Lock()
+		clone, cloned := u.clones[repoKey(r.Forge, r.Project)]
+		u.mu.Unlock()
 		src.mu.Lock()
 		row := workspaceRepo{Repository: repo, URL: webURL(r, 0, 0), Forge: forgeName(r.Forge), Project: r.Project, About: about[repoKey(r.Forge, r.Project)], Open: openCount(src.st, repo), Closed: closedCount(src.st, repo)}
+		row.now = now
+		if cloned {
+			row.Created, row.Last = clone.Created, clone.Last
+			if !managed {
+				row.Fork, row.Stale = clone.Fork, clone.stale(now)
+			}
+		}
 		row.MRPass, row.MRFail, row.MROther = src.requests[repo].counts()
 		row.MRRead = !src.requests[repo].Read.IsZero()
 		for _, l := range src.st.ListedIssues[repo] {

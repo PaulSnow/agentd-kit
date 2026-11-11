@@ -187,6 +187,14 @@
     "repo-tokens": function (a, b) { return num(b, "tokens") - num(a, "tokens") || repoName(a, b); },
     "repo-changed": function (a, b) { return num(b, "changed") - num(a, "changed") || repoName(a, b); },
     "repo-mrs": function (a, b) { return num(b, "mrfail") - num(a, "mrfail") || num(b, "mrpass") - num(a, "mrpass") || repoName(a, b); },
+    "repo-newest": function (a, b) {
+      var x = num(a, "created"), y = num(b, "created");
+      return (!x || !y ? (y ? 1 : 0) - (x ? 1 : 0) : y - x) || repoName(a, b);
+    },
+    "repo-oldest": function (a, b) {
+      var x = num(a, "created"), y = num(b, "created");
+      return (!x || !y ? (y ? 1 : 0) - (x ? 1 : 0) : x - y) || repoName(a, b);
+    },
     "ci-failing": function (a, b) { return (b.dataset.failing ? 1 : 0) - (a.dataset.failing ? 1 : 0); }
   };
   function compareRows(by, a, b) {
@@ -216,6 +224,10 @@
     var filter = section.querySelector(".box-filter");
     var level = section.querySelector(".box-priority");
     var umbrella = section.querySelector(".box-umbrella");
+    var hides = Array.prototype.slice.call(section.querySelectorAll(".box-hide"));
+    hides.forEach(function (h) {
+      if (typeof state["hide-" + h.dataset.hide] === "boolean") { h.checked = state["hide-" + h.dataset.hide]; }
+    });
     if (select && state.sort && sorts[state.sort] && select.querySelector('option[value="' + state.sort + '"]')) { select.value = state.sort; }
     if (level && typeof state.level === "string") { level.value = state.level; }
     if (umbrella) {
@@ -239,7 +251,7 @@
     var shown = 0;
     var moved = document.createDocumentFragment();
     rows.forEach(function (r) {
-      r.hidden = !matches(r, words) || !!(level && level.value && r.dataset.priority !== level.value) || !!(umbrella && umbrella.checked && !r.dataset.umbrella);
+      r.hidden = !matches(r, words) || !!(level && level.value && r.dataset.priority !== level.value) || !!(umbrella && umbrella.checked && !r.dataset.umbrella) || hides.some(function (h) { return h.checked && !!r.dataset[h.dataset.hide]; });
       if (!r.hidden) { shown++; }
       moved.appendChild(r);
     });
@@ -255,7 +267,7 @@
   }
   function boxInput(e) {
     var section = e.target.closest ? e.target.closest("[data-box]") : null;
-    if (!section || !e.target.matches(".box-sort, .box-filter, .box-priority, .box-umbrella")) {
+    if (!section || !e.target.matches(".box-sort, .box-filter, .box-priority, .box-umbrella, .box-hide")) {
       return;
     }
     var key = "agentd-box:" + section.dataset.key + ":" + section.dataset.box;
@@ -263,7 +275,9 @@
     var filter = section.querySelector(".box-filter");
     var level = section.querySelector(".box-priority");
     var umbrella = section.querySelector(".box-umbrella");
-    store(key, { sort: select ? select.value : "", filter: filter ? filter.value : "", level: level ? level.value : "", umbrella: !!(umbrella && umbrella.checked) });
+    var state = { sort: select ? select.value : "", filter: filter ? filter.value : "", level: level ? level.value : "", umbrella: !!(umbrella && umbrella.checked) };
+    section.querySelectorAll(".box-hide").forEach(function (h) { state["hide-" + h.dataset.hide] = h.checked; });
+    store(key, state);
     if (filter) { filter.defaultValue = filter.value; }
     applyBox(section, e.target === filter);
   }
