@@ -59,12 +59,12 @@ func (a *forkAPI) At(string) ForgeAPI { return a }
 
 func TestForgeOfURL(t *testing.T) {
 	for in, want := range map[string]string{
-		"git@github.com:PaulSnow/agentd-kit.git":                "github PaulSnow/agentd-kit",
-		"https://github.com/DTRules/DTRules":                    "github DTRules/DTRules",
-		"https://gitlab.com/accumulatenetwork/core/staking.git": "gitlab accumulatenetwork/core/staking",
-		"ssh://git@gitlab.com/a/b.git":                          "gitlab a/b",
-		"https://example.org/a/b.git":                           "",
-		"/some/local/path":                                      "",
+		"git@github.com:example-org/tool.git":               "github example-org/tool",
+		"https://github.com/Example/Rules":                  "github Example/Rules",
+		"https://gitlab.com/example-group/core/payouts.git": "gitlab example-group/core/payouts",
+		"ssh://git@gitlab.com/a/b.git":                      "gitlab a/b",
+		"https://example.org/a/b.git":                       "",
+		"/some/local/path":                                  "",
 	} {
 		f, p, ok := forgeOfURL(in)
 		got := ""
