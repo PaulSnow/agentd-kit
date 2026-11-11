@@ -734,10 +734,49 @@ func (u *UI) rescan() {
 			fmt.Fprintf(os.Stderr, "agentd ui: keeping the scan of the clones: %v\n", err)
 		}
 	}
+	before := u.workspaceRepos()
 	u.mu.Lock()
 	u.clones = got
 	u.mu.Unlock()
 	u.loadCatalog()
+	var added []string
+	for _, repo := range sortedKeys(u.workspaceRepos()) {
+		if !before[repo] {
+			added = append(added, repo)
+		}
+	}
+	u.readNew(added)
+}
+
+// readNewFor is how long a scan reads the repositories it newly lists
+// before it leaves the rest to read behind it, so Refresh answers in time.
+const readNewFor = 15 * time.Second
+
+// readNew reads the issues and requests of repositories a scan newly
+// lists, those it has time for at once and the rest behind it.
+func (u *UI) readNew(repos []string) {
+	if u.issueAPI == nil {
+		return
+	}
+	until := time.Now().Add(readNewFor)
+	for i, repo := range repos {
+		if time.Now().After(until) {
+			go u.readRepos(u.issueAPI, repos[i:])
+			return
+		}
+		u.readRepos(u.issueAPI, []string{repo})
+	}
+}
+
+// readRepos reads each repository's issues and requests, those the index
+// takes.
+func (u *UI) readRepos(api ForgeAPI, repos []string) {
+	for _, repo := range repos {
+		if src, r, ok := u.workspacePick(repo); ok && indexed(r) && src.cfg.Poll.Index {
+			src.readIssues(api, repo, r)
+			src.readRequests(api, repo, r)
+		}
+	}
 }
 
 // serveRefresh is the home page's Refresh: it looks for clones again and
