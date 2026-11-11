@@ -3,7 +3,7 @@
 :root {
   --bg: #f6f7f9;
   --surface: #ffffff;
-  --repo-title: #7b2fbf;
+  --repo-title: #c40000;
   --text: #1c2028;
   --muted: #5d6573;
   --line: #dde1e7;
@@ -35,7 +35,7 @@
   :root {
     --bg: #12151a;
     --surface: #1b1f26;
-    --repo-title: #d29bff;
+    --repo-title: #ff2a2a;
     --text: #e4e7ec;
     --muted: #9aa3b2;
     --line: #2d333d;
