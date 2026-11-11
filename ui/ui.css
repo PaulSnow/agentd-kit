@@ -3,7 +3,7 @@
 :root {
   --bg: #f6f7f9;
   --surface: #ffffff;
-  --repo-title: #c40000;
+  --repo-title: #ff4d4d;
   --text: #1c2028;
   --muted: #5d6573;
   --line: #dde1e7;
@@ -35,7 +35,7 @@
   :root {
     --bg: #12151a;
     --surface: #1b1f26;
-    --repo-title: #ff2a2a;
+    --repo-title: #ff4d4d;
     --text: #e4e7ec;
     --muted: #9aa3b2;
     --line: #2d333d;
@@ -76,7 +76,7 @@ h4 { font-size: var(--size-s); color: var(--muted); margin: var(--space-3) 0 var
 /* The repository a page is about: centred in the top bar, large, in a
    colour nothing else on the page uses, so it never reads as the Next
    link or a badge. */
-.topbar-repo { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--repo-title); font-size: 2.25rem; font-weight: 800; line-height: 1.1; letter-spacing: .01em; }
+.topbar-repo { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--repo-title); background: #ffffff; padding: 0 .5em; border-radius: var(--radius); font-size: 2.25rem; font-weight: 800; line-height: 1.2; letter-spacing: .01em; }
 .topbar:has(.topbar-repo) { min-height: 3.5rem; align-items: center; }
 .crumbs { margin: 0 0 var(--space-3); font-size: var(--size-s); }
 .foot { max-width: 60rem; margin: 0 auto; padding: var(--space-4); font-size: var(--size-s); }
@@ -314,6 +314,7 @@ body:has(.workspace) > main { max-width: none; padding: 0; }
 #repo-card .repo-forge { color: var(--muted); }
 #terminal.drop-over { outline: 2px dashed #2fb457; outline-offset: -2px; }
 .repo-nav { display: inline-flex; gap: var(--space-2); align-items: baseline; margin-right: var(--space-2); }
+.repo-next { text-align: center; padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--line); }
 .next-link { padding: 0 var(--space-2); border: 1px solid #2fb457; border-radius: var(--radius); text-decoration: none; white-space: nowrap; }
 .mr-list { padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--line); }
 .mr-list h2 { font-size: var(--size-s); margin: 0 0 var(--space-1); }
