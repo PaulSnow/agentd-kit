@@ -223,7 +223,7 @@ func TestNextRunning(t *testing.T) {
 	u.home = t.TempDir()
 	u.tmuxArgs = []string{"-L", "agentd-test-none", "-f", "/dev/null"}
 	page := owner(t, u, "/r/widgets")
-	for _, want := range []string{`id="repo-nav"`, `<a href="/">`, "No other session running"} {
+	for _, want := range []string{`id="repo-nav"`, `<a href="/">`, `id="repo-next"`, "No other session running"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("page lacks %s", want)
 		}
