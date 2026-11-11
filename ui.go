@@ -471,6 +471,10 @@ type UI struct {
 	cloneGit   cloneGit
 	cloneAPI   ForgeAPI
 	scanMu     sync.Mutex
+	// issueAPI reads the issues and requests of a repository a scan
+	// newly lists, so they show without waiting for the next poll; nil
+	// leaves them to it.
+	issueAPI ForgeAPI
 }
 
 // NewUI builds the UI's handler over sources, the first the main config's.
@@ -1242,6 +1246,7 @@ func uiCmd(args []string) error {
 	ui.cloneFile = cloneFile(cfg.EventLog)
 	ui.cloneGit = execCloneGit{Timeout: cfg.Timeouts.Forge.Duration}
 	ui.cloneAPI = ExecForgeAPI{Timeout: cfg.Timeouts.Forge.Duration}
+	ui.issueAPI = ui.cloneAPI
 	ui.clones = loadClones(ui.cloneFile)
 	ui.loadCatalog()
 	go ui.rescan()

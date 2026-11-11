@@ -162,11 +162,17 @@ func TestClonesOnHome(t *testing.T) {
 		t.Errorf("the scan kept %d clones, want 5", len(kept))
 	}
 	clone("github.com/someone/brand-new", "git@github.com:someone/brand-new.git", false, recent, recent)
+	var read []string
+	fail := ""
+	u.issueAPI = listedAPI{asked: &read, body: func() string { return "[]" }, fail: &fail}
 	if w := ownerPost(u, "/refresh", url.Values{}); w.Code != http.StatusSeeOther {
 		t.Fatalf("refresh: %d %s", w.Code, w.Body.String())
 	}
 	if home := owner(t, u, "/"); !strings.Contains(home, `href="/r/brand-new"`) {
 		t.Error("Refresh did not find a new clone")
+	}
+	if all := strings.Join(read, " "); !strings.Contains(all, "someone/brand-new") || strings.Contains(all, "someone/fresh-tool") {
+		t.Errorf("Refresh read the forge for %v, want the new repository alone", read)
 	}
 	if n := len(api.asked) - asked; n != 1 {
 		t.Errorf("the second scan asked the forge %d times, want 1: %v", n, api.asked[asked:])

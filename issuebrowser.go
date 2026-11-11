@@ -446,12 +446,7 @@ func (src *uiSource) readIssues(api ForgeAPI, repo string, r Repository) {
 // then its open requests.
 func (u *UI) readAllIssues(api ForgeAPI) {
 	u.loadCatalog()
-	for _, repo := range sortedKeys(u.workspaceRepos()) {
-		if src, r, ok := u.workspacePick(repo); ok && indexed(r) && src.cfg.Poll.Index {
-			src.readIssues(api, repo, r)
-			src.readRequests(api, repo, r)
-		}
-	}
+	u.readRepos(api, sortedKeys(u.workspaceRepos()))
 }
 
 // pollIssues keeps the listed issues up to date until ctx ends.
