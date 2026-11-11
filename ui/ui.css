@@ -3,6 +3,7 @@
 :root {
   --bg: #f6f7f9;
   --surface: #ffffff;
+  --repo-title: #7b2fbf;
   --text: #1c2028;
   --muted: #5d6573;
   --line: #dde1e7;
@@ -34,6 +35,7 @@
   :root {
     --bg: #12151a;
     --surface: #1b1f26;
+    --repo-title: #d29bff;
     --text: #e4e7ec;
     --muted: #9aa3b2;
     --line: #2d333d;
@@ -68,10 +70,14 @@ h4 { font-size: var(--size-s); color: var(--muted); margin: var(--space-3) 0 var
 .empty { color: var(--muted); font-style: italic; }
 .count { display: inline-block; min-width: 1.5em; padding: 0 var(--space-2); border-radius: 1em; background: var(--alert); color: var(--surface); font-size: var(--size-s); text-align: center; }
 
-.topbar { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-3); padding: var(--space-3) var(--space-4); background: var(--surface); border-bottom: 1px solid var(--line); }
+.topbar { position: relative; display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-3); padding: var(--space-3) var(--space-4); background: var(--surface); border-bottom: 1px solid var(--line); }
 .brand { font-weight: 700; font-size: var(--size-l); text-decoration: none; color: var(--text); }
 .topbar-title { color: var(--muted); }
-.topbar-repo { color: var(--accent); font-size: var(--size-xl); font-weight: 700; }
+/* The repository a page is about: centred in the top bar, large, in a
+   colour nothing else on the page uses, so it never reads as the Next
+   link or a badge. */
+.topbar-repo { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--repo-title); font-size: 2.25rem; font-weight: 800; line-height: 1.1; letter-spacing: .01em; }
+.topbar:has(.topbar-repo) { min-height: 3.5rem; align-items: center; }
 .crumbs { margin: 0 0 var(--space-3); font-size: var(--size-s); }
 .foot { max-width: 60rem; margin: 0 auto; padding: var(--space-4); font-size: var(--size-s); }
 
