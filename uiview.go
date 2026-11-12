@@ -50,6 +50,45 @@ type uiPage struct {
 	loc         *time.Location
 	// Static says the page does not refresh itself.
 	Static bool
+	// RingOn says the title is a repository page's, between the arrows;
+	// Ring is the other repositories with a running session, in the
+	// order the right arrow reaches them.
+	RingOn bool
+	Ring   []string
+}
+
+// ringShown is how many of the ring the title lists.
+const ringShown = 12
+
+// ringItem is one repository under the title: N clicks of the right arrow
+// away.
+type ringItem struct {
+	N    int
+	Name string
+}
+
+// RingNext is the repository the right arrow goes to, RingPrev the left.
+func (p uiPage) RingNext() string { return p.Ring[0] }
+func (p uiPage) RingPrev() string { return p.Ring[len(p.Ring)-1] }
+
+// RingShown is the start of the ring the title lists, RingMore how many
+// it leaves out.
+func (p uiPage) RingShown() []ringItem {
+	var out []ringItem
+	for i, name := range p.Ring {
+		if i == ringShown {
+			break
+		}
+		out = append(out, ringItem{N: i + 1, Name: name})
+	}
+	return out
+}
+
+func (p uiPage) RingMore() int {
+	if len(p.Ring) <= ringShown {
+		return 0
+	}
+	return len(p.Ring) - ringShown
 }
 
 // When is t as the owner reads it, or "-".

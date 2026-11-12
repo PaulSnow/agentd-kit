@@ -186,11 +186,11 @@ func TestTerminalFiles(t *testing.T) {
 	}
 }
 
-// Next is the following repository with a running session, by name in
-// any case, going round, and Back the one before; never the page's own,
-// and none when no other runs. The page links back to the repositories
-// either way.
-func TestNextRunning(t *testing.T) {
+// The title's ring is the other repositories with a running session, by
+// name in any case, going round from the page's own: the right arrow goes
+// to its first, the left to its last; empty when no other runs. The page
+// links back to the repositories either way.
+func TestRunningRing(t *testing.T) {
 	repos := []string{"sprockets", "Gadgets", "gears", "nuts", "zeta"}
 	on := func(names ...string) func(string) bool {
 		return func(n string) bool {
@@ -217,19 +217,31 @@ func TestNextRunning(t *testing.T) {
 		{"rivets", []string{"gears", "sprockets"}, "sprockets", "gears"},
 		{"nuts", []string{"Gadgets", "gears", "sprockets", "zeta"}, "sprockets", "gears"},
 	} {
-		if got := stepRunning(append([]string(nil), repos...), on(c.running...), c.current, false); got != c.next {
-			t.Errorf("after %s with %v running: %q, want %q", c.current, c.running, got, c.next)
+		p := uiPage{Ring: runningRing(append([]string(nil), repos...), on(c.running...), c.current)}
+		next, back := "", ""
+		if len(p.Ring) > 0 {
+			next, back = p.RingNext(), p.RingPrev()
 		}
-		if got := stepRunning(append([]string(nil), repos...), on(c.running...), c.current, true); got != c.back {
-			t.Errorf("before %s with %v running: %q, want %q", c.current, c.running, got, c.back)
+		if next != c.next || back != c.back {
+			t.Errorf("at %s with %v running: right %q, left %q, want %q, %q", c.current, c.running, next, back, c.next, c.back)
 		}
+	}
+	if got := strings.Join(runningRing(append([]string(nil), repos...), on(repos...), "nuts"), " "); got != "sprockets zeta Gadgets gears" {
+		t.Errorf("the ring from nuts: %s", got)
+	}
+	var many []string
+	for i := 0; i < ringShown+3; i++ {
+		many = append(many, fmt.Sprintf("r%02d", i))
+	}
+	if p := (uiPage{Ring: many}); len(p.RingShown()) != ringShown || p.RingShown()[1] != (ringItem{2, "r01"}) || p.RingMore() != 3 {
+		t.Errorf("a long ring lists %v and %d more", p.RingShown(), p.RingMore())
 	}
 	f := newLevelsFixture(t)
 	u, _ := testUI(t, UIConfig{}, f.src)
 	u.home = t.TempDir()
 	u.tmuxArgs = []string{"-L", "agentd-test-none", "-f", "/dev/null"}
 	page := owner(t, u, "/r/widgets")
-	for _, want := range []string{`id="repo-nav"`, `<a href="/">`, `id="repo-next"`, "No other session running"} {
+	for _, want := range []string{`id="repo-nav"`, `<a href="/">`, `id="repo-ring"`, "No other session running"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("page lacks %s", want)
 		}
