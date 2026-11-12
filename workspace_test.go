@@ -187,8 +187,9 @@ func TestTerminalFiles(t *testing.T) {
 }
 
 // Next is the following repository with a running session, by name in
-// any case, going round; never the page's own, and none when no other
-// runs. The page links back to the repositories either way.
+// any case, going round, and Back the one before; never the page's own,
+// and none when no other runs. The page links back to the repositories
+// either way.
 func TestNextRunning(t *testing.T) {
 	repos := []string{"sprockets", "Gadgets", "gears", "nuts", "zeta"}
 	on := func(names ...string) func(string) bool {
@@ -202,20 +203,25 @@ func TestNextRunning(t *testing.T) {
 		}
 	}
 	for _, c := range []struct {
-		current string
-		running []string
-		want    string
+		current    string
+		running    []string
+		next, back string
 	}{
-		{"gears", []string{"gears", "sprockets"}, "sprockets"},
-		{"sprockets", []string{"gears", "sprockets"}, "gears"},
-		{"Gadgets", []string{"gears", "zeta"}, "gears"},
-		{"nuts", []string{"Gadgets"}, "Gadgets"},
-		{"sprockets", []string{"sprockets"}, ""},
-		{"zeta", nil, ""},
-		{"rivets", []string{"nuts"}, "nuts"},
+		{"gears", []string{"gears", "sprockets"}, "sprockets", "sprockets"},
+		{"sprockets", []string{"gears", "sprockets"}, "gears", "gears"},
+		{"Gadgets", []string{"gears", "zeta"}, "gears", "zeta"},
+		{"nuts", []string{"Gadgets"}, "Gadgets", "Gadgets"},
+		{"sprockets", []string{"sprockets"}, "", ""},
+		{"zeta", nil, "", ""},
+		{"rivets", []string{"nuts"}, "nuts", "nuts"},
+		{"rivets", []string{"gears", "sprockets"}, "sprockets", "gears"},
+		{"nuts", []string{"Gadgets", "gears", "sprockets", "zeta"}, "sprockets", "gears"},
 	} {
-		if got := nextRunning(append([]string(nil), repos...), on(c.running...), c.current); got != c.want {
-			t.Errorf("after %s with %v running: %q, want %q", c.current, c.running, got, c.want)
+		if got := stepRunning(append([]string(nil), repos...), on(c.running...), c.current, false); got != c.next {
+			t.Errorf("after %s with %v running: %q, want %q", c.current, c.running, got, c.next)
+		}
+		if got := stepRunning(append([]string(nil), repos...), on(c.running...), c.current, true); got != c.back {
+			t.Errorf("before %s with %v running: %q, want %q", c.current, c.running, got, c.back)
 		}
 	}
 	f := newLevelsFixture(t)
