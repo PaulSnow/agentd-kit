@@ -57,11 +57,8 @@ type uiPage struct {
 	Ring   []string
 }
 
-// ringShown is how many of the ring the title lists.
-const ringShown = 12
-
-// ringItem is one repository under the title: N clicks of the right arrow
-// away.
+// ringItem is one repository under the title: N clicks of its side's
+// arrow away.
 type ringItem struct {
 	N    int
 	Name string
@@ -71,24 +68,31 @@ type ringItem struct {
 func (p uiPage) RingNext() string { return p.Ring[0] }
 func (p uiPage) RingPrev() string { return p.Ring[len(p.Ring)-1] }
 
-// RingShown is the start of the ring the title lists, RingMore how many
-// it leaves out.
-func (p uiPage) RingShown() []ringItem {
+// RingRight is the half of the ring the right arrow reaches first, the
+// nearest first; RingLeft the rest, which the left arrow reaches first,
+// listed as they sit left of the title, the nearest last. ui.js splits a
+// rotated ring the same way.
+func (p uiPage) RingRight() []ringItem {
 	var out []ringItem
-	for i, name := range p.Ring {
-		if i == ringShown {
-			break
-		}
+	for i, name := range p.Ring[:(len(p.Ring)+1)/2] {
 		out = append(out, ringItem{N: i + 1, Name: name})
 	}
 	return out
 }
 
-func (p uiPage) RingMore() int {
-	if len(p.Ring) <= ringShown {
-		return 0
+func (p uiPage) RingLeft() []ringItem {
+	left := p.Ring[(len(p.Ring)+1)/2:]
+	var out []ringItem
+	for i, name := range left {
+		out = append(out, ringItem{N: len(left) - i, Name: name})
 	}
-	return len(p.Ring) - ringShown
+	return out
+}
+
+// RingJSON is the ring for ui.js to rotate.
+func (p uiPage) RingJSON() string {
+	b, _ := json.Marshal(p.Ring)
+	return string(b)
 }
 
 // When is t as the owner reads it, or "-".

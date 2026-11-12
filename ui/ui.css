@@ -81,12 +81,18 @@ h4 { font-size: var(--size-s); color: var(--muted); margin: var(--space-3) 0 var
 /* A repository page's title between its arrows, and under it the other
    running repositories, numbered by clicks of the right arrow. */
 .topbar:has(.topbar-ring) { min-height: 5.25rem; }
-.topbar-ring { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); max-width: 70%; display: flex; flex-direction: column; align-items: center; gap: var(--space-1); }
+.topbar-ring { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 76%; display: flex; flex-direction: column; align-items: center; gap: var(--space-1); }
 .ring-title { display: flex; align-items: center; gap: var(--space-2); max-width: 100%; }
 .topbar-ring .topbar-repo { position: static; transform: none; max-width: 100%; }
 .ring-arrow { font-size: 2.25rem; font-weight: 800; line-height: 1; padding: 0 .3em; text-decoration: none; border: 1px solid var(--line); border-radius: var(--radius); }
-.title-ring { list-style: none; margin: 0; padding: 0; display: flex; gap: var(--space-3); max-width: 100%; overflow: hidden; white-space: nowrap; font-size: var(--size-s); }
-.title-ring a { text-decoration: none; }
+/* The left half reads toward the title and the right away from it, a gap
+   under the title between them; a long half fades out at its far end. */
+.ring-lists { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: 8rem; width: 100%; font-size: var(--size-s); white-space: nowrap; }
+div.ring-lists.muted { display: block; text-align: center; }
+.ring-left, .ring-right { list-style: none; margin: 0; padding: 0; display: flex; gap: var(--space-3); overflow: hidden; }
+.ring-left { justify-content: flex-end; -webkit-mask-image: linear-gradient(to right, transparent, #000 3rem); mask-image: linear-gradient(to right, transparent, #000 3rem); }
+.ring-right { -webkit-mask-image: linear-gradient(to left, transparent, #000 3rem); mask-image: linear-gradient(to left, transparent, #000 3rem); }
+.ring-lists a { display: inline-block; text-decoration: none; }
 .ring-n { display: inline-block; min-width: 1.4em; text-align: center; border-radius: 999px; background: var(--line); color: var(--text); font-size: .85em; }
 .crumbs { margin: 0 0 var(--space-3); font-size: var(--size-s); }
 .foot { max-width: 60rem; margin: 0 auto; padding: var(--space-4); font-size: var(--size-s); }

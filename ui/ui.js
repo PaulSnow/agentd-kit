@@ -1325,3 +1325,82 @@
     add(form, e.dataTransfer.files);
   });
 })();
+
+// The repository page's title rotates (#94): a click of an arrow, or of a
+// repository under the title, slides the ring round, the one picked into
+// the title and the page's own out to its side, then opens the page picked.
+// The split into halves is uiPage.RingLeft and RingRight's.
+(function () {
+  "use strict";
+  var turn = 450;
+
+  function link(name, step) {
+    var a = document.createElement("a");
+    a.href = "/r/" + encodeURIComponent(name);
+    a.dataset.step = String(step);
+    a.dataset.name = name;
+    var n = document.createElement("span");
+    n.className = "ring-n";
+    n.textContent = String(Math.abs(step));
+    a.append(n, " " + name);
+    var li = document.createElement("li");
+    li.append(a);
+    return li;
+  }
+
+  // render shows current in the title with ring round it.
+  function render(box, current, ring) {
+    var title = box.querySelector(".topbar-repo");
+    title.textContent = current;
+    title.dataset.name = current;
+    var arrows = box.querySelectorAll(".ring-arrow");
+    arrows[0].href = "/r/" + encodeURIComponent(ring[ring.length - 1]);
+    arrows[1].href = "/r/" + encodeURIComponent(ring[0]);
+    var half = Math.ceil(ring.length / 2);
+    var right = box.querySelector(".ring-right"), left = box.querySelector(".ring-left");
+    right.replaceChildren.apply(right, ring.slice(0, half).map(function (name, i) { return link(name, i + 1); }));
+    var rest = ring.slice(half);
+    left.replaceChildren.apply(left, rest.map(function (name, i) { return link(name, -(rest.length - i)); }));
+  }
+
+  function centre(r) { return { x: r.left + r.width / 2, y: r.top + r.height / 2, h: r.height }; }
+
+  document.addEventListener("click", function (e) {
+    var a = e.target.closest && e.target.closest("#repo-ring [data-step]");
+    if (!a || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
+      return;
+    }
+    var box = a.closest("#repo-ring");
+    var cycle = [box.dataset.current].concat(JSON.parse(box.dataset.ring || "[]"));
+    var n = cycle.length;
+    if (n < 2) {
+      return;
+    }
+    e.preventDefault();
+    var k = ((Number(a.dataset.step) % n) + n) % n;
+    var ring = [];
+    for (var i = 1; i < n; i++) {
+      ring.push(cycle[(k + i) % n]);
+    }
+    var before = {};
+    box.querySelectorAll("[data-name]").forEach(function (el) { before[el.dataset.name] = centre(el.getBoundingClientRect()); });
+    box.dataset.current = cycle[k];
+    box.dataset.ring = JSON.stringify(ring);
+    render(box, cycle[k], ring);
+    var href = "/r/" + encodeURIComponent(cycle[k]);
+    if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      box.querySelectorAll("[data-name]").forEach(function (el) {
+        var was = before[el.dataset.name], now = centre(el.getBoundingClientRect());
+        if (!was || !now.h) {
+          el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: turn });
+          return;
+        }
+        el.animate([
+          { transform: "translate(" + (was.x - now.x) + "px," + (was.y - now.y) + "px) scale(" + was.h / now.h + ")" },
+          { transform: "none" }
+        ], { duration: turn, easing: "ease-in-out" });
+      });
+    }
+    setTimeout(function () { location.href = href; }, turn);
+  });
+})();
