@@ -578,8 +578,8 @@ type uiWorkspace struct {
 	// Requests are the repository's open requests as last read.
 	Requests requestReading
 	// Next is the next repository, after this one, with a running
-	// session, none when no other has one.
-	Next string
+	// session, Prev the one before it; none when no other has one.
+	Next, Prev string
 	// Account is the account the repository's session runs on, "" with
 	// none running; MoveTo the one it should move to.
 	Account, MoveTo string
@@ -608,15 +608,17 @@ func (u *UI) workspaceView(repo string, now time.Time) (*uiWorkspace, error) {
 	for name := range u.workspaceRepos() {
 		repos = append(repos, name)
 	}
-	v.Next = nextRunning(repos, func(name string) bool { return running[workspaceSession(name)] }, repo)
+	isRunning := func(name string) bool { return running[workspaceSession(name)] }
+	v.Next = stepRunning(repos, isRunning, repo, false)
+	v.Prev = stepRunning(repos, isRunning, repo, true)
 	v.Account, v.MoveTo = u.sessionMove(workspaceSession(repo), now)
 	return v, nil
 }
 
-// nextRunning is the repository after current, by name as the home page
-// orders them, whose session is running, going round from the last to the
-// first; none when no other is running.
-func nextRunning(repos []string, running func(string) bool, current string) string {
+// stepRunning is the repository after current, or before it when back, by
+// name as the home page orders them, whose session is running, going round
+// past either end; none when no other is running.
+func stepRunning(repos []string, running func(string) bool, current string, back bool) string {
 	sort.Slice(repos, func(a, b int) bool {
 		la, lb := strings.ToLower(repos[a]), strings.ToLower(repos[b])
 		if la != lb {
@@ -628,8 +630,15 @@ func nextRunning(repos []string, running func(string) bool, current string) stri
 		l, lc := strings.ToLower(repos[i]), strings.ToLower(current)
 		return l > lc || (l == lc && repos[i] >= current)
 	})
-	for i := 0; i < len(repos); i++ {
-		name := repos[(at+i)%len(repos)]
+	// at is current, or the first after it when it is not listed, so going
+	// back starts at the one before at.
+	n := len(repos)
+	for i := 0; i < n; i++ {
+		j := at + i
+		if back {
+			j = at - 1 - i
+		}
+		name := repos[(j%n+n)%n]
 		if name != current && running(name) {
 			return name
 		}
