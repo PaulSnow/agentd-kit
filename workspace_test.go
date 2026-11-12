@@ -229,12 +229,26 @@ func TestRunningRing(t *testing.T) {
 	if got := strings.Join(runningRing(append([]string(nil), repos...), on(repos...), "nuts"), " "); got != "sprockets zeta Gadgets gears" {
 		t.Errorf("the ring from nuts: %s", got)
 	}
-	var many []string
-	for i := 0; i < ringShown+3; i++ {
-		many = append(many, fmt.Sprintf("r%02d", i))
-	}
-	if p := (uiPage{Ring: many}); len(p.RingShown()) != ringShown || p.RingShown()[1] != (ringItem{2, "r01"}) || p.RingMore() != 3 {
-		t.Errorf("a long ring lists %v and %d more", p.RingShown(), p.RingMore())
+	// The right half is the nearer by the right arrow, the left the rest,
+	// listed toward the title, each numbered by its arrow's clicks.
+	for ring, want := range map[string]string{
+		"a":           "| 1a",
+		"a b":         "1b | 1a",
+		"a b c d e":   "2d 1e | 1a 2b 3c",
+		"a b c d e f": "3d 2e 1f | 1a 2b 3c",
+	} {
+		p := uiPage{Ring: strings.Fields(ring)}
+		var got []string
+		for _, it := range p.RingLeft() {
+			got = append(got, fmt.Sprintf("%d%s", it.N, it.Name))
+		}
+		got = append(got, "|")
+		for _, it := range p.RingRight() {
+			got = append(got, fmt.Sprintf("%d%s", it.N, it.Name))
+		}
+		if s := strings.Join(got, " "); s != want {
+			t.Errorf("%s: %s, want %s", ring, s, want)
+		}
 	}
 	f := newLevelsFixture(t)
 	u, _ := testUI(t, UIConfig{}, f.src)
@@ -492,7 +506,7 @@ func TestPageSessionAccount(t *testing.T) {
 	if !strings.Contains(page, `data-close="/r/widgets/close"`) {
 		t.Error("the page has no Close session")
 	}
-	if !strings.Contains(page, `<span class="topbar-title topbar-repo">widgets</span>`) || strings.Contains(owner(t, u, "/"), "topbar-repo") {
+	if !strings.Contains(page, `<span class="topbar-title topbar-repo" data-name="widgets">widgets</span>`) || strings.Contains(owner(t, u, "/"), "topbar-repo") {
 		t.Error("only the repository page shows its repository in the top bar's repository style")
 	}
 	if strings.Contains(page, "Needs a reset") || strings.Contains(owner(t, u, "/"), ">reset</span>") {
