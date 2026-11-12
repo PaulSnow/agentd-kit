@@ -93,7 +93,6 @@ div.ring-lists.muted { display: block; text-align: center; }
 .ring-left { justify-content: flex-end; -webkit-mask-image: linear-gradient(to right, transparent, #000 3rem); mask-image: linear-gradient(to right, transparent, #000 3rem); }
 .ring-right { -webkit-mask-image: linear-gradient(to left, transparent, #000 3rem); mask-image: linear-gradient(to left, transparent, #000 3rem); }
 .ring-lists a { display: inline-block; text-decoration: none; }
-.ring-n { display: inline-block; min-width: 1.4em; text-align: center; border-radius: 999px; background: var(--line); color: var(--text); font-size: .85em; }
 .crumbs { margin: 0 0 var(--space-3); font-size: var(--size-s); }
 .foot { max-width: 60rem; margin: 0 auto; padding: var(--space-4); font-size: var(--size-s); }
 

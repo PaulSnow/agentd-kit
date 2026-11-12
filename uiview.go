@@ -58,7 +58,7 @@ type uiPage struct {
 }
 
 // ringItem is one repository under the title: N clicks of its side's
-// arrow away.
+// arrow away, the step a click on it takes.
 type ringItem struct {
 	N    int
 	Name string

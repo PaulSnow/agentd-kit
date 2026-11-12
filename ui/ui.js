@@ -1339,10 +1339,7 @@
     a.href = "/r/" + encodeURIComponent(name);
     a.dataset.step = String(step);
     a.dataset.name = name;
-    var n = document.createElement("span");
-    n.className = "ring-n";
-    n.textContent = String(Math.abs(step));
-    a.append(n, " " + name);
+    a.textContent = name;
     var li = document.createElement("li");
     li.append(a);
     return li;
