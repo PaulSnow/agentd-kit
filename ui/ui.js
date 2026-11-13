@@ -531,10 +531,10 @@
             move.textContent = d.note || "";
             move.title = d.note_title || "";
           }
-          var summary = document.getElementById("term-summary");
-          if (summary) {
-            summary.hidden = !d.summary;
-          }
+          ["term-summary", "term-give"].forEach(function (id) {
+            var el = document.getElementById(id);
+            if (el) { el.hidden = !d.summary; }
+          });
         })
         .catch(function () {});
     }
