@@ -425,7 +425,14 @@ func TestTerminal(t *testing.T) {
 		b, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, string(b)
 	}
-	if code, text := screen(u.token); code != http.StatusOK || !strings.Contains(text, "hello-terminal") {
+	// The terminal echoed the text; tmux may still be redrawing the screen
+	// at its new size, when it reads empty.
+	code, text := screen(u.token)
+	for i := 0; i < 100 && code == http.StatusOK && !strings.Contains(text, "hello-terminal"); i++ {
+		time.Sleep(50 * time.Millisecond)
+		code, text = screen(u.token)
+	}
+	if code != http.StatusOK || !strings.Contains(text, "hello-terminal") {
 		t.Errorf("the screen: %d %q", code, text)
 	}
 	if code, _ := screen("wrong"); code != http.StatusForbidden {
