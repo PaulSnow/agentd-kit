@@ -519,15 +519,21 @@
         .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
         .then(function (d) {
           el.textContent = d.running ? "Tokens used: " + d.tokens : "No session";
+          // The session's title names its account; beside it, whether it
+          // needs a reset to move to another, or agentd is resetting it.
           var acct = document.getElementById("term-account");
           if (acct) {
-            acct.textContent = d.account ? ", account " + d.account : "";
+            acct.textContent = d.account_title ? " · " + d.account_title : "";
           }
           var move = document.getElementById("term-move");
           if (move) {
-            move.hidden = !d.move_to;
-            move.textContent = d.move_to ? "Needs a reset → " + d.move_to : "";
-            move.title = d.move_to ? "New sessions go on " + d.move_to + ", whose week resets first. Close session and start a new one to move this one there." : "";
+            move.hidden = !d.note;
+            move.textContent = d.note || "";
+            move.title = d.note_title || "";
+          }
+          var summary = document.getElementById("term-summary");
+          if (summary) {
+            summary.hidden = !d.summary;
           }
         })
         .catch(function () {});
@@ -592,6 +598,43 @@
   })();
   levelBoxes();
   talkBottom(document);
+
+  // A repository page's issues and merge requests (#99): agentd reads them
+  // from the forge when the page is entered and every 30 seconds while it
+  // is the one shown, then the page fetches itself and swaps them in. A
+  // hidden page asks for nothing, and reads again once it is shown. The
+  // terminal is not a refreshed section, so it stays as it is.
+  var reader = document.querySelector("[data-read]");
+  if (reader) {
+    var readUrl = reader.dataset.read;
+    var readToken = reader.dataset.token;
+    var lastRead = 0;
+    var readForge = function () {
+      if (document.hidden) {
+        return;
+      }
+      lastRead = Date.now();
+      var form = new URLSearchParams();
+      form.set("token", readToken);
+      // The page is fetched whether the read went or not: a failed read
+      // keeps the list and says it is stale.
+      fetch(readUrl, { method: "POST", body: form, credentials: "same-origin" })
+        .catch(function () {})
+        .then(refresh);
+    };
+    readForge();
+    setInterval(function () {
+      if (Date.now() - lastRead >= every - 1000) {
+        readForge();
+      }
+    }, 5000);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden && Date.now() - lastRead >= every) {
+        readForge();
+      }
+    });
+    return;
+  }
 
   var box = document.getElementById("box");
   if (!box) {

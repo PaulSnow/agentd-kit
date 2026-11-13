@@ -260,6 +260,19 @@ func TestRunningRing(t *testing.T) {
 			t.Errorf("page lacks %s", want)
 		}
 	}
+	// Home, with no session running, says so under its title (#98).
+	home := owner(t, u, "/")
+	for _, want := range []string{`id="repo-ring"`, `data-current="All Repositories"`, "No session running"} {
+		if !strings.Contains(home, want) {
+			t.Errorf("home lacks %s", want)
+		}
+	}
+	if strings.Contains(home, "No other session running") || strings.Contains(home, "ring-arrow") {
+		t.Error("home, with no session running, speaks of another or offers arrows")
+	}
+	if got := strings.Join(runningRing(append([]string(nil), repos...), on("zeta", "Gadgets", "nuts"), ""), " "); got != "Gadgets nuts zeta" {
+		t.Errorf("home's ring: %s", got)
+	}
 }
 
 // wsClient is the browser's end of a terminal, for the test.
@@ -497,7 +510,7 @@ func TestPageSessionAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	page := owner(t, u, "/r/widgets")
-	if !strings.Contains(page, `<span id="term-account">, account b</span>`) {
+	if !strings.Contains(page, `<strong>Claude Code<span id="term-account" class="term-account"> · account b</span></strong>`) {
 		t.Error("the page does not say the account")
 	}
 	if u.sessionAccount("repo-none") != "" {
@@ -506,26 +519,49 @@ func TestPageSessionAccount(t *testing.T) {
 	if !strings.Contains(page, `data-close="/r/widgets/close"`) {
 		t.Error("the page has no Close session")
 	}
-	if !strings.Contains(page, `<span class="topbar-title topbar-repo" data-name="widgets">widgets</span>`) || strings.Contains(owner(t, u, "/"), "topbar-repo") {
-		t.Error("only the repository page shows its repository in the top bar's repository style")
+	if !strings.Contains(page, `<span class="topbar-title topbar-repo" data-name="widgets">widgets</span>`) {
+		t.Error("the repository page does not show its repository in the top bar")
+	}
+	// Home is titled as a repository page is, over the repositories with a
+	// running session (#98).
+	for _, want := range []string{`<title>All Repositories</title>`, `<span class="topbar-title topbar-repo" data-name="All Repositories">All Repositories</span>`,
+		`data-ring="[&#34;widgets&#34;]"`, `<a href="/r/widgets" data-step="1" data-name="widgets">widgets</a>`, `href="/r/widgets" data-step="1" title="On to widgets"`} {
+		if home := owner(t, u, "/"); !strings.Contains(home, want) {
+			t.Errorf("home lacks %s", want)
+		}
 	}
 	if strings.Contains(page, "Needs a reset") || strings.Contains(owner(t, u, "/"), ">reset</span>") {
 		t.Error("a session on the right account is said to need a reset")
 	}
 	read("a", 40, pageAt.Add(24*time.Hour))
-	if page := owner(t, u, "/r/widgets"); !strings.Contains(page, `title="New sessions go on a, whose week resets first. Close session and start a new one to move this one there.">Needs a reset → a</span>`) {
+	// A session that should move but has active work says so beside its
+	// title, and why agentd waits (#97); this one is not at a prompt.
+	if page := owner(t, u, "/r/widgets"); !strings.Contains(page, `title="This session is on b; new sessions go on a, whose week resets first. It has active work (it is not at its prompt), so agentd waits: once it is idle, agentd asks it for a summary and restarts it on a. Close session moves it now, without a summary.">Needs a reset → a</span>`) {
 		t.Error("the page does not say the session needs a reset")
 	}
-	if home := owner(t, u, "/"); !strings.Contains(home, `title="Its session is on b; new sessions go on a, whose week resets first. Open it and use Close session.">reset</span>`) {
-		t.Error("home does not mark the session that needs a reset")
+	if home := owner(t, u, "/"); !strings.Contains(home, `<span class="row-account muted" title="The account its session runs on">account b</span>`) ||
+		!strings.Contains(home, `title="Its session is on b; new sessions go on a, whose week resets first. agentd asks it for a summary and restarts it on a once it is idle.">reset</span>`) {
+		t.Error("home does not name the session's account and mark that it needs a reset")
 	}
 	var tok struct {
 		Account string `json:"account"`
+		Title   string `json:"account_title"`
 		MoveTo  string `json:"move_to"`
+		Note    string `json:"note"`
 	}
-	if err := json.Unmarshal([]byte(owner(t, u, "/r/widgets/tokens")), &tok); err != nil || tok.Account != "b" || tok.MoveTo != "a" {
+	if err := json.Unmarshal([]byte(owner(t, u, "/r/widgets/tokens")), &tok); err != nil || tok.Account != "b" || tok.MoveTo != "a" || tok.Title != "account b" || tok.Note != "Needs a reset → a" {
 		t.Errorf("tokens %+v %v", tok, err)
 	}
+	// A session with active work is never reset.
+	u.resetIdle(pageAt)
+	if st := u.resetOf(name); st != nil || u.sessionAccount(name) != "b" {
+		t.Errorf("a session with active work was reset: %+v", st)
+	}
+	u.cfg.ManualReset = true
+	if page := owner(t, u, "/r/widgets"); !strings.Contains(page, `Close session and start a new one to move this one there.">Needs a reset → a</span>`) {
+		t.Error("with manual_reset the page does not leave the reset to the owner")
+	}
+	u.cfg.ManualReset = false
 	if got := u.moveTo("default login", "a"); got != "a" {
 		t.Errorf("default login, no account on it: %q", got)
 	}
@@ -700,5 +736,61 @@ func TestRepoSorts(t *testing.T) {
 		if s := strings.Join(got[by], " "); s != want {
 			t.Errorf("%s: %s, want %s", by, s, want)
 		}
+	}
+}
+
+// A repository page asks for its issues to be read from the forge now, on
+// entering and every 30 seconds while shown (#99): the read goes to the
+// forge for that repository alone, a second ask within readFresh reads
+// nothing, it takes a POST from the UI's page only, and a failed read keeps
+// the list and says it is stale.
+func TestPageReadsItsRepository(t *testing.T) {
+	f := newLevelsFixture(t)
+	f.cfg.Poll.Index = true
+	u, _ := testUI(t, UIConfig{}, f.src)
+	u.home = t.TempDir()
+	u.tmuxArgs = []string{"-L", "agentd-test-none", "-f", "/dev/null"}
+	var asked []string
+	fail := ""
+	body := `[{"number":70,"title":"Newly opened","state":"open","user":{"login":"al"},"created_at":"2026-09-01T00:00:00Z","updated_at":"2026-10-02T00:00:00Z"}]`
+	u.issueAPI = listedAPI{asked: &asked, body: func() string { return body }, fail: &fail}
+	page := owner(t, u, "/r/widgets")
+	if !strings.Contains(page, `data-read="/r/widgets/read"`) {
+		t.Fatal("the issues pane does not say where to ask for a read")
+	}
+	if strings.Contains(page, "Newly opened") {
+		t.Fatal("the issue is listed before any read")
+	}
+	if w := postTo(u, "/r/widgets/read", "http://evil.example", u.token, url.Values{}, "192.0.2.20:51000"); w.Code != http.StatusForbidden || len(asked) != 0 {
+		t.Errorf("another origin: %d, asked %v", w.Code, asked)
+	}
+	if w := get(u, "GET", "/r/widgets/read", pageAddr, "192.0.2.20:51000"); w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("a GET: %d", w.Code)
+	}
+	if w := ownerPost(u, "/r/none/read", url.Values{}); w.Code != http.StatusNotFound {
+		t.Errorf("no such repository: %d", w.Code)
+	}
+	if w := ownerPost(u, "/r/widgets/read", url.Values{}); w.Code != http.StatusNoContent {
+		t.Fatalf("read: %d %s", w.Code, w.Body.String())
+	}
+	if len(asked) == 0 {
+		t.Fatal("the forge was not read")
+	}
+	if page := owner(t, u, "/r/widgets"); !strings.Contains(page, "Newly opened") {
+		t.Error("the page does not show the issue the read found")
+	}
+	n := len(asked)
+	if w := ownerPost(u, "/r/widgets/read", url.Values{}); w.Code != http.StatusNoContent || len(asked) != n {
+		t.Errorf("a second ask at once: %d, asked %d more", w.Code, len(asked)-n)
+	}
+	u.mu.Lock()
+	u.readAt["widgets"] = time.Now().Add(-readFresh - time.Second)
+	u.mu.Unlock()
+	fail = "the forge is away"
+	if w := ownerPost(u, "/r/widgets/read", url.Values{}); w.Code != http.StatusNoContent || len(asked) == n {
+		t.Errorf("an ask after readFresh: %d, asked %d more", w.Code, len(asked)-n)
+	}
+	if page := owner(t, u, "/r/widgets"); !strings.Contains(page, "Newly opened") || !strings.Contains(page, "This list is stale") || !strings.Contains(page, "the forge is away") {
+		t.Error("a failed read does not keep the list and say it is stale")
 	}
 }

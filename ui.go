@@ -48,6 +48,10 @@ type UIConfig struct {
 	// SessionCommand starts a repository's Claude Code session, in its
 	// clone; {session_id} is replaced. Empty, plain claude under a login shell.
 	SessionCommand []string `json:"session_command"`
+	// ManualReset leaves a page session that should move to another
+	// account to the owner's Close session: agentd does not ask an idle
+	// one for a summary and restart it by itself (#96).
+	ManualReset bool `json:"manual_reset"`
 }
 
 // Whois names the login behind a remote address.
@@ -475,6 +479,19 @@ type UI struct {
 	// newly lists, so they show without waiting for the next poll; nil
 	// leaves them to it.
 	issueAPI ForgeAPI
+	// reading is each repository's read the page asked for that is still
+	// going, and readAt when its last one ended, under mu (#99).
+	reading map[string]chan struct{}
+	readAt  map[string]time.Time
+	// resets is where each page session's move to another account
+	// stands, under mu; the rest pace it, a test's shorter (#96).
+	resets       map[string]*resetState
+	resetQuiet   time.Duration
+	resetGap     time.Duration
+	resetSummary time.Duration
+	resetPrompt  time.Duration
+	resetPoll    time.Duration
+	resetPause   time.Duration
 }
 
 // NewUI builds the UI's handler over sources, the first the main config's.
@@ -502,7 +519,8 @@ func NewUI(cfg UIConfig, whois Whois, sources []*uiSource, now func() time.Time)
 	}
 	home, _ := os.UserHomeDir()
 	return &UI{cfg: cfg, whois: whois, sources: sources, self: ip, now: now, loc: time.Local, token: hex.EncodeToString(b),
-		answers: map[string]whoisAnswer{}, slots: make(chan struct{}, whoisSlots), home: home, usage: newUsageReader()}, nil
+		answers: map[string]whoisAnswer{}, slots: make(chan struct{}, whoisSlots), home: home, usage: newUsageReader(),
+		resetQuiet: resetQuiet, resetGap: resetGap, resetSummary: resetSummary, resetPrompt: resetPrompt, resetPoll: 3 * time.Second, resetPause: 1500 * time.Millisecond}, nil
 }
 
 // source is the source named name, or nil.
@@ -1254,6 +1272,7 @@ func uiCmd(args []string) error {
 		ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, MaxHeaderBytes: 1 << 16}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	go ui.pollIssues(ctx, ExecForgeAPI{Timeout: cfg.Timeouts.Forge.Duration}, cfg.Poll.Every.Duration)
+	go ui.resetLoop(ctx)
 	defer stop()
 	go func() {
 		<-ctx.Done()
