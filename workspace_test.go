@@ -702,3 +702,59 @@ func TestRepoSorts(t *testing.T) {
 		}
 	}
 }
+
+// A repository page asks for its issues to be read from the forge now, on
+// entering and every 30 seconds while shown (#99): the read goes to the
+// forge for that repository alone, a second ask within readFresh reads
+// nothing, it takes a POST from the UI's page only, and a failed read keeps
+// the list and says it is stale.
+func TestPageReadsItsRepository(t *testing.T) {
+	f := newLevelsFixture(t)
+	f.cfg.Poll.Index = true
+	u, _ := testUI(t, UIConfig{}, f.src)
+	u.home = t.TempDir()
+	u.tmuxArgs = []string{"-L", "agentd-test-none", "-f", "/dev/null"}
+	var asked []string
+	fail := ""
+	body := `[{"number":70,"title":"Newly opened","state":"open","user":{"login":"al"},"created_at":"2026-09-01T00:00:00Z","updated_at":"2026-10-02T00:00:00Z"}]`
+	u.issueAPI = listedAPI{asked: &asked, body: func() string { return body }, fail: &fail}
+	page := owner(t, u, "/r/widgets")
+	if !strings.Contains(page, `data-read="/r/widgets/read"`) {
+		t.Fatal("the issues pane does not say where to ask for a read")
+	}
+	if strings.Contains(page, "Newly opened") {
+		t.Fatal("the issue is listed before any read")
+	}
+	if w := postTo(u, "/r/widgets/read", "http://evil.example", u.token, url.Values{}, "192.0.2.20:51000"); w.Code != http.StatusForbidden || len(asked) != 0 {
+		t.Errorf("another origin: %d, asked %v", w.Code, asked)
+	}
+	if w := get(u, "GET", "/r/widgets/read", pageAddr, "192.0.2.20:51000"); w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("a GET: %d", w.Code)
+	}
+	if w := ownerPost(u, "/r/none/read", url.Values{}); w.Code != http.StatusNotFound {
+		t.Errorf("no such repository: %d", w.Code)
+	}
+	if w := ownerPost(u, "/r/widgets/read", url.Values{}); w.Code != http.StatusNoContent {
+		t.Fatalf("read: %d %s", w.Code, w.Body.String())
+	}
+	if len(asked) == 0 {
+		t.Fatal("the forge was not read")
+	}
+	if page := owner(t, u, "/r/widgets"); !strings.Contains(page, "Newly opened") {
+		t.Error("the page does not show the issue the read found")
+	}
+	n := len(asked)
+	if w := ownerPost(u, "/r/widgets/read", url.Values{}); w.Code != http.StatusNoContent || len(asked) != n {
+		t.Errorf("a second ask at once: %d, asked %d more", w.Code, len(asked)-n)
+	}
+	u.mu.Lock()
+	u.readAt["widgets"] = time.Now().Add(-readFresh - time.Second)
+	u.mu.Unlock()
+	fail = "the forge is away"
+	if w := ownerPost(u, "/r/widgets/read", url.Values{}); w.Code != http.StatusNoContent || len(asked) == n {
+		t.Errorf("an ask after readFresh: %d, asked %d more", w.Code, len(asked)-n)
+	}
+	if page := owner(t, u, "/r/widgets"); !strings.Contains(page, "Newly opened") || !strings.Contains(page, "This list is stale") || !strings.Contains(page, "the forge is away") {
+		t.Error("a failed read does not keep the list and say it is stale")
+	}
+}

@@ -304,6 +304,7 @@ form.attach-over { outline: 2px dashed var(--accent); outline-offset: 2px; }
 .box-states { display: flex; gap: var(--space-3); padding: var(--space-2) var(--space-3) 0; }
 .box-states a[aria-current] { font-weight: 600; text-decoration: none; border-bottom: 2px solid var(--accent); }
 .box-note { margin: var(--space-1) var(--space-3) 0; font-size: var(--size-s); }
+.box-stale { color: var(--alert); }
 body:has(.workspace) > .foot { display: none; }
 body:has(.workspace) > main { max-width: none; padding: 0; }
 .workspace { position: fixed; top: 3.25rem; left: 0; right: 0; bottom: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(22rem, 32rem); }

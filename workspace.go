@@ -779,6 +779,73 @@ func (u *UI) readRepos(api ForgeAPI, repos []string) {
 	}
 }
 
+// readFresh is how long a repository's read stands before its page may ask
+// for another, so two windows on one repository read it once; readWait is
+// how long the page's ask waits for the read before it answers, and the
+// read goes on behind it (#99).
+const (
+	readFresh = 20 * time.Second
+	readWait  = 15 * time.Second
+)
+
+// readNow reads repo's issues and requests from the forge for its page,
+// unless a read ended within readFresh. The channel closes when the read
+// in hand ends; it is closed already when there is nothing to read.
+func (u *UI) readNow(repo string) <-chan struct{} {
+	none := make(chan struct{})
+	close(none)
+	src, r, ok := u.workspacePick(repo)
+	if !ok || u.issueAPI == nil || !indexed(r) || !src.cfg.Poll.Index {
+		return none
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if c := u.reading[repo]; c != nil {
+		return c
+	}
+	if at, ok := u.readAt[repo]; ok && time.Since(at) < readFresh {
+		return none
+	}
+	if u.reading == nil {
+		u.reading, u.readAt = map[string]chan struct{}{}, map[string]time.Time{}
+	}
+	c := make(chan struct{})
+	u.reading[repo] = c
+	go func() {
+		u.readRepos(u.issueAPI, []string{repo})
+		u.mu.Lock()
+		delete(u.reading, repo)
+		u.readAt[repo] = time.Now()
+		u.mu.Unlock()
+		close(c)
+	}()
+	return c
+}
+
+// serveRead is a repository page asking for its issues and requests to be
+// read from the forge now: on entering the page and every 30 seconds while
+// it is the one shown (#99). It answers once the read ends, or after
+// readWait; the page then fetches itself, and shows what was read.
+func (u *UI) serveRead(w http.ResponseWriter, r *http.Request, repo string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !u.checkPost(w, r) {
+		return
+	}
+	if _, _, ok := u.workspacePick(repo); !ok {
+		http.NotFound(w, r)
+		return
+	}
+	select {
+	case <-u.readNow(repo):
+	case <-time.After(readWait):
+	case <-r.Context().Done():
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // serveRefresh is the home page's Refresh: it looks for clones again and
 // shows the list.
 func (u *UI) serveRefresh(w http.ResponseWriter, r *http.Request) {
@@ -1305,6 +1372,10 @@ func (u *UI) serveWorkspace(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		u.serveTerminalFiles(w, r, src.cfg, repo)
+		return
+	}
+	if rest == "read" {
+		u.serveRead(w, r, repo)
 		return
 	}
 	if rest == "close" {
