@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,6 +57,7 @@ func TestIdleReset(t *testing.T) {
 	u.tmuxArgs = []string{"-L", fmt.Sprintf("agentd-test-reset-%d", time.Now().UnixNano()), "-f", "/dev/null"}
 	t.Cleanup(func() { u.tmux("kill-server") })
 	u.resetPoll, u.resetPause, u.resetSummary, u.resetPrompt = 50*time.Millisecond, 100*time.Millisecond, 10*time.Second, 10*time.Second
+	u.handoverRoot = filepath.Join(t.TempDir(), "handover")
 	clone := filepath.Join(u.home, "repos", "github.com", "example-org", "widgets")
 	if err := os.MkdirAll(filepath.Join(clone, ".git"), 0o755); err != nil {
 		t.Fatal(err)
@@ -152,8 +155,15 @@ func TestIdleReset(t *testing.T) {
 		b, _ := os.ReadFile(filepath.Join(dirA, "given.txt"))
 		given = string(b)
 	}
-	if !strings.Contains(given, "this session replaces one that ran on the Claude account b") || !strings.Contains(given, "The work stands at step three of five.") {
+	file := u.handoverFile(name)
+	if !strings.Contains(given, "this session replaces an earlier one") || !strings.Contains(given, "is in the file "+file+".") {
 		t.Errorf("the new session was given: %q", given)
+	}
+	if b, err := os.ReadFile(file); err != nil || !strings.Contains(string(b), "The work stands at step three of five.") {
+		t.Errorf("the summary for the new session: %q %v", b, err)
+	}
+	if fi, err := os.Stat(u.handoverRoot); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Errorf("the summary's folder: %v %v", fi.Mode(), err)
 	}
 	// The page names the new account, marks nothing, and links the summary.
 	page := owner(t, u, "/r/widgets")
@@ -165,6 +175,41 @@ func TestIdleReset(t *testing.T) {
 	}
 	if w := get(u, "GET", "/r/widgets/handover?token=wrong", pageAddr, "192.0.2.20:51000"); w.Code != 403 {
 		t.Errorf("the summary with a wrong token: %d", w.Code)
+	}
+
+	// Give summary types the line again: from the UI's page only, and only
+	// at an empty prompt.
+	if !strings.Contains(page, `<form id="term-give" class="term-give" method="post" action="/r/widgets/handover/give">`) {
+		t.Error("the page offers no Give summary")
+	}
+	idle("before Give summary")
+	if w := postTo(u, "/r/widgets/handover/give", "http://evil.example", u.token, url.Values{}, "192.0.2.20:51000"); w.Code != http.StatusForbidden {
+		t.Errorf("Give summary from another origin: %d", w.Code)
+	}
+	if out, err := u.tmux("send-keys", "-t", "="+name+":", "-l", "--", "a draft"); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if w := ownerPost(u, "/r/widgets/handover/give", url.Values{}); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "text is typed at its prompt") {
+		t.Errorf("Give summary over a draft: %d %s", w.Code, w.Body.String())
+	}
+	if out, err := u.tmux("send-keys", "-t", "="+name+":", "C-u"); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	idle("the draft cleared")
+	if w := ownerPost(u, "/r/widgets/handover/give", url.Values{}); w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/r/widgets" {
+		t.Errorf("Give summary: %d %s", w.Code, w.Body.String())
+	}
+	for i := 0; i < 100 && strings.Count(given, "is in the file "+file) < 2; i++ {
+		time.Sleep(50 * time.Millisecond)
+		b, _ := os.ReadFile(filepath.Join(dirA, "given.txt"))
+		given = string(b)
+	}
+	if n := strings.Count(given, "is in the file "+file); n != 2 {
+		t.Errorf("Give summary typed the line %d times in all, want 2", n)
+	}
+	if w := ownerPost(u, "/all/handover/give", url.Values{}); w.Code != http.StatusNotFound {
+		t.Errorf("Give summary with none kept: %d", w.Code)
 	}
 	// It is not reset again within the gap, whatever placement picks.
 	read("b", 5, pageAt.Add(12*time.Hour))
@@ -202,6 +247,7 @@ func TestIdleResetNoSummary(t *testing.T) {
 	u.tmuxArgs = []string{"-L", fmt.Sprintf("agentd-test-mute-%d", time.Now().UnixNano()), "-f", "/dev/null"}
 	t.Cleanup(func() { u.tmux("kill-server") })
 	u.resetPoll, u.resetPause, u.resetSummary, u.resetQuiet = 50*time.Millisecond, 100*time.Millisecond, 500*time.Millisecond, 0
+	u.handoverRoot = filepath.Join(t.TempDir(), "handover")
 	clone := filepath.Join(u.home, "repos", "github.com", "example-org", "widgets")
 	if err := os.MkdirAll(filepath.Join(clone, ".git"), 0o755); err != nil {
 		t.Fatal(err)
@@ -272,5 +318,33 @@ func TestPromptText(t *testing.T) {
 	}
 	if !spinnerLine.MatchString("· Churning… (5m 6s · ↓ 22.9k tokens)") || spinnerLine.MatchString("✻ Brewed for 24s · done 9:43 AM") {
 		t.Error("the spinner line of a running turn, or an ended one's, is misread")
+	}
+}
+
+// The summaries' folder must be this user's alone: a link or an open one
+// is refused, since /tmp is shared.
+func TestHandoverFolder(t *testing.T) {
+	u := &UI{handoverRoot: filepath.Join(t.TempDir(), "handover")}
+	path, err := u.keepHandover("repo-widgets", "the summary\n")
+	if err != nil || path != u.handoverFile("repo-widgets") || !u.hasHandover("repo-widgets") {
+		t.Fatalf("kept %q, %v", path, err)
+	}
+	if u.hasHandover("repo-gadgets") {
+		t.Error("a summary for a session that left none")
+	}
+	open := filepath.Join(t.TempDir(), "open")
+	if err := os.Mkdir(open, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	os.Chmod(open, 0o777)
+	if _, err := (&UI{handoverRoot: open}).keepHandover("repo-widgets", "x"); err == nil {
+		t.Error("an open folder was taken")
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(u.handoverRoot, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&UI{handoverRoot: link}).keepHandover("repo-widgets", "x"); err == nil {
+		t.Error("a link was taken")
 	}
 }

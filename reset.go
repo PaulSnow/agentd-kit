@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -266,31 +267,81 @@ func shortDuration(d time.Duration) string {
 // the reply in the transcript.
 const summaryAsk = `agentd: this session is about to be restarted, to move it from the Claude account %s to %s. Reply with a summary of the current work that a fresh session can carry on from: the goal, what is done, what is in progress, the next steps, the questions open for the owner, and the branches, files and commands that matter. Reply with the summary alone and use no tools. (handover %s)`
 
-// summaryFeed is what the new session is given, before the summary.
-const summaryFeed = `agentd: this session replaces one that ran on the Claude account %s; it was restarted to move to %s. Below is the summary the earlier session left of its current work. Read it, say in a line or two where the work stands, and carry on from it when the owner next asks; start nothing by yourself.`
+// summaryFeed is the one line the new session is given: where the summary
+// is, which it reads itself. The same line is typed when the owner gives
+// it again with Give summary.
+const summaryFeed = `agentd: this session replaces an earlier one that agentd restarted to move it to another Claude account. The summary that session left of its current work is in the file %s. Read it, say in a line or two where the work stands, and carry on from it when the owner next asks; start nothing by yourself.`
+
+// handoverFile is where the summary the session name last left is kept for
+// the new session to read: one known file per page session, so the owner
+// can have it read again (#96).
+func (u *UI) handoverFile(name string) string {
+	return filepath.Join(u.handoverRoot, name+".md")
+}
+
+// keepHandover writes text as the summary the session name left, in a
+// folder only this user may use: one that is a link, or another user's,
+// is refused, since /tmp is shared.
+func (u *UI) keepHandover(name, text string) (string, error) {
+	if err := os.MkdirAll(u.handoverRoot, 0o700); err != nil {
+		return "", err
+	}
+	fi, err := os.Lstat(u.handoverRoot)
+	if err != nil {
+		return "", err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !fi.IsDir() || !ok || int(st.Uid) != os.Getuid() || fi.Mode().Perm()&0o077 != 0 {
+		return "", fmt.Errorf("%s is not a folder of this user's alone", u.handoverRoot)
+	}
+	path := u.handoverFile(name)
+	tmp, err := os.CreateTemp(u.handoverRoot, name+".*")
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.WriteString(text); err != nil {
+		tmp.Close()
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	return path, os.Rename(tmp.Name(), path)
+}
+
+// hasHandover says whether a summary is kept for the session name.
+func (u *UI) hasHandover(name string) bool {
+	fi, err := os.Lstat(u.handoverFile(name))
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// giveHandover types the line that has the session name read its kept
+// summary. It refuses unless the session is at an empty prompt, so it
+// never types into a turn, a dialog or the owner's draft.
+func (u *UI) giveHandover(name string) error {
+	if !u.hasHandover(name) {
+		return errNoHandover
+	}
+	if !u.sessionExists(name) {
+		return errNoSession
+	}
+	if why := u.screenBusy(name); why != "" {
+		return fmt.Errorf("the session is not at an empty prompt: %s", why)
+	}
+	return u.typeLine(name, fmt.Sprintf(summaryFeed, u.handoverFile(name)))
+}
+
+var (
+	errNoHandover = errors.New("no summary is kept for this session")
+	errNoSession  = errors.New("no session is running; open the page to start one, then give it the summary")
+)
 
 // typeLine types one line at the session's prompt and enters it. The
 // Enter follows a moment later, or it is read as part of a paste.
 func (u *UI) typeLine(name, text string) error {
 	if out, err := u.tmux("send-keys", "-t", "="+name+":", "-l", "--", text); err != nil {
 		return fmt.Errorf("typing: %w: %s", err, strings.TrimSpace(out))
-	}
-	time.Sleep(u.resetPause)
-	if out, err := u.tmux("send-keys", "-t", "="+name+":", "C-m"); err != nil {
-		return fmt.Errorf("entering: %w: %s", err, strings.TrimSpace(out))
-	}
-	return nil
-}
-
-// pasteText pastes text of several lines at the session's prompt as one
-// paste, and enters it.
-func (u *UI) pasteText(name, text string) error {
-	buf := "agentd-" + name
-	if out, err := u.tmux("set-buffer", "-b", buf, "--", text); err != nil {
-		return fmt.Errorf("pasting: %w: %s", err, strings.TrimSpace(out))
-	}
-	if out, err := u.tmux("paste-buffer", "-d", "-p", "-b", buf, "-t", "="+name+":"); err != nil {
-		return fmt.Errorf("pasting: %w: %s", err, strings.TrimSpace(out))
 	}
 	time.Sleep(u.resetPause)
 	if out, err := u.tmux("send-keys", "-t", "="+name+":", "C-m"); err != nil {
@@ -507,6 +558,10 @@ func (u *UI) handover(s pageSession, on, to string, worked bool) {
 			fail("the summary was not kept: %v", err)
 			return
 		}
+		if _, err := u.keepHandover(s.name, head+summary+"\n"); err != nil {
+			fail("the summary was not kept for the new session: %v; the session is as it was", err)
+			return
+		}
 		// The owner may have taken the session up while it wrote.
 		for i := 0; ; i++ {
 			why := u.screenBusy(s.name)
@@ -550,16 +605,16 @@ func (u *UI) handover(s pageSession, on, to string, worked bool) {
 				break
 			}
 			if !u.sessionExists(s.name) {
-				fail("the new session ended before it took the summary, which is kept")
+				fail("the new session ended before it took the summary; it is kept in %s: start the session, then Give summary", u.handoverFile(s.name))
 				return
 			}
 			if time.Now().After(until) {
-				fail("the new session did not come to its prompt within %s; the summary is kept, not given", shortDuration(u.resetPrompt))
+				fail("the new session did not come to its prompt within %s (a trust question, say); the summary is kept in %s: once the session is at its prompt, Give summary has it read it", shortDuration(u.resetPrompt), u.handoverFile(s.name))
 				return
 			}
 		}
-		if err := u.pasteText(s.name, fmt.Sprintf(summaryFeed, on, st.To)+"\n\n"+summary); err != nil {
-			fail("the summary is kept, not given: %v", err)
+		if err := u.giveHandover(s.name); err != nil {
+			fail("the summary is kept in %s, not given: %v; Give summary tries again", u.handoverFile(s.name), err)
 			return
 		}
 	}
@@ -582,6 +637,9 @@ func (u *UI) resetNote(s pageSession, on, to string) (text, title string) {
 		return "Needs a reset → " + to, "New sessions go on " + to + ", whose week resets first. Close session and start a new one to move this one there."
 	case st != nil && st.Step == resetFailed && time.Since(st.At) < u.resetGap:
 		return "Needs a reset → " + to + " (the last try failed)", "agentd tried to move this session to " + st.To + ": " + st.Err + ". It tries again in an hour; Close session moves it now, without a summary."
+	case st != nil && st.Step == resetFailed && time.Since(st.At) < u.resetGap && u.hasHandover(s.name):
+		// Moved, but the summary did not reach the new session.
+		return "Summary not given", "agentd moved this session to " + st.To + ", but " + st.Err + "."
 	}
 	why, _ := u.sessionBusy(s, time.Now())
 	if why == "" {
@@ -604,12 +662,11 @@ func accountTitle(account string) string {
 func (u *UI) accountInfo(s pageSession, now time.Time) map[string]any {
 	on, to := u.sessionMove(s.name, now)
 	text, title := u.resetNote(s, on, to)
-	st := u.resetOf(s.name)
 	titled := ""
 	if on != "" {
 		titled = accountTitle(on)
 	}
-	return map[string]any{"account": on, "account_title": titled, "move_to": to, "note": text, "note_title": title, "summary": st != nil && st.File != ""}
+	return map[string]any{"account": on, "account_title": titled, "move_to": to, "note": text, "note_title": title, "summary": u.hasHandover(s.name)}
 }
 
 // serveHandover answers the summary the session name last left when
@@ -618,12 +675,11 @@ func (u *UI) serveHandover(w http.ResponseWriter, r *http.Request, name string) 
 	if !u.checkQueryToken(w, r) {
 		return
 	}
-	st := u.resetOf(name)
-	if st == nil || st.File == "" {
-		http.Error(w, "no summary is kept for this session", http.StatusNotFound)
+	if !u.hasHandover(name) {
+		http.Error(w, errNoHandover.Error(), http.StatusNotFound)
 		return
 	}
-	b, err := os.ReadFile(st.File)
+	b, err := os.ReadFile(u.handoverFile(name))
 	if err != nil {
 		http.Error(w, "reading the summary: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -631,6 +687,33 @@ func (u *UI) serveHandover(w http.ResponseWriter, r *http.Request, name string) 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Write(b)
+}
+
+// serveGive is the page's Give summary: a POST from the UI's own page with
+// its token, which has the session read the summary kept for it. The page
+// is sent back to back, with the outcome said there.
+func (u *UI) serveGive(w http.ResponseWriter, r *http.Request, name, back string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !u.checkPost(w, r) {
+		return
+	}
+	err := u.giveHandover(name)
+	switch {
+	case errors.Is(err, errNoHandover), errors.Is(err, errNoSession):
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	case err != nil:
+		http.Error(w, "not given: "+err.Error()+"; clear it, then Give summary again", http.StatusConflict)
+		return
+	}
+	if st := u.resetOf(name); st != nil && st.Step == resetFailed {
+		st.Step, st.Err, st.At = resetDone, "", time.Now()
+		u.setReset(name, *st)
+	}
+	http.Redirect(w, r, back, http.StatusSeeOther)
 }
 
 // checkQueryToken says whether a GET carries the page's token, and refuses

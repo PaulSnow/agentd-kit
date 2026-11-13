@@ -627,8 +627,7 @@ func (u *UI) workspaceView(repo string, now time.Time) (*uiWorkspace, error) {
 		src, _, _ := u.workspacePick(repo)
 		s := pageSession{workspaceSession(repo), v.Clone, defaultWorkspaceCommand, src.cfg}
 		v.Note, v.NoteTitle = u.resetNote(s, v.Account, v.MoveTo)
-		st := u.resetOf(s.name)
-		v.Summary = st != nil && st.File != ""
+		v.Summary = u.hasHandover(s.name)
 	}
 	return v, nil
 }
@@ -1239,9 +1238,7 @@ func (u *UI) homeView(now time.Time) *uiHome {
 	v.ConsoleAccount = u.sessionAccount(allConsoleSession)
 	v.ConsoleMoveTo = u.moveTo(v.ConsoleAccount, pick)
 	v.Note, v.NoteTitle = u.resetNote(u.consoleSession(), v.ConsoleAccount, v.ConsoleMoveTo)
-	if st := u.resetOf(allConsoleSession); st != nil && st.File != "" {
-		v.Summary = true
-	}
+	v.Summary = u.hasHandover(allConsoleSession)
 	return v
 }
 
@@ -1268,6 +1265,10 @@ func (u *UI) allConsoleDir() string {
 func (u *UI) serveAllConsole(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/all/files" {
 		u.serveTerminalFiles(w, r, u.sources[0].cfg, allConsoleSession)
+		return
+	}
+	if r.URL.Path == "/all/handover/give" {
+		u.serveGive(w, r, allConsoleSession, "/")
 		return
 	}
 	if r.URL.Path == "/all/close" {
@@ -1414,6 +1415,14 @@ func (u *UI) serveWorkspace(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		u.serveTerminalFiles(w, r, src.cfg, repo)
+		return
+	}
+	if rest == "handover/give" {
+		if _, _, ok := u.workspacePick(repo); !ok {
+			http.NotFound(w, r)
+			return
+		}
+		u.serveGive(w, r, workspaceSession(repo), "/r/"+url.PathEscape(repo))
 		return
 	}
 	if rest == "read" {
