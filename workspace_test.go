@@ -260,6 +260,19 @@ func TestRunningRing(t *testing.T) {
 			t.Errorf("page lacks %s", want)
 		}
 	}
+	// Home, with no session running, says so under its title (#98).
+	home := owner(t, u, "/")
+	for _, want := range []string{`id="repo-ring"`, `data-current="All Repositories"`, "No session running"} {
+		if !strings.Contains(home, want) {
+			t.Errorf("home lacks %s", want)
+		}
+	}
+	if strings.Contains(home, "No other session running") || strings.Contains(home, "ring-arrow") {
+		t.Error("home, with no session running, speaks of another or offers arrows")
+	}
+	if got := strings.Join(runningRing(append([]string(nil), repos...), on("zeta", "Gadgets", "nuts"), ""), " "); got != "Gadgets nuts zeta" {
+		t.Errorf("home's ring: %s", got)
+	}
 }
 
 // wsClient is the browser's end of a terminal, for the test.
@@ -506,8 +519,16 @@ func TestPageSessionAccount(t *testing.T) {
 	if !strings.Contains(page, `data-close="/r/widgets/close"`) {
 		t.Error("the page has no Close session")
 	}
-	if !strings.Contains(page, `<span class="topbar-title topbar-repo" data-name="widgets">widgets</span>`) || strings.Contains(owner(t, u, "/"), "topbar-repo") {
-		t.Error("only the repository page shows its repository in the top bar's repository style")
+	if !strings.Contains(page, `<span class="topbar-title topbar-repo" data-name="widgets">widgets</span>`) {
+		t.Error("the repository page does not show its repository in the top bar")
+	}
+	// Home is titled as a repository page is, over the repositories with a
+	// running session (#98).
+	for _, want := range []string{`<title>All Repositories</title>`, `<span class="topbar-title topbar-repo" data-name="All Repositories">All Repositories</span>`,
+		`data-ring="[&#34;widgets&#34;]"`, `<a href="/r/widgets" data-step="1" data-name="widgets">widgets</a>`, `href="/r/widgets" data-step="1" title="On to widgets"`} {
+		if home := owner(t, u, "/"); !strings.Contains(home, want) {
+			t.Errorf("home lacks %s", want)
+		}
 	}
 	if strings.Contains(page, "Needs a reset") || strings.Contains(owner(t, u, "/"), ">reset</span>") {
 		t.Error("a session on the right account is said to need a reset")

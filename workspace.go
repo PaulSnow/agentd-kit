@@ -1162,8 +1162,12 @@ func (p *uiHome) TerminalURL() string {
 // homeView is the home page.
 func (u *UI) homeView(now time.Time) *uiHome {
 	host, _ := os.Hostname()
-	v := &uiHome{uiPage: uiPage{Title: "Repositories", Token: u.token, Back: "/", Now: now, loc: u.loc}, Host: host, Sorts: RepoSorts}
+	v := &uiHome{uiPage: uiPage{Title: allRepositories, Token: u.token, Back: "/", Now: now, loc: u.loc}, Host: host, Sorts: RepoSorts}
 	running := u.runningSessions()
+	// The title is laid out as a repository page's, over every repository
+	// with a running session, by name (#98).
+	v.RingOn = true
+	v.Ring = runningRing(sortedKeys(u.workspaceRepos()), func(name string) bool { return running[workspaceSession(name)] }, "")
 	pick, _ := u.pageAccount(now)
 	u.mu.Lock()
 	about := u.about
@@ -1209,6 +1213,10 @@ func (u *UI) homeView(now time.Time) *uiHome {
 	v.ConsoleMoveTo = u.moveTo(v.ConsoleAccount, pick)
 	return v
 }
+
+// allRepositories is the home page's title: the page for all of them, laid
+// out as one repository's page is (#98).
+const allRepositories = "All Repositories"
 
 // allConsoleSession is the tmux session of the console for all the work.
 const allConsoleSession = "console-all"
