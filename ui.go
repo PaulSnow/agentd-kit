@@ -492,6 +492,9 @@ type UI struct {
 	resetPrompt  time.Duration
 	resetPoll    time.Duration
 	resetPause   time.Duration
+	// handoverRoot is where each page session's summary is kept for its
+	// new session to read, one known file each (#96).
+	handoverRoot string
 }
 
 // NewUI builds the UI's handler over sources, the first the main config's.
@@ -520,7 +523,8 @@ func NewUI(cfg UIConfig, whois Whois, sources []*uiSource, now func() time.Time)
 	home, _ := os.UserHomeDir()
 	return &UI{cfg: cfg, whois: whois, sources: sources, self: ip, now: now, loc: time.Local, token: hex.EncodeToString(b),
 		answers: map[string]whoisAnswer{}, slots: make(chan struct{}, whoisSlots), home: home, usage: newUsageReader(),
-		resetQuiet: resetQuiet, resetGap: resetGap, resetSummary: resetSummary, resetPrompt: resetPrompt, resetPoll: 3 * time.Second, resetPause: 1500 * time.Millisecond}, nil
+		resetQuiet: resetQuiet, resetGap: resetGap, resetSummary: resetSummary, resetPrompt: resetPrompt, resetPoll: 3 * time.Second, resetPause: 1500 * time.Millisecond,
+		handoverRoot: filepath.Join(os.TempDir(), "agentd-handover")}, nil
 }
 
 // source is the source named name, or nil.
