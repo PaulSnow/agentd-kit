@@ -475,6 +475,10 @@ type UI struct {
 	// newly lists, so they show without waiting for the next poll; nil
 	// leaves them to it.
 	issueAPI ForgeAPI
+	// reading is each repository's read the page asked for that is still
+	// going, and readAt when its last one ended, under mu (#99).
+	reading map[string]chan struct{}
+	readAt  map[string]time.Time
 }
 
 // NewUI builds the UI's handler over sources, the first the main config's.
