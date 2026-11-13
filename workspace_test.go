@@ -510,7 +510,7 @@ func TestPageSessionAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	page := owner(t, u, "/r/widgets")
-	if !strings.Contains(page, `<span id="term-account">, account b</span>`) {
+	if !strings.Contains(page, `<strong>Claude Code<span id="term-account" class="term-account"> · account b</span></strong>`) {
 		t.Error("the page does not say the account")
 	}
 	if u.sessionAccount("repo-none") != "" {
@@ -534,19 +534,34 @@ func TestPageSessionAccount(t *testing.T) {
 		t.Error("a session on the right account is said to need a reset")
 	}
 	read("a", 40, pageAt.Add(24*time.Hour))
-	if page := owner(t, u, "/r/widgets"); !strings.Contains(page, `title="New sessions go on a, whose week resets first. Close session and start a new one to move this one there.">Needs a reset → a</span>`) {
+	// A session that should move but has active work says so beside its
+	// title, and why agentd waits (#97); this one is not at a prompt.
+	if page := owner(t, u, "/r/widgets"); !strings.Contains(page, `title="This session is on b; new sessions go on a, whose week resets first. It has active work (it is not at its prompt), so agentd waits: once it is idle, agentd asks it for a summary and restarts it on a. Close session moves it now, without a summary.">Needs a reset → a</span>`) {
 		t.Error("the page does not say the session needs a reset")
 	}
-	if home := owner(t, u, "/"); !strings.Contains(home, `title="Its session is on b; new sessions go on a, whose week resets first. Open it and use Close session.">reset</span>`) {
-		t.Error("home does not mark the session that needs a reset")
+	if home := owner(t, u, "/"); !strings.Contains(home, `<span class="row-account muted" title="The account its session runs on">account b</span>`) ||
+		!strings.Contains(home, `title="Its session is on b; new sessions go on a, whose week resets first. agentd asks it for a summary and restarts it on a once it is idle.">reset</span>`) {
+		t.Error("home does not name the session's account and mark that it needs a reset")
 	}
 	var tok struct {
 		Account string `json:"account"`
+		Title   string `json:"account_title"`
 		MoveTo  string `json:"move_to"`
+		Note    string `json:"note"`
 	}
-	if err := json.Unmarshal([]byte(owner(t, u, "/r/widgets/tokens")), &tok); err != nil || tok.Account != "b" || tok.MoveTo != "a" {
+	if err := json.Unmarshal([]byte(owner(t, u, "/r/widgets/tokens")), &tok); err != nil || tok.Account != "b" || tok.MoveTo != "a" || tok.Title != "account b" || tok.Note != "Needs a reset → a" {
 		t.Errorf("tokens %+v %v", tok, err)
 	}
+	// A session with active work is never reset.
+	u.resetIdle(pageAt)
+	if st := u.resetOf(name); st != nil || u.sessionAccount(name) != "b" {
+		t.Errorf("a session with active work was reset: %+v", st)
+	}
+	u.cfg.ManualReset = true
+	if page := owner(t, u, "/r/widgets"); !strings.Contains(page, `Close session and start a new one to move this one there.">Needs a reset → a</span>`) {
+		t.Error("with manual_reset the page does not leave the reset to the owner")
+	}
+	u.cfg.ManualReset = false
 	if got := u.moveTo("default login", "a"); got != "a" {
 		t.Errorf("default login, no account on it: %q", got)
 	}
