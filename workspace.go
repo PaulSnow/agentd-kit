@@ -123,6 +123,12 @@ func (u *UI) ensureSession(name, dir string, command []string) error {
 	if u.sessionExists(name) {
 		return nil
 	}
+	return u.startSession(name, dir, command)
+}
+
+// startSession starts the session name in dir, on the account placement
+// picks now. The caller holds sessionsMu.
+func (u *UI) startSession(name, dir string, command []string) error {
 	id, err := newUUID()
 	if err != nil {
 		return err
@@ -519,7 +525,12 @@ func (u *UI) connectTerminal(w http.ResponseWriter, r *http.Request, name, dir s
 			break
 		}
 	}
-	if !u.sessionExists(name) {
+	// Under the lock: a reset ends the session and starts its successor
+	// under it, and the page reconnects to that one (#96).
+	u.sessionsMu.Lock()
+	ended := !u.sessionExists(name)
+	u.sessionsMu.Unlock()
+	if ended {
 		ws.closeWith(terminalEnded)
 	}
 }
@@ -578,8 +589,12 @@ type uiWorkspace struct {
 	// Requests are the repository's open requests as last read.
 	Requests requestReading
 	// Account is the account the repository's session runs on, "" with
-	// none running; MoveTo the one it should move to.
+	// none running; MoveTo the one it should move to. Note is what the
+	// title says of a reset, NoteTitle its explanation, and Summary
+	// whether the summary of an earlier reset is kept (#96, #97).
 	Account, MoveTo string
+	Note, NoteTitle string
+	Summary         bool
 }
 
 // TerminalURL is the page's WebSocket address, with the UI's token.
@@ -608,6 +623,13 @@ func (u *UI) workspaceView(repo string, now time.Time) (*uiWorkspace, error) {
 	v.RingOn = true
 	v.Ring = runningRing(repos, func(name string) bool { return running[workspaceSession(name)] }, repo)
 	v.Account, v.MoveTo = u.sessionMove(workspaceSession(repo), now)
+	if v.Clone != "" {
+		src, _, _ := u.workspacePick(repo)
+		s := pageSession{workspaceSession(repo), v.Clone, defaultWorkspaceCommand, src.cfg}
+		v.Note, v.NoteTitle = u.resetNote(s, v.Account, v.MoveTo)
+		st := u.resetOf(s.name)
+		v.Summary = st != nil && st.File != ""
+	}
 	return v, nil
 }
 
@@ -931,10 +953,12 @@ func (u *UI) serveTokens(w http.ResponseWriter, repo string) {
 		http.Error(w, "no such repository", http.StatusNotFound)
 		return
 	}
-	spend, running := u.sessionTokens(src.cfg, repo, workspaceClone(r, u.home))
-	on, to := u.sessionMove(workspaceSession(repo), u.now())
+	dir := workspaceClone(r, u.home)
+	spend, running := u.sessionTokens(src.cfg, repo, dir)
+	info := u.accountInfo(pageSession{workspaceSession(repo), dir, defaultWorkspaceCommand, src.cfg}, u.now())
+	info["tokens"], info["running"] = tokens(spend), running
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"tokens": tokens(spend), "running": running, "account": on, "move_to": to})
+	json.NewEncoder(w).Encode(info)
 }
 
 // workspaceRepo is a repository on the home page.
@@ -1045,8 +1069,11 @@ type uiHome struct {
 	// reports it.
 	Accounts []AccountReport
 	// ConsoleAccount is the account the console runs on, "" when it is
-	// not running; ConsoleMoveTo the one it should move to.
+	// not running; ConsoleMoveTo the one it should move to; the rest as
+	// a repository page's.
 	ConsoleAccount, ConsoleMoveTo string
+	Note, NoteTitle               string
+	Summary                       bool
 }
 
 // usageBar is one of an account's limits as a bar: its label, percent
@@ -1211,6 +1238,10 @@ func (u *UI) homeView(now time.Time) *uiHome {
 	v.Accounts = u.accountReports(now)
 	v.ConsoleAccount = u.sessionAccount(allConsoleSession)
 	v.ConsoleMoveTo = u.moveTo(v.ConsoleAccount, pick)
+	v.Note, v.NoteTitle = u.resetNote(u.consoleSession(), v.ConsoleAccount, v.ConsoleMoveTo)
+	if st := u.resetOf(allConsoleSession); st != nil && st.File != "" {
+		v.Summary = true
+	}
 	return v
 }
 
@@ -1260,11 +1291,14 @@ func (u *UI) serveAllConsole(w http.ResponseWriter, r *http.Request) {
 		u.connectTerminal(w, r, allConsoleSession, dir, allConsoleCommand)
 	case "/all/screen":
 		u.serveScreen(w, r, allConsoleSession)
+	case "/all/handover":
+		u.serveHandover(w, r, allConsoleSession)
 	case "/all/tokens":
 		spend, running := u.namedSessionTokens(u.sources[0].cfg, allConsoleSession, u.allConsoleDir())
-		on, to := u.sessionMove(allConsoleSession, u.now())
+		info := u.accountInfo(u.consoleSession(), u.now())
+		info["tokens"], info["running"] = tokens(spend), running
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"tokens": tokens(spend), "running": running, "account": on, "move_to": to})
+		json.NewEncoder(w).Encode(info)
 	default:
 		http.NotFound(w, r)
 	}
@@ -1415,6 +1449,13 @@ func (u *UI) serveWorkspace(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		u.serveScreen(w, r, workspaceSession(repo))
+		return
+	case "handover":
+		if _, _, ok := u.workspacePick(repo); !ok {
+			http.NotFound(w, r)
+			return
+		}
+		u.serveHandover(w, r, workspaceSession(repo))
 		return
 	case "":
 		w.Header().Set("Content-Security-Policy", workspaceCSP)

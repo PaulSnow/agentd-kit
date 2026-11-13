@@ -519,15 +519,21 @@
         .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
         .then(function (d) {
           el.textContent = d.running ? "Tokens used: " + d.tokens : "No session";
+          // The session's title names its account; beside it, whether it
+          // needs a reset to move to another, or agentd is resetting it.
           var acct = document.getElementById("term-account");
           if (acct) {
-            acct.textContent = d.account ? ", account " + d.account : "";
+            acct.textContent = d.account_title ? " · " + d.account_title : "";
           }
           var move = document.getElementById("term-move");
           if (move) {
-            move.hidden = !d.move_to;
-            move.textContent = d.move_to ? "Needs a reset → " + d.move_to : "";
-            move.title = d.move_to ? "New sessions go on " + d.move_to + ", whose week resets first. Close session and start a new one to move this one there." : "";
+            move.hidden = !d.note;
+            move.textContent = d.note || "";
+            move.title = d.note_title || "";
+          }
+          var summary = document.getElementById("term-summary");
+          if (summary) {
+            summary.hidden = !d.summary;
           }
         })
         .catch(function () {});
