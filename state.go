@@ -18,6 +18,11 @@ const (
 	Failed         State = "failed"
 	CrashLooping   State = "crash-looping"
 	Stopped        State = "stopped" // the budget or the stop time was reached
+
+	// Gone and Stale are for the views only (shownState): Classify, actOn
+	// and the fold never see them.
+	Gone  State = "gone"  // no longer supervised: ended, or no longer configured
+	Stale State = "stale" // supervised, but not observed lately, or the run stopped
 )
 
 // Track is what the supervisor remembers about one session between passes.
@@ -59,13 +64,14 @@ type Track struct {
 	Transcript string
 	Measured   string
 	Usage      map[string]UsagePayload
-	Checkpoint Checkpoint  // the latest merge seen at the worktree's head
-	Launched   time.Time   // the latest restart or rotation started
-	Brief      []BriefPart // a session's brief parts as its latest launch wrote them
-	RotatedFor string      // the merge the latest rotation was at
-	Rotations  int         // rotations, taken or would-be, ever
-	Stopped    string      // why the session was stopped, until the owner clears it
-	SpendBase  int64       // the spend when the owner last cleared it, which its cap counts from
+	Checkpoint Checkpoint   // the latest merge seen at the worktree's head
+	Launched   time.Time    // the latest restart or rotation started
+	Brief      []BriefPart  // a session's brief parts as its latest launch wrote them
+	RotatedFor string       // the merge the latest rotation was at
+	Cuts       []SessionCut // its context and brief cuts, oldest first (#87)
+	Rotations  int          // rotations, taken or would-be, ever
+	Stopped    string       // why the session was stopped, until the owner clears it
+	SpendBase  int64        // the spend when the owner last cleared it, which its cap counts from
 
 	Posted    map[string]bool        // escalation keys already posted, or given up on
 	Questions QuestionsEscalation    // the escalation of the Questions section
@@ -77,6 +83,7 @@ type Track struct {
 
 	// What the views show, folded from the log by apply alone.
 	LastSeen      time.Time
+	EndedAt       time.Time // when the runtime session was ended; a new start makes a new Track
 	Head, Reason  string
 	RestartCount  int                // restarts, taken or would-be, ever
 	NudgeCount    int                // nudges ever
@@ -100,6 +107,10 @@ type Track struct {
 	Raised          []Decision
 	RaisedCount     int
 	Deadlines       map[string]DeadlineRecord
+	// FirstSeen is when each open decision was first seen, by its id and
+	// hash as it was asked (#88): a per-kind default deadline counts
+	// from it, and the digest's wait.
+	FirstSeen map[string]time.Time
 
 	Asked      string // the Questions text last posted, while they stay open
 	AskedAt    time.Time
@@ -383,4 +394,55 @@ func Classify(t *Track, ev Evidence, pol Policies, now time.Time) (State, string
 		return Idle, fmt.Sprintf("screen unchanged for %s", unchanged.Round(time.Minute))
 	}
 	return Working, "screen changed recently"
+}
+
+// shownState is what the views show of session name's track t at now:
+// what is true now, not only what was last observed. A session no longer
+// supervised, a runtime session ended or one no longer configured, is
+// Gone; one still supervised but not observed for over two observe
+// heartbeats, or whose run has stopped (other than a --once run's end
+// of pass), is Stale. Each names the time it
+// was last seen and what it was then. Done, Stopped and CrashLooping are
+// ends and are shown as they are, and so is a track never observed. A
+// zero now is the log's last event.
+func (st *LogState) shownState(name string, t *Track, now time.Time) (State, string) {
+	if t == nil {
+		return "", ""
+	}
+	if !t.Observed || t.State == Done || t.State == Stopped || t.State == CrashLooping {
+		return t.State, t.Reason
+	}
+	if now.IsZero() {
+		now = st.Last
+	}
+	seen := t.LastSeen.UTC().Format(time.RFC3339)
+	_, running := st.Runtime[name]
+	configured := st.cfg == nil
+	if st.cfg != nil {
+		_, configured = st.cfg.Sessions[name]
+	}
+	if !running && (!t.EndedAt.IsZero() || !configured) {
+		return Gone, fmt.Sprintf("gone since %s; last seen %s", seen, t.State)
+	}
+	// A --once run stops after each pass and the next comes on its own:
+	// only the time since the session was last seen tells for it.
+	stopped := !st.Stopped.IsZero() && !st.Stopped.Before(st.Started) && st.StopReason != "once"
+	if stopped || now.Sub(t.LastSeen) > 2*observeHeartbeat {
+		why := fmt.Sprintf("stale since %s; last seen %s", seen, t.State)
+		if t.Reason != "" {
+			why += ": " + t.Reason
+		}
+		return Stale, why
+	}
+	return t.State, t.Reason
+}
+
+// SessionCut is one cut agentd made to a session (#87): its context cut
+// mid-turn at the hard cap, or its BRIEF.md cut to policies.brief.max_bytes.
+type SessionCut struct {
+	At      time.Time
+	Action  string    // the provision, restart or rotate that made it
+	Context int64     // a context cut: the context it left
+	Cap     int64     // and the hard cap it reached
+	Brief   *BriefCut // a brief cut
 }

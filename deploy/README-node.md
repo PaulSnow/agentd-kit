@@ -30,15 +30,18 @@ or asleep shows "laptop: last seen <time>".
 2. In `~/.config/agentd-kit/coord-live.json`, add the hub on the tailnet
    IP, the hosts, and the laptop to each repository it should watch:
 
-       "hub": {"address": "100.64.0.1:8737", "silent_after": "10m", "retry_after": "30m"},
+       "hub": {"address": "HUB_ADDRESS:8737", "silent_after": "10m", "retry_after": "30m"},
        "hosts": {
          "buildhost": {"token_file": "~/.config/agentd-kit/hub-buildhost.token"},
          "laptop": {"token_file": "~/.config/agentd-kit/hub-laptop.token", "observe": true}
        },
        "repositories": {
-         "staking": {..., "clone_on": ["laptop"]},
+         "widgets": {..., "clone_on": ["laptop"]},
          "agentd-kit": {..., "clone_on": ["laptop"]}
        }
+
+   `HUB_ADDRESS` stands for the build host's tailnet address (as
+   `tailscale ip -4` prints it there).
 
    `observe: true` means the hub sends the laptop no clone, session or
    deploy command, and no repository may place its sessions there.
@@ -56,7 +59,7 @@ or asleep shows "laptop: last seen <time>".
        {
          "node": {
            "name": "laptop",
-           "hub": "http://100.64.0.1:8737",
+           "hub": "http://HUB_ADDRESS:8737",
            "token_file": "~/.config/agentd/hub.token",
            "repos_root": "~/repos",
            "more_roots": ["~/go/src"],
@@ -65,8 +68,9 @@ or asleep shows "laptop: last seen <time>".
          }
        }
 
+   `HUB_ADDRESS` is the build host's tailnet address, as above.
    Clones are found at `<root>/<forge host>/<project>`, as
-   `~/repos/gitlab.com/accumulatenetwork/core/staking`.
+   `~/repos/gitlab.example.com/example-group/widgets`.
 
 3. Install agentd and the unit, then start it:
 
@@ -80,3 +84,27 @@ or asleep shows "laptop: last seen <time>".
 
 4. On the build host, `agentd nodes -config ~/.config/agentd-kit/coord-live.json`
    shows the laptop reporting within one `every`.
+
+## Documents and prompts (#95)
+
+To let the build host send the laptop documents and run prompts there,
+add `"errands": true` to the laptop's `node.json` and restart its node:
+
+       systemctl --user restart agentd-node
+
+`observe` stays: the laptop still takes no clone, session or deploy
+command. Then, on the build host:
+
+       agentd send laptop report.pdf
+       agentd send -open laptop report.pdf
+       agentd prompt laptop "What is in ~/Downloads?"
+
+The first saves the file in the laptop's `~/agentd-inbox`, the second
+opens it there as well. A prompt runs `claude -p` on the laptop with its
+permission checks skipped, so it may do anything there, under the
+laptop's Claude Code login. On the laptop,
+`agentd send -config ~/.config/agentd/node.json hub notes.md` sends a
+file to the build host's `~/agentd-inbox`. The unit needs the desktop
+session's environment (`DISPLAY`, `DBUS_SESSION_BUS_ADDRESS`) for
+`-open` and `-notify`; a desktop login imports it into the user's
+systemd manager.

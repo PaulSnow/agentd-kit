@@ -40,6 +40,12 @@ type ContextStats struct {
 	Cards         int   `json:"cards"`
 	ExpertCalls   int   `json:"expert_calls"`
 	ExpertTokens  int64 `json:"expert_tokens"`
+	// The curators' daily token budget, what they spent in the last 24
+	// hours in its units, and when agentd last said they reached a daily
+	// limit (#82).
+	CuratorBudget   int64  `json:"curator_budget_tokens"`
+	CuratorSpent24h int64  `json:"curator_spent_24h"`
+	CuratorCappedAt string `json:"curator_capped_at,omitempty"`
 }
 
 // contextStats measures events for repo from since on.
@@ -149,7 +155,17 @@ func contextCmd(args []string, w io.Writer) error {
 		if err := sub.Parse(rest[2:]); err != nil {
 			return err
 		}
-		_, err = fmt.Fprintln(w, compact(contextStats(events, rest[1], time.Now().Add(-*span))))
+		now := time.Now()
+		st := contextStats(events, rest[1], now.Add(-*span))
+		cs := NewContextStore(cfg)
+		for _, e := range events {
+			cs.Apply(e)
+		}
+		st.CuratorBudget, st.CuratorSpent24h = cfg.Jobs.Curator.budget(), cs.CuratorSpent(rest[1], now)
+		if at, ok := cs.capped[rest[1]]; ok {
+			st.CuratorCappedAt = at.UTC().Format(time.RFC3339)
+		}
+		_, err = fmt.Fprintln(w, compact(st))
 		return err
 	case "curate":
 		sub := flag.NewFlagSet("context curate", flag.ContinueOnError)

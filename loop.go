@@ -39,7 +39,17 @@ const (
 	// under sessions.max; recorded once a step and round, so how long it
 	// waited is known (#71).
 	LoopWait = "wait"
+	// LoopPlace: where the request stands changed, Place its key and
+	// Reason why it stands there; recorded once a place, so how long it
+	// stood without progress is known, and one owner card says so once
+	// it stood LoopStallAfter.
+	LoopPlace = "place"
 )
+
+// LoopStallAfter is how long a request may stand at one place, with no
+// step taken, no new head and no new round, before the owner is told
+// once what it waits on.
+const LoopStallAfter = 6 * time.Hour
 
 // ownerLoopStep says whether a loop step is the owner's word.
 func ownerLoopStep(step string) bool {
@@ -78,7 +88,7 @@ const (
 
 func validLoopStep(step string) bool {
 	switch step {
-	case LoopReview, LoopJudge, LoopFix, LoopApprove, LoopFailed, LoopRetry, LoopSkip, LoopStop, LoopWait:
+	case LoopReview, LoopJudge, LoopFix, LoopApprove, LoopFailed, LoopRetry, LoopSkip, LoopStop, LoopWait, LoopPlace:
 		return true
 	}
 	return false
@@ -94,6 +104,7 @@ type LoopPayload struct {
 	Step       string `json:"step"`
 	Failed     string `json:"failed,omitempty"`
 	Waits      string `json:"waits,omitempty"` // the step a wait is of
+	Place      string `json:"place,omitempty"` // the key of a place
 	Session    string `json:"session,omitempty"`
 	Round      int    `json:"round,omitempty"`
 	Reason     string `json:"reason,omitempty"`
@@ -121,6 +132,10 @@ type LoopRecord struct {
 	WaitSince time.Time
 	WaitStep  string
 	WaitRound int
+	// PlaceKey is the key of the place the request stands at, recorded
+	// at PlaceSince; a change of place records the next.
+	PlaceKey   string
+	PlaceSince time.Time
 }
 
 // requestsTrackPrefix begins the name of the track a repository's
@@ -141,10 +156,12 @@ func (st *LogState) applyLoop(e Event) {
 		st.Loops = map[string]LoopRecord{}
 	}
 	r := st.Loops[key]
-	if p.Step != LoopWait {
+	if p.Step != LoopWait && p.Step != LoopPlace {
 		r.WaitSince, r.WaitStep, r.WaitRound = time.Time{}, "", 0
 	}
 	switch p.Step {
+	case LoopPlace:
+		r.PlaceKey, r.PlaceSince = p.Place, e.Time
 	case LoopWait:
 		r.WaitSince, r.WaitStep, r.WaitRound = e.Time, p.Waits, p.Round
 	case LoopReview:
@@ -509,7 +526,19 @@ func placeOf(cfg *Config, st *LogState, q loopRequest, now time.Time) loopPlace 
 			return owner("round %d adopted findings; waiting for the author to push; the new head is reviewed", last.N)
 		case q.worker() == "":
 			// The author pushed: the new head is reviewed.
+		case L.FixRound < last.N && (L.ReviewRound > last.N || fixHold(st, q) != "" && L.ReviewHead != "" && r.Head != L.ReviewHead):
+			// The work session cannot be relaunched, but it pushed to
+			// the request since the round was reviewed, as a session
+			// that continues a request, handed the owner's fix answer
+			// while it works or asks, does: the new head is reviewed,
+			// as after a fix round, rather than waiting on a relaunch
+			// it no longer needs; once that review is taken, the round
+			// is behind it.
 		case L.FixRound < last.N:
+			if hold := fixHold(st, q); hold != "" {
+				return loopPlace{Phase: PlaceFixing, Reason: fmt.Sprintf("round %d has findings to fix; the relaunch waits on: %s", last.N, hold),
+					Session: q.worker(), Round: last.N, Head: r.Head}
+			}
 			return loopPlace{Phase: PlaceFixing, Reason: fmt.Sprintf("round %d has findings to fix; the work session is relaunched once it is done", last.N),
 				Do: LoopFix, Session: q.worker(), Round: last.N, Head: r.Head}
 		case r.Head == L.FixHead:
@@ -824,6 +853,9 @@ func (s *Supervisor) runLoops(now time.Time) {
 		}
 		p := placeOf(s.cfg, s.st, q, now)
 		s.noteLoopSentence(q, p)
+		if s.notePlace(q, p, now); s.halt != nil {
+			return
+		}
 		lp := LoopPayload{Repository: q.Repository, Ref: q.Ref, Case: q.Case, Head: p.Head, Step: p.Do, Session: p.Session, Round: p.Round}
 		switch p.Do {
 		case "end":
@@ -873,6 +905,55 @@ func (s *Supervisor) runLoops(now time.Time) {
 	}
 	s.endFinished(now)
 	s.startNext(now)
+}
+
+// placeKey is the key of where q stands at p: its phase, its head, its
+// rounds and the steps taken for it, so any progress changes it, and a
+// step that waits for a place keeps the phase of the step.
+func placeKey(st *LogState, q loopRequest, p loopPlace) string {
+	key := ciKey(q.Repository, q.Ref)
+	L := st.Loops[key]
+	phase := p.Phase
+	if phase == PlaceWaitPlace {
+		phase = PlaceReviewing
+		if p.Do == LoopJudge {
+			phase = PlaceJudging
+		}
+	}
+	rounds, disposed := 0, false
+	if c := st.Cases[q.Case]; c != nil && len(c.Rounds) > 0 {
+		rounds, disposed = len(c.Rounds), c.Rounds[len(c.Rounds)-1].Dispositions != nil
+	}
+	return fmt.Sprintf("%s|%s|%d|%v|%d|%d|%d|%d", phase, st.CI[key].Head, rounds, disposed, L.ReviewRound, L.JudgeRound, L.FixRound, L.Failures)
+}
+
+// notePlace records where q stands when that changed, and tells the owner
+// once, on its repository's requests track, when q has stood there for
+// LoopStallAfter: what it waits on, since when, and what the owner can
+// do. A wait the owner already has a card for (a deferred finding's
+// decision), chose (a stopped loop) or was told of (a failed step) is
+// not told again.
+func (s *Supervisor) notePlace(q loopRequest, p loopPlace, now time.Time) {
+	key := ciKey(q.Repository, q.Ref)
+	L := s.st.Loops[key]
+	pk := placeKey(s.st, q, p)
+	if L.PlaceKey != pk {
+		s.emit("", Event{Kind: KindLoop, Loop: &LoopPayload{Repository: q.Repository, Ref: q.Ref, Case: q.Case, Head: s.st.CI[key].Head, Step: LoopPlace, Place: pk, Session: p.Session, Round: p.Round, Reason: p.Reason}})
+		return
+	}
+	if L.PlaceSince.IsZero() || now.Sub(L.PlaceSince) < LoopStallAfter || p.Entry != "" || L.Stopped || L.Failed != nil {
+		return
+	}
+	text := fmt.Sprintf("%s in %s has been %s since %s with no progress; it waits on: %s.", q.Ref, q.Repository, p.Phase,
+		L.PlaceSince.In(time.Local).Format("2006-01-02 15:04"), strings.TrimSuffix(p.Reason, "."))
+	switch w := q.worker(); {
+	case p.Phase == PlaceFixing && w != "":
+		text += fmt.Sprintf(" Look at its work session %s.", w)
+	case p.Session != "":
+		text += fmt.Sprintf(" Look at %s.", p.Session)
+	}
+	text += fmt.Sprintf(" agentd loop stop %s %s leaves it alone.", q.Repository, q.Ref)
+	s.escalate(requestsTrack(q.Repository), "loop-stall:"+key+":"+textHash(pk), text, s.track(requestsTrack(q.Repository)), now)
 }
 
 // followUpIssues opens, once each, the follow-up issue of every finding
@@ -1181,20 +1262,54 @@ func (s *Supervisor) endJudgment(repo, name string) {
 	}
 }
 
+// fixHold is what the relaunch of q's work session for a fix round waits
+// on, as the state has it, or "" when fixRound relaunches it at its next
+// pass.
+func fixHold(st *LogState, q loopRequest) string {
+	name := q.worker()
+	t := st.Tracks[name]
+	if t == nil {
+		return fmt.Sprintf("its work session %s is not running", name)
+	}
+	return fixHoldOf(name, t, t.State, q)
+}
+
+// fixHoldOf is what the relaunch of work session name, at state, for q's
+// fix round waits on, or "": the one test fixRound and fixHold share.
+// A laptop hold or a launch that fails is told by fixRound's skip.
+func fixHoldOf(name string, t *Track, state State, q loopRequest) string {
+	switch {
+	case t == nil:
+		return fmt.Sprintf("its work session %s is not running", name)
+	case t.Limited:
+		return fmt.Sprintf("%s is rate-limited", name)
+	case state != Done && state != Idle:
+		return fmt.Sprintf("%s is %s, not done or idle", name, stateWords(state))
+	case !q.Outside && t.Delivered[q.Delivered] == "":
+		return fmt.Sprintf("%s has not delivered the request", name)
+	}
+	return ""
+}
+
+// stateWords is state as a fix round's hold names it.
+func stateWords(state State) string {
+	if state == "" {
+		return "not yet observed"
+	}
+	return string(state)
+}
+
 // fixRound relaunches a work session that is done, or idle, for the round
 // whose adopted findings its request waits on, and says whether it did.
 // The session keeps its branch; its STATUS.md loses its DONE and its
 // facts carry the rounds, so its next delivery moves the request's head.
 func (s *Supervisor) fixRound(name string, sess Session, t *Track, ev Evidence, state State) bool {
-	if state != Done && state != Idle || t.Limited {
-		return false
-	}
 	for _, q := range loopRequests(s.cfg, s.st, s.clock.Now()) {
-		if q.worker() != name {
+		if q.worker() != name || fixHoldOf(name, t, state, q) != "" {
 			continue
 		}
 		p := placeOf(s.cfg, s.st, q, s.clock.Now())
-		if p.Do != LoopFix || !q.Outside && t.Delivered[q.Delivered] == "" {
+		if p.Do != LoopFix {
 			continue
 		}
 		rp := s.st.Runtime[name]

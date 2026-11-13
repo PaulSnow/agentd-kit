@@ -141,7 +141,7 @@ func TestLaptopOverlapHoldsAndReleasesStart(t *testing.T) {
 	if !strings.Contains(page, "laptop: laptop-work, 1 changed, 0 ahead") {
 		t.Errorf("the page lacks the laptop's clone:\n%s", page)
 	}
-	if home := owner(t, u, "/"); !strings.Contains(home, "1 laptop overlap") {
+	if home := owner(t, u, "/status"); !strings.Contains(home, "1 laptop overlap") {
 		t.Errorf("the home page lacks the overlap count")
 	}
 
@@ -299,31 +299,31 @@ func TestLaptopWorkIsTheItem(t *testing.T) {
 	}
 }
 
-// The staking case: the laptop's requests-poll edits a file item
-// W258e3837's brief plans, one card on the staking page.
-func TestStakingOverlapCard(t *testing.T) {
+// A widgets case: the laptop's requests-poll edits a file item
+// W258e3837's brief plans, one card on the widgets page.
+func TestWidgetsOverlapCard(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Hosts = map[string]HostConfig{"buildhost": {}, "laptop": {Observe: true}}
-	cfg.Repositories = map[string]Repository{"staking": {Forge: "gitlab", Host: "gitlab.com", Project: "accumulatenetwork/core/staking", CloneOn: []string{"laptop"}}}
+	cfg.Repositories = map[string]Repository{"widgets": {Forge: "gitlab", Host: "gitlab.example.com", Project: "example-group/widgets", CloneOn: []string{"laptop"}}}
 	now := time.Date(2026, 11, 1, 22, 0, 0, 0, time.UTC)
 	st := NewLogState(&cfg, ModeLive)
-	st.Work = map[string]*WorkItem{"W258e3837": {ID: "W258e3837", Repository: "staking", State: WorkOpen, Designer: true,
-		Design: &WorkDesign{Brief: &DesignBrief{Exists: []string{"internal/pull/requests_indexing.go indexes the requests (line 40)."}, Where: "staking"}}}}
+	st.Work = map[string]*WorkItem{"W258e3837": {ID: "W258e3837", Repository: "widgets", State: WorkOpen, Designer: true,
+		Design: &WorkDesign{Brief: &DesignBrief{Exists: []string{"internal/spin/index.go indexes the requests (line 40)."}, Where: "widgets"}}}}
 	st.apply(Event{V: EventVersion, Time: now, Kind: KindNode, Mode: ModeShared, Node: &NodePayload{Host: "laptop", Seq: 1, At: now, Report: &NodeReport{Clones: []CloneState{{
-		Repository: "staking", Path: "gitlab.com/accumulatenetwork/core/staking", Exists: true, Git: true, Branch: "requests-poll",
-		Changed: []string{"internal/pull/requests_indexing.go"}, Local: []LocalBranch{{Name: "requests-poll"}}}}}}})
+		Repository: "widgets", Path: "gitlab.example.com/example-group/widgets", Exists: true, Git: true, Branch: "requests-poll",
+		Changed: []string{"internal/spin/index.go"}, Local: []LocalBranch{{Name: "requests-poll"}}}}}}})
 	got := Overlaps(&cfg, st, nil, now)
 	if len(got) != 1 {
 		t.Fatalf("overlaps %+v", got)
 	}
 	for k, o := range got {
-		st.apply(Event{V: EventVersion, Time: now, Kind: KindLaptop, Mode: ModeLive, Laptop: &LaptopPayload{Op: LaptopOpen, Repository: "staking", Key: k, Overlap: o}})
+		st.apply(Event{V: EventVersion, Time: now, Kind: KindLaptop, Mode: ModeLive, Laptop: &LaptopPayload{Op: LaptopOpen, Repository: "widgets", Key: k, Overlap: o}})
 	}
-	v := BuildRepoLevel(&cfg, st, "staking", nil, now)
-	if len(v.Overlaps) != 1 || v.Overlaps[0].Sentence != "Your laptop's requests-poll edits internal/pull/requests_indexing.go; item W258e3837 here plans the same file." {
-		t.Fatalf("staking page overlaps %+v", v.Overlaps)
+	v := BuildRepoLevel(&cfg, st, "widgets", nil, now)
+	if len(v.Overlaps) != 1 || v.Overlaps[0].Sentence != "Your laptop's requests-poll edits internal/spin/index.go; item W258e3837 here plans the same file." {
+		t.Fatalf("widgets page overlaps %+v", v.Overlaps)
 	}
-	if row := BuildHomeRow(&cfg, st, "staking", nil, now); row.Overlaps != 1 {
+	if row := BuildHomeRow(&cfg, st, "widgets", nil, now); row.Overlaps != 1 {
 		t.Fatalf("home row %+v", row)
 	}
 }

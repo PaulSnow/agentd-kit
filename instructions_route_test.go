@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // instruction is the instruction the log folds to, as the page reads it.
@@ -87,7 +88,7 @@ func TestInstructionToWorkingSessionAtOnce(t *testing.T) {
 	if len(docs) != 1 || docs[0].Text != text || !docs[0].New || docs[0].ID != in.ID {
 		t.Fatalf("instructions.json = %+v", docs)
 	}
-	if got := h.typed("b"); len(got) != 1 || got[0] != h.cfg.Policies.Instructions.Pointer {
+	if got := h.typed("b"); len(got) != 1 || got[0] != h.cfg.Policies.Instructions.Pointer+" (1 new, "+itoa(utf8.RuneCountInString(text))+" characters)" {
 		t.Fatalf("typed into b: %q", got)
 	}
 	if n := len(h.typed("a")); n != 0 {

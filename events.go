@@ -63,6 +63,7 @@ type Event struct {
 	Message     *MessagePayload     `json:"message,omitempty"`
 	Inbox       *InboxPayload       `json:"inbox,omitempty"`
 	Job         *JobPayload         `json:"job,omitempty"`
+	Step        *StepPayload        `json:"step,omitempty"`
 	Loop        *LoopPayload        `json:"loop,omitempty"`
 	Node        *NodePayload        `json:"node,omitempty"`
 	Laptop      *LaptopPayload      `json:"laptop,omitempty"`
@@ -118,6 +119,7 @@ const (
 	KindMessage     = "message"     // a post to a console: a session's report (agentd console post)
 	KindInbox       = "inbox"       // a reader read the owner's instructions for a console (agentd console inbox)
 	KindJob         = "job"         // a scheduled job's run started, ended or was skipped
+	KindStep        = "step"        // a model step's run: its inputs' hash, how it ended and what it cost (#85)
 	KindLoop        = "loop"        // a step agentd took in a request's loop, or the owner's retry of a failed one
 	KindRoute       = "route"       // where agentd sends an owner instruction, or why it waits or failed
 	KindStatus      = "status"      // a status check of an active session: the model's record, or the failure that leaves a gap
@@ -226,9 +228,14 @@ type ActPayload struct {
 	Transcript string `json:"transcript,omitempty"`
 	Context    int64  `json:"context,omitempty"`
 	Checkpoint string `json:"checkpoint,omitempty"`
+	// A rotation at the hard cap (#87): the cap it reached.
+	HardCap int64 `json:"hard_cap,omitempty"`
 	// A restart or rotation of a session with brief parts: the parts it
 	// wrote (#50).
 	Brief []BriefPart `json:"brief,omitempty"`
+	// A provision, restart or rotation whose BRIEF.md was cut to
+	// policies.brief.max_bytes (#87).
+	BriefCut *BriefCut `json:"brief_cut,omitempty"`
 	// A stop: why. An earlier version's wake: what was due.
 	Reason string `json:"reason,omitempty"`
 	// An earlier version's wake: the coordinator's spend when it was
@@ -388,7 +395,7 @@ func (e Event) check() error {
 		KindSkip: e.Skip != nil, KindCrash: e.Crash != nil, KindClear: e.Clear != nil, KindError: e.Error != nil, KindWarning: e.Warning != nil,
 		KindItem: e.Item != nil, KindSeen: e.Seen != nil, KindCursor: e.Cursor != nil, KindUsage: e.Usage != nil,
 		KindCheckpoint: e.Checkpoint != nil, KindPoll: e.Poll != nil, KindTriage: e.Triage != nil, KindDecision: e.Decision != nil,
-		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, KindApproval: e.Approval != nil, KindAccount: e.Account != nil, KindMessage: e.Message != nil, KindInbox: e.Inbox != nil, KindJob: e.Job != nil, KindLoop: e.Loop != nil, KindNode: e.Node != nil, KindLaptop: e.Laptop != nil, KindRoute: e.Route != nil, KindStatus: e.Status != nil, KindCard: e.Card != nil, KindThread: e.Thread != nil, KindQuery: e.Query != nil, KindAttachment: e.Attachment != nil, KindFact: e.Fact != nil, KindOps: e.Ops != nil, KindRelease: e.Release != nil, KindFleet: e.Fleet != nil, KindWorkItem: e.Work != nil, KindIndex: e.Index != nil, KindSentence: e.Sentence != nil, "act": e.Act != nil,
+		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, KindApproval: e.Approval != nil, KindAccount: e.Account != nil, KindMessage: e.Message != nil, KindInbox: e.Inbox != nil, KindJob: e.Job != nil, KindStep: e.Step != nil, KindLoop: e.Loop != nil, KindNode: e.Node != nil, KindLaptop: e.Laptop != nil, KindRoute: e.Route != nil, KindStatus: e.Status != nil, KindCard: e.Card != nil, KindThread: e.Thread != nil, KindQuery: e.Query != nil, KindAttachment: e.Attachment != nil, KindFact: e.Fact != nil, KindOps: e.Ops != nil, KindRelease: e.Release != nil, KindFleet: e.Fleet != nil, KindWorkItem: e.Work != nil, KindIndex: e.Index != nil, KindSentence: e.Sentence != nil, "act": e.Act != nil,
 	}
 	want := e.Kind
 	switch e.Kind {
@@ -413,6 +420,8 @@ func (e Event) check() error {
 		return errors.New("an inbox event is a shared fact, for no one session, and names its console, reader and the ids read")
 	case e.Kind == KindJob && (e.Session != "" || e.Mode != ModeLive && e.Mode != ModeShadow || e.Job.Name == "" || !validJobPhase(e.Job.Phase)):
 		return errors.New("a job event is a run's, for no one session, and names its job and a phase")
+	case e.Kind == KindStep && (e.Session != "" || e.Mode != ModeShared || e.Step.Pipeline == "" || e.Step.Name == "" || !validStepOutcome(e.Step.Outcome) || e.Step.Hash == "" && e.Step.Outcome != StepFailed):
+		return errors.New("a step event is a shared fact, for no one session, and names its pipeline, step, outcome and, unless it failed, its inputs' hash")
 	case e.Kind == KindLoop && (e.Session != "" || e.Loop.Repository == "" || e.Loop.Ref == "" || !validLoopStep(e.Loop.Step) || (e.Mode == ModeOwner) != ownerLoopStep(e.Loop.Step) || e.Mode != ModeOwner && e.Mode != ModeLive && e.Mode != ModeShadow):
 		return errors.New("a loop event is a run's step, or the owner's retry, skip or stop, for no one session, and names its repository, request and step")
 	case e.Kind == KindNode && (e.Session != "" || e.Mode != ModeShared):
@@ -452,7 +461,7 @@ func (e Event) check() error {
 		return errors.New("an approval is a shared fact of the coordinator that gave it, and names its repository, request and head")
 	case e.Kind == KindPolicy && (e.Session != "" || e.Mode != ModeShared || e.Policy.Repository == "" || e.Policy.Tip == ""):
 		return errors.New("a policy event is a shared fact, for no one session, and names its repository and tip")
-	case e.Kind != KindCase && e.Kind != KindCoordinator && e.Kind != KindSession && e.Kind != KindPolicy && e.Kind != KindApproval && e.Kind != KindAccount && e.Kind != KindMessage && e.Kind != KindInbox && e.Kind != KindNode && e.Kind != KindThread && e.Kind != KindQuery && e.Kind != KindOps && (e.Kind == KindItem || e.Kind == KindCursor || e.Kind == KindTriage || failedTriage) != (e.Mode == ModeShared):
+	case e.Kind != KindCase && e.Kind != KindCoordinator && e.Kind != KindSession && e.Kind != KindPolicy && e.Kind != KindApproval && e.Kind != KindAccount && e.Kind != KindMessage && e.Kind != KindInbox && e.Kind != KindNode && e.Kind != KindThread && e.Kind != KindQuery && e.Kind != KindOps && e.Kind != KindStep && (e.Kind == KindItem || e.Kind == KindCursor || e.Kind == KindTriage || failedTriage) != (e.Mode == ModeShared):
 		return fmt.Errorf("a %s event must not carry mode %q", e.Kind, e.Mode)
 	case e.Kind == KindSeen && e.Mode != ModeOwner:
 		return fmt.Errorf("a seen event is the owner's, not %q", e.Mode)

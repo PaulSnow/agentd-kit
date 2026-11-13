@@ -163,6 +163,9 @@ func (s *Supervisor) feedEntries() []feedEntry {
 			}
 			add(repo, "delivery:"+d.Delivered+":"+d.Ref, fmt.Sprintf("%s delivered %s to %s.", name, d.Ref, repo), "")
 		}
+		for _, c := range t.Cuts {
+			add(sess.Repository, cutKey(name, c), cutLine(name, c), "")
+		}
 		// Only a merge made: one cut short may not have been.
 		keys := make([]string, 0, len(t.Merged))
 		for k := range t.Merged {
@@ -505,4 +508,29 @@ func cutFold(s, prefix string) (string, bool) {
 		return s[len(prefix):], true
 	}
 	return s, false
+}
+
+// cutKey is a cut's console key (#87): one line per cut.
+func cutKey(name string, c SessionCut) string {
+	kind := "brief"
+	if c.Brief == nil {
+		kind = "context"
+	}
+	return fmt.Sprintf("cut:%s:%s:%d", name, kind, c.At.UnixNano())
+}
+
+// cutLine is a cut as its console line says it (#87).
+func cutLine(name string, c SessionCut) string {
+	if c.Brief == nil {
+		return fmt.Sprintf("%s was cut mid-turn at %s tokens (cap %s); a fresh context resumes from STATUS.md.", name, kTokens(c.Context), kTokens(c.Cap))
+	}
+	return fmt.Sprintf("%s's brief was cut from %s to %s bytes at its %s: dropped %s.", name, kTokens(int64(c.Brief.Bytes)), kTokens(int64(c.Brief.Kept)), c.Action, strings.Join(c.Brief.Dropped, ", "))
+}
+
+// kTokens is n in thousands, as 152k, or n itself under 1,000.
+func kTokens(n int64) string {
+	if n < 1000 {
+		return fmt.Sprint(n)
+	}
+	return fmt.Sprintf("%dk", n/1000)
 }

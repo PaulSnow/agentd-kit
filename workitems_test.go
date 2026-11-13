@@ -894,11 +894,16 @@ func TestDoneLineFailingCheckAsksOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.ticks(3, time.Minute)
-	if a := h.answerOf("the child is not fixed"); !strings.Contains(a, "open again") {
-		t.Fatalf("answer = %q", a)
-	}
 	if it = h.item(it.ID); len(it.Tried) != 1 || it.Tried[0] != name || it.Session == name {
 		t.Fatalf("after not done: item = %+v", it)
+	}
+	// The owner's words go to the new session whole (#77), which answers.
+	var got bool
+	for _, d := range readInstructions(t, h.sup.cfg.Sessions[it.Session].Workdir) {
+		got = got || d.Text == "the child is not fixed"
+	}
+	if !got {
+		t.Fatalf("the owner's words did not reach %s", it.Session)
 	}
 }
 

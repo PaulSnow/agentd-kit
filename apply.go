@@ -20,12 +20,15 @@ type LogState struct {
 	Pending map[string]Event // intents with no outcome yet, by intent id
 	Started time.Time
 	Stopped time.Time
-	Events  int                   // events of this mode, the owner's and the shared ones, applied
-	Last    time.Time             // the latest time of those events
-	Items   map[string]*Item      // new items by id, and whether the owner saw them
-	Cursors map[string]time.Time  // how far each source of items has been read
-	Polls   map[string]PollRecord // each forge source's latest poll record
-	Cases   map[string]*Case      // each case by id
+	// StopReason is why the run stopped: "once" for a --once run, whose
+	// next run comes on its own, so its sessions are not stale for it.
+	StopReason string
+	Events     int                   // events of this mode, the owner's and the shared ones, applied
+	Last       time.Time             // the latest time of those events
+	Items      map[string]*Item      // new items by id, and whether the owner saw them
+	Cursors    map[string]time.Time  // how far each source of items has been read
+	Polls      map[string]PollRecord // each forge source's latest poll record
+	Cases      map[string]*Case      // each case by id
 	// Instructions are the owner's console instructions, by id.
 	Instructions map[string]*Instruction
 	// Ops are the changes proposed on the ops console (#63), by id.
@@ -62,6 +65,10 @@ type LogState struct {
 	StartedAt map[string]time.Time
 	// Jobs are the scheduled jobs' latest slots and runs (#51).
 	Jobs map[string]JobRecord
+	// StepRuns are each step's latest run, by pipeline/name, and
+	// PipelineUsage what each pipeline's steps cost in all (#85).
+	StepRuns      map[string]StepRun
+	PipelineUsage map[string]JobUsage
 	// Loops are the steps agentd took in each request's loop, by ciKey
 	// (#53).
 	Loops map[string]LoopRecord
@@ -89,6 +96,11 @@ type LogState struct {
 	// closedKept after they left it.
 	Closed    map[string]map[string]*IndexIssue
 	Sentences map[string]*IndexSentence
+	// ListedIssues and Priorities are the issue browser's, from the page
+	// process's issue file and never the log: each issue as last listed,
+	// open or closed, and the owner's priority on each that has one.
+	ListedIssues map[string]map[string]*ListedIssue
+	Priorities   map[string]map[string]string
 	// Steps are each issue's and request's dated steps, by sentenceKey.
 	Steps map[string][]IssueStep
 	// Swept is when the steps and sentences were last swept of what
@@ -97,6 +109,9 @@ type LogState struct {
 	// Coord is coordination with the owner's laptop (coord.go): nil
 	// until a node reports or an overlap is logged.
 	Coord *CoordState
+	// DigestDay is the local day the owner's digest was last posted for
+	// (#88), YYYY-MM-DD, so a day's is posted once.
+	DigestDay string
 
 	cfg *Config // its policies, read as each event is applied
 }
@@ -250,12 +265,21 @@ func (st *LogState) apply(e Event) {
 			st.applyAccount(e)
 		case KindJob:
 			st.applyJob(e)
+		case KindStep:
+			st.applyStep(e)
+		case KindMessage:
+			if e.Message.Digest > st.DigestDay {
+				st.DigestDay = e.Message.Digest
+			}
 		case KindFeed:
 			st.applyFeed(e)
 		case KindStart:
-			st.Started, st.Stopped = e.Time, time.Time{}
+			st.Started, st.Stopped, st.StopReason = e.Time, time.Time{}, ""
 		case KindStop:
-			st.Stopped = e.Time
+			st.Stopped, st.StopReason = e.Time, ""
+			if e.Stop != nil {
+				st.StopReason = e.Stop.Reason
+			}
 		case KindItem:
 			// An item is one however often it is seen: the first sighting's
 			// time stands, and so does the owner's having seen it. A
@@ -350,6 +374,9 @@ func (st *LogState) apply(e Event) {
 		}
 		t.Dialog.Showing = o.Dialog
 		t.StatusQuestions = o.StatusQuestions
+		if o.StatusQuestions != "" {
+			t.noteSeen(statusDecisionFor(o.StatusQuestions), e.Time)
+		}
 		t.Questions.observeQuestions(o.Questions, o.Done)
 		if !o.Questions || o.Done {
 			t.Asked = ""
@@ -383,6 +410,9 @@ func (st *LogState) apply(e Event) {
 		t.DecisionsHash = e.Decision.Hash
 		if e.Decision.Refused == "" {
 			t.Decisions = e.Decision.Decisions
+			for _, d := range t.Decisions {
+				t.noteSeen(d, e.Time)
+			}
 		}
 	case KindAnswer:
 		// The latest answer to a decision stands, to be delivered anew; a
@@ -509,6 +539,16 @@ func (st *LogState) apply(e Event) {
 // which started nothing that can be observed; counted is false for an
 // action cut short, which the views list apart rather than count.
 func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
+	if taken && (a.Action == ActProvision || a.Action == ActRestart || a.Action == ActRotate) {
+		// A cut made (#87): the context at the hard cap, the brief to its
+		// size; a would-be one cut nothing.
+		if a.Action == ActRotate && a.HardCap > 0 {
+			t.Cuts = append(t.Cuts[:len(t.Cuts):len(t.Cuts)], SessionCut{At: at, Action: a.Action, Context: a.Context, Cap: a.HardCap})
+		}
+		if a.BriefCut != nil {
+			t.Cuts = append(t.Cuts[:len(t.Cuts):len(t.Cuts)], SessionCut{At: at, Action: a.Action, Brief: a.BriefCut})
+		}
+	}
 	n := 0
 	if counted {
 		n = 1
@@ -586,6 +626,7 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 			if !t.hasRaised(a.Raised.ID) {
 				t.Raised = append(t.Raised[:len(t.Raised):len(t.Raised)], *a.Raised)
 			}
+			t.noteSeen(*a.Raised, at)
 		}
 	case ActProvision:
 		t.Provisioned = a.Key

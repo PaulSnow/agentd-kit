@@ -20,8 +20,9 @@ import (
 // record must have stood before its curator runs, MaxWait how long its
 // oldest may wait regardless, and Gap the least time between two
 // curations of a topic. MaxInput bounds one call's input in bytes,
-// PerDay the curations of a repository in a day, and Lookback how old a
-// record may be for a topic never curated to be curated at all.
+// PerDay the curations of a repository in a day, BudgetTokens the tokens
+// they may spend in a day (in the ledger's units), and Lookback how old a
+// record may be to be sent to a curator at all.
 type CuratorConfig struct {
 	Enabled  bool     `json:"enabled"`
 	Quiet    Duration `json:"quiet"`
@@ -30,6 +31,10 @@ type CuratorConfig struct {
 	MaxInput int      `json:"max_input"`
 	PerDay   int      `json:"per_day"`
 	Lookback Duration `json:"lookback"`
+	// BudgetTokens is a repository's curator tokens over the last day:
+	// once they reach it, no curator call starts there until the window
+	// allows (#82).
+	BudgetTokens int64 `json:"budget_tokens"`
 }
 
 const (
@@ -39,6 +44,14 @@ const (
 	DefaultCuratorMaxInput = 16 * 1024
 	DefaultCuratorPerDay   = 300
 	DefaultCuratorLookback = 72 * time.Hour
+	DefaultCuratorBudget   = 1_000_000
+	// curatorCallGuess is what a curator call is taken to cost, in the
+	// ledger's units, before the day has one to go by: about the average
+	// seen in the event log.
+	curatorCallGuess = 20_000
+	// curatorBackoffMax is the longest a failed curation waits to be
+	// tried again.
+	curatorBackoffMax = 6 * time.Hour
 	// curatorRecordText is the most of one record a curator is sent, and
 	// curatorOwnerText of what the owner or an issue's thread says.
 	curatorRecordText = 1500
@@ -73,6 +86,30 @@ func (c CuratorConfig) perDay() int {
 		return c.PerDay
 	}
 	return DefaultCuratorPerDay
+}
+
+func (c CuratorConfig) budget() int64 {
+	if c.BudgetTokens > 0 {
+		return c.BudgetTokens
+	}
+	return DefaultCuratorBudget
+}
+
+// firstsPerDay is how many topics never curated a repository's curators
+// may start on in a day: a new repository's back-fill spreads over days
+// rather than spending the day's calls at once.
+func (c CuratorConfig) firstsPerDay() int {
+	return max(c.perDay()/4, 1)
+}
+
+// backoff is how long a topic waits after failures failed curations in a
+// row: the gap, doubled for each, at most curatorBackoffMax.
+func (c CuratorConfig) backoff(failures int) time.Duration {
+	d := c.gap()
+	for i := 0; i < failures && d < curatorBackoffMax; i++ {
+		d *= 2
+	}
+	return min(d, curatorBackoffMax)
 }
 
 // curatedKinds are the records whose arrival calls a topic's curator; the
@@ -110,25 +147,31 @@ type curatorCall struct {
 	through     time.Time
 	last        time.Time // the last curation's through, kept when this one fails
 	refusals    int       // the refusals in a row before this one
+	failures    int       // the failures in a row before this one
 	records     []string
 	src         cardSources
 }
 
-// curatorRefusals is how many refusals in a row a topic's records are
-// sent again for; after that its curator gives them up, so a diff the
-// model cannot get right is not paid for forever.
+// curatorRefusals is how many refusals, or failures, in a row a topic's
+// records are sent again for; after that its curator gives them up, so a
+// diff the model cannot get right, or a call that keeps failing, is not
+// paid for forever.
 const curatorRefusals = 3
 
-// curatorDue is topic's curator call when it is due now, or nil. New
-// records go oldest first, as many as fit; those left over are due again
-// after the gap.
+// curatorDue is topic's curator call when it is due now, or nil. It is
+// due only when a record that calls curators, an agent's flag or a
+// revised card is newer than the last curation's through: nothing new,
+// no call. New records go oldest first, as many as fit; those left over
+// are due again after the gap, and after a failed call the same records
+// wait a backoff that doubles with each failure in a row.
 func (cs *ContextStore) curatorDue(cfg CuratorConfig, repo, topic string, now time.Time) *curatorCall {
 	last, curated := cs.curated[repo][topic]
-	if curated && now.Sub(last.At) < cfg.gap() {
+	if curated && now.Sub(last.At) < cfg.gap() || last.Failures > 0 && now.Sub(last.At) < cfg.backoff(last.Failures) {
 		return nil
 	}
 	in := curatorInput{Topic: topic, Kind: cardKindOf(topic), Card: cs.Card(repo, topic), Refused: last.Refused}
-	call := &curatorCall{repo: repo, topic: topic, card: in.Card, last: last.Through, refusals: last.Refusals, src: cardSources{fresh: map[string]bool{}}}
+	call := &curatorCall{repo: repo, topic: topic, card: in.Card, last: last.Through, refusals: last.Refusals, failures: last.Failures,
+		src: cardSources{fresh: map[string]bool{}}}
 	var oldest, newest time.Time
 	note := func(at time.Time) {
 		if oldest.IsZero() || at.Before(oldest) {
@@ -164,7 +207,10 @@ func (cs *ContextStore) curatorDue(cfg CuratorConfig, repo, topic string, now ti
 	} else {
 		trigger := false
 		for _, r := range cs.History(repo).OnTopic(topic) {
-			if !r.At.After(last.Through) || !curated && now.Sub(r.At) > cfg.lookback() {
+			// Records older than lookback are not sent, for a topic
+			// curated before as for one never curated: a backlog the
+			// curators could not keep up with is not paid for days on.
+			if !r.At.After(last.Through) || now.Sub(r.At) > cfg.lookback() {
 				continue
 			}
 			fresh = append(fresh, r)
@@ -247,8 +293,18 @@ func cardSrcs(c *Card) []string {
 
 // curationsToday is how many curations repo had in the day before now.
 func (cs *ContextStore) curationsToday(repo string, now time.Time) int {
+	return inDay(cs.runs[repo], now)
+}
+
+// firstsToday is how many topics of repo were first curated in the day
+// before now.
+func (cs *ContextStore) firstsToday(repo string, now time.Time) int {
+	return inDay(cs.firsts[repo], now)
+}
+
+func inDay(ats []time.Time, now time.Time) int {
 	n := 0
-	for _, at := range cs.runs[repo] {
+	for _, at := range ats {
 		if now.Sub(at) < 24*time.Hour {
 			n++
 		}
@@ -256,7 +312,65 @@ func (cs *ContextStore) curationsToday(repo string, now time.Time) int {
 	return n
 }
 
-// curatorTopics are repo's topics that keep a card and have history, the
+// CuratorSpent is repo's curator tokens, in the ledger's units, over the
+// day before now.
+func (cs *ContextStore) CuratorSpent(repo string, now time.Time) int64 {
+	var n int64
+	for _, s := range cs.curatorSpend[repo] {
+		if now.Sub(s.At) < 24*time.Hour {
+			n += s.Tokens
+		}
+	}
+	return n
+}
+
+// curatorAverage is the average tokens of repo's curator calls over the
+// day before now, curatorCallGuess without one.
+func (cs *ContextStore) curatorAverage(repo string, now time.Time) int64 {
+	var n, sum int64
+	for _, sp := range cs.curatorSpend[repo] {
+		if now.Sub(sp.At) < 24*time.Hour {
+			n, sum = n+1, sum+sp.Tokens
+		}
+	}
+	if n == 0 {
+		return curatorCallGuess
+	}
+	return sum / n
+}
+
+// curatorResumes is when repo's curators may start again once its day's
+// calls or tokens reached their limit: when the oldest call of the window
+// that took it there leaves the day.
+func (cs *ContextStore) curatorResumes(cfg CuratorConfig, repo string, now time.Time) time.Time {
+	var at time.Time
+	if runs := cs.runs[repo]; inDay(runs, now) >= cfg.perDay() {
+		for _, r := range runs {
+			if now.Sub(r) < 24*time.Hour {
+				at = r.Add(24 * time.Hour)
+				break
+			}
+		}
+	}
+	spent := cs.CuratorSpent(repo, now)
+	for _, s := range cs.curatorSpend[repo] {
+		if now.Sub(s.At) >= 24*time.Hour {
+			continue
+		}
+		if spent < cfg.budget() {
+			break
+		}
+		spent -= s.Tokens
+		if t := s.At.Add(24 * time.Hour); t.After(at) {
+			at = t
+		}
+	}
+	return at
+}
+
+// curatorTopics are repo's topics that keep a card and have history: the
+// topics curated before by name, then those never curated with the newest
+// record first, so a back-fill takes what is current first, and the
 // repository's own last, so it sees the cards revised this pass next time.
 func (cs *ContextStore) curatorTopics(repo string) []string {
 	var out []string
@@ -270,7 +384,27 @@ func (cs *ContextStore) curatorTopics(repo string) []string {
 			out = append(out, t)
 		}
 	}
-	sort.Strings(out)
+	newest := map[string]time.Time{}
+	for _, t := range out {
+		if _, ok := cs.curated[repo][t]; !ok {
+			for _, r := range cs.History(repo).OnTopic(t) {
+				if r.At.After(newest[t]) {
+					newest[t] = r.At
+				}
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		_, ci := cs.curated[repo][out[i]]
+		_, cj := cs.curated[repo][out[j]]
+		switch {
+		case ci != cj:
+			return ci
+		case !ci && !newest[out[i]].Equal(newest[out[j]]):
+			return newest[out[i]].After(newest[out[j]])
+		}
+		return out[i] < out[j]
+	})
 	return append(out, TopicRepo)
 }
 
@@ -332,7 +466,13 @@ func curate(c *curatorCall, job Job, run func(Job, []byte) (json.RawMessage, Job
 	raw, usage, err := run(job, c.input)
 	p.Usage = &usage
 	if err != nil {
-		p.Error, p.Through = oneLine(err.Error(), 500), c.last
+		p.Error = oneLine(err.Error(), 500)
+		if c.failures+1 < curatorRefusals {
+			p.Through = c.last // tried again after its backoff
+		} else {
+			p.GaveUp = true
+			p.Error = cutUTF8(p.Error, 400) + fmt.Sprintf("; given up after %d failures: these records are not sent again", curatorRefusals)
+		}
 		return p
 	}
 	d, err := readDiff(raw)
@@ -375,7 +515,17 @@ func (s *Supervisor) curateCards(now time.Time) {
 		return j.Run(s.runCtx, curatorSystem, curatorSchema(), input)
 	}
 	for _, repo := range sortedKeys(s.cfg.Repositories) {
-		started := cs.curationsToday(repo, now)
+		started, firsts := cs.curationsToday(repo, now), cs.firstsToday(repo, now)
+		// Calls running now, and those started this pass, are not in the
+		// store yet: each counts as a call and at the day's average cost,
+		// so one pass does not start past the limits.
+		spent, est := cs.CuratorSpent(repo, now), cs.curatorAverage(repo, now)
+		for key := range s.work.inFlight {
+			if strings.HasPrefix(key, "card:"+repo+"|") {
+				started++
+				spent += est
+			}
+		}
 		for _, topic := range cs.curatorTopics(repo) {
 			if k := cardKindOf(topic); (k == CardIssue || k == CardRequest) && s.api != nil && cs.threadChanged(repo, topic, now, cfg.lookback()) && cs.ThreadDue(repo, topic, now) {
 				tr, api := cs.threadRead(repo, topic), s.api
@@ -384,12 +534,20 @@ func (s *Supervisor) curateCards(now time.Time) {
 				})
 				continue // curated once its thread is read
 			}
-			if started >= cfg.perDay() {
-				break
+			_, curated := cs.curated[repo][topic]
+			if !curated && topic != TopicRepo && firsts >= cfg.firstsPerDay() {
+				continue // the day's share of the back-fill is taken
 			}
 			call := cs.curatorDue(cfg, repo, topic, now)
 			if call == nil {
 				continue
+			}
+			if limit := curatorLimit(cfg, started, spent); limit != "" {
+				s.noticeCuratorCap(repo, limit, now)
+				break
+			}
+			if !curated && topic != TopicRepo {
+				firsts++
 			}
 			if s.spawnShared("card:"+repo+"|"+topic, func(w *Supervisor) {
 				p := curate(call, job, run, w.clock.Now())
@@ -399,9 +557,48 @@ func (s *Supervisor) curateCards(now time.Time) {
 				w.emit("", Event{Kind: KindCard, Card: p})
 			}) {
 				started++
+				spent += est
 			}
 		}
 	}
+}
+
+// curatorLimit names the limit a repository's curators reached, with
+// started calls and spent tokens over the day, or is empty.
+func curatorLimit(cfg CuratorConfig, started int, spent int64) string {
+	switch {
+	case spent >= cfg.budget():
+		return fmt.Sprintf("its token budget, jobs.curator.budget_tokens %d (%d spent in the last 24 hours, counting calls still running)", cfg.budget(), spent)
+	case started >= cfg.perDay():
+		return fmt.Sprintf("its calls a day, jobs.curator.per_day %d", cfg.perDay())
+	}
+	return ""
+}
+
+// noticeCuratorCap posts on repo's console, once a day, that its curators
+// stopped at a limit with records still due, and when they resume. The
+// post is info: nothing waits on the owner.
+func (s *Supervisor) noticeCuratorCap(repo, limit string, now time.Time) {
+	cs := s.cards
+	if at, ok := cs.capped[repo]; ok && now.Sub(at) < 24*time.Hour || s.cappedAt[repo].After(now.Add(-24*time.Hour)) {
+		return
+	}
+	if s.cappedAt == nil {
+		s.cappedAt = map[string]time.Time{}
+	}
+	s.cappedAt[repo] = now // until the post is folded back
+	text := fmt.Sprintf("The curators of %s reached %s; no card of %s is curated until ", repo, limit, repo)
+	if at := cs.curatorResumes(s.cfg.Jobs.Curator, repo, now); !at.IsZero() {
+		text += "about " + at.UTC().Format("2006-01-02 15:04Z") + ", when the day's window allows."
+	} else {
+		text += "the day's window allows."
+	}
+	m := &MessagePayload{ID: "U" + shortHash(HashPane("curator\n" + repo + "\n" + now.UTC().Format(time.RFC3339Nano)))[:8],
+		Console: s.cfg.RepositoryConsole(repo), Kind: "info", From: "agentd", Text: text, Capped: repo}
+	if i := s.confidentialMatch(text, ""); i > 0 {
+		m.Text, m.Withheld = "", i
+	}
+	s.emit("", Event{Kind: KindMessage, Mode: ModeShared, Message: m})
 }
 
 // threadChanged says whether an item on ref arrived since its thread was

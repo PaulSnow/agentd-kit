@@ -411,7 +411,8 @@ func (s *Supervisor) threadInputFor(in *Instruction, repo, cwd string) threadInp
 	if in.Re != nil && in.Re.Session != "" {
 		if _, ok := s.cfg.Sessions[in.Re.Session]; ok {
 			t := s.track(in.Re.Session)
-			ts := &threadSession{Name: in.Re.Session, State: string(t.State), Reason: keep(t.Reason)}
+			state, why := s.st.shownState(in.Re.Session, t, x.At)
+			ts := &threadSession{Name: in.Re.Session, State: string(state), Reason: keep(why)}
 			for i := len(t.StatusPoints) - 1; i >= 0; i-- {
 				if r := t.StatusPoints[i].Record; r != nil {
 					ts.Now = keep(r.Summary)
@@ -424,7 +425,8 @@ func (s *Supervisor) threadInputFor(in *Instruction, repo, cwd string) threadInp
 	for _, name := range s.cfg.SessionNames() {
 		if sess := s.cfg.Sessions[name]; sess.Repository == repo && sess.Role == "" && sess.Kind != KindChat && s.takesInstructions(name) {
 			f := readSessionFiles(sess.Workdir)
-			r := threadRunning{Name: name, State: string(s.track(name).State), Brief: keep(f.Brief), Now: keep(f.Now)}
+			state, _ := s.st.shownState(name, s.track(name), x.At)
+			r := threadRunning{Name: name, State: string(state), Brief: keep(f.Brief), Now: keep(f.Now)}
 			if !f.StatusAt.IsZero() {
 				r.StatusAt = &f.StatusAt
 			}

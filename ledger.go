@@ -76,19 +76,10 @@ type LedgerSpend struct {
 	Tokens     int64
 }
 
-// FallbackUse is a session placed on an account that is not the first of
-// its repository's fallback.
-type FallbackUse struct {
-	At         time.Time
-	Repository string
-	Session    string
-}
-
 // AccountLedger is what the fold keeps for the account reports.
 type AccountLedger struct {
 	Readings map[string][]LedgerReading // by account, oldest first
 	Spends   []LedgerSpend              // oldest first
-	Fallback map[string]FallbackUse     // each account's latest fallback placement
 	Noticed  map[string]time.Time       // each account's latest notice
 	seen     map[string]seenSpend       // each transcript's spend so far
 	applied  map[string]time.Time       // the readings and job spends held, by applyKey
@@ -101,7 +92,7 @@ type seenSpend struct {
 }
 
 func newAccountLedger() *AccountLedger {
-	return &AccountLedger{Readings: map[string][]LedgerReading{}, Fallback: map[string]FallbackUse{},
+	return &AccountLedger{Readings: map[string][]LedgerReading{},
 		Noticed: map[string]time.Time{}, seen: map[string]seenSpend{}, applied: map[string]time.Time{}}
 }
 
@@ -204,15 +195,6 @@ func (st *LogState) applyLedger(e Event) {
 			repo = in.Repositories[0]
 		}
 		job(SpendThread, repo, e.Route.Agent.Usage)
-	case e.Runtime != nil && e.Kind == KindSession && (e.Runtime.Action == SessionStart || e.Runtime.Action == SessionPlace):
-		p := e.Runtime
-		if r, ok := st.Runtime[e.Session]; !ok || r.ID != p.ID || r.Account != p.Account || p.Account == "" || st.cfg == nil {
-			return // one the fold ignored
-		}
-		rules, _ := effectivePolicy(st.cfg, st, p.Repository)
-		if fb := rules.Sessions.Fallback; len(fb) > 1 && fb[0] != p.Account && contains(fb, p.Account) {
-			l.Fallback[p.Account] = FallbackUse{At: e.Time, Repository: p.Repository, Session: e.Session}
-		}
 	case e.Message != nil && e.Message.Account != "":
 		l.Noticed[e.Message.Account] = e.Time
 	}
@@ -269,6 +251,11 @@ type AccountReport struct {
 	FiveHourReset *time.Time `json:"five_hour_reset,omitempty"`
 	Weekly        *float64   `json:"weekly,omitempty"`
 	WeeklyReset   *time.Time `json:"weekly_reset,omitempty"`
+	// Model, ModelWeekly and ModelWeeklyReset are the weekly window the
+	// plan keeps for one model, such as Fable, when the reading has one.
+	Model            string     `json:"model,omitempty"`
+	ModelWeekly      *float64   `json:"model_weekly,omitempty"`
+	ModelWeeklyReset *time.Time `json:"model_weekly_reset,omitempty"`
 	// Week is the weekly percent over the current week, oldest first; a
 	// point without a value is a gap.
 	Week     []WeekPoint `json:"week"`
@@ -277,10 +264,9 @@ type AccountReport struct {
 	Burn     Burn        `json:"burn"`
 	// Projected is the weekly percent at the reset at the burn's rate;
 	// Over says it reaches Limit.
-	Projected *float64     `json:"projected,omitempty"`
-	Limit     float64      `json:"limit"`
-	Over      bool         `json:"over,omitempty"`
-	Fallback  *FallbackUse `json:"fallback,omitempty"`
+	Projected *float64 `json:"projected,omitempty"`
+	Limit     float64  `json:"limit"`
+	Over      bool     `json:"over,omitempty"`
 }
 
 // WeekPoint is one reading of the week's line.
@@ -364,14 +350,12 @@ func accountReport(cfg *Config, st *LogState, l *AccountLedger, account string, 
 			at := r.At
 			rep.ReadAt = &at
 			rep.FiveHour, rep.FiveHourReset, rep.Weekly, rep.WeeklyReset = r.FiveHour, r.FiveHourReset, r.Weekly, r.WeeklyReset
+			rep.Model, rep.ModelWeekly, rep.ModelWeeklyReset = r.Model, r.ModelWeekly, r.ModelWeeklyReset
 		}
 		rep.Stale = r.At.IsZero() || now.Sub(r.At) > stale
 		if r.ErrorAt.After(r.At) && !confidentialMatcher(cfg)(r.Error) {
 			rep.Error = r.Error
 		}
-	}
-	if fb, ok := l.Fallback[account]; ok && now.Sub(fb.At) < weekLength {
-		rep.Fallback = &fb
 	}
 	// The week: from the latest reset a week back, else the last week. A
 	// reset already past, with no reading since, is rolled on to the
@@ -501,8 +485,7 @@ func burnOf(l *AccountLedger, account string, reset *time.Time, now time.Time, s
 
 // noticeAccounts tells the repository most responsible, once per
 // noticeEvery an account at most, when the account's projected week
-// reaches the limit, or a fallback account was placed on, and which
-// sessions use it. Shadow mode tells nobody.
+// reaches the limit, and which sessions use it. Shadow mode tells nobody.
 func (s *Supervisor) noticeAccounts(now time.Time) {
 	if s.shadow || s.st.Ledger == nil || !s.cfg.Usage.Enabled {
 		return
@@ -512,21 +495,12 @@ func (s *Supervisor) noticeAccounts(now time.Time) {
 		if rep.Account == AccountUnknown || now.Sub(l.Noticed[rep.Account]) < noticeEvery {
 			continue
 		}
-		var why string
-		fb, fallback := l.Fallback[rep.Account]
-		switch {
-		case rep.Over:
-			why = fmt.Sprintf("account %s is projected to reach %.0f%% of its week by the reset at %s (now %.0f%%, rising %+.2f%% an hour; the limit is %.0f%%)",
-				rep.Account, *rep.Projected, rep.WeeklyReset.UTC().Format("2006-01-02 15:04Z"), *rep.Weekly, *rep.Burn.WeeklyPerHour, rep.Limit)
-		case fallback && now.Sub(fb.At) < noticeEvery && fb.At.After(l.Noticed[rep.Account]):
-			why = fmt.Sprintf("fallback account %s is in use: %s was placed on it", rep.Account, fb.Session)
-		default:
+		if !rep.Over {
 			continue
 		}
+		why := fmt.Sprintf("account %s is projected to reach %.0f%% of its week by the reset at %s (now %.0f%%, rising %+.2f%% an hour; the limit is %.0f%%)",
+			rep.Account, *rep.Projected, rep.WeeklyReset.UTC().Format("2006-01-02 15:04Z"), *rep.Weekly, *rep.Burn.WeeklyPerHour, rep.Limit)
 		repo, users := l.users(rep.Account, now)
-		if repo == "" && fallback {
-			repo = fb.Repository
-		}
 		if repo == "" {
 			continue
 		}
@@ -643,9 +617,6 @@ func accountReportText(r AccountReport) string {
 			fmt.Fprintf(&b, " — OVER the %.0f%% limit", r.Limit)
 		}
 		b.WriteString("\n")
-	}
-	if r.Fallback != nil {
-		fmt.Fprintf(&b, "  in use as a fallback: %s placed %s\n", r.Fallback.Session, r.Fallback.At.UTC().Format("2006-01-02 15:04Z"))
 	}
 	return b.String()
 }

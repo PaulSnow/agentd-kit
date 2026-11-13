@@ -281,7 +281,11 @@ func ReportFrom(cfg *Config, st *LogState, host string, now time.Time) Report {
 		}
 		rr := group(cfg.Sessions[n].Repository)
 		if rr != nil && rs.State != "" {
-			c := ReportCase{Session: n, State: string(rs.State), Since: rs.Since, Head: rs.Head, OwnerOnly: rr.OwnerOnly}
+			shown, _ := st.shownState(n, rs, now)
+			c := ReportCase{Session: n, State: string(shown), Since: rs.Since, Head: rs.Head, OwnerOnly: rr.OwnerOnly}
+			if shown == Gone || shown == Stale { // gone or stale since it was last seen
+				c.Since = rs.LastSeen
+			}
 			if secret(c.Head) {
 				c.Head = ""
 			}
@@ -367,7 +371,7 @@ func (d *digestCounts) add(state string, delivered, asked, items int) {
 func (d digestCounts) digest() string {
 	total := 0
 	var parts []string
-	for _, st := range []State{Working, Starting, Idle, BlockedOnOwner, UsageLimited, Done, Failed, CrashLooping} {
+	for _, st := range []State{Working, Starting, Idle, BlockedOnOwner, UsageLimited, Done, Failed, CrashLooping, Stale, Gone} {
 		if d.states[st] > 0 {
 			total += d.states[st]
 			parts = append(parts, fmt.Sprintf("%d %s", d.states[st], st))

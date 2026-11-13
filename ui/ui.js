@@ -81,7 +81,8 @@
   }
 
   function refresh() {
-    if (document.hidden) {
+    // The closed list is long and barely changes, so it stays as loaded.
+    if (document.hidden || document.querySelector("[data-static]")) {
       return;
     }
     fetch(location.href, { credentials: "same-origin", cache: "no-store" })
@@ -155,11 +156,14 @@
   function rank(row) { return wordRank[row.dataset.word] !== undefined ? wordRank[row.dataset.word] : 3; }
   // run is how long ago a worked row's session started, the longest first.
   function run(row) { return num(row, "run") || Infinity; }
+  function closedAt(row) { return num(row, "closed") || Infinity; }
+  function order(x, y) { return x < y ? -1 : x > y ? 1 : 0; }
+  function repoName(a, b) { return cmp(text(a, "name"), text(b, "name")); }
   var sorts = {
     "needs-me": function (a, b) { return rank(a) - rank(b); },
     "last-change": function () { return 0; },
     "working": function (a, b) {
-      return (b.dataset.working ? 1 : 0) - (a.dataset.working ? 1 : 0) || (a.dataset.working ? cmp(run(a), run(b)) : 0);
+      return (b.dataset.working ? 1 : 0) - (a.dataset.working ? 1 : 0) || (a.dataset.working ? order(run(a), run(b)) : 0);
     },
     "has-mr": function (a, b) {
       var x = num(a, "mr") > 0, y = num(b, "mr") > 0;
@@ -168,10 +172,29 @@
     "newest": function (a, b) { return num(b, "number") - num(a, "number"); },
     "oldest": function (a, b) { return num(a, "number") - num(b, "number"); },
     "stale": function (a, b) { return num(a, "changed") - num(b, "changed"); },
+    "priority": function (a, b) { return num(a, "priority") - num(b, "priority"); },
+    "umbrella": function (a, b) { return (b.dataset.umbrella ? 1 : 0) - (a.dataset.umbrella ? 1 : 0); },
+    "recently-closed": function (a, b) { return num(b, "closed") - num(a, "closed"); },
+    "oldest-closed": function (a, b) { return order(closedAt(a), closedAt(b)); },
     "label": function (a, b) { return cmp(text(a, "label"), text(b, "label")); },
     "milestone": function (a, b) { return cmp(text(a, "milestone"), text(b, "milestone")); },
     "author": function (a, b) { return cmp(text(a, "author"), text(b, "author")); },
     "loop": function (a, b) { return num(a, "rank") - num(b, "rank"); },
+    "repo-session": function (a, b) { return (b.dataset.running ? 1 : 0) - (a.dataset.running ? 1 : 0) || repoName(a, b); },
+    "repo-name": function (a, b) { return repoName(a, b); },
+    "repo-open": function (a, b) { return num(b, "open") - num(a, "open") || repoName(a, b); },
+    "repo-closed": function (a, b) { return num(b, "closedcount") - num(a, "closedcount") || repoName(a, b); },
+    "repo-tokens": function (a, b) { return num(b, "tokens") - num(a, "tokens") || repoName(a, b); },
+    "repo-changed": function (a, b) { return num(b, "changed") - num(a, "changed") || repoName(a, b); },
+    "repo-mrs": function (a, b) { return num(b, "mrfail") - num(a, "mrfail") || num(b, "mrpass") - num(a, "mrpass") || repoName(a, b); },
+    "repo-newest": function (a, b) {
+      var x = num(a, "created"), y = num(b, "created");
+      return (!x || !y ? (y ? 1 : 0) - (x ? 1 : 0) : y - x) || repoName(a, b);
+    },
+    "repo-oldest": function (a, b) {
+      var x = num(a, "created"), y = num(b, "created");
+      return (!x || !y ? (y ? 1 : 0) - (x ? 1 : 0) : x - y) || repoName(a, b);
+    },
     "ci-failing": function (a, b) { return (b.dataset.failing ? 1 : 0) - (a.dataset.failing ? 1 : 0); }
   };
   function compareRows(by, a, b) {
@@ -194,12 +217,23 @@
     }
     return true;
   }
-  function applyBox(section) {
+  function applyBox(section, wordsOnly) {
     var key = "agentd-box:" + section.dataset.key + ":" + section.dataset.box;
     var state = stored(key);
     var select = section.querySelector(".box-sort");
     var filter = section.querySelector(".box-filter");
-    if (select && state.sort && sorts[state.sort]) { select.value = state.sort; }
+    var level = section.querySelector(".box-priority");
+    var umbrella = section.querySelector(".box-umbrella");
+    var hides = Array.prototype.slice.call(section.querySelectorAll(".box-hide"));
+    hides.forEach(function (h) {
+      if (typeof state["hide-" + h.dataset.hide] === "boolean") { h.checked = state["hide-" + h.dataset.hide]; }
+    });
+    if (select && state.sort && sorts[state.sort] && select.querySelector('option[value="' + state.sort + '"]')) { select.value = state.sort; }
+    if (level && typeof state.level === "string") { level.value = state.level; }
+    if (umbrella) {
+      umbrella.checked = !!state.umbrella;
+      umbrella.defaultChecked = umbrella.checked;
+    }
     if (filter && typeof state.filter === "string" && document.activeElement !== filter) {
       // As the page's own value, so a refresh does not take the box for
       // one the owner is typing in.
@@ -210,13 +244,18 @@
     var words = filter ? filter.value.toLowerCase().split(/\s+/).filter(Boolean) : [];
     var list = section.querySelector(".box-rows");
     var rows = Array.prototype.slice.call(list.querySelectorAll(".box-row"));
-    rows.sort(function (a, b) { return compareRows(by, a, b); });
+    // Words alone keep the order, so typing stays quick in a long list.
+    if (!wordsOnly) {
+      rows.sort(function (a, b) { return compareRows(by, a, b); });
+    }
     var shown = 0;
+    var moved = document.createDocumentFragment();
     rows.forEach(function (r) {
-      r.hidden = !matches(r, words);
+      r.hidden = !matches(r, words) || !!(level && level.value && r.dataset.priority !== level.value) || !!(umbrella && umbrella.checked && !r.dataset.umbrella) || hides.some(function (h) { return h.checked && !!r.dataset[h.dataset.hide]; });
       if (!r.hidden) { shown++; }
-      list.appendChild(r);
+      moved.appendChild(r);
     });
+    list.appendChild(moved);
     var out = section.querySelector(".box-shown");
     if (out) { out.textContent = String(shown); }
   }
@@ -228,17 +267,319 @@
   }
   function boxInput(e) {
     var section = e.target.closest ? e.target.closest("[data-box]") : null;
-    if (!section || !e.target.matches(".box-sort, .box-filter")) {
+    if (!section || !e.target.matches(".box-sort, .box-filter, .box-priority, .box-umbrella, .box-hide")) {
       return;
     }
     var key = "agentd-box:" + section.dataset.key + ":" + section.dataset.box;
     var select = section.querySelector(".box-sort");
     var filter = section.querySelector(".box-filter");
-    store(key, { sort: select ? select.value : "", filter: filter ? filter.value : "" });
+    var level = section.querySelector(".box-priority");
+    var umbrella = section.querySelector(".box-umbrella");
+    var state = { sort: select ? select.value : "", filter: filter ? filter.value : "", level: level ? level.value : "", umbrella: !!(umbrella && umbrella.checked) };
+    section.querySelectorAll(".box-hide").forEach(function (h) { state["hide-" + h.dataset.hide] = h.checked; });
+    store(key, state);
     if (filter) { filter.defaultValue = filter.value; }
-    applyBox(section);
+    applyBox(section, e.target === filter);
   }
   document.addEventListener("change", boxInput);
+  // The workspace's issue panel changes between its lists in place, so the
+  // terminal beside it stays connected.
+  document.addEventListener("click", function (e) {
+    var link = e.target.closest ? e.target.closest("a[data-panel]") : null;
+    var pane = document.querySelector(".issue-pane");
+    if (!link || !pane) {
+      return;
+    }
+    e.preventDefault();
+    fetch(link.getAttribute("href"), { credentials: "same-origin", cache: "no-store" })
+      .then(function (r) { return r.ok ? r.text() : Promise.reject(r.status); })
+      .then(function (html) {
+        var box = new DOMParser().parseFromString(html, "text/html").querySelector(".panel-box");
+        if (box) {
+          pane.replaceChildren(document.importNode(box, true));
+          levelBoxes();
+        }
+      })
+      .catch(function () {});
+  });
+  // The workspace's terminal: a window onto the repository's session, which
+  // goes on when the page closes. It reconnects by itself unless the session
+  // has ended; then a new one is the owner's to start.
+  (function () {
+    var el = document.getElementById("terminal");
+    if (!el || !window.Terminal || !window.FitAddon) {
+      return;
+    }
+    var status = document.getElementById("term-state");
+    var again = document.getElementById("term-new");
+    var term = new window.Terminal({ cursorBlink: true, fontSize: 13, scrollback: 10000, theme: { background: "#0f1115" } });
+    var fit = new window.FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.open(el);
+    var encoder = new TextEncoder();
+    var ws = null;
+    var failed = 0;
+    function sendSize() {
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ cols: term.cols, rows: term.rows }));
+      }
+    }
+    function connect() {
+      again.hidden = true;
+      status.textContent = "Connecting";
+      ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + el.dataset.ws);
+      ws.binaryType = "arraybuffer";
+      ws.onopen = function () {
+        failed = 0;
+        status.textContent = "";
+        document.dispatchEvent(new Event("terminal-open"));
+        fit.fit();
+        sendSize();
+        term.focus();
+      };
+      ws.onmessage = function (e) {
+        term.write(new Uint8Array(e.data));
+      };
+      ws.onclose = function (e) {
+        if (e.code === 4000) {
+          status.textContent = "The session has ended.";
+          again.hidden = false;
+          return;
+        }
+        // The page's token is refused once the UI has restarted, and only
+        // a reload brings a new one; the session is still there.
+        failed++;
+        status.textContent = failed < 3 ? "Disconnected; trying again." : "Disconnected; if this lasts, reload the page. The session is still running.";
+        setTimeout(connect, 3000);
+      };
+    }
+    term.onData(function (d) {
+      if (ws && ws.readyState === 1) {
+        ws.send(encoder.encode(d));
+      }
+    });
+    term.onResize(sendSize);
+    // Close session ends it, after asking; the terminal sees it end and
+    // offers a new one, which goes on the account whose week resets first.
+    var closer = document.getElementById("term-close");
+    if (closer) {
+      closer.addEventListener("click", function () {
+        if (!window.confirm("Close this session? Claude Code stops here. Start a new one afterwards; it goes on the account whose week resets first.")) {
+          return;
+        }
+        var form = new FormData();
+        form.append("token", el.dataset.token);
+        status.textContent = "Closing";
+        fetch(closer.dataset.close, { method: "POST", body: new URLSearchParams(form), credentials: "same-origin" })
+          .then(function (r) { return r.ok ? "" : r.text(); })
+          .then(function (err) {
+            if (err) {
+              status.textContent = "Not closed: " + err.trim();
+            }
+          })
+          .catch(function (e) { status.textContent = "Not closed: " + e; });
+      });
+    }
+    // Images for the session: pasted or dropped on the terminal, or picked
+    // with the button. agentd stores each on its machine and answers its
+    // path, which is pasted into the session as a path is pasted by hand;
+    // Claude Code takes it as the image.
+    function give(list) {
+      var files = Array.prototype.filter.call(list || [], function (f) { return f.size > 0; });
+      if (!files.length || !el.dataset.files) {
+        return;
+      }
+      if (!ws || ws.readyState !== 1) {
+        status.textContent = "Open the session first, then add the image.";
+        return;
+      }
+      var form = new FormData();
+      form.append("token", el.dataset.token);
+      files.forEach(function (f) { form.append("file", f, f.name || "pasted.png"); });
+      status.textContent = files.length === 1 ? "Sending the image" : "Sending " + files.length + " files";
+      fetch(el.dataset.files, { method: "POST", body: form, credentials: "same-origin" })
+        .then(function (r) {
+          return r.ok ? r.json() : r.text().then(function (t) { return Promise.reject(t); });
+        })
+        .then(function (d) {
+          status.textContent = "";
+          d.paths.forEach(function (p, i) {
+            if (i > 0) { ws.send(encoder.encode(" ")); }
+            term.paste(p);
+          });
+          term.focus();
+        })
+        .catch(function (t) {
+          status.textContent = "Not sent: " + String(t).trim();
+        });
+    }
+    function hasFiles(e) {
+      var types = e.dataTransfer ? e.dataTransfer.types : [];
+      return Array.prototype.indexOf.call(types, "Files") >= 0;
+    }
+    // Before the terminal's own paste, which takes only text.
+    el.addEventListener("paste", function (e) {
+      var files = e.clipboardData ? e.clipboardData.files : null;
+      if (files && files.length) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        give(files);
+      }
+    }, true);
+    el.addEventListener("dragover", function (e) {
+      if (hasFiles(e)) {
+        e.preventDefault();
+        el.classList.add("drop-over");
+      }
+    });
+    el.addEventListener("dragleave", function () { el.classList.remove("drop-over"); });
+    el.addEventListener("drop", function (e) {
+      el.classList.remove("drop-over");
+      if (hasFiles(e)) {
+        e.preventDefault();
+        give(e.dataTransfer.files);
+      }
+    });
+    var picker = document.getElementById("term-file");
+    var pick = document.getElementById("term-image");
+    if (picker && pick) {
+      pick.addEventListener("click", function () { picker.click(); });
+      picker.addEventListener("change", function () {
+        give(picker.files);
+        picker.value = "";
+      });
+    }
+    // The text on the screen, shown where it selects and copies as any
+    // text does; the terminal's own selection belongs to Claude Code.
+    var textLink = document.getElementById("term-text");
+    var pane = document.getElementById("screen-pane");
+    if (textLink && pane && el.dataset.screen) {
+      var shown = document.getElementById("screen-text");
+      var said = document.getElementById("screen-state");
+      var readScreen = function () {
+        said.textContent = "reading…";
+        fetch(el.dataset.screen + "?token=" + encodeURIComponent(el.dataset.token), { cache: "no-store" })
+          .then(function (r) { return r.text().then(function (t) { return { ok: r.ok, text: t }; }); })
+          .then(function (got) {
+            if (got.ok) {
+              shown.textContent = got.text;
+              said.textContent = "as of " + new Date().toLocaleTimeString();
+            } else {
+              said.textContent = got.text.trim();
+            }
+          })
+          .catch(function (e) { said.textContent = "not read: " + e; });
+      };
+      textLink.addEventListener("click", function () {
+        pane.hidden = false;
+        readScreen();
+        shown.focus();
+      });
+      document.getElementById("screen-refresh").addEventListener("click", readScreen);
+      document.getElementById("screen-close").addEventListener("click", function () { pane.hidden = true; term.focus(); });
+      document.getElementById("screen-copy").addEventListener("click", function () {
+        var range = document.createRange();
+        range.selectNodeContents(shown);
+        var sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        said.textContent = document.execCommand("copy") ? "copied" : "selected: copy it with the keyboard";
+      });
+      pane.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") {
+          pane.hidden = true;
+          term.focus();
+        }
+      });
+    }
+    new ResizeObserver(function () { fit.fit(); }).observe(el);
+    again.addEventListener("click", function () {
+      term.reset();
+      connect();
+    });
+    fit.fit();
+    // The home page's console waits to be opened; once running, it reconnects.
+    if (el.dataset.wait) {
+      var label = again.textContent;
+      again.textContent = el.dataset.wait;
+      again.hidden = false;
+      again.addEventListener("click", function () { again.textContent = label; }, { once: true });
+    } else {
+      connect();
+    }
+  })();
+  // The session's tokens, as its transcript counts them.
+  (function () {
+    var el = document.getElementById("tokens");
+    if (!el) {
+      return;
+    }
+    function read() {
+      fetch(el.dataset.url, { credentials: "same-origin", cache: "no-store" })
+        .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+        .then(function (d) {
+          el.textContent = d.running ? "Tokens used: " + d.tokens : "No session";
+          // The session's title names its account; beside it, whether it
+          // needs a reset to move to another, or agentd is resetting it.
+          var acct = document.getElementById("term-account");
+          if (acct) {
+            acct.textContent = d.account_title ? " · " + d.account_title : "";
+          }
+          var move = document.getElementById("term-move");
+          if (move) {
+            move.hidden = !d.note;
+            move.textContent = d.note || "";
+            move.title = d.note_title || "";
+          }
+          ["term-summary", "term-give"].forEach(function (id) {
+            var el = document.getElementById(id);
+            if (el) { el.hidden = !d.summary; }
+          });
+        })
+        .catch(function () {});
+    }
+    read();
+    document.addEventListener("terminal-open", read);
+    setInterval(read, 10000);
+  })();
+  // A row's priority is saved as it is chosen; if that fails, the choice
+  // goes back to what is saved and the select says why.
+  document.addEventListener("change", function (e) {
+    var select = e.target;
+    if (!select.matches || !select.matches(".row-priority")) {
+      return;
+    }
+    var host = select.closest("[data-token]");
+    var row = select.closest(".box-row");
+    var saved = function () {
+      for (var i = 0; i < select.options.length; i++) {
+        if (select.options[i].defaultSelected) { return select.options[i].value; }
+      }
+      return "";
+    };
+    var form = new URLSearchParams();
+    form.set("token", host.dataset.token);
+    form.set("src", host.dataset.src);
+    form.set("repository", host.dataset.repository);
+    form.set("ref", select.dataset.ref);
+    form.set("level", select.value);
+    fetch("/priority", { method: "POST", body: form, credentials: "same-origin" })
+      .then(function (r) { return r.ok ? null : r.text().then(function (t) { return Promise.reject(t); }); })
+      .then(function () {
+        select.removeAttribute("title");
+        for (var i = 0; i < select.options.length; i++) {
+          select.options[i].defaultSelected = select.options[i].selected;
+        }
+        if (row) {
+          row.dataset.priority = String(select.value === "high" ? 0 : select.value === "medium" ? 1 : select.value === "low" ? 2 : 3);
+          applyBox(row.closest("[data-box]"));
+        }
+      })
+      .catch(function (why) {
+        select.value = saved();
+        select.title = "Not saved: " + why;
+      });
+  });
   document.addEventListener("input", boxInput);
   // A link may name the issue box's sort, as home's waits-on-you number
   // does (?sort=needs-me): it is taken as the owner's choice.
@@ -257,6 +598,43 @@
   })();
   levelBoxes();
   talkBottom(document);
+
+  // A repository page's issues and merge requests (#99): agentd reads them
+  // from the forge when the page is entered and every 30 seconds while it
+  // is the one shown, then the page fetches itself and swaps them in. A
+  // hidden page asks for nothing, and reads again once it is shown. The
+  // terminal is not a refreshed section, so it stays as it is.
+  var reader = document.querySelector("[data-read]");
+  if (reader) {
+    var readUrl = reader.dataset.read;
+    var readToken = reader.dataset.token;
+    var lastRead = 0;
+    var readForge = function () {
+      if (document.hidden) {
+        return;
+      }
+      lastRead = Date.now();
+      var form = new URLSearchParams();
+      form.set("token", readToken);
+      // The page is fetched whether the read went or not: a failed read
+      // keeps the list and says it is stale.
+      fetch(readUrl, { method: "POST", body: form, credentials: "same-origin" })
+        .catch(function () {})
+        .then(refresh);
+    };
+    readForge();
+    setInterval(function () {
+      if (Date.now() - lastRead >= every - 1000) {
+        readForge();
+      }
+    }, 5000);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden && Date.now() - lastRead >= every) {
+        readForge();
+      }
+    });
+    return;
+  }
 
   var box = document.getElementById("box");
   if (!box) {
@@ -920,6 +1298,53 @@
     }
   });
 
+  // The repository list's card (#repo-card): what a repository is for and
+  // its forge, shown beside the row the pointer is on or that has focus.
+  var card = null;
+  function showCard(row) {
+    var about = row && row.querySelector(".repo-about");
+    if (!about) { return; }
+    if (!card) {
+      card = document.createElement("div");
+      card.id = "repo-card";
+      card.setAttribute("role", "tooltip");
+      document.body.appendChild(card);
+    }
+    card.innerHTML = about.innerHTML;
+    card.hidden = false;
+    var r = row.getBoundingClientRect();
+    var box = row.closest(".repos-box").getBoundingClientRect();
+    var w = card.offsetWidth, h = card.offsetHeight, gap = 8;
+    var left = box.left - w - gap;
+    var top = r.top;
+    if (left < gap) {
+      left = Math.max(gap, Math.min(r.left, window.innerWidth - w - gap));
+      top = r.bottom + gap;
+      if (top + h > window.innerHeight - gap) { top = r.top - h - gap; }
+    }
+    card.style.left = left + "px";
+    card.style.top = Math.max(gap, Math.min(top, window.innerHeight - h - gap)) + "px";
+  }
+  function hideCard() {
+    if (card) { card.hidden = true; }
+  }
+  function cardRow(e) {
+    var t = e.target;
+    return t && t.closest ? t.closest("#repositories .box-row") : null;
+  }
+  document.addEventListener("mouseover", function (e) {
+    var row = cardRow(e);
+    if (row) { showCard(row); } else { hideCard(); }
+  });
+  document.addEventListener("focusin", function (e) {
+    var row = cardRow(e);
+    if (row) { showCard(row); } else { hideCard(); }
+  });
+  document.addEventListener("scroll", hideCard, true);
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") { hideCard(); }
+  });
+
   document.addEventListener("dragover", function (e) {
     var form = e.target.closest ? e.target.closest("form") : null;
     if (inputOf(form) && e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types, "Files") >= 0) {
@@ -941,5 +1366,81 @@
     e.preventDefault();
     form.classList.remove("attach-over");
     add(form, e.dataTransfer.files);
+  });
+})();
+
+// The repository page's title rotates (#94): a click of an arrow, or of a
+// repository under the title, slides the ring round, the one picked into
+// the title and the page's own out to its side, then opens the page picked.
+// The split into halves is uiPage.RingLeft and RingRight's.
+(function () {
+  "use strict";
+  var turn = 450;
+
+  function link(name, step) {
+    var a = document.createElement("a");
+    a.href = "/r/" + encodeURIComponent(name);
+    a.dataset.step = String(step);
+    a.dataset.name = name;
+    a.textContent = name;
+    var li = document.createElement("li");
+    li.append(a);
+    return li;
+  }
+
+  // render shows current in the title with ring round it.
+  function render(box, current, ring) {
+    var title = box.querySelector(".topbar-repo");
+    title.textContent = current;
+    title.dataset.name = current;
+    var arrows = box.querySelectorAll(".ring-arrow");
+    arrows[0].href = "/r/" + encodeURIComponent(ring[ring.length - 1]);
+    arrows[1].href = "/r/" + encodeURIComponent(ring[0]);
+    var half = Math.ceil(ring.length / 2);
+    var right = box.querySelector(".ring-right"), left = box.querySelector(".ring-left");
+    right.replaceChildren.apply(right, ring.slice(0, half).map(function (name, i) { return link(name, i + 1); }));
+    var rest = ring.slice(half);
+    left.replaceChildren.apply(left, rest.map(function (name, i) { return link(name, -(rest.length - i)); }));
+  }
+
+  function centre(r) { return { x: r.left + r.width / 2, y: r.top + r.height / 2, h: r.height }; }
+
+  document.addEventListener("click", function (e) {
+    var a = e.target.closest && e.target.closest("#repo-ring [data-step]");
+    if (!a || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
+      return;
+    }
+    var box = a.closest("#repo-ring");
+    var cycle = [box.dataset.current].concat(JSON.parse(box.dataset.ring || "[]"));
+    var n = cycle.length;
+    if (n < 2) {
+      return;
+    }
+    e.preventDefault();
+    var k = ((Number(a.dataset.step) % n) + n) % n;
+    var ring = [];
+    for (var i = 1; i < n; i++) {
+      ring.push(cycle[(k + i) % n]);
+    }
+    var before = {};
+    box.querySelectorAll("[data-name]").forEach(function (el) { before[el.dataset.name] = centre(el.getBoundingClientRect()); });
+    box.dataset.current = cycle[k];
+    box.dataset.ring = JSON.stringify(ring);
+    render(box, cycle[k], ring);
+    var href = "/r/" + encodeURIComponent(cycle[k]);
+    if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      box.querySelectorAll("[data-name]").forEach(function (el) {
+        var was = before[el.dataset.name], now = centre(el.getBoundingClientRect());
+        if (!was || !now.h) {
+          el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: turn });
+          return;
+        }
+        el.animate([
+          { transform: "translate(" + (was.x - now.x) + "px," + (was.y - now.y) + "px) scale(" + was.h / now.h + ")" },
+          { transform: "none" }
+        ], { duration: turn, easing: "ease-in-out" });
+      });
+    }
+    setTimeout(function () { location.href = href; }, turn);
   });
 })();

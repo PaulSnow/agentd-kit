@@ -37,6 +37,8 @@ type ManifestRepo struct {
 	Active   bool   `json:"active"`
 	Audience string `json:"audience"`
 	Note     string `json:"note,omitempty"`
+	// Description is a few sentences on what the repository is for.
+	Description string `json:"description,omitempty"`
 }
 
 // Snapshot is the tracking system's snapshot file. Its field names are the
@@ -152,17 +154,18 @@ type SnapScan struct {
 // snapshot holds the repository's forge data; one it does not hold is
 // listed all the same, with no work, never dropped.
 type RepoRecord struct {
-	Key        string // platform/path, lower case: the repository's identity
-	Name       string
-	Platform   string
-	Path       string
-	Active     bool
-	Audience   string
-	Note       string
-	Tracked    bool
-	OpenIssues []SnapIssue
-	OpenMRs    []SnapMR
-	Clones     []SnapClone
+	Key         string // platform/path, lower case: the repository's identity
+	Name        string
+	Platform    string
+	Path        string
+	Active      bool
+	Audience    string
+	Note        string
+	Description string
+	Tracked     bool
+	OpenIssues  []SnapIssue
+	OpenMRs     []SnapMR
+	Clones      []SnapClone
 }
 
 // Inventory is every repository in the manifest, in key order, as the
@@ -249,7 +252,7 @@ func LoadInventory(tr Tracking) (*Inventory, error) {
 			errs = append(errs, fmt.Errorf("entry %d: %s is listed twice", i, key))
 			continue
 		}
-		r := &RepoRecord{Key: key, Name: m.Name, Platform: m.Platform, Path: m.Path, Active: m.Active, Audience: m.Audience, Note: m.Note}
+		r := &RepoRecord{Key: key, Name: m.Name, Platform: m.Platform, Path: m.Path, Active: m.Active, Audience: m.Audience, Note: m.Note, Description: m.Description}
 		inv.byKey[key] = r
 		inv.Repos = append(inv.Repos, r)
 	}

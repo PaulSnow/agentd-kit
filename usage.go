@@ -97,7 +97,13 @@ type AccountPayload struct {
 	Weekly        *float64   `json:"weekly,omitempty"`
 	WeeklyReset   *time.Time `json:"weekly_reset,omitempty"`
 	Overage       *bool      `json:"overage,omitempty"`
-	Error         string     `json:"error,omitempty"`
+	// Model names the model the plan also limits weekly on its own, such
+	// as Fable, when the reading has that window: ModelWeekly is its
+	// percent, ModelWeeklyReset when it resets.
+	Model            string     `json:"model,omitempty"`
+	ModelWeekly      *float64   `json:"model_weekly,omitempty"`
+	ModelWeeklyReset *time.Time `json:"model_weekly_reset,omitempty"`
+	Error            string     `json:"error,omitempty"`
 }
 
 // AccountRecord is an account's latest reading as the fold keeps it: the
@@ -107,6 +113,21 @@ type AccountRecord struct {
 	AccountPayload
 	At      time.Time // when the numbers were read
 	ErrorAt time.Time
+	// FailingSince is when the readings began failing: the first error
+	// after a good reading, or the first ever; zero while they read
+	// (#80).
+	FailingSince time.Time
+}
+
+// usageReadingDown is how long an account's readings fail before the
+// owner is shown one card for it and placement goes on without a
+// reading (#80).
+const usageReadingDown = time.Hour
+
+// readingDown says whether r's readings have failed for longer than
+// usageReadingDown at now.
+func (r AccountRecord) readingDown(now time.Time) bool {
+	return !r.FailingSince.IsZero() && now.Sub(r.FailingSince) > usageReadingDown
 }
 
 // applyAccount folds a reading. A failed one keeps the numbers before it.
@@ -118,6 +139,9 @@ func (st *LogState) applyAccount(e Event) {
 	r := st.Accounts[p.Account]
 	if p.Error != "" {
 		r.Account, r.Error, r.ErrorAt = p.Account, p.Error, e.Time
+		if r.FailingSince.IsZero() {
+			r.FailingSince = e.Time
+		}
 		st.Accounts[p.Account] = r
 		return
 	}
@@ -155,8 +179,8 @@ func (r AccountRecord) sameReading(p AccountPayload) bool {
 		return r.Error == p.Error
 	}
 	// After an error, a reading is news.
-	return r.Error == "" && !r.At.IsZero() && near(r.FiveHour, p.FiveHour) && near(r.Weekly, p.Weekly) &&
-		tm(r.FiveHourReset)+tm(r.WeeklyReset)+b(r.Overage)+r.Method == tm(p.FiveHourReset)+tm(p.WeeklyReset)+b(p.Overage)+p.Method
+	return r.Error == "" && !r.At.IsZero() && near(r.FiveHour, p.FiveHour) && near(r.Weekly, p.Weekly) && near(r.ModelWeekly, p.ModelWeekly) &&
+		tm(r.FiveHourReset)+tm(r.WeeklyReset)+tm(r.ModelWeeklyReset)+b(r.Overage)+r.Method+"/"+r.Model == tm(p.FiveHourReset)+tm(p.WeeklyReset)+tm(p.ModelWeeklyReset)+b(p.Overage)+p.Method+"/"+p.Model
 }
 
 // errNoUsageScope is the endpoint refusing the token: a token without
@@ -285,18 +309,58 @@ func (u planReader) endpoint(tok string, p *AccountPayload) error {
 	case resp.StatusCode != http.StatusOK:
 		return fmt.Errorf("usage endpoint: HTTP %d: %s", resp.StatusCode, oneLine(scrubToken(string(body), tok), 200))
 	}
+	return readEndpointAnswer(body, p)
+}
+
+// usageNumber is a utilization as the endpoint gives it: a number, or a
+// number in a string.
+type usageNumber struct{ v *float64 }
+
+func (n *usageNumber) UnmarshalJSON(b []byte) error {
+	s := strings.Trim(strings.TrimSpace(string(b)), `"`)
+	if s == "" || s == "null" {
+		return nil
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
+		return nil // not a utilization: the window counts as unread
+	}
+	n.v = &v
+	return nil
+}
+
+// usageWindow is one window of the endpoint's answer.
+type usageWindow struct {
+	Utilization usageNumber `json:"utilization"`
+	ResetsAt    *string     `json:"resets_at"`
+}
+
+// readEndpointAnswer reads the usage endpoint's answer (#80). A window
+// that is null or absent while the other is read is idle: 0% with no
+// reset, as the endpoint answers when nothing was used in it. The weekly
+// window is also read from the limits list (group weekly, kind
+// weekly_all) when seven_day has none. Only when neither window can be
+// read does it fail, naming the answer's top-level keys, never values.
+// A weekly window scoped to a model (kind weekly_scoped) is the model's
+// own: its display name, percent and reset.
+func readEndpointAnswer(body []byte, p *AccountPayload) error {
 	var doc struct {
-		FiveHour *struct {
-			Utilization *float64 `json:"utilization"`
-			ResetsAt    *string  `json:"resets_at"`
-		} `json:"five_hour"`
-		SevenDay *struct {
-			Utilization *float64 `json:"utilization"`
-			ResetsAt    *string  `json:"resets_at"`
-		} `json:"seven_day"`
+		FiveHour   *usageWindow `json:"five_hour"`
+		SevenDay   *usageWindow `json:"seven_day"`
 		ExtraUsage *struct {
 			IsEnabled *bool `json:"is_enabled"`
 		} `json:"extra_usage"`
+		Limits []struct {
+			Kind     string      `json:"kind"`
+			Group    string      `json:"group"`
+			Percent  usageNumber `json:"percent"`
+			ResetsAt *string     `json:"resets_at"`
+			Scope    *struct {
+				Model *struct {
+					DisplayName string `json:"display_name"`
+				} `json:"model"`
+			} `json:"scope"`
+		} `json:"limits"`
 	}
 	if err := json.Unmarshal(body, &doc); err != nil {
 		return fmt.Errorf("usage endpoint: unreadable answer: %w", err)
@@ -313,18 +377,41 @@ func (u planReader) endpoint(tok string, p *AccountPayload) error {
 		return &t
 	}
 	if doc.FiveHour != nil {
-		p.FiveHour, p.FiveHourReset = doc.FiveHour.Utilization, reset(doc.FiveHour.ResetsAt)
+		p.FiveHour, p.FiveHourReset = doc.FiveHour.Utilization.v, reset(doc.FiveHour.ResetsAt)
 	}
 	if doc.SevenDay != nil {
-		p.Weekly, p.WeeklyReset = doc.SevenDay.Utilization, reset(doc.SevenDay.ResetsAt)
+		p.Weekly, p.WeeklyReset = doc.SevenDay.Utilization.v, reset(doc.SevenDay.ResetsAt)
+	}
+	for _, l := range doc.Limits {
+		if p.Weekly == nil && l.Kind == "weekly_all" && l.Percent.v != nil {
+			p.Weekly, p.WeeklyReset = l.Percent.v, reset(l.ResetsAt)
+		}
+		if p.ModelWeekly == nil && l.Kind == "weekly_scoped" && l.Percent.v != nil && l.Scope != nil && l.Scope.Model != nil && l.Scope.Model.DisplayName != "" {
+			p.Model, p.ModelWeekly, p.ModelWeeklyReset = l.Scope.Model.DisplayName, l.Percent.v, reset(l.ResetsAt)
+		}
 	}
 	if doc.ExtraUsage != nil {
 		p.Overage = doc.ExtraUsage.IsEnabled
 	}
-	if p.FiveHour == nil || p.Weekly == nil {
-		return errors.New("usage endpoint: the answer has no five-hour or weekly utilization")
+	if p.FiveHour == nil && p.Weekly == nil {
+		var keys map[string]json.RawMessage
+		json.Unmarshal(body, &keys)
+		return fmt.Errorf("usage endpoint: the answer has no five-hour or weekly utilization; its keys: %s", strings.Join(sortedKeys(keys), ", "))
 	}
+	idleWindow(p)
 	return nil
+}
+
+// idleWindow reads a window the answer left out, while it gave the
+// other, as idle: 0% with no reset.
+func idleWindow(p *AccountPayload) {
+	zero := func() *float64 { v := 0.0; return &v }
+	if p.FiveHour == nil {
+		p.FiveHour, p.FiveHourReset = zero(), nil
+	}
+	if p.Weekly == nil {
+		p.Weekly, p.WeeklyReset = zero(), nil
+	}
 }
 
 // claudeCodeSystem is the system line Claude Code sends, which an OAuth
@@ -373,16 +460,56 @@ func (u planReader) headers(tok string, p *AccountPayload) error {
 	const pre = "anthropic-ratelimit-unified-"
 	p.FiveHour, p.FiveHourReset = pct(pre+"5h-utilization"), at(pre+"5h-reset")
 	p.Weekly, p.WeeklyReset = pct(pre+"7d-utilization"), at(pre+"7d-reset")
+	// A seven-day window of its own (7d_NAME) is the limit on the model
+	// the request was made with, which the plan limits apart.
+	var scoped []string
+	for k := range h {
+		if k = strings.ToLower(k); strings.HasPrefix(k, pre+"7d_") && strings.HasSuffix(k, "-utilization") {
+			scoped = append(scoped, strings.TrimSuffix(k, "-utilization"))
+		}
+	}
+	sort.Strings(scoped)
+	for _, w := range scoped {
+		if v := pct(w + "-utilization"); v != nil {
+			p.Model, p.ModelWeekly, p.ModelWeeklyReset = modelName(u.cfg.Model), v, at(w+"-reset")
+			break
+		}
+	}
 	if o := h.Get(pre + "overage-status"); o != "" {
 		on := o != "rejected" && o != "disabled"
 		p.Overage = &on
 	}
 	// A refused request (429, the limit reached) still carries the
-	// headers; without them the reading failed.
-	if p.FiveHour == nil || p.Weekly == nil {
-		return fmt.Errorf("messages: HTTP %d without the rate-limit headers: %s", resp.StatusCode, oneLine(scrubToken(string(answer), tok), 200))
+	// headers; without either window's the reading failed, naming the
+	// rate-limit headers the answer had. A window left out while the
+	// other is given is idle (#80): the answer gives no 5h headers when
+	// nothing was used in the five hours.
+	if p.FiveHour == nil && p.Weekly == nil {
+		var names []string
+		for k := range h {
+			if k = strings.ToLower(k); strings.HasPrefix(k, "anthropic-ratelimit-") {
+				names = append(names, k)
+			}
+		}
+		sort.Strings(names)
+		had := "none"
+		if len(names) > 0 {
+			had = strings.Join(names, ", ")
+		}
+		return fmt.Errorf("messages: HTTP %d without the five-hour or weekly rate-limit headers (rate-limit headers: %s): %s", resp.StatusCode, had, oneLine(scrubToken(string(answer), tok), 120))
 	}
+	idleWindow(p)
 	return nil
+}
+
+// modelName is a model id as people name the model: claude-fable-5-1 is
+// Fable.
+func modelName(id string) string {
+	parts := strings.Split(id, "-")
+	if len(parts) < 2 || parts[0] != "claude" || parts[1] == "" {
+		return id
+	}
+	return strings.ToUpper(parts[1][:1]) + parts[1][1:]
 }
 
 // readAccounts reads each account whose reading is due, in a worker of
@@ -428,45 +555,72 @@ func (s *Supervisor) readAccounts(now time.Time) {
 	}
 }
 
-// placeAccount is the account a started session of repo goes on: the
-// first of the repository's sessions.fallback whose latest reading is
-// fresh and under the limit on both windows, or, with the readings off,
-// the first; an account whose usage is off counts as having room once
-// every account before it is known to have none. Tried says whether this
-// run has read an account yet (nil: all have been): an earlier account
-// not yet tried is waited for, never passed over for a later one, since
-// a placement holds for good. When no account is chosen, it is "" and why
-// says each account's state; full says every account was read and is at
-// or over the limit, rather than unread.
-func placeAccount(cfg *Config, st *LogState, repo string, now time.Time, tried func(string) bool) (account, why string, full bool) {
+// placeAccount picks the account for a start in repo, of its policy's
+// fallback accounts, as pickAccount does.
+func placeAccount(cfg *Config, st *LogState, repo string, now time.Time, tried func(string) bool) (account, why string, full bool, blind string) {
 	rules, _ := effectivePolicy(cfg, st, repo)
+	if len(rules.Sessions.Fallback) == 0 {
+		return "", "the repository's policy has no sessions.fallback", false, ""
+	}
+	return pickAccount(cfg, st, rules.Sessions.Fallback, now, tried)
+}
+
+// pickAccount picks, of fallback's accounts with room, the one whose week
+// resets first, since what it leaves unused at the reset is lost; the
+// order settles a tie, and an account without a reset comes after those
+// with one. An account has room when its reading is fresh and under the
+// limit, or its usage is off. Every account must have been read by this
+// run first, as tried says (nil: all have been), since a placement holds
+// for good. With none with room, one whose readings have been failing for
+// over an hour is used blind; else it answers why it waits, and full when
+// every account was read and is at or over the limit.
+func pickAccount(cfg *Config, st *LogState, fallback []string, now time.Time, tried func(string) bool) (account, why string, full bool, blind string) {
 	u := cfg.Usage
+	if !u.Enabled {
+		return fallback[0], "", false, ""
+	}
 	var states []string
-	full = len(rules.Sessions.Fallback) > 0
-	for _, a := range rules.Sessions.Fallback {
-		if !u.Enabled || cfg.Accounts[a].Usage == UsageOff {
-			return a, "", false
+	var blindWhy string
+	var reset *time.Time
+	full = true
+	for _, a := range fallback {
+		if cfg.Accounts[a].Usage == UsageOff {
+			if account == "" {
+				account = a
+			}
+			continue
 		}
 		if tried != nil && !tried(a) {
-			return "", strings.Join(append(states, a+": not read yet by this run"), "; "), false
+			return "", strings.Join(append(states, a+": not read yet by this run"), "; "), false, ""
 		}
 		r, ok := st.Accounts[a]
 		high, both := r.usageHigh()
+		fresh := both && now.Sub(r.At) <= usageStale*u.Every.Duration
 		switch {
+		case !fresh && r.readingDown(now):
+			if blind == "" {
+				blind, blindWhy = a, fmt.Sprintf("placed on %s without a reading: its usage readings have failed since %s", a, r.FailingSince.UTC().Format(time.RFC3339))
+			}
+			full = false
 		case !ok || !both:
 			states, full = append(states, a+": no reading yet"), false
 		case now.Sub(r.At) > usageStale*u.Every.Duration:
 			states, full = append(states, fmt.Sprintf("%s: no reading since %s", a, r.At.UTC().Format(time.RFC3339))), false
 		case high >= u.Limit:
 			states = append(states, fmt.Sprintf("%s: %s", a, usageText(r.AccountPayload)))
-		default:
-			return a, "", false
+		case r.WeeklyReset != nil && (account == "" || reset == nil || r.WeeklyReset.Before(*reset)):
+			account, reset = a, r.WeeklyReset
+		case account == "":
+			account = a
 		}
 	}
-	if len(states) == 0 {
-		return "", "the repository's policy has no sessions.fallback", false
+	switch {
+	case account != "":
+		return account, "", false, ""
+	case blind != "":
+		return blind, "", false, blindWhy
 	}
-	return "", strings.Join(states, "; "), full
+	return "", strings.Join(states, "; "), full, ""
 }
 
 // usageText is a reading in words.
@@ -482,6 +636,9 @@ func usageText(p AccountPayload) string {
 		return s
 	}
 	s := part("5h", p.FiveHour, p.FiveHourReset) + ", " + part("weekly", p.Weekly, p.WeeklyReset)
+	if p.ModelWeekly != nil {
+		s += ", " + part(p.Model+" weekly", p.ModelWeekly, p.ModelWeeklyReset)
+	}
 	if p.Overage != nil {
 		if *p.Overage {
 			s += ", overage on"
@@ -511,7 +668,7 @@ func (s *Supervisor) place(name string, t *Track, now time.Time) {
 	since := s.work.usageSince
 	s.work.mu.Unlock()
 	tried := func(a string) bool { _, ok := read[a]; return ok }
-	account, why, full := placeAccount(s.cfg, s.st, p.Repository, now, tried)
+	account, why, full, blind := placeAccount(s.cfg, s.st, p.Repository, now, tried)
 	if s.shadow {
 		if account != "" {
 			why = "the live run places it; it would go on " + account
@@ -534,15 +691,25 @@ func (s *Supervisor) place(name string, t *Track, now time.Time) {
 		waited := now.Sub(from)
 		switch {
 		case full:
-			s.escalate(name, key, fmt.Sprintf("%s, started for branch %s of %s, waits for an account: every account of its fallback is at or over %.0f%% (%s). It starts on the first with room.",
+			s.escalate(name, key, fmt.Sprintf("%s, started for branch %s of %s, waits for an account: every account of its fallback is at or over %.0f%% (%s). It starts once one has room.",
 				name, p.Branch, p.Repository, s.cfg.Usage.Limit, why), t, now)
 		case !since.IsZero() && waited >= usageStale*s.cfg.Usage.Every.Duration:
-			s.escalate(name, key, fmt.Sprintf("%s, started for branch %s of %s, has waited %s for an account: %s. It starts on the first fallback account with room once it is read.",
+			s.escalate(name, key, fmt.Sprintf("%s, started for branch %s of %s, has waited %s for an account: %s. It is placed once every fallback account is read.",
 				name, p.Branch, p.Repository, waited.Round(time.Minute), why), t, now)
 		}
 		return
 	}
-	s.emit(name, Event{Kind: KindSession, Mode: ModeShared, Runtime: &RuntimePayload{ID: p.ID, Action: SessionPlace, Repository: p.Repository, Account: account, By: "agentd"}})
+	s.emit(name, Event{Kind: KindSession, Mode: ModeShared, Runtime: &RuntimePayload{ID: p.ID, Action: SessionPlace, Repository: p.Repository, Account: account, By: "agentd", Why: blind}})
+	if blind != "" {
+		// Placed without a reading: the repository's console is told,
+		// once for the start, as its place event says.
+		text := fmt.Sprintf("%s, started for branch %s, was %s.", name, p.Branch, blind)
+		m := &MessagePayload{ID: "P" + shortHash(HashPane("place:" + name + ":" + p.ID))[:8], Console: s.cfg.RepositoryConsole(p.Repository), Kind: "info", From: "agentd", Text: text, Account: account}
+		if i := s.confidentialMatch(text); i > 0 {
+			m.Text, m.Withheld = "", i
+		}
+		s.emit("", Event{Kind: KindMessage, Mode: ModeShared, Message: m})
+	}
 	s.refreshRuntime()
 }
 

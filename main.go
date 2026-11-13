@@ -9,6 +9,7 @@
 //	agentd clear [--config PATH] [--log PATH] SESSION
 //	agentd inventory [--config PATH]
 //	agentd report [--config PATH] [--log PATH] [--shadow] [--host NAME] --out PATH
+//	agentd digest [--config PATH] [--log PATH] [--shadow] [--json]
 //	agentd page [--config PATH] [--log PATH] [--shadow]
 //	agentd items [--config PATH] [--log PATH] [--new] [--seen ID,...] [--work [--all] [--json]]
 //	agentd cases [--config PATH] [--log PATH] [--shadow] [--json]
@@ -90,6 +91,8 @@ func runCommand(name string, args []string) (handled bool, err error) {
 		return true, inventoryCmd(args, os.Stdout)
 	case "report":
 		return true, reportCmd(args)
+	case "digest":
+		return true, digestCmd(args)
 	case "ui":
 		return true, uiCmd(args)
 	case "accounts":
@@ -98,6 +101,10 @@ func runCommand(name string, args []string) (handled bool, err error) {
 		return true, itemsCmd(args, os.Stdout)
 	case "triage":
 		return true, triageCmd(args, os.Stdout)
+	case "step":
+		return true, stepCmd(args, os.Stdout)
+	case "steps":
+		return true, stepsCmd(args, os.Stdout)
 	case "status-check":
 		return true, statusCheckCmd(args, os.Stdout)
 	case "context":
@@ -114,6 +121,10 @@ func runCommand(name string, args []string) (handled bool, err error) {
 		return true, nodeCmd(args)
 	case "nodes":
 		return true, nodesCmd(args, os.Stdout)
+	case "send":
+		return true, sendCmd(args, os.Stdout)
+	case "prompt":
+		return true, promptCmd(args, os.Stdout)
 	case "releases":
 		return true, releasesCmd(args, os.Stdout)
 	}
@@ -170,10 +181,13 @@ const usageLines = `usage:
   agentd issue [--config PATH] [--log PATH] [--all] REPO N
   agentd inventory [--config PATH]
   agentd report [--config PATH] [--log PATH] [--shadow] [--host NAME] --out PATH
+  agentd digest [--config PATH] [--log PATH] [--shadow] [--json]
   agentd ui [--config PATH] [--log PATH]
   agentd accounts [--config PATH] [--report [--json]]
   agentd items [--config PATH] [--log PATH] [--new] [--seen ID,...] | --work [--all] [--json]
   agentd triage [--config PATH] --items FILE
+  agentd step [--config PATH] [--log PATH] --spec FILE [--force]
+  agentd steps [--config PATH] [--log PATH] [--json]
   agentd status-check [--config PATH] --transcript FILE [--window 5m] [--input] [--call]
   agentd cases [--config PATH] [--log PATH] [--shadow] [--json]
   agentd cases [--config PATH] [--log PATH] rule CASE restriction|waiver|close|reopen [TEXT]
@@ -184,6 +198,8 @@ const usageLines = `usage:
   agentd context [--config PATH] [--log PATH] stats REPO [--since 24h] | card REPO [TOPIC]
   agentd hub [--config PATH] [--log PATH]
   agentd node [--config PATH] [--once]
+  agentd send [-open] [-notify] [-wait D] [--config PATH] HOST FILE...
+  agentd prompt [-dir D] [-model M] [-timeout D] [--config PATH] HOST TEXT...
   agentd nodes [--config PATH] [--log PATH]
   agentd version
 
@@ -224,6 +240,12 @@ into that tmux session. console inbox prints the owner's replies for a
 console that NAME has not read, one JSON object a line, and records them
 read. triage tries the triage job on the items in
 FILE with one call (retried once on failure) and prints its checked answer and cost; it logs nothing.
+step runs the model step a spec FILE describes, once, with claude -p and
+no tmux: skipped when its inputs and output are those of its last good
+run, unless --force. It writes the checked answer to the spec's output,
+logs one step event and prints it, and exits non-zero when the step
+failed, went over its token budget or failed its check. steps prints
+each pipeline's token and cost totals and its steps' latest runs.
 status-check builds the status graph's input from the window at the end
 of a transcript and prints its size; with --call it makes the one call
 and prints the checked record and its cost. It logs nothing.

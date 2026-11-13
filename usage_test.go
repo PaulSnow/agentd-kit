@@ -31,6 +31,7 @@ type fakeUsageAPI struct {
 	pct      map[string][2]float64 // by token: five-hour, weekly
 	calls    []string
 	messages []map[string]any
+	down     bool // every answer is a 500
 }
 
 func newFakeUsageAPI(t *testing.T) (*fakeUsageAPI, *httptest.Server) {
@@ -46,6 +47,8 @@ func newFakeUsageAPI(t *testing.T) (*fakeUsageAPI, *httptest.Server) {
 		}
 		p, ok := f.pct[tok]
 		switch {
+		case f.down:
+			http.Error(w, "the service is down", http.StatusInternalServerError)
 		case !ok:
 			http.Error(w, "unknown token "+tok, http.StatusUnauthorized)
 		case r.URL.Path == "/api/oauth/usage" && tok == tokenB:
@@ -230,7 +233,7 @@ func TestUsageReadingsLogged(t *testing.T) {
 	}
 	noToken(t, "the event log", h.buf.String())
 	// The UI shows each account.
-	body := owner(t, harnessUI(t, h), "/")
+	body := owner(t, harnessUI(t, h), "/status")
 	for _, want := range []string{"<strong>a</strong>", "5h 30%", "week 20%", "overage off", "internal error for [token]"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("UI lacks %q", want)
@@ -342,7 +345,16 @@ func TestAccountFold(t *testing.T) {
 		{V: EventVersion, Time: t0, Kind: KindAccount, Mode: ModeShared, Account: &AccountPayload{Account: "a", Method: UsageEndpoint, FiveHour: &five, Weekly: &week}},
 		{V: EventVersion, Time: t0.Add(time.Minute), Kind: KindAccount, Mode: ModeShared, Account: &AccountPayload{Account: "a", Error: "down"}},
 	})
-	if r := st.Accounts["a"]; *r.FiveHour != 10 || r.Error != "down" || !r.At.Equal(t0) {
+	if r := st.Accounts["a"]; *r.FiveHour != 10 || r.Error != "down" || !r.At.Equal(t0) || !r.FailingSince.Equal(t0.Add(time.Minute)) {
+		t.Fatalf("a %+v", r)
+	}
+	// A later error keeps when the failing began; a good reading clears it.
+	st.Fold([]Event{{V: EventVersion, Time: t0.Add(2 * time.Minute), Kind: KindAccount, Mode: ModeShared, Account: &AccountPayload{Account: "a", Error: "still down"}}})
+	if r := st.Accounts["a"]; !r.FailingSince.Equal(t0.Add(time.Minute)) || r.readingDown(t0.Add(time.Hour)) || !r.readingDown(t0.Add(62*time.Minute)) {
+		t.Fatalf("a %+v", r)
+	}
+	st.Fold([]Event{{V: EventVersion, Time: t0.Add(3 * time.Minute), Kind: KindAccount, Mode: ModeShared, Account: &AccountPayload{Account: "a", Method: UsageEndpoint, FiveHour: &five, Weekly: &week}}})
+	if r := st.Accounts["a"]; !r.FailingSince.IsZero() || r.readingDown(t0.Add(2*time.Hour)) {
 		t.Fatalf("a %+v", r)
 	}
 	st.Runtime = map[string]RuntimePayload{"s": {ID: "i1", Action: SessionStart, Repository: "widgets"}}
@@ -392,7 +404,7 @@ func TestUsageSteadyAccountStaysFresh(t *testing.T) {
 	if n < 3 {
 		t.Fatalf("a logged %d times in an hour, want a reading at least every %s", n, relogAfter(h.cfg.Usage))
 	}
-	if a, why, _ := placeAccount(h.cfg, h.logState(), "widgets", h.clock.Now(), nil); a != "a" {
+	if a, why, _, _ := placeAccount(h.cfg, h.logState(), "widgets", h.clock.Now(), nil); a != "b" {
 		t.Fatalf("placed on %q: %s", a, why)
 	}
 }
@@ -406,8 +418,49 @@ func TestPlacementNoNoticeBeforeReadings(t *testing.T) {
 	if n := placementNotices(h); len(n) != 0 {
 		t.Fatalf("notices before the readings: %q", n)
 	}
-	if acct := projected(h.cfg, h.events()).Sessions[name].Account; acct != "a" {
+	if acct := projected(h.cfg, h.events()).Sessions[name].Account; acct != "b" {
 		t.Fatalf("placed on %q", acct)
+	}
+}
+
+// Of the accounts with room, a start goes on the one whose week resets
+// first, since what it leaves unused at the reset is lost; one at the
+// limit is passed over however soon it resets, and the fallback order
+// settles a tie.
+func TestPlacementResetsFirst(t *testing.T) {
+	h, _ := usageHarness(t)
+	h.ticks(1, time.Minute)
+	st := h.logState()
+	place := func() string {
+		a, why, _, _ := placeAccount(h.cfg, st, "widgets", h.clock.Now(), nil)
+		if a == "" {
+			t.Fatalf("not placed: %s", why)
+		}
+		return a
+	}
+	a, b := st.Accounts["a"], st.Accounts["b"]
+	if a.WeeklyReset == nil || b.WeeklyReset == nil || !b.WeeklyReset.Before(*a.WeeklyReset) {
+		t.Fatalf("resets a %v, b %v", a.WeeklyReset, b.WeeklyReset)
+	}
+	if got := place(); got != "b" {
+		t.Fatalf("b resets first, placed on %s", got)
+	}
+	sooner := b.WeeklyReset.Add(-time.Hour)
+	a.WeeklyReset = &sooner
+	st.Accounts["a"] = a
+	if got := place(); got != "a" {
+		t.Fatalf("a resets first, placed on %s", got)
+	}
+	full := 95.0
+	a.Weekly = &full
+	st.Accounts["a"] = a
+	if got := place(); got != "b" {
+		t.Fatalf("a is full, placed on %s", got)
+	}
+	a.Weekly, b.WeeklyReset = b.Weekly, a.WeeklyReset
+	st.Accounts["a"], st.Accounts["b"] = a, b
+	if got := place(); got != "a" {
+		t.Fatalf("a tie, placed on %s", got)
 	}
 }
 
@@ -541,5 +594,229 @@ func TestFallbackNamesAnAccount(t *testing.T) {
 	h.cfg.Repositories["widgets"] = w
 	if err := h.cfg.finish(h.dir); err == nil || !strings.Contains(err.Error(), "fallback") {
 		t.Fatalf("an empty fallback: %v", err)
+	}
+}
+
+// serveRecorded serves a recorded answer of testdata/usage (#80): a JSON
+// body, or an .http file of status line, headers, a blank line and the
+// body.
+func serveRecorded(t *testing.T, file string) *httptest.Server {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", "usage", file))
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, header, body := http.StatusOK, http.Header{}, b
+	if strings.HasSuffix(file, ".http") {
+		head, rest, ok := strings.Cut(string(b), "\n\n")
+		if !ok {
+			t.Fatalf("%s has no blank line after its headers", file)
+		}
+		lines := strings.Split(head, "\n")
+		if f := strings.Fields(lines[0]); len(f) < 2 || func() bool { _, err := fmt.Sscan(f[1], &status); return err != nil }() {
+			t.Fatalf("%s: status line %q", file, lines[0])
+		}
+		for _, l := range lines[1:] {
+			k, v, _ := strings.Cut(l, ":")
+			header.Add(strings.TrimSpace(k), strings.TrimSpace(v))
+		}
+		body = []byte(rest)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for k, vs := range header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(status)
+		w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// readRecorded reads account a, by method, from a recorded answer.
+func readRecorded(t *testing.T, file, method string) AccountPayload {
+	t.Helper()
+	cfg := DefaultConfig()
+	cfg.Usage.API = serveRecorded(t, file).URL
+	a := usageAccounts(t, t.TempDir())["a"]
+	a.Usage = method
+	return newPlanReader(cfg.Usage, 5*time.Second).read("a", a)
+}
+
+// The usage endpoint's answer of 2026-11-01 is read, with its Fable
+// window: its five-hour window is null while nothing was used in it,
+// which is 0% with no reset, not a failure.
+func TestUsageEndpointCurrentAnswer(t *testing.T) {
+	p := readRecorded(t, "endpoint-2026-11-01.json", UsageEndpoint)
+	if p.Error != "" {
+		t.Fatalf("error %q", p.Error)
+	}
+	if got := usageText(p); got != "5h 0%, weekly 20% until 2026-11-07 04:59Z, Fable weekly 27% until 2026-11-07 04:59Z, overage off" {
+		t.Fatalf("reading %q", got)
+	}
+	if p.FiveHourReset != nil || p.WeeklyReset == nil || p.WeeklyReset.Unix() != time.Date(2026, 11, 7, 4, 59, 59, 0, time.UTC).Unix() {
+		t.Fatalf("resets %v %v", p.FiveHourReset, p.WeeklyReset)
+	}
+}
+
+// The messages answer of 2026-11-01 is read: it carries the seven-day
+// headers only while nothing was used in the five hours.
+func TestUsageHeadersCurrentAnswer(t *testing.T) {
+	p := readRecorded(t, "messages-2026-11-01.http", UsageHeaders)
+	if p.Error != "" {
+		t.Fatalf("error %q", p.Error)
+	}
+	if got := usageText(p); got != "5h 0%, weekly 12% until 2026-11-03 12:00Z, overage off" {
+		t.Fatalf("reading %q", got)
+	}
+}
+
+// Other shapes of the endpoint's answer: a utilization in a string, the
+// weekly window only in the limits list, and an answer with neither
+// window, whose error names its keys and no values.
+func TestUsageEndpointShapes(t *testing.T) {
+	for body, want := range map[string]string{
+		`{"five_hour":{"utilization":"33.5","resets_at":"2026-11-01T20:00:00Z"},"seven_day":null}`:                            "5h 34% until 2026-11-01 20:00Z, weekly 0%",
+		`{"five_hour":null,"seven_day":null,"limits":[{"kind":"weekly_all","group":"weekly","percent":41,"resets_at":null}]}`: "5h 0%, weekly 41%",
+		`{"five_hour":null,"seven_day":{"utilization":37,"resets_at":null},"limits":[{"kind":"weekly_all","group":"weekly","percent":37},{"kind":"weekly_scoped","group":"weekly","percent":57,"resets_at":"2026-11-14T04:59:59Z","scope":{"model":{"id":null,"display_name":"Fable"},"surface":null}}]}`: "5h 0%, weekly 37%, Fable weekly 57% until 2026-11-14 04:59Z",
+		`{"five_hour":null,"seven_day":null,"secret_field":"value-not-shown"}`: "error: usage endpoint: the answer has no five-hour or weekly utilization; its keys: five_hour, secret_field, seven_day",
+	} {
+		var p AccountPayload
+		got := ""
+		if err := readEndpointAnswer([]byte(body), &p); err != nil {
+			got = "error: " + err.Error()
+		} else {
+			got = usageText(p)
+		}
+		if got != want {
+			t.Errorf("%s:\n got %q\nwant %q", body, got, want)
+		}
+	}
+}
+
+// A messages answer with a seven-day window of its own beside the plain
+// one has the limit on the request's model: read with Fable, it is
+// Fable's.
+func TestUsageHeadersModelWindow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("anthropic-ratelimit-unified-7d-utilization", "0.37")
+		h.Set("anthropic-ratelimit-unified-7d-reset", "1794632400")
+		h.Set("anthropic-ratelimit-unified-7d_oi-utilization", "0.56")
+		h.Set("anthropic-ratelimit-unified-7d_oi-reset", "1794632400")
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	cfg := DefaultConfig()
+	cfg.Usage.API = srv.URL
+	cfg.Usage.Model = "claude-fable-5-1"
+	a := usageAccounts(t, t.TempDir())["a"]
+	a.Usage = UsageHeaders
+	p := newPlanReader(cfg.Usage, 5*time.Second).read("a", a)
+	if got := usageText(p); got != "5h 0%, weekly 37% until 2026-11-14 05:00Z, Fable weekly 56% until 2026-11-14 05:00Z" {
+		t.Fatalf("reading %q (%s)", got, p.Error)
+	}
+	var r AccountRecord
+	r.AccountPayload, r.At = p, time.Now()
+	q := p
+	v := 70.0
+	q.ModelWeekly = &v
+	if r.sameReading(p) != true || r.sameReading(q) != false {
+		t.Error("a change in the model's window is not news")
+	}
+}
+
+// A messages answer with neither window's headers fails, naming the
+// rate-limit headers it had.
+func TestUsageHeadersNoWindow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("anthropic-ratelimit-unified-status", "allowed")
+		fmt.Fprint(w, `{"type":"message"}`)
+	}))
+	defer srv.Close()
+	cfg := DefaultConfig()
+	cfg.Usage.API = srv.URL
+	a := usageAccounts(t, t.TempDir())["a"]
+	a.Usage = UsageHeaders
+	p := newPlanReader(cfg.Usage, 5*time.Second).read("a", a)
+	if !strings.Contains(p.Error, "rate-limit headers: anthropic-ratelimit-unified-status)") {
+		t.Fatalf("error %q", p.Error)
+	}
+}
+
+func (f *fakeUsageAPI) setDown(down bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.down = down
+}
+
+// accountCards counts the overview's account cards for name.
+func accountCards(t *testing.T, h *harness, name string) int {
+	t.Helper()
+	return strings.Count(owner(t, harnessUI(t, h), "/status"), name+"&#39;s usage readings have failed since")
+}
+
+// Readings that fail on every account hold a start for the first hour;
+// after it the start goes on the first fallback account without a
+// reading, and says so in its place event and on the console. Each
+// failing account is one card in the overview, from the hour on, until a
+// reading succeeds (#80).
+func TestPlacementWithoutAReading(t *testing.T) {
+	h, f := usageHarness(t)
+	f.setDown(true)
+	h.ticks(1, time.Minute)
+	if r := h.logState().Accounts["a"]; r.FailingSince.IsZero() || r.Error == "" {
+		t.Fatalf("a %+v", r)
+	}
+	name := h.startSession("fix/spin", KindWork, 7)
+	h.ticks(50, time.Minute)
+	for _, p := range h.sessionEvents() {
+		if p.Action == SessionPlace {
+			t.Fatalf("placed within the hour: %+v", p)
+		}
+	}
+	if n := accountCards(t, h, "a"); n != 0 {
+		t.Fatalf("%d cards for a within the hour", n)
+	}
+	h.ticks(15, time.Minute)
+	var placed []RuntimePayload
+	for _, p := range h.sessionEvents() {
+		if p.Action == SessionPlace {
+			placed = append(placed, p)
+		}
+	}
+	if len(placed) != 1 || placed[0].Account != "a" || !strings.Contains(placed[0].Why, "placed on a without a reading: its usage readings have failed since") {
+		t.Fatalf("placements %+v", placed)
+	}
+	if acct := projected(h.cfg, h.events()).Sessions[name].Account; acct != "a" {
+		t.Fatalf("session account %q", acct)
+	}
+	told := 0
+	for _, e := range h.events() {
+		if e.Kind == KindMessage && strings.Contains(e.Message.Text, name+", started for branch fix/spin, was placed on a without a reading") {
+			told++
+		}
+	}
+	if told != 1 {
+		t.Fatalf("told the console %d times", told)
+	}
+	for _, acct := range []string{"a", "b", "c"} {
+		if n := accountCards(t, h, acct); n != 1 {
+			t.Fatalf("%d cards for %s after the hour", n, acct)
+		}
+	}
+	// A good reading takes the card away.
+	f.setDown(false)
+	h.ticks(16, time.Minute)
+	if r := h.logState().Accounts["a"]; !r.FailingSince.IsZero() {
+		t.Fatalf("a still failing: %+v", r)
+	}
+	if n := accountCards(t, h, "a"); n != 0 {
+		t.Fatalf("%d cards for a after a good reading", n)
+	}
+	if n := accountCards(t, h, "c"); n != 1 {
+		t.Fatalf("%d cards for c, which still fails", n)
 	}
 }

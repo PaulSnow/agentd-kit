@@ -45,6 +45,13 @@ type UIConfig struct {
 	Owner   string   `json:"owner"`
 	Logs    []string `json:"logs"`
 	Shadow  bool     `json:"shadow"`
+	// SessionCommand starts a repository's Claude Code session, in its
+	// clone; {session_id} is replaced. Empty, plain claude under a login shell.
+	SessionCommand []string `json:"session_command"`
+	// ManualReset leaves a page session that should move to another
+	// account to the owner's Close session: agentd does not ask an idle
+	// one for a summary and restart it by itself (#96).
+	ManualReset bool `json:"manual_reset"`
 }
 
 // Whois names the login behind a remote address.
@@ -152,6 +159,12 @@ type uiSource struct {
 	// echo marks a shadow source over a live source's log: the owner's
 	// records and the shared facts are the live source's to show.
 	echo bool
+	// issuePath is the issue file, "" to keep it in memory, and issueReads
+	// how each repository's listing last went.
+	issuePath  string
+	issueReads map[string]issueReading
+	// requests are each repository's open requests as last read.
+	requests map[string]requestReading
 	// owned is the owner's message each session started for one was
 	// started for, until its first post, which is threaded under it (#65).
 	owned map[string]string
@@ -439,6 +452,49 @@ type UI struct {
 	mu      sync.Mutex
 	answers map[string]whoisAnswer // by caller IP
 	slots   chan struct{}
+
+	// The workspace: where clones are looked for, the tmux server's
+	// arguments (a test's own), one start of a session at a time, and what
+	// the sessions' transcripts have used.
+	home       string
+	tmuxArgs   []string
+	sessionsMu sync.Mutex
+	usage      *usageReader
+	// catalog is what the tracking system follows beyond the configuration,
+	// by name, under mu.
+	catalog map[string]Repository
+	// about is each tracked repository's description, by platform/path,
+	// configured ones too, under mu.
+	about map[string]string
+	// clones are the repositories cloned under cloneRoots, by
+	// platform/path, as the last scan found them, under mu; cloneFile
+	// keeps that scan, "" in memory only. One scan at a time (#96).
+	clones     map[string]scannedClone
+	cloneRoots []string
+	cloneFile  string
+	cloneGit   cloneGit
+	cloneAPI   ForgeAPI
+	scanMu     sync.Mutex
+	// issueAPI reads the issues and requests of a repository a scan
+	// newly lists, so they show without waiting for the next poll; nil
+	// leaves them to it.
+	issueAPI ForgeAPI
+	// reading is each repository's read the page asked for that is still
+	// going, and readAt when its last one ended, under mu (#99).
+	reading map[string]chan struct{}
+	readAt  map[string]time.Time
+	// resets is where each page session's move to another account
+	// stands, under mu; the rest pace it, a test's shorter (#96).
+	resets       map[string]*resetState
+	resetQuiet   time.Duration
+	resetGap     time.Duration
+	resetSummary time.Duration
+	resetPrompt  time.Duration
+	resetPoll    time.Duration
+	resetPause   time.Duration
+	// handoverRoot is where each page session's summary is kept for its
+	// new session to read, one known file each (#96).
+	handoverRoot string
 }
 
 // NewUI builds the UI's handler over sources, the first the main config's.
@@ -464,8 +520,11 @@ func NewUI(cfg UIConfig, whois Whois, sources []*uiSource, now func() time.Time)
 	if _, err := rand.Read(b); err != nil {
 		return nil, err
 	}
+	home, _ := os.UserHomeDir()
 	return &UI{cfg: cfg, whois: whois, sources: sources, self: ip, now: now, loc: time.Local, token: hex.EncodeToString(b),
-		answers: map[string]whoisAnswer{}, slots: make(chan struct{}, whoisSlots)}, nil
+		answers: map[string]whoisAnswer{}, slots: make(chan struct{}, whoisSlots), home: home, usage: newUsageReader(),
+		resetQuiet: resetQuiet, resetGap: resetGap, resetSummary: resetSummary, resetPrompt: resetPrompt, resetPoll: 3 * time.Second, resetPause: 1500 * time.Millisecond,
+		handoverRoot: filepath.Join(os.TempDir(), "agentd-handover")}, nil
 }
 
 // source is the source named name, or nil.
@@ -511,7 +570,7 @@ func (u *UI) login(remote string, ip net.IP) (string, error) {
 	return login, err
 }
 
-//go:embed ui/ui.css ui/ui.js
+//go:embed ui/ui.css ui/ui.js ui/xterm.js ui/xterm.css ui/addon-fit.js
 var uiAssets embed.FS
 
 func (u *UI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -542,16 +601,16 @@ func (u *UI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	get := r.Method == http.MethodGet || r.Method == http.MethodHead
 	posts := map[string]func(http.ResponseWriter, *http.Request){
 		"/seen": u.serveSeen, "/answer": u.serveAnswer, "/deadline": u.serveDeadline, "/reply": u.serveReply, "/respond": u.serveRespond,
-		"/coord": u.serveCoord,
+		"/coord": u.serveCoord, "/priority": u.serveIssuePriority, "/refresh": u.serveRefresh,
 	}
 	switch {
-	case path == "/ui.css" || path == "/ui.js":
+	case path == "/ui.css" || path == "/ui.js" || path == "/xterm.js" || path == "/xterm.css" || path == "/addon-fit.js":
 		if !get {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		b, _ := uiAssets.ReadFile("ui" + path)
-		if path == "/ui.css" {
+		if strings.HasSuffix(path, ".css") {
 			h.Set("Content-Type", "text/css; charset=utf-8")
 		} else {
 			h.Set("Content-Type", "text/javascript; charset=utf-8")
@@ -575,7 +634,11 @@ func (u *UI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		u.serveAttachment(w, r)
-	case path == "/" || strings.HasPrefix(path, "/console/") || strings.HasPrefix(path, "/session/") || strings.HasPrefix(path, "/repo/"):
+	case strings.HasPrefix(path, "/r/"):
+		u.serveWorkspace(w, r)
+	case strings.HasPrefix(path, "/all/"):
+		u.serveAllConsole(w, r)
+	case path == "/" || path == "/status" || strings.HasPrefix(path, "/console/") || strings.HasPrefix(path, "/session/") || strings.HasPrefix(path, "/repo/"):
 		if !get {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -594,6 +657,10 @@ func (u *UI) serveView(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch path := r.URL.Path; {
 	case path == "/":
+		w.Header().Set("Content-Security-Policy", workspaceCSP)
+		name = "home"
+		view = u.homeView(now)
+	case path == "/status":
 		name = "index"
 		view, err = u.indexView(now)
 	case strings.HasPrefix(path, "/repo/"):
@@ -675,6 +742,11 @@ func (u *UI) serveView(w http.ResponseWriter, r *http.Request) {
 		}
 		view = v
 	}
+	u.render(w, name, view, err)
+}
+
+// render writes page name from view, or says err.
+func (u *UI) render(w http.ResponseWriter, name string, view any, err error) {
 	if err != nil {
 		http.Error(w, "the UI's data could not be read; see agentd's output", http.StatusInternalServerError)
 		fmt.Fprintf(os.Stderr, "agentd ui: %v\n", err)
@@ -1184,9 +1256,27 @@ func uiCmd(args []string) error {
 	if _, err := ui.indexView(time.Now()); err != nil {
 		return err
 	}
+	for _, src := range sources {
+		if err := src.loadIssues(issueFile(src.cfg.EventLog)); err != nil {
+			return err
+		}
+	}
+	ui.cloneRoots = []string{expandPath(cfg.Node.ReposRoot, "")}
+	for _, r := range cfg.Node.MoreRoots {
+		ui.cloneRoots = append(ui.cloneRoots, expandPath(r, ""))
+	}
+	ui.cloneFile = cloneFile(cfg.EventLog)
+	ui.cloneGit = execCloneGit{Timeout: cfg.Timeouts.Forge.Duration}
+	ui.cloneAPI = ExecForgeAPI{Timeout: cfg.Timeouts.Forge.Duration}
+	ui.issueAPI = ui.cloneAPI
+	ui.clones = loadClones(ui.cloneFile)
+	ui.loadCatalog()
+	go ui.rescan()
 	srv := &http.Server{Addr: cfg.UI.Address, Handler: ui, ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, MaxHeaderBytes: 1 << 16}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	go ui.pollIssues(ctx, ExecForgeAPI{Timeout: cfg.Timeouts.Forge.Duration}, cfg.Poll.Every.Duration)
+	go ui.resetLoop(ctx)
 	defer stop()
 	go func() {
 		<-ctx.Done()

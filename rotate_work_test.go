@@ -154,7 +154,7 @@ func TestWorkSessionNotRotatedUnderThresholdOrBusy(t *testing.T) {
 	// A new instruction is taken, its turn running over the threshold.
 	h.status(name, workLeft)
 	h.alive(name, runningScreen)
-	h.workTranscript(name, id, promptLine("u3", "Also fix the flake.", h.clock.Now())+usageLine("m2", 10, 150000, 0, 5, false))
+	h.workTranscript(name, id, promptLine("u3", "Also fix the flake.", h.clock.Now())+usageLine("m2", 10, 140000, 0, 5, false))
 	h.ticks(4, time.Minute)
 	if n := len(h.rotations(name)); n != 0 {
 		t.Fatalf("rotated mid-turn: %d", n)
@@ -209,7 +209,7 @@ func TestWorkRotationWaitsForMovingScreen(t *testing.T) {
 	h.status(name, doneStatus)
 	h.alive(name, idleScreen)
 	at := h.clock.Now()
-	h.workTranscript(name, id, promptLine("u1", "Fix the spin test.", at)+summaryLine("u2", "m1", "Fixed; DONE.", at, 150000))
+	h.workTranscript(name, id, promptLine("u1", "Fix the spin test.", at)+summaryLine("u2", "m1", "Fixed; DONE.", at, 140000))
 	h.delivered(name)
 	// A pass reads the pane once to observe it; the line lands before the
 	// pass reads it again to act.

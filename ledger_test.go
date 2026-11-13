@@ -133,11 +133,6 @@ func TestAccountReportSessionRestartedOnAnotherAccount(t *testing.T) {
 	if b.Burn.Tokens != 290 || b.Burn.TokensPerHour != 48 {
 		t.Fatalf("b burn %+v", b.Burn)
 	}
-	// Restarted on b, a fallback of widgets: the ledger says so, naming
-	// the latest session started on it.
-	if b.Fallback == nil || b.Fallback.Session != "r1" || a.Fallback != nil {
-		t.Fatalf("fallback a %+v, b %+v", a.Fallback, b.Fallback)
-	}
 }
 
 // The top five sessions are named, the rest summed; a day starts at
@@ -210,26 +205,6 @@ func TestAccountReportMissingReading(t *testing.T) {
 	// An account never read has no numbers at all, and no line.
 	if b := reportOf(t, AccountReports(cfg, st, pageAt, time.UTC), "b"); b.Weekly != nil || b.ReadAt != nil || len(b.Week) != 0 || b.Projected != nil {
 		t.Fatalf("b %+v", b)
-	}
-}
-
-// A session placed on a fallback account is told to its repository's
-// console once, naming the session, however many passes follow.
-func TestFallbackUseNoticed(t *testing.T) {
-	h, f := usageHarness(t)
-	f.set(tokenA, 95, 40)
-	h.ticks(1, time.Minute)
-	name := h.startSession("fix/spin", KindWork, 7)
-	h.ticks(30, time.Minute)
-	var notices []MessagePayload
-	for _, e := range h.events() {
-		if e.Kind == KindMessage && e.Message.Account != "" {
-			notices = append(notices, *e.Message)
-		}
-	}
-	if len(notices) != 1 || notices[0].Account != "b" || notices[0].Console != "widgets" || notices[0].Kind != "info" ||
-		!strings.Contains(notices[0].Text, name) || !strings.Contains(notices[0].Text, "fallback account b") {
-		t.Fatalf("notices %+v", notices)
 	}
 }
 
