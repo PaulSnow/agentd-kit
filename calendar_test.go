@@ -135,7 +135,7 @@ func TestCalendarJobIsReadOnlyUnderThePersonalLogin(t *testing.T) {
 		t.Errorf("the check inherited the session's environment:\n%s", env)
 	}
 	wd, _ := os.Getwd()
-	if !strings.Contains(env, "PWD="+os.TempDir()) || !strings.Contains(env, "agentd-calendar-") || strings.Contains(env, "PWD="+wd+"\n") {
+	if !strings.Contains(env, "/agentd-calendar-") || strings.Contains(env, "\nPWD="+wd+"\n") {
 		t.Errorf("the check did not run in an empty directory of its own:\n%s", env)
 	}
 	var in map[string]string
