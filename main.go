@@ -4,7 +4,8 @@
 //
 //	agentd run [--config PATH] [--log PATH] [--shadow] [--once] [--every 5m]
 //	agentd status [--config PATH] [--log PATH] [--mode live|shadow]
-//	agentd config [--config PATH]
+//	agentd config [--config PATH] [--log PATH] [reload]
+//	agentd sessions [--config PATH] [--log PATH] end NAME | model NAME MODEL [--now] | model NAME --clear
 //	agentd mark-delivered [--config PATH] [--log PATH] SESSION WORKTREE REF
 //	agentd clear [--config PATH] [--log PATH] SESSION
 //	agentd inventory [--config PATH]
@@ -163,10 +164,11 @@ func usage() {
 const usageLines = `usage:
   agentd run [--config PATH] [--log PATH] [--shadow] [--once] [--every 5m]
   agentd status [--config PATH] [--log PATH] [--mode live|shadow]
-  agentd config [--config PATH]
+  agentd config [--config PATH] [--log PATH] [reload]
   agentd mark-delivered [--config PATH] [--log PATH] SESSION WORKTREE REF
   agentd clear [--config PATH] [--log PATH] SESSION
   agentd sessions [--config PATH] [--log PATH] end NAME
+  agentd sessions [--config PATH] [--log PATH] model NAME MODEL [--now] | model NAME --clear
   agentd loop [--config PATH] [--log PATH] retry|skip|stop REPOSITORY REQUEST
   agentd releases [--config PATH] [--log PATH] [open|retry REPOSITORY TAG]
   agentd policy [--config PATH] [--log PATH] show REPO
@@ -210,7 +212,16 @@ as in "try --log next".
 
 run supervises the configured sessions; --shadow observes and logs what it
 would do without acting. status prints the state table from the event log.
-config prints the resolved configuration. mark-delivered records that a
+config prints the resolved configuration; config reload checks the file
+as agentd run loads it and, if it loads, asks the running agentd to
+reload it at its next pass, as SIGHUP to agentd run does. A file that does
+not load is refused and the running config stays; event_log, ops, ui, hub
+and node apply only at a restart. status shows when the file differs from
+the config agentd runs. sessions model gives one session its own model,
+ahead of the policies' and within its repository's sessions.models;
+agentd relaunches it on that model at its next checkpoint, or at the next
+pass with --now, never while it waits on the owner. --clear takes it off.
+mark-delivered records that a
 worktree was already delivered as REF by other means, so run never delivers
 it again. clear lifts a crash-looping session's park, so it may be
 restarted again. sessions end stops a session agentd started and takes it
@@ -292,13 +303,19 @@ func runCmd(args []string) error {
 	shadow := fs.Bool("shadow", false, "observe and log, act on nothing")
 	once := fs.Bool("once", false, "one pass, then exit")
 	every := fs.Duration("every", 0, "poll interval (default: poll_interval in the configuration)")
-	cfg, _, err := loadConfigFlag(fs, args)
+	cfg, logPath, err := loadConfigFlag(fs, args)
 	if err != nil {
 		return err
 	}
-	if *every > 0 {
-		cfg.PollInterval = Duration{*every}
+	override := func(c *Config) {
+		if *every > 0 {
+			c.PollInterval = Duration{*every}
+		}
+		if *logPath != "" {
+			c.EventLog = expandPath(*logPath, "")
+		}
 	}
+	override(cfg)
 	lock, err := lockInstance(realPath(cfg.EventLog) + ".lock")
 	if err != nil {
 		return err
@@ -319,9 +336,11 @@ func runCmd(args []string) error {
 	if cfg.Ops.on() {
 		sup.ops = newOpsEnv(cfg)
 	}
+	sup.override = override
 	sup.Replay(events)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	defer reloadOnHangup(ctx, sup)()
 	mode := "live"
 	if *shadow {
 		mode = "shadow"
@@ -417,6 +436,23 @@ func configCmd(args []string) error {
 	if err != nil {
 		return err
 	}
+	switch rest := fs.Args(); {
+	case len(rest) == 1 && rest[0] == "reload":
+		// loadConfigFlag loaded it as a reload would: it loads.
+		log, err := OpenLog(cfg.EventLog)
+		if err != nil {
+			return err
+		}
+		defer log.Close()
+		next, err := RequestReload(cfg.Path, log, time.Now())
+		if err != nil {
+			return err
+		}
+		fmt.Printf("asked agentd to reload %s (sha256 %s) at its next pass; agentd status shows when it has\n", next.Path, shortHash(next.Hash))
+		return nil
+	case len(rest) > 0:
+		return fmt.Errorf("usage: agentd config [reload]")
+	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(cfg)
@@ -449,14 +485,51 @@ func sessionsCmd(args []string) error {
 		return err
 	}
 	rest := fs.Args()
-	if len(rest) != 2 || rest[0] != "end" {
-		return fmt.Errorf("usage: agentd sessions end NAME")
+	const use = "usage: agentd sessions end NAME | agentd sessions model NAME MODEL [--now] | agentd sessions model NAME --clear"
+	var model string
+	var now bool
+	switch {
+	case len(rest) == 2 && rest[0] == "end":
+	case len(rest) >= 3 && rest[0] == "model":
+		// The model's own flags come after its words.
+		mf := flag.NewFlagSet("sessions model", flag.ContinueOnError)
+		nowFlag := mf.Bool("now", false, "relaunch at the next pass, not at the next checkpoint")
+		clear := mf.Bool("clear", false, "take the session's own model off; the policies' runs again")
+		words := []string{rest[1]}
+		if err := mf.Parse(rest[2:]); err != nil {
+			return err
+		}
+		words = append(words, mf.Args()...)
+		switch {
+		case *clear && len(words) == 1 && !*nowFlag:
+		case !*clear && len(words) == 2 && words[1] != "":
+			model = words[1]
+		default:
+			return fmt.Errorf(use)
+		}
+		rest, now = words, *nowFlag
+	default:
+		return fmt.Errorf(use)
 	}
 	log, events, err := openLoaded(cfg.EventLog)
 	if err != nil {
 		return err
 	}
 	defer log.Close()
+	if model != "" || len(rest) == 1 {
+		if err := SetSessionModel(cfg, log, events, time.Now(), rest[0], model, now); err != nil {
+			return err
+		}
+		switch {
+		case model == "":
+			fmt.Printf("%s: its own model taken off; it relaunches on the policies' model at its next checkpoint, if that differs\n", rest[0])
+		case now:
+			fmt.Printf("%s: model %s; agentd relaunches it at its next pass\n", rest[0], model)
+		default:
+			fmt.Printf("%s: model %s; agentd relaunches it at its next checkpoint\n", rest[0], model)
+		}
+		return nil
+	}
 	return EndSession(cfg, log, events, time.Now(), rest[1])
 }
 

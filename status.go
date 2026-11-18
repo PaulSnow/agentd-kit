@@ -32,7 +32,52 @@ type SessionStatus struct {
 	Rotations   int
 	Stopped     string // why the budget stopped it
 	LastCut     string `json:",omitempty"` // its latest context or brief cut, as the console said it (#87)
-	Model       string // the model its launches run, "default" the command's own; "" a session not configured
+	Model       string // the model its latest launch ran, else the one it would launch on, "default" the command's own; "" a session not configured
+	// Wanted is the model it would launch on now, when that is not the
+	// one it runs: a relaunch is pending (#100).
+	Wanted string `json:",omitempty"`
+}
+
+// modelView is the model a configured session runs, as the views show
+// it, and the one it would launch on now when that differs (#100): its
+// latest launch's, else, before a launch recorded one, the one it would
+// launch on, or "unknown" while a model the owner set for it waits for
+// its relaunch. "" for a session not configured.
+func modelView(cfg *Config, st *LogState, name string, t *Track) (string, string) {
+	sess, ok := cfg.Sessions[name]
+	if !ok {
+		return "", ""
+	}
+	want := sessionModel(cfg, st, name, sess)
+	switch _, set := st.Models[name]; {
+	case t != nil && t.ModelKnown && t.Model != want:
+		return modelLabel(t.Model), modelLabel(want)
+	case t != nil && t.ModelKnown:
+		return modelLabel(t.Model), ""
+	case t != nil && set && t.Live:
+		return "unknown", modelLabel(want)
+	}
+	return modelLabel(want), ""
+}
+
+// modelLabel is a model as the views show it: "default" for the
+// command's own.
+func modelLabel(m string) string {
+	if m == "" {
+		return "default"
+	}
+	return m
+}
+
+// ModelText is the row's model as status prints it.
+func (r SessionStatus) ModelText() string {
+	if r.Model == "" {
+		return "-"
+	}
+	if r.Wanted != "" {
+		return r.Model + " (wanted " + r.Wanted + ", relaunch pending)"
+	}
+	return r.Model
 }
 
 // Summarize folds the event log for mode through the one reader into one
@@ -64,6 +109,9 @@ func summarizeState(cfg *Config, st *LogState, now time.Time) ([]SessionStatus, 
 	}
 	if !st.Stopped.IsZero() {
 		meta["stopped"] = st.Stopped
+	}
+	if v := configView(cfg, st); v != nil {
+		meta["config"] = *v
 	}
 	// A source no longer polled is left out.
 	polls := map[string]PollRecord{}
@@ -119,13 +167,7 @@ func summarizeState(cfg *Config, st *LogState, now time.Time) ([]SessionStatus, 
 		if sp, ok := t.spend(mode == ModeLive); ok {
 			r.Spend = sp
 		}
-		sess, ok := cfg.Sessions[name]
-		if ok {
-			r.Model = sessionModel(cfg, st, sess)
-			if r.Model == "" {
-				r.Model = "default"
-			}
-		}
+		r.Model, r.Wanted = modelView(cfg, st, name, t)
 		for _, d := range cfg.Sessions[name].Deliver {
 			if why := t.Blocked[d.Worktree]; why != "" && t.Delivered[name+":"+d.Worktree] == "" {
 				r.Blocked = append(r.Blocked, why)
@@ -159,6 +201,11 @@ func PrintStatus(w io.Writer, rows []SessionStatus, meta map[string]any, now tim
 			line += ", stopped " + st.Local().Format("2006-01-02 15:04")
 		}
 		fmt.Fprintf(w, "%s; %d events\n", line, meta["events"])
+	}
+	if v, ok := meta["config"].(ConfigView); ok {
+		if line, ok := v.Notice(); ok {
+			fmt.Fprintln(w, line)
+		}
 	}
 	// A request's CI as the watcher last saw it; once agentd has stopped,
 	// no one is watching, so it is unknown.
@@ -244,10 +291,7 @@ func PrintStatus(w io.Writer, rows []SessionStatus, meta map[string]any, now tim
 		if r.Guessed {
 			why += "; tokens from the newest transcript in its directory, a guess"
 		}
-		model := r.Model
-		if model == "" {
-			model = "-"
-		}
+		model := r.ModelText()
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%s\t%s\t%s\n",
 			r.Name, r.State, ago(now, r.Since), ago(now, r.LastSeen), tokens(r.Context), tokens(r.Spend), r.Restarts, r.Rotations,
 			r.Nudges, r.Escalations, delivered, model, why)

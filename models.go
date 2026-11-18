@@ -22,14 +22,22 @@ func allowedModel(p RepoPolicy, m string) string {
 	return p.Sessions.Models[0]
 }
 
-// sessionModel is the model a session runs (#52): its repository's
+// sessionModel is the model a session runs (#52): the owner's for it by
+// name (agentd sessions model, #100), else its repository's
 // policy's for its kind, or else policies.models'. A reviewer or a judge,
 // started or configured, runs the reviewer or judge model; any other
 // session is a work session. "" is the restart command's own default.
-func sessionModel(cfg *Config, st *LogState, sess Session) string {
+func sessionModel(cfg *Config, st *LogState, name string, sess Session) string {
 	var p RepoPolicy
 	if sess.Repository != "" {
 		p, _ = effectivePolicy(cfg, st, sess.Repository)
+	}
+	// The owner's model for this one session comes first (#100), still
+	// narrowed by the repository's sessions.models.
+	if st != nil {
+		if o, ok := st.Models[name]; ok {
+			return allowedModel(p, o.Model)
+		}
 	}
 	g := cfg.Policies.Models
 	switch sess.Role {

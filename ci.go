@@ -1054,7 +1054,7 @@ func (s *Supervisor) startCIFix(name string, sess Session, t *Track, ev Evidence
 		return false
 	}
 	key := "ci-fix:" + name + ":" + r.Ref + ":" + r.Head + ":" + r.Cause
-	err = s.act(name, ActCIFix, &ActPayload{Key: key, Attempt: attempt, Cwd: sess.Cwd, Respawn: ev.PaneDead, Account: sess.Account, Command: line, Transcript: id,
+	err = s.act(name, ActCIFix, &ActPayload{Key: key, Attempt: attempt, Cwd: sess.Cwd, Respawn: ev.PaneDead, Account: sess.Account, Command: line, Model: launchModel(sessionModel(s.cfg, s.st, name, sess)), Transcript: id,
 		Repository: r.Repository, Ref: r.Ref, URL: r.URL, Head: r.Head, Delivered: r.Delivered, Cause: r.Cause, Decision: retry}, func() error {
 		switch {
 		case ev.Alive:

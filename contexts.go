@@ -500,20 +500,27 @@ func (s *Supervisor) measure(name string, sess Session, t *Track, toolsSince tim
 // so and its facts say why "cap". Only a Working or Idle one is cut
 // (capEligible): a finished, waiting, stopped or parked session has
 // nothing to resume.
+// A live session whose model changed (#100), by the owner's agentd
+// sessions model or by a reload, is relaunched on it the same way, at its
+// next checkpoint, with or without the context policy, and its facts say
+// why "model"; with the owner's --now, at the next pass. Neither while the
+// owner waits on it.
 func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, state State, now time.Time) bool {
 	pol := s.cfg.Policies.Context
-	if !pol.Enabled || !ev.Alive {
+	model, modelDue, modelNow := s.modelChange(name, sess, t)
+	if !pol.Enabled && !modelDue || !ev.Alive {
 		return false
 	}
-	if t.Transcript != "" && t.guessed() {
+	if pol.Enabled && t.Transcript != "" && t.guessed() {
 		// The launch's transcript never appeared: the restart command
 		// does not pass {session_id} on, and live mode acts on no guess.
 		key := "transcript:" + name + ":" + t.Transcript
 		s.skipOnce(name, key, "launched transcript "+t.Transcript+" never appeared; not rotating or counting a guess", t, nil)
 		s.escalate(name, key, fmt.Sprintf("%s: the transcript agentd launched it under never appeared, so its context and spend are guesses and it is not rotated or held to its budget. Make the restart command pass --session-id {session_id}.", name), t, now)
 	}
-	u, ok := t.current()
-	if !ok || u.Context <= pol.Threshold || u.Guessed && !s.shadow {
+	u, measured := t.current()
+	over := pol.Enabled && measured && u.Context > pol.Threshold && !(u.Guessed && !s.shadow)
+	if !over && !modelDue {
 		return false
 	}
 	// Nothing acts while the owner waits on its answer (#56, #87).
@@ -522,8 +529,11 @@ func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, st
 	}
 	mark, ok := s.rotationPoint(sess, t, ev, now)
 	capped := false
-	if !ok && capEligible(sess, t, ev, state) && s.overCap(sess, t) {
+	if !ok && over && capEligible(sess, t, ev, state) && s.overCap(sess, t) {
 		mark, ok, capped = capMark(t), true, true
+	}
+	if !ok && modelNow {
+		mark, ok = modelMark(model, s.st.Models[name]), true
 	}
 	if !ok {
 		return false
@@ -552,9 +562,12 @@ func (s *Supervisor) rotate(name string, sess Session, t *Track, ev Evidence, st
 		s.skipOnce(name, "account:"+name, "not rotating: "+err.Error(), t, &SkipPayload{Account: sess.Account})
 		return false
 	}
-	a := &ActPayload{Key: key, Cwd: sess.Cwd, Account: sess.Account, Command: line, Transcript: id, Context: u.Context, Checkpoint: mark, Brief: brief.parts(), BriefCut: brief.briefCut()}
-	if capped {
+	a := &ActPayload{Key: key, Cwd: sess.Cwd, Account: sess.Account, Command: line, Model: launchModel(sessionModel(s.cfg, s.st, name, sess)), Transcript: id, Context: u.Context, Checkpoint: mark, Brief: brief.parts(), BriefCut: brief.briefCut()}
+	switch {
+	case capped:
 		a.Reason, a.HardCap = fmt.Sprintf("context %d over hard cap %d", u.Context, pol.HardCap), pol.HardCap
+	case modelDue:
+		a.Reason = "model"
 	}
 	replace := func() error {
 		if err := brief.write(sess.Workdir); err != nil {
@@ -1000,7 +1013,7 @@ func (s *Supervisor) launchCommandWith(name string, sess Session, t *Track, id, 
 	s.noteTrust(name, sess, t)
 	r := strings.NewReplacer("{brief}", sess.Workdir+"/BRIEF.md", "{status}", sess.Workdir+"/STATUS.md",
 		"{session_id}", id, "{prompt}", s.promptWith(name, facts, why), "{mcp}", mcpLaunchConfig(s.cfg, name, sess))
-	cmd := withModel(s.cfg.Policies.Restart.Command, sessionModel(s.cfg, s.st, sess))
+	cmd := withModel(s.cfg.Policies.Restart.Command, sessionModel(s.cfg, s.st, name, sess))
 	for i, part := range cmd {
 		cmd[i] = r.Replace(part)
 	}
