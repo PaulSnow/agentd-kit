@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -33,6 +34,7 @@ type workState struct {
 	jobs     sync.WaitGroup
 	err      error                // the first event a worker could not append
 	wake     chan struct{}        // signalled when the owner wrote to the log
+	hup      atomic.Bool          // SIGHUP asked for a config reload (#100)
 	nextPoll map[string]time.Time // when each forge source is next due
 	// nextUsage is when each account's usage is next read, set once this
 	// run has read it; usageSince is when this run began reading.

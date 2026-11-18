@@ -336,6 +336,10 @@ type uiRow struct {
 	Spend      int64
 	HasSpend   bool
 	LastTurn   time.Time
+	// Model is the model the session runs and Wanted the one it is to be
+	// relaunched on, when that differs (#100).
+	Model  string
+	Wanted string
 }
 
 // uiRequest is one open request of a repository: delivered by a session,
@@ -454,8 +458,29 @@ type uiIndex struct {
 	// PollAlerts are the forge polls failing for more than two intervals
 	// (#75), shown on the home level.
 	PollAlerts []uiPollAlert
-	Repos      []*uiRepo
-	Consoles   []*uiOtherConsole // listed after the repositories, by name
+	// ConfigAlerts are the runs whose config file differs from the
+	// config they run, or whose reload was refused (#100).
+	ConfigAlerts []uiConfigAlert
+	Repos        []*uiRepo
+	Consoles     []*uiOtherConsole // listed after the repositories, by name
+}
+
+// uiConfigAlert is a run's config line, when the file differs from what
+// it runs or a reload left something to a restart.
+type uiConfigAlert struct {
+	Src  string
+	Line string
+}
+
+// configAlert is src's config alert, if its run is running and its config
+// line says something the owner may act on (#100).
+func (src *uiSource) configAlert() (uiConfigAlert, bool) {
+	v := configView(nil, src.st)
+	if v == nil || !src.st.Stopped.IsZero() {
+		return uiConfigAlert{}, false
+	}
+	line, ok := v.Notice()
+	return uiConfigAlert{Src: src.Name, Line: line}, ok
 }
 
 // uiPollAlert is a forge poll that has failed for more than two poll
@@ -525,6 +550,7 @@ func (src *uiSource) row(c ReportCase) uiRow {
 	if n := len(t.Turns); n > 0 {
 		r.LastTurn = t.Turns[n-1].At
 	}
+	r.Model, r.Wanted = modelView(withRuntime(src.cfg, src.st.Runtime), src.st, c.Session, t)
 	return r
 }
 
@@ -654,6 +680,9 @@ func (src *uiSource) addIndex(v *uiIndex, get func(string) *uiRepo, now time.Tim
 	}
 	src.addAccountNeeds(v, cfg, now)
 	v.PollAlerts = append(v.PollAlerts, src.pollAlerts(cfg, now)...)
+	if a, ok := src.configAlert(); ok {
+		v.ConfigAlerts = append(v.ConfigAlerts, a)
+	}
 	for _, rr := range rep.Repositories {
 		r := get(uiRepoName(rr))
 		if _, ok := cfg.Repositories[rr.Name]; ok {

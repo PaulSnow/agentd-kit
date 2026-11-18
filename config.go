@@ -19,6 +19,7 @@ import (
 // beside this file shows the shape.
 type Config struct {
 	Path          string   `json:"-"` // the file it was loaded from, when it was
+	Hash          string   `json:"-"` // the sha256 of the bytes it was loaded from (#100)
 	EventLog      string   `json:"event_log"`
 	PollInterval  Duration `json:"poll_interval"`
 	TranscriptDir string   `json:"transcript_dir"`
@@ -466,7 +467,7 @@ func LoadConfig(path string) (*Config, error) {
 	if err := cfg.finish(filepath.Dir(path)); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	cfg.Path = path
+	cfg.Path, cfg.Hash = path, fileHash(b)
 	return &cfg, nil
 }
 

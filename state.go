@@ -151,6 +151,11 @@ type Track struct {
 	// Unretestable: each retest the forge answered with an empty pipeline,
 	// by its key; it is not asked again (#46).
 	Unretestable map[string]bool
+	// Model is the model the session's latest launch ran, "" for the
+	// command's default, and ModelKnown whether a launch recorded it
+	// (#100): a launch logged before then did not.
+	Model      string
+	ModelKnown bool
 }
 
 // DeliveryRecord is one request a delivery opened, found, or was told of.

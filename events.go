@@ -80,6 +80,8 @@ type Event struct {
 	Work        *WorkPayload        `json:"work,omitempty"`
 	Index       *IndexPayload       `json:"index,omitempty"`
 	Sentence    *SentencePayload    `json:"sentence,omitempty"`
+	Config      *ConfigPayload      `json:"config,omitempty"`
+	Model       *ModelPayload       `json:"model,omitempty"`
 }
 
 // Event kinds.
@@ -124,6 +126,8 @@ const (
 	KindRoute       = "route"       // where agentd sends an owner instruction, or why it waits or failed
 	KindStatus      = "status"      // a status check of an active session: the model's record, or the failure that leaves a gap
 	KindAttachment  = "attachment"  // a file the owner attached to a console message (#61)
+	KindConfig      = "config"      // the owner's reload request, or a run's config drift, reload or refusal (#100)
+	KindModel       = "model"       // the owner's model for one session, or its clearing (#100)
 )
 
 // Modes, in the mode every event carries. A run reads only the events of
@@ -167,6 +171,47 @@ const (
 // StartPayload is a run's start: the sessions it supervises.
 type StartPayload struct {
 	Sessions []string `json:"sessions"`
+	// ConfigPath and ConfigHash are the config the run loaded: its file
+	// and the sha256 of the bytes read (#100).
+	ConfigPath string `json:"config_path,omitempty"`
+	ConfigHash string `json:"config_hash,omitempty"`
+}
+
+// Config steps (#100).
+const (
+	ConfigRequest = "request" // the owner asked the run to reload (agentd config reload)
+	ConfigDrift   = "drift"   // the file on disk differs from the running config, or no longer does
+	ConfigApplied = "applied" // the run reloaded the file
+	ConfigRefused = "refused" // a reload the file's error refused: the running config stays
+)
+
+// ConfigPayload is a step of the config a run holds (#100): the owner's
+// request to reload, the run's sighting of the file on disk (Hash) apart
+// from the config it runs (Previous), with the file's load error if it has
+// one, a reload applied, or one refused. RestartOnly are the fields a
+// reload changed that only a restart applies; they keep their running
+// values. Removed are the configured sessions the file no longer has,
+// which a reload reports and does not end.
+type ConfigPayload struct {
+	Step        string   `json:"step"`
+	Path        string   `json:"path,omitempty"`
+	Hash        string   `json:"hash,omitempty"`
+	Previous    string   `json:"previous,omitempty"`
+	Applied     bool     `json:"applied,omitempty"`
+	Error       string   `json:"error,omitempty"`
+	RestartOnly []string `json:"restart_only,omitempty"`
+	Removed     []string `json:"removed,omitempty"`
+	// Signal says a request came from SIGHUP, not agentd config reload.
+	Signal bool `json:"signal,omitempty"`
+}
+
+// ModelPayload is the owner's model for one session (agentd sessions
+// model, #100): Model runs ahead of the policies' until a clear (Model
+// ""); Now relaunches it at the next pass rather than at its next
+// checkpoint.
+type ModelPayload struct {
+	Model string `json:"model,omitempty"`
+	Now   bool   `json:"now,omitempty"`
 }
 
 // StopPayload is why a run stopped.
@@ -223,6 +268,9 @@ type ActPayload struct {
 	Respawn bool   `json:"respawn,omitempty"`
 	Account string `json:"account,omitempty"`
 	Command string `json:"command,omitempty"`
+	// A launch: the model its command runs, "" for the command's own
+	// default; absent from a launch logged before #100.
+	Model *string `json:"model,omitempty"`
 	// A restart or rotation: the Claude Code session id it launched, and
 	// for a rotation the context it left and the merge it rotated at.
 	Transcript string `json:"transcript,omitempty"`
@@ -395,7 +443,7 @@ func (e Event) check() error {
 		KindSkip: e.Skip != nil, KindCrash: e.Crash != nil, KindClear: e.Clear != nil, KindError: e.Error != nil, KindWarning: e.Warning != nil,
 		KindItem: e.Item != nil, KindSeen: e.Seen != nil, KindCursor: e.Cursor != nil, KindUsage: e.Usage != nil,
 		KindCheckpoint: e.Checkpoint != nil, KindPoll: e.Poll != nil, KindTriage: e.Triage != nil, KindDecision: e.Decision != nil,
-		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, KindApproval: e.Approval != nil, KindAccount: e.Account != nil, KindMessage: e.Message != nil, KindInbox: e.Inbox != nil, KindJob: e.Job != nil, KindStep: e.Step != nil, KindLoop: e.Loop != nil, KindNode: e.Node != nil, KindLaptop: e.Laptop != nil, KindRoute: e.Route != nil, KindStatus: e.Status != nil, KindCard: e.Card != nil, KindThread: e.Thread != nil, KindQuery: e.Query != nil, KindAttachment: e.Attachment != nil, KindFact: e.Fact != nil, KindOps: e.Ops != nil, KindRelease: e.Release != nil, KindFleet: e.Fleet != nil, KindWorkItem: e.Work != nil, KindIndex: e.Index != nil, KindSentence: e.Sentence != nil, "act": e.Act != nil,
+		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, KindApproval: e.Approval != nil, KindAccount: e.Account != nil, KindMessage: e.Message != nil, KindInbox: e.Inbox != nil, KindJob: e.Job != nil, KindStep: e.Step != nil, KindLoop: e.Loop != nil, KindNode: e.Node != nil, KindLaptop: e.Laptop != nil, KindRoute: e.Route != nil, KindStatus: e.Status != nil, KindCard: e.Card != nil, KindThread: e.Thread != nil, KindQuery: e.Query != nil, KindAttachment: e.Attachment != nil, KindFact: e.Fact != nil, KindOps: e.Ops != nil, KindRelease: e.Release != nil, KindFleet: e.Fleet != nil, KindWorkItem: e.Work != nil, KindIndex: e.Index != nil, KindSentence: e.Sentence != nil, KindConfig: e.Config != nil, KindModel: e.Model != nil, "act": e.Act != nil,
 	}
 	want := e.Kind
 	switch e.Kind {
@@ -453,6 +501,11 @@ func (e Event) check() error {
 		return e.Index.check()
 	case e.Kind == KindSentence && e.Sentence.check() != nil:
 		return e.Sentence.check()
+	case e.Kind == KindConfig && (e.Session != "" || (e.Config.Step == ConfigRequest) != (e.Mode == ModeOwner) || e.Mode != ModeOwner && e.Mode != ModeLive && e.Mode != ModeShadow ||
+		e.Config.Step != ConfigRequest && e.Config.Step != ConfigDrift && e.Config.Step != ConfigApplied && e.Config.Step != ConfigRefused):
+		return errors.New("a config event is the owner's reload request, or a run's drift, reload or refusal, for no one session")
+	case e.Kind == KindModel && (e.Session == "" || e.Mode != ModeOwner):
+		return errors.New("a model event is the owner's, for one session")
 	case e.Kind == KindQuery && (e.Mode != ModeShared || e.Query.Repository == "" || e.Query.Tool == ""):
 		return errors.New("a query event is a shared fact and names its repository and tool")
 	case e.Kind == KindAccount && (e.Session != "" || e.Mode != ModeShared || e.Account.Account == ""):

@@ -1337,7 +1337,7 @@ func (s *Supervisor) fixRound(name string, sess Session, t *Track, ev Evidence, 
 		}
 		status := filepath.Join(sess.Workdir, "STATUS.md")
 		err = s.act(name, ActFixRound, &ActPayload{Key: fmt.Sprintf("fix-round:%s:%s:%d", name, q.Ref, p.Round), Cwd: sess.Cwd, Respawn: ev.PaneDead, Account: sess.Account,
-			Command: line, Transcript: id, Repository: q.Repository, Ref: q.Ref, Head: p.Head, Delivered: q.Delivered}, func() error {
+			Command: line, Model: launchModel(sessionModel(s.cfg, s.st, name, with)), Transcript: id, Repository: q.Repository, Ref: q.Ref, Head: p.Head, Delivered: q.Delivered}, func() error {
 			if b, err := os.ReadFile(status); err == nil && ParseStatus(string(b)).Done {
 				if err := writeAtomic(status, []byte(undone(string(b)))); err != nil {
 					return err

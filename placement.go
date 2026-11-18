@@ -129,7 +129,7 @@ func (p *placements) commands(cfg *Config, rec *NodeRecord, now time.Time) []Nod
 		}
 		out = append(out, NodeCommand{ID: startID(name, r), Action: NodeSessionStart, Session: name, Start: r.ID,
 			Repository: r.Repository, Path: layoutPath(repo), Kind: r.Kind, Branch: r.Branch, Target: repo.Sessions.Target, Issue: r.Issue,
-			Account: r.Account, Model: sessionModel(cfg, p.st, runtimeSession(name, r, repo))})
+			Account: r.Account, Model: sessionModel(cfg, p.st, name, runtimeSession(name, r, repo))})
 	}
 	return out
 }

@@ -112,6 +112,11 @@ type LogState struct {
 	// DigestDay is the local day the owner's digest was last posted for
 	// (#88), YYYY-MM-DD, so a day's is posted once.
 	DigestDay string
+	// Config is the config the run holds and the file on disk as the run
+	// last saw it (#100); Models the owner's model for each session that
+	// has one, by name.
+	Config ConfigState
+	Models map[string]ModelOverride
 
 	cfg *Config // its policies, read as each event is applied
 }
@@ -259,6 +264,14 @@ func (st *LogState) apply(e Event) {
 		st.applyWork(e)
 		return
 	}
+	if e.Kind == KindConfig {
+		st.applyConfig(e)
+		return
+	}
+	if e.Kind == KindModel {
+		st.applyModel(e)
+		return
+	}
 	if e.Session == "" {
 		switch e.Kind {
 		case KindAccount:
@@ -275,6 +288,7 @@ func (st *LogState) apply(e Event) {
 			st.applyFeed(e)
 		case KindStart:
 			st.Started, st.Stopped, st.StopReason = e.Time, time.Time{}, ""
+			st.Config.started(e.Time, e.Start)
 		case KindStop:
 			st.Stopped, st.StopReason = e.Time, ""
 			if e.Stop != nil {
@@ -569,6 +583,7 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 			t.Hash, t.HashSince, t.Observed, t.Live = "", at, true, true
 			t.Nudges, t.LastNudge, t.Limited = 0, time.Time{}, false
 			t.launched(a.Transcript, at)
+			t.launchedModel(a)
 			t.launchedBrief(a)
 		}
 	case ActRotate:
@@ -580,6 +595,7 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 			t.Hash, t.HashSince, t.Observed = "", at, true
 			t.Nudges, t.LastNudge, t.Limited = 0, time.Time{}, false
 			t.launched(a.Transcript, at)
+			t.launchedModel(a)
 			t.launchedBrief(a)
 		}
 	case ActCIFix, ActFixRound:
@@ -596,6 +612,7 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 			t.Hash, t.HashSince, t.Observed, t.Live = "", at, true, true
 			t.Nudges, t.LastNudge, t.Limited = 0, time.Time{}, false
 			t.launched(a.Transcript, at)
+			t.launchedModel(a)
 		}
 	case ActMerge:
 		// Taken, would-be or cut short: the forge may have merged it, so

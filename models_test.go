@@ -105,11 +105,11 @@ func TestNarrowedModelsHold(t *testing.T) {
 	}}
 	sess := h.cfg.Sessions["a"]
 	sess.Role, sess.Repository = "", "widgets"
-	if m := sessionModel(h.cfg, h.sup.st, sess); m != "haiku" {
+	if m := sessionModel(h.cfg, h.sup.st, "a", sess); m != "haiku" {
 		t.Errorf("work model = %q, want haiku", m)
 	}
 	sess.Role, sess.Issue = RoleReviewer, 7
-	if m := sessionModel(h.cfg, h.sup.st, sess); m != "sonnet" {
+	if m := sessionModel(h.cfg, h.sup.st, "a", sess); m != "sonnet" {
 		t.Errorf("reviewer model = %q, want sonnet", m)
 	}
 }

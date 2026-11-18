@@ -222,18 +222,24 @@ type opsRow struct {
 	Context  int64     `json:"context,omitempty"`
 	Stopped  string    `json:"stopped,omitempty"`
 	Model    string    `json:"model,omitempty"`
+	// Wanted is the model it is to be relaunched on, when that differs
+	// from the one it runs (#100).
+	Wanted string `json:"wanted_model,omitempty"`
 }
 
 // opsStatus is one supervisor as ops_status gives it: whether its process
 // is up, its config's check, and its sessions.
 type opsStatus struct {
-	Name     string   `json:"name"`
-	Tmux     string   `json:"tmux"`
-	Up       bool     `json:"up"`
-	Pane     string   `json:"pane,omitempty"` // what its pane runs, or why it could not be asked
-	Self     bool     `json:"self,omitempty"` // the process serving the ops console
-	Config   string   `json:"config_error,omitempty"`
-	Summary  string   `json:"summary,omitempty"` // its sessions by state, in a line
+	Name    string `json:"name"`
+	Tmux    string `json:"tmux"`
+	Up      bool   `json:"up"`
+	Pane    string `json:"pane,omitempty"` // what its pane runs, or why it could not be asked
+	Self    bool   `json:"self,omitempty"` // the process serving the ops console
+	Config  string `json:"config_error,omitempty"`
+	Summary string `json:"summary,omitempty"` // its sessions by state, in a line
+	// Drift is its config line when its config file differs from the
+	// config it runs, or a reload left something to a restart (#100).
+	Drift    string   `json:"config_drift,omitempty"`
 	Sessions []opsRow `json:"sessions,omitempty"`
 }
 
@@ -262,7 +268,14 @@ func (o *opsEnv) status(names []string, rows bool) []opsStatus {
 			out = append(out, st)
 			continue
 		}
-		table, _ := SummarizeAt(projected(cfg, events), events, statusMode(events), o.now())
+		table, meta := SummarizeAt(projected(cfg, events), events, statusMode(events), o.now())
+		if v, ok := meta["config"].(ConfigView); ok {
+			line, _ := v.Notice()
+			st.Drift = oneLine(line, 400)
+			if secret(st.Drift) {
+				st.Drift = withheldMessage
+			}
+		}
 		counts := map[string]int{}
 		for _, r := range table {
 			counts[string(r.State)]++
@@ -270,7 +283,7 @@ func (o *opsEnv) status(names []string, rows bool) []opsStatus {
 				continue
 			}
 			row := opsRow{Name: r.Name, State: r.State, Since: r.Since, LastSeen: r.LastSeen, Head: r.Head, Reason: r.Reason,
-				Restarts: r.Restarts, Errors: r.Errors, Stopped: r.Stopped, Model: r.Model}
+				Restarts: r.Restarts, Errors: r.Errors, Stopped: r.Stopped, Model: r.Model, Wanted: r.Wanted}
 			if r.Context > 0 {
 				row.Context = r.Context
 			}

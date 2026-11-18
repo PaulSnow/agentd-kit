@@ -108,6 +108,9 @@ type Supervisor struct {
 	// jobsLeft is set once this run has ended the scheduled jobs' runs an
 	// earlier agentd left with no end (#51).
 	jobsLeft bool
+	// override applies run's flags, --every and --log, to a config, so
+	// a reload keeps them over the file's (#100).
+	override func(*Config)
 
 	st           *LogState
 	limitRe      *regexp.Regexp
@@ -427,7 +430,7 @@ func (s *Supervisor) surfaceCutShort() {
 // to StopWait.
 func (s *Supervisor) Run(ctx context.Context, once bool) error {
 	s.runCtx = ctx
-	s.emit("", Event{Kind: KindStart, Start: &StartPayload{Sessions: s.cfg.SessionNames()}})
+	s.emit("", Event{Kind: KindStart, Start: &StartPayload{Sessions: s.cfg.SessionNames(), ConfigPath: s.base.Path, ConfigHash: s.base.Hash}})
 	s.surfaceCutShort()
 	if !once {
 		go s.watchOwner(ctx, s.log.Size())
@@ -506,6 +509,7 @@ func (s *Supervisor) watchOwner(ctx context.Context, off int64) {
 func (s *Supervisor) Pass() error {
 	s.halt = nil
 	s.ownerRecords()
+	s.checkConfig()
 	s.endSessions(s.clock.Now())
 	// Instructions are routed before the sessions' steps, so one is
 	// delivered in the pass that read it.
@@ -571,7 +575,8 @@ func (s *Supervisor) ownerRecords() {
 			e.Kind == KindItem && s.st.itemChanged(*e.Item) || e.Kind == KindCase && e.Mode == ModeOwner ||
 			e.Kind == KindLoop && e.Mode == ModeOwner || e.Kind == KindOps && e.Ops.Step == OpsProposed ||
 			e.Kind == KindRelease && e.Mode == ModeOwner || e.Kind == KindNode && e.Node.Result != nil && e.Node.Result.Action == NodeDeployStep ||
-			e.Kind == KindNode && e.Node.Report != nil || e.Kind == KindLaptop && e.Mode == ModeOwner
+			e.Kind == KindNode && e.Node.Report != nil || e.Kind == KindLaptop && e.Mode == ModeOwner ||
+			e.Kind == KindConfig && e.Mode == ModeOwner
 		if e.Session == "" && shared {
 			s.st.apply(e)
 			continue
@@ -957,7 +962,7 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			return state
 		}
 		answers, ins := t.answersFor(false), s.st.instructionsFor(name, false)
-		err = s.act(name, ActRestart, &ActPayload{Attempt: n + 1, Cwd: sess.Cwd, Respawn: ev.PaneDead, Account: sess.Account, Command: line, Transcript: id, Answers: ids, AnswersAt: at, Instructions: iids, Brief: brief.parts(), BriefCut: brief.briefCut()}, func() error {
+		err = s.act(name, ActRestart, &ActPayload{Attempt: n + 1, Cwd: sess.Cwd, Respawn: ev.PaneDead, Account: sess.Account, Command: line, Model: launchModel(sessionModel(s.cfg, s.st, name, sess)), Transcript: id, Answers: ids, AnswersAt: at, Instructions: iids, Brief: brief.parts(), BriefCut: brief.briefCut()}, func() error {
 			if err := brief.write(sess.Workdir); err != nil {
 				return err
 			}
