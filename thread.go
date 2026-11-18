@@ -614,7 +614,7 @@ func (s *Supervisor) startThread(in *Instruction, repo, cwd string) {
 			var raw json.RawMessage
 			var usage JobUsage
 			var ran []TurnPayload
-			raw, usage, ran, err = job.RunAgent(w.runCtx, threadSystem, threadSchema(), input, cwd, mcp, withCalendar(cfg, agentAllowed(cwd, dirs...)), dirs...)
+			raw, usage, ran, err = job.RunAgent(w.runCtx, threadSystem, threadSchema(), input, cwd, mcp, withCalendar(cfg, repo, agentAllowed(cwd, dirs...)), dirs...)
 			p.Usage, p.Activity = &usage, ran
 			// Nothing written at home or at a repository is handed to a
 			// running session (#69): a hand-over is dropped, the owner is

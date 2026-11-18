@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -206,8 +207,8 @@ func calendarJob(cfg *Config) (Job, error) {
 	if acct.Shared {
 		return Job{}, fmt.Errorf("the calendar check's account %q is marked shared", k.account())
 	}
-	if len(calendarReadTools) == 0 {
-		return Job{}, errors.New("the calendar connector's read tools are not known yet (#101's scratch call), so no check runs")
+	if len(calendarReadTools) == 0 || len(calendarWriteTools) == 0 {
+		return Job{}, errors.New("the calendar connector's read and write tools are not both known yet (#101's scratch call), so no check runs")
 	}
 	j := jobFromConfig(cfg)
 	j.Account, j.AccountName = acct, k.account()
@@ -246,15 +247,22 @@ func (p *CalendarPayload) check() error {
 }
 
 // Calendar runs one check of prompt for caller and logs that it ran. The
-// reply goes to the caller alone; on a match of the confidential
-// patterns it is withheld whole. The error, when there is one, is for the
-// caller too: the log has only its outcome.
-func Calendar(ctx context.Context, cfg *Config, log *Log, now time.Time, caller, prompt string) (*CalendarReply, time.Duration, error) {
+// reply goes to the caller alone; on a match of pats, the confidential
+// patterns of the config and of the repositories' own files, it is
+// withheld whole. The error, when there is one, is for the caller too,
+// screened the same way, since a failed call's words can quote the
+// calendar: the log has only its outcome.
+func Calendar(ctx context.Context, cfg *Config, log *Log, now time.Time, caller, prompt string, pats []*regexp.Regexp) (*CalendarReply, time.Duration, error) {
 	p := &CalendarPayload{Caller: oneLine(caller, 200), Account: cfg.Jobs.Calendar.account(), Outcome: CalendarFailed}
 	if p.Caller == "" {
 		p.Caller = "cli"
 	}
-	reply, took, err := runCalendar(ctx, cfg, now, prompt, p)
+	reply, took, err := runCalendar(ctx, cfg, now, prompt, p, pats)
+	if err != nil {
+		if i := withheldBy(pats, err.Error()); i > 0 {
+			err = fmt.Errorf("the calendar check failed, and its error is withheld: it matches confidential pattern %d", i)
+		}
+	}
 	p.DurationMS = took.Milliseconds()
 	if lerr := log.Append(Event{V: EventVersion, Time: now.Add(took), Kind: KindCalendar, Mode: ModeShared, Calendar: p}); lerr != nil && err == nil {
 		err = fmt.Errorf("the check ran, but agentd could not log it: %v", lerr)
@@ -263,7 +271,7 @@ func Calendar(ctx context.Context, cfg *Config, log *Log, now time.Time, caller,
 	return reply, took, err
 }
 
-func runCalendar(ctx context.Context, cfg *Config, now time.Time, prompt string, p *CalendarPayload) (*CalendarReply, time.Duration, error) {
+func runCalendar(ctx context.Context, cfg *Config, now time.Time, prompt string, p *CalendarPayload, pats []*regexp.Regexp) (*CalendarReply, time.Duration, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" || len(prompt) > calendarPromptMax {
 		p.Outcome = CalendarRefused
@@ -274,6 +282,14 @@ func runCalendar(ctx context.Context, cfg *Config, now time.Time, prompt string,
 		p.Outcome = CalendarRefused
 		return nil, 0, err
 	}
+	// The job runs in an empty directory of its own, so no repository's
+	// files, CLAUDE.md or .mcp.json reach it.
+	dir, err := os.MkdirTemp("", "agentd-calendar-")
+	if err != nil {
+		return nil, 0, err
+	}
+	defer os.RemoveAll(dir)
+	job.Dir = dir
 	zone, _ := now.Zone()
 	input, _ := json.Marshal(map[string]string{"prompt": prompt, "now": now.Format(time.RFC3339), "tz": zone})
 	job.MaxInput = max(job.MaxInput, len(input))
@@ -291,7 +307,7 @@ func runCalendar(ctx context.Context, cfg *Config, now time.Time, prompt string,
 	for _, e := range r.Events {
 		texts = append(texts, e.Title, e.Start, e.End, e.Location, e.Calendar)
 	}
-	if i := withheldBy(compiledPatterns(cfg), texts...); i > 0 {
+	if i := withheldBy(pats, texts...); i > 0 {
 		p.Outcome = CalendarWithheld
 		return &CalendarReply{Text: fmt.Sprintf("(withheld: the calendar's answer matches confidential pattern %d)", i), Events: []CalendarEvent{}, Withheld: i}, took, nil
 	}
@@ -312,16 +328,17 @@ func calendarCmd(args []string, w io.Writer) error {
 	if strings.TrimSpace(prompt) == "" {
 		return errors.New(`usage: agentd calendar [--json] PROMPT..., as in agentd calendar "is Thursday 2pm free"`)
 	}
-	log, err := OpenLog(cfg.EventLog)
+	log, events, err := openLoaded(cfg.EventLog)
 	if err != nil {
 		return err
 	}
 	defer log.Close()
+	pats := append(compiledPatterns(cfg), filePatterns(NewLogState(cfg, ModeLive).Fold(events))...)
 	caller := tmuxSessionName()
 	if caller == "" {
 		caller = "cli"
 	}
-	r, _, err := Calendar(context.Background(), cfg, log, time.Now(), caller, prompt)
+	r, _, err := Calendar(context.Background(), cfg, log, time.Now(), caller, prompt, pats)
 	if err != nil {
 		return err
 	}
@@ -361,7 +378,7 @@ const ToolCalendar = "calendar_check"
 // check is on, to a session with a repository, a console thread's agent
 // and the ops agent.
 func (srv *MCPServer) calendarToolOffered() bool {
-	if !srv.cfg.Jobs.Calendar.Enabled {
+	if !srv.cfg.Jobs.Calendar.Enabled || srv.cfg.Repositories[srv.sess.Repository].Public {
 		return false
 	}
 	return srv.sess.Role == RoleOps || srv.sess.Repository != ""
@@ -375,7 +392,7 @@ func calendarToolList() []MCPTool {
 }
 
 // calendarCall answers calendar_check. It is refused to a session whose
-// repository is public. Only the calendar event is logged: no query
+// repository is public, which is not offered it either. Only the calendar event is logged: no query
 // event, which would hold the directive.
 func (srv *MCPServer) calendarCall(args json.RawMessage) (string, bool) {
 	var a struct {
@@ -395,7 +412,11 @@ func (srv *MCPServer) calendarCall(args json.RawMessage) (string, bool) {
 		}
 		return compact(map[string]any{"refused": "the calendar check is not offered to a session of a public repository: " + srv.sess.Repository}), true
 	}
-	r, _, err := Calendar(context.Background(), srv.cfg, srv.log, srv.now(), caller, a.Prompt)
+	cs, err := srv.contextStore()
+	if err != nil {
+		return compact(map[string]any{"refused": "agentd could not read its log: " + err.Error()}), true
+	}
+	r, _, err := Calendar(context.Background(), srv.cfg, srv.log, srv.now(), caller, a.Prompt, cs.patterns())
 	if err != nil {
 		return compact(map[string]any{"refused": cutUTF8(err.Error(), 1000)}), true
 	}
@@ -421,9 +442,9 @@ func calendarAllowed(cfg *Config) []string {
 }
 
 // withCalendar is a console thread agent's --allowedTools, with
-// calendar_check when the check is on.
-func withCalendar(cfg *Config, allowed string) string {
-	if !cfg.Jobs.Calendar.Enabled {
+// calendar_check when the check is on and repo is not public.
+func withCalendar(cfg *Config, repo, allowed string) string {
+	if !cfg.Jobs.Calendar.Enabled || cfg.Repositories[repo].Public {
 		return allowed
 	}
 	return allowed + ",mcp__agentd__" + ToolCalendar

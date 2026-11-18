@@ -101,7 +101,7 @@ func TestCalendarJobIsReadOnlyUnderThePersonalLogin(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", "/home/owner/.claude-acme")
 	cfg := calendarConfig(t)
 	log, buf := calendarLog(t)
-	r, _, err := Calendar(context.Background(), cfg, log, calendarNow, "widgets-s1", "anything on Friday at noon")
+	r, _, err := Calendar(context.Background(), cfg, log, calendarNow, "widgets-s1", "anything on Friday at noon", compiledPatterns(cfg))
 	if err != nil || !r.Answered || len(r.Events) != 2 || r.Events[0].Title != "Dentist" || !r.Events[1].AllDay {
 		t.Fatalf("reply = %+v, %v", r, err)
 	}
@@ -134,6 +134,10 @@ func TestCalendarJobIsReadOnlyUnderThePersonalLogin(t *testing.T) {
 	if strings.Contains(env, "ANTHROPIC_API_KEY") || strings.Contains(env, "CLAUDECODE=") {
 		t.Errorf("the check inherited the session's environment:\n%s", env)
 	}
+	wd, _ := os.Getwd()
+	if !strings.Contains(env, "PWD="+os.TempDir()) || !strings.Contains(env, "agentd-calendar-") || strings.Contains(env, "PWD="+wd+"\n") {
+		t.Errorf("the check did not run in an empty directory of its own:\n%s", env)
+	}
 	var in map[string]string
 	if err := json.Unmarshal([]byte(readFake(t, dir, "in.1")), &in); err != nil || in["prompt"] != "anything on Friday at noon" || in["now"] != "2026-11-18T10:00:00-06:00" || in["tz"] != "CST" {
 		t.Errorf("input %v, %v", in, err)
@@ -156,7 +160,7 @@ func TestCalendarFollowsItsConfig(t *testing.T) {
 	cfg.Accounts["home"] = Account{ConfigDir: "/home/owner/.claude-home"}
 	cfg.Jobs.Calendar = CalendarConfig{Enabled: true, Account: "home", Model: "claude-sonnet-5-5", Timeout: Duration{time.Minute}}
 	log, buf := calendarLog(t)
-	if _, _, err := Calendar(context.Background(), cfg, log, calendarNow, "cli", "what do I have tomorrow afternoon"); err != nil {
+	if _, _, err := Calendar(context.Background(), cfg, log, calendarNow, "cli", "what do I have tomorrow afternoon", compiledPatterns(cfg)); err != nil {
 		t.Fatal(err)
 	}
 	args := strings.Split(readFake(t, dir, "args.1"), "\n")
@@ -187,7 +191,7 @@ func TestCalendarRefusesWithoutCalling(t *testing.T) {
 		cfg := calendarConfig(t)
 		change(cfg)
 		log, buf := calendarLog(t)
-		if r, _, err := Calendar(context.Background(), cfg, log, calendarNow, "cli", "is Thursday 2pm free"); err == nil || r != nil {
+		if r, _, err := Calendar(context.Background(), cfg, log, calendarNow, "cli", "is Thursday 2pm free", compiledPatterns(cfg)); err == nil || r != nil {
 			t.Errorf("%s: ran: %+v", name, r)
 		}
 		if ev := calendarEvents(t, buf); len(ev) != 1 || ev[0].Outcome != CalendarRefused {
@@ -196,11 +200,16 @@ func TestCalendarRefusesWithoutCalling(t *testing.T) {
 	}
 	calendarReadTools = nil
 	log, _ := calendarLog(t)
-	if _, _, err := Calendar(context.Background(), calendarConfig(t), log, calendarNow, "cli", "is Thursday 2pm free"); err == nil || !strings.Contains(err.Error(), "scratch call") {
+	if _, _, err := Calendar(context.Background(), calendarConfig(t), log, calendarNow, "cli", "is Thursday 2pm free", compiledPatterns(calendarConfig(t))); err == nil || !strings.Contains(err.Error(), "scratch call") {
 		t.Errorf("ran with no read tools known: %v", err)
 	}
 	withCalendarTools(t)
-	if _, _, err := Calendar(context.Background(), calendarConfig(t), log, calendarNow, "cli", "  "); err == nil {
+	calendarWriteTools = nil
+	if _, _, err := Calendar(context.Background(), calendarConfig(t), log, calendarNow, "cli", "is Thursday 2pm free", compiledPatterns(calendarConfig(t))); err == nil {
+		t.Errorf("ran with no write tools known to deny")
+	}
+	withCalendarTools(t)
+	if _, _, err := Calendar(context.Background(), calendarConfig(t), log, calendarNow, "cli", "  ", compiledPatterns(calendarConfig(t))); err == nil {
 		t.Error("ran an empty directive")
 	}
 	if n := claudeCalls(t, dir); n != 0 {
@@ -245,27 +254,32 @@ func TestCalendarWithholdsAndLogsNothingOfTheCalendar(t *testing.T) {
 	claudeAnswers(t, dir, 2, claudeResult(secret))
 	claudeAnswers(t, dir, 3, claudeResult(`{"text":"Dentist at 2","events":[{"title":"Dentist"}],"answered":true}`))
 	claudeAnswers(t, dir, 4, `{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Dentist on Thursday could not be read"}`)
+	claudeAnswers(t, dir, 5, `{"type":"result","subtype":"error_max_turns","is_error":true,"result":"Project Falcon review on Friday"}`)
 	cfg := calendarConfig(t)
 	log, buf := calendarLog(t)
-	if r, _, err := Calendar(context.Background(), cfg, log, calendarNow, "s1", "is Thursday 2pm free"); err != nil || r.Withheld != 0 {
+	if r, _, err := Calendar(context.Background(), cfg, log, calendarNow, "s1", "is Thursday 2pm free", compiledPatterns(cfg)); err != nil || r.Withheld != 0 {
 		t.Fatal(r, err)
 	}
-	r, _, err := Calendar(context.Background(), cfg, log, calendarNow, "s1", "is Thursday 2pm free")
+	r, _, err := Calendar(context.Background(), cfg, log, calendarNow, "s1", "is Thursday 2pm free", compiledPatterns(cfg))
 	if err != nil || r.Withheld != 1 || len(r.Events) != 0 || strings.Contains(r.Text, "Dentist") || strings.Contains(r.Text, "Falcon") {
 		t.Fatalf("withheld reply %+v, %v", r, err)
 	}
-	if _, _, err := Calendar(context.Background(), cfg, log, calendarNow, "s1", "is Thursday 2pm free"); err == nil {
+	if _, _, err := Calendar(context.Background(), cfg, log, calendarNow, "s1", "is Thursday 2pm free", compiledPatterns(cfg)); err == nil {
 		t.Fatal("a malformed reply was taken")
 	}
-	if _, _, err := Calendar(context.Background(), cfg, log, calendarNow, "s1", "is Thursday 2pm free"); err == nil {
+	if _, _, err := Calendar(context.Background(), cfg, log, calendarNow, "s1", "is Thursday 2pm free", compiledPatterns(cfg)); err == nil {
 		t.Fatal("a failed call was taken")
+	}
+	// A failed call's words are screened for the caller as a reply is.
+	if _, _, err := Calendar(context.Background(), cfg, log, calendarNow, "s1", "is Thursday 2pm free", compiledPatterns(cfg)); err == nil || strings.Contains(err.Error(), "Falcon") || !strings.Contains(err.Error(), "withheld") {
+		t.Fatalf("a failed call's error: %v", err)
 	}
 	ev := calendarEvents(t, buf)
 	var outcomes []string
 	for _, e := range ev {
 		outcomes = append(outcomes, e.Outcome)
 	}
-	if strings.Join(outcomes, ",") != "ok,withheld,failed,failed" {
+	if strings.Join(outcomes, ",") != "ok,withheld,failed,failed,failed" {
 		t.Fatalf("outcomes %v", outcomes)
 	}
 	for _, w := range []string{"Thursday", "Dentist", "Main St", "Falcon", "Holiday", "2pm"} {
@@ -330,6 +344,9 @@ func TestCalendarTool(t *testing.T) {
 	if srv := server(cfg, "loose", Session{}); contains(srv.tools(), ToolCalendar) {
 		t.Error("a session with no repository is offered calendar_check")
 	}
+	if srv := server(cfg, "site-s1", Session{Repository: "site"}); contains(srv.tools(), ToolCalendar) {
+		t.Error("a public repository's session is offered calendar_check")
+	}
 	off := calendarConfig(t)
 	off.Jobs.Calendar.Enabled = false
 	if srv := server(off, "widgets-s1", Session{Repository: "widgets"}); contains(srv.tools(), ToolCalendar) {
@@ -346,7 +363,7 @@ func TestCalendarTool(t *testing.T) {
 		t.Error("tools/list does not give calendar_check with its warning")
 	}
 
-	text, refused := callOne(t, server(cfg, "site-s1", Session{Repository: "site"}), ToolCalendar, map[string]any{"prompt": "is Thursday 2pm free"})
+	text, refused := server(cfg, "site-s1", Session{Repository: "site"}).calendarCall(json.RawMessage(`{"prompt":"is Thursday 2pm free"}`))
 	if !refused || !strings.Contains(text, "public repository") {
 		t.Fatalf("a public repository's session: %s", text)
 	}
@@ -373,11 +390,14 @@ func TestCalendarTool(t *testing.T) {
 // The headless agents may call calendar_check only while it is on.
 func TestCalendarAllowedForAgents(t *testing.T) {
 	cfg := calendarConfig(t)
-	if !strings.Contains(opsAllowed(cfg, "/clone"), "mcp__agentd__"+ToolCalendar) || !strings.Contains(withCalendar(cfg, "x"), "mcp__agentd__"+ToolCalendar) {
+	if withCalendar(cfg, "site", "x") != "x" {
+		t.Error("a public repository's thread agent is allowed calendar_check")
+	}
+	if !strings.Contains(opsAllowed(cfg, "/clone"), "mcp__agentd__"+ToolCalendar) || !strings.Contains(withCalendar(cfg, "widgets", "x"), "mcp__agentd__"+ToolCalendar) {
 		t.Error("an agent is not allowed calendar_check while it is on")
 	}
 	cfg.Jobs.Calendar.Enabled = false
-	if strings.Contains(opsAllowed(cfg, "/clone"), ToolCalendar) || withCalendar(cfg, "x") != "x" {
+	if strings.Contains(opsAllowed(cfg, "/clone"), ToolCalendar) || withCalendar(cfg, "widgets", "x") != "x" {
 		t.Error("an agent is allowed calendar_check while it is off")
 	}
 }
