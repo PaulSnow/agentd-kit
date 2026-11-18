@@ -8,12 +8,27 @@
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now agentd-node
 #   loginctl enable-linger "$USER"
+#
+# PATH: systemd's default leaves out ~/.local/bin, where claude lives, so
+# agentd prompt failed with "exec: claude: executable file not found in
+# $PATH". The Environment= line below sets it.
+#
+# Terminals (agentd terminal, open_terminal): a window needs the desktop
+# session's DISPLAY, WAYLAND_DISPLAY and DBUS_SESSION_BUS_ADDRESS, which a
+# user service does not get. From the desktop session, once per login (a
+# desktop autostart entry does it), run
+#
+#   systemctl --user import-environment DISPLAY WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS
+#
+# The node reads them from the user manager when it opens a window, so it
+# needs no restart; without them it answers "no graphical session".
 [Unit]
 Description=agentd node (observe only): reports this machine's clones to the hub
 After=network-online.target
 Wants=network-online.target
 
 [Service]
+Environment=PATH=%h/.local/bin:%h/go/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/go/bin/agentd node -config %h/.config/agentd/node.json
 Restart=on-failure
 RestartSec=30s

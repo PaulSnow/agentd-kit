@@ -82,6 +82,7 @@ type Event struct {
 	Sentence    *SentencePayload    `json:"sentence,omitempty"`
 	Config      *ConfigPayload      `json:"config,omitempty"`
 	Model       *ModelPayload       `json:"model,omitempty"`
+	Terminal    *TerminalPayload    `json:"terminal,omitempty"`
 }
 
 // Event kinds.
@@ -443,7 +444,7 @@ func (e Event) check() error {
 		KindSkip: e.Skip != nil, KindCrash: e.Crash != nil, KindClear: e.Clear != nil, KindError: e.Error != nil, KindWarning: e.Warning != nil,
 		KindItem: e.Item != nil, KindSeen: e.Seen != nil, KindCursor: e.Cursor != nil, KindUsage: e.Usage != nil,
 		KindCheckpoint: e.Checkpoint != nil, KindPoll: e.Poll != nil, KindTriage: e.Triage != nil, KindDecision: e.Decision != nil,
-		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, KindApproval: e.Approval != nil, KindAccount: e.Account != nil, KindMessage: e.Message != nil, KindInbox: e.Inbox != nil, KindJob: e.Job != nil, KindStep: e.Step != nil, KindLoop: e.Loop != nil, KindNode: e.Node != nil, KindLaptop: e.Laptop != nil, KindRoute: e.Route != nil, KindStatus: e.Status != nil, KindCard: e.Card != nil, KindThread: e.Thread != nil, KindQuery: e.Query != nil, KindAttachment: e.Attachment != nil, KindFact: e.Fact != nil, KindOps: e.Ops != nil, KindRelease: e.Release != nil, KindFleet: e.Fleet != nil, KindWorkItem: e.Work != nil, KindIndex: e.Index != nil, KindSentence: e.Sentence != nil, KindConfig: e.Config != nil, KindModel: e.Model != nil, "act": e.Act != nil,
+		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, KindApproval: e.Approval != nil, KindAccount: e.Account != nil, KindMessage: e.Message != nil, KindInbox: e.Inbox != nil, KindJob: e.Job != nil, KindStep: e.Step != nil, KindLoop: e.Loop != nil, KindNode: e.Node != nil, KindLaptop: e.Laptop != nil, KindRoute: e.Route != nil, KindStatus: e.Status != nil, KindCard: e.Card != nil, KindThread: e.Thread != nil, KindQuery: e.Query != nil, KindAttachment: e.Attachment != nil, KindFact: e.Fact != nil, KindOps: e.Ops != nil, KindRelease: e.Release != nil, KindFleet: e.Fleet != nil, KindWorkItem: e.Work != nil, KindIndex: e.Index != nil, KindSentence: e.Sentence != nil, KindTerminal: e.Terminal != nil, KindConfig: e.Config != nil, KindModel: e.Model != nil, "act": e.Act != nil,
 	}
 	want := e.Kind
 	switch e.Kind {
@@ -474,6 +475,10 @@ func (e Event) check() error {
 		return errors.New("a loop event is a run's step, or the owner's retry, skip or stop, for no one session, and names its repository, request and step")
 	case e.Kind == KindNode && (e.Session != "" || e.Mode != ModeShared):
 		return errors.New("a node event is a shared fact, for no one session")
+	case e.Kind == KindTerminal && (e.Session != "" || e.Mode != ModeShared):
+		return errors.New("a terminal event is a shared fact, for no one session")
+	case e.Kind == KindTerminal && e.Terminal.check() != nil:
+		return e.Terminal.check()
 	case e.Kind == KindNode && e.Node.check() != nil:
 		return e.Node.check()
 	case e.Kind == KindLaptop && (e.Session != "" || (e.Laptop.Op == LaptopChoice) != (e.Mode == ModeOwner) || e.Mode != ModeOwner && e.Mode != ModeLive && e.Mode != ModeShadow):
@@ -514,7 +519,7 @@ func (e Event) check() error {
 		return errors.New("an approval is a shared fact of the coordinator that gave it, and names its repository, request and head")
 	case e.Kind == KindPolicy && (e.Session != "" || e.Mode != ModeShared || e.Policy.Repository == "" || e.Policy.Tip == ""):
 		return errors.New("a policy event is a shared fact, for no one session, and names its repository and tip")
-	case e.Kind != KindCase && e.Kind != KindCoordinator && e.Kind != KindSession && e.Kind != KindPolicy && e.Kind != KindApproval && e.Kind != KindAccount && e.Kind != KindMessage && e.Kind != KindInbox && e.Kind != KindNode && e.Kind != KindThread && e.Kind != KindQuery && e.Kind != KindOps && e.Kind != KindStep && (e.Kind == KindItem || e.Kind == KindCursor || e.Kind == KindTriage || failedTriage) != (e.Mode == ModeShared):
+	case e.Kind != KindCase && e.Kind != KindCoordinator && e.Kind != KindSession && e.Kind != KindPolicy && e.Kind != KindApproval && e.Kind != KindAccount && e.Kind != KindMessage && e.Kind != KindInbox && e.Kind != KindNode && e.Kind != KindTerminal && e.Kind != KindThread && e.Kind != KindQuery && e.Kind != KindOps && e.Kind != KindStep && (e.Kind == KindItem || e.Kind == KindCursor || e.Kind == KindTriage || failedTriage) != (e.Mode == ModeShared):
 		return fmt.Errorf("a %s event must not carry mode %q", e.Kind, e.Mode)
 	case e.Kind == KindSeen && e.Mode != ModeOwner:
 		return fmt.Errorf("a seen event is the owner's, not %q", e.Mode)

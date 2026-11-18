@@ -96,6 +96,12 @@ type Errand struct {
 	Dir        string `json:"dir,omitempty"`
 	Model      string `json:"model,omitempty"`
 	TimeoutSec int64  `json:"timeout_sec,omitempty"`
+	// A terminal (Wcace1380): the host the window logs into, or "local";
+	// the shell text it runs there first, if any, never logged; and who
+	// asked.
+	Target  string `json:"target,omitempty"`
+	Command string `json:"command,omitempty"`
+	By      string `json:"by,omitempty"`
 }
 
 // ErrandDone is how an errand ended: a document's path where it was saved,
@@ -108,6 +114,9 @@ type ErrandDone struct {
 	Path   string `json:"path,omitempty"`
 	Exit   int    `json:"exit"`
 	Output string `json:"output,omitempty"`
+	// A terminal's emulator and what it launched, its command left out.
+	Emulator string `json:"emulator,omitempty"`
+	Launched string `json:"launched,omitempty"`
 }
 
 // pendingErrand is an errand the hub holds for a host.
@@ -266,6 +275,8 @@ func (q *errandQueue) next(ctx context.Context, host string, wait time.Duration)
 				}
 			case p.Kind == ErrandPrompt && !p.started.IsZero() && now.Sub(p.started) > time.Duration(p.TimeoutSec)*time.Second+errandLease:
 				q.removeLocked(p, ErrandDone{Error: "the node began the prompt and never answered"})
+			case p.Kind == ErrandTerminal && !p.started.IsZero() && now.Sub(p.started) > errandLease:
+				q.removeLocked(p, ErrandDone{Error: "the node began opening the terminal and never answered"})
 			}
 		}
 		if found != nil {
@@ -304,14 +315,15 @@ func (q *errandQueue) get(host, id string) *pendingErrand {
 var errStarted = errors.New("the errand was begun already")
 
 // begin records that host's node began errand id: fetched the document,
-// or started the prompt. A prompt begins once only, so a node that took
-// it again after a lost answer never runs it twice.
+// or started the prompt or the terminal. A prompt or a terminal begins
+// once only, so a node that took it again after a lost answer never runs
+// it twice.
 func (q *errandQueue) begin(host, id string) (*pendingErrand, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	for _, p := range q.byHost[host] {
 		if p.ID == id {
-			if p.Kind == ErrandPrompt && !p.started.IsZero() {
+			if (p.Kind == ErrandPrompt || p.Kind == ErrandTerminal) && !p.started.IsZero() {
 				return nil, errStarted
 			}
 			p.started = q.now()
@@ -491,7 +503,7 @@ func (h *Hub) serveErrands(w http.ResponseWriter, r *http.Request, host string) 
 		}
 		switch {
 		case what == "file" && r.Method == http.MethodGet && p.Kind == ErrandDocument,
-			what == "start" && r.Method == http.MethodPost && p.Kind == ErrandPrompt:
+			what == "start" && r.Method == http.MethodPost && (p.Kind == ErrandPrompt || p.Kind == ErrandTerminal):
 			if _, err := h.errands.begin(host, id); errors.Is(err, errStarted) {
 				http.Error(w, err.Error(), http.StatusConflict)
 				return true
@@ -516,8 +528,16 @@ func (h *Hub) serveErrands(w http.ResponseWriter, r *http.Request, host string) 
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return true
 			}
+			// A terminal is logged before whoever asked hears how it ended.
+			if p.Kind == ErrandTerminal {
+				h.logTerminal(host, p.Errand, d)
+			}
 			h.errands.finish(host, id, d)
-			fmt.Fprintf(os.Stderr, "agentd hub: %s %s %s on %s: %s\n", p.Kind, p.ID, p.Name, host, doneText(d))
+			if p.Kind == ErrandTerminal {
+				fmt.Fprintf(os.Stderr, "agentd hub: terminal %s on %s into %s for %s: %s\n", p.ID, host, p.Target, p.By, terminalText(host, p.Errand, d))
+			} else {
+				fmt.Fprintf(os.Stderr, "agentd hub: %s %s %s on %s: %s\n", p.Kind, p.ID, p.Name, host, doneText(d))
+			}
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.NotFound(w, r)
@@ -649,6 +669,7 @@ func (h *Hub) localHandler() http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(d)
 	})
+	mux.HandleFunc(localTerminalPath, h.serveLocalTerminal)
 	return mux
 }
 
@@ -767,7 +788,7 @@ func (n *Node) doErrand(ctx context.Context, e Errand) *ErrandDone {
 	switch e.Kind {
 	case ErrandDocument:
 		d = n.fetchDocument(ctx, e)
-	case ErrandPrompt:
+	case ErrandPrompt, ErrandTerminal:
 		resp, err := n.hubRequest(ctx, http.MethodPost, errandPrefix+url.PathEscape(e.ID)+"/start", nil)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "agentd node: errand", e.ID+":", err)
@@ -776,6 +797,10 @@ func (n *Node) doErrand(ctx context.Context, e Errand) *ErrandDone {
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusNoContent {
 			return nil
+		}
+		if e.Kind == ErrandTerminal {
+			d = n.openTerminal(e)
+			break
 		}
 		d = n.runPrompt(ctx, e)
 	default:

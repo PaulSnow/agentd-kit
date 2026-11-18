@@ -69,6 +69,7 @@ func opsToolList() []MCPTool {
 		{Name: ToolOpsClear, Description: "Propose clearing a parked, crash-looping session on a supervisor, so it may be restarted (agentd clear).", InputSchema: obj(sup+`,"session":{"type":"string"},`+why, "supervisor", "session", "why")},
 		{Name: ToolOpsEnd, Description: "Propose ending a session agentd started on a supervisor, keeping its files (agentd sessions end).", InputSchema: obj(sup+`,"session":{"type":"string"},`+why, "supervisor", "session", "why")},
 		{Name: ToolOpsRollback, Description: "Propose rolling agentd back to a kept binary, agentd.SHA, which ops_status's facts list: swapped in, checked and every supervisor restarted.", InputSchema: obj(`"binary":{"type":"string","description":"a kept binary's name, agentd.SHA"},`+why, "binary", "why")},
+		{Name: ToolOpsTerminal, Description: openTerminalDescription, InputSchema: obj(openTerminalProps+","+why, "host", "target", "why")},
 	}
 }
 
@@ -133,10 +134,21 @@ func (srv *MCPServer) opsCall(tool string, args json.RawMessage) (string, bool) 
 	}
 	// A value the log may not hold cannot be shown to the owner, nor
 	// carried out from the log.
-	if v := string(c.Value) + "\n" + c.Pointer; srv.withheld(v) != v {
+	c.Thread = strings.TrimPrefix(srv.name, "thread:")
+	return srv.recordOps(c)
+}
+
+// recordOps records change c as proposed, once, and answers the agent
+// that its entry waits on the owner's yes.
+func (srv *MCPServer) recordOps(c OpsChange) (string, bool) {
+	refuse := func(err error) (string, bool) {
+		return compact(map[string]any{"refused": srv.withheld(cutUTF8(err.Error(), 2000))}), true
+	}
+	// A value the log may not hold cannot be shown to the owner, nor
+	// carried out from the log.
+	if v := string(c.Value) + "\n" + c.Pointer + "\n" + c.Command; srv.withheld(v) != v {
 		return refuse(fmt.Errorf("the change matches a confidential pattern; the owner makes it by hand"))
 	}
-	c.Thread = strings.TrimPrefix(srv.name, "thread:")
 	c.Summary, c.Why = srv.withheld(c.Summary), srv.withheld(c.Why)
 	events, err := srv.load()
 	if err != nil {
@@ -167,5 +179,6 @@ func (srv *MCPServer) opsCall(tool string, args json.RawMessage) (string, bool) 
 // sameChange says whether two proposals make the same change.
 func sameChange(a, b OpsChange) bool {
 	return a.Op == b.Op && a.Supervisor == b.Supervisor && a.Pointer == b.Pointer && string(a.Value) == string(b.Value) && a.Delete == b.Delete &&
-		a.Base == b.Base && a.Commit == b.Commit && a.Kept == b.Kept && a.Session == b.Session
+		a.Base == b.Base && a.Commit == b.Commit && a.Kept == b.Kept && a.Session == b.Session &&
+		a.Host == b.Host && a.Target == b.Target && a.Command == b.Command
 }

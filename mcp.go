@@ -648,6 +648,9 @@ func (srv *MCPServer) call(tool string, args json.RawMessage) (string, bool) {
 	if contains(opsTools, tool) && srv.ops != nil {
 		return srv.opsCall(tool, args)
 	}
+	if tool == ToolOpsTerminal {
+		return srv.sessionTerminal(args)
+	}
 	events, err := srv.load()
 	if err != nil {
 		return compact(map[string]any{"refused": "agentd could not read its log: " + err.Error()}), true
