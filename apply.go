@@ -221,6 +221,9 @@ func (st *LogState) apply(e Event) {
 	if e.Kind == KindCard || e.Kind == KindThread || e.Kind == KindQuery {
 		return // the repository's context, which its store folds (#60)
 	}
+	if e.Kind == KindCalendar {
+		return // a check that ran (#101): nothing the run acts on
+	}
 	if e.Kind == KindRoute {
 		st.applyRoute(e)
 		return

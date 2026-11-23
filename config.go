@@ -70,6 +70,9 @@ type Account struct {
 	// Usage is how agentd reads the account's usage (#39): auto (the
 	// default), endpoint, headers or off.
 	Usage string `json:"usage"`
+	// Shared marks a login others use too: the calendar check, which
+	// reads the owner's private calendar, never runs under it (#101).
+	Shared bool `json:"shared"`
 }
 
 // Timeouts bound every external command agentd runs. A command still
@@ -297,6 +300,9 @@ type Repository struct {
 	// OwnerOnly marks every entry the report publishes for this repository
 	// as for the owner alone.
 	OwnerOnly bool `json:"owner_only"`
+	// Public marks a repository anyone can read: its sessions are refused
+	// the calendar check, whose answer is the owner's private data (#101).
+	Public bool `json:"public"`
 	// Sessions, when set, is where the sessions agentd starts live, and
 	// turns on the repository's request loop (sessions.go, loop.go).
 	Sessions *SessionsPolicy `json:"sessions"`
@@ -516,6 +522,7 @@ func (c *Config) finish(base string) error {
 		c.Jobs.Expert.BudgetTokens < 0 || c.Jobs.Expert.Timeout.Duration < 0 {
 		errs = append(errs, errors.New("jobs.curator's and jobs.expert's settings must not be negative"))
 	}
+	errs = append(errs, c.checkCalendar()...)
 	if d := c.Jobs.Designer; d.MaxInput < 0 || d.Timeout.Duration < 0 {
 		errs = append(errs, errors.New("jobs.designer.max_input and jobs.designer.timeout must not be negative"))
 	}

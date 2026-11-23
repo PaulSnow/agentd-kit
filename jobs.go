@@ -81,6 +81,9 @@ type JobsConfig struct {
 	// Sentences turns on the idle-issue sentences of the issue index,
 	// on Model when set (#69).
 	Sentences SentencesConfig `json:"sentences"`
+
+	// Calendar is the calendar check's call (#101, calendar.go).
+	Calendar CalendarConfig `json:"calendar"`
 }
 
 // SentencesConfig turns on the idle-issue sentence job and sets its model.
@@ -142,6 +145,14 @@ type Job struct {
 	Dir   string
 	// Turns bounds an agent's model turns, by default agentTurns.
 	Turns int
+	// MCP is the call's --mcp-config document, emptyMCP when unset, and
+	// NoStrictMCP leaves --strict-mcp-config out, so the servers of the
+	// account's own login load as well. Allow are the tools the call may
+	// use without asking, as --allowedTools: a headless call is refused
+	// any other (#101's calendar check names its connector's read tools).
+	MCP         string
+	NoStrictMCP bool
+	Allow       []string
 }
 
 // turns is the model turns an agent run of j may take.
@@ -205,8 +216,19 @@ func (j Job) Run(ctx context.Context, system string, schema, input []byte) (json
 	if len(input) > j.MaxInput {
 		return nil, JobUsage{}, fmt.Errorf("job input is %d bytes, over the %d allowed", len(input), j.MaxInput)
 	}
+	mcp := j.MCP
+	if mcp == "" {
+		mcp = emptyMCP
+	}
 	args := []string{"-p", "--model", j.Model, "--output-format", "json", "--json-schema", string(schema),
-		"--system-prompt", system, "--setting-sources", "", "--strict-mcp-config", "--mcp-config", emptyMCP, "--tools", strings.Join(j.Tools, ",")}
+		"--system-prompt", system, "--setting-sources", ""}
+	if !j.NoStrictMCP {
+		args = append(args, "--strict-mcp-config")
+	}
+	args = append(args, "--mcp-config", mcp, "--tools", strings.Join(j.Tools, ","))
+	if len(j.Allow) > 0 {
+		args = append(args, "--allowedTools", strings.Join(j.Allow, ","))
+	}
 	if len(j.Deny) > 0 {
 		args = append(args, "--disallowedTools", strings.Join(j.Deny, ","))
 	}

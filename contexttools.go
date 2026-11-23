@@ -61,20 +61,25 @@ func contextToolList() []MCPTool {
 // tools are the tools the server offers: a case's own, then the context
 // tools when the server knows its repository.
 func (srv *MCPServer) tools() []string {
-	if srv.sess.Role == RoleQuery {
-		return contextTools
+	var tools []string
+	switch {
+	case srv.sess.Role == RoleQuery:
+		tools = contextTools
+	case srv.sess.Role == RoleOps:
+		tools = append(append([]string{}, opsTools...), ToolAskExpert)
+	default:
+		tools = toolsFor(srv.sess.Role)
+		// A working session may propose a terminal for the owner, on the ops
+		// console, when there is one (Wcace1380).
+		if srv.cfg.opsConsole() != "" && contains(tools, ToolRaiseDecision) && srv.sess.Role != RoleJudge {
+			tools = append(append([]string{}, tools...), ToolOpsTerminal)
+		}
+		if srv.sess.Repository != "" {
+			tools = append(append([]string{}, tools...), contextTools...)
+		}
 	}
-	if srv.sess.Role == RoleOps {
-		return append(append([]string{}, opsTools...), ToolAskExpert)
-	}
-	tools := toolsFor(srv.sess.Role)
-	// A working session may propose a terminal for the owner, on the ops
-	// console, when there is one (Wcace1380).
-	if srv.cfg.opsConsole() != "" && contains(tools, ToolRaiseDecision) && srv.sess.Role != RoleJudge {
-		tools = append(append([]string{}, tools...), ToolOpsTerminal)
-	}
-	if srv.sess.Repository != "" {
-		tools = append(append([]string{}, tools...), contextTools...)
+	if srv.calendarToolOffered() {
+		tools = append(append([]string{}, tools...), ToolCalendar)
 	}
 	return tools
 }

@@ -100,6 +100,8 @@ func runCommand(name string, args []string) (handled bool, err error) {
 		return true, accountsCmd(args, os.Stdout)
 	case "items":
 		return true, itemsCmd(args, os.Stdout)
+	case "calendar":
+		return true, calendarCmd(args, os.Stdout)
 	case "triage":
 		return true, triageCmd(args, os.Stdout)
 	case "step":
@@ -192,6 +194,7 @@ const usageLines = `usage:
   agentd triage [--config PATH] --items FILE
   agentd step [--config PATH] [--log PATH] --spec FILE [--force]
   agentd steps [--config PATH] [--log PATH] [--json]
+  agentd calendar [--config PATH] [--log PATH] [--json] PROMPT...
   agentd status-check [--config PATH] --transcript FILE [--window 5m] [--input] [--call]
   agentd cases [--config PATH] [--log PATH] [--shadow] [--json]
   agentd cases [--config PATH] [--log PATH] rule CASE restriction|waiver|close|reopen [TEXT]
