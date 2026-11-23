@@ -114,6 +114,11 @@ func TestCalendarJobIsReadOnlyUnderThePersonalLogin(t *testing.T) {
 	if tools, ok := argAfter(args, "--tools"); !ok || tools != "ToolSearch,CronList" {
 		t.Errorf("--tools %q: a check has only ToolSearch and CronList", tools)
 	}
+	for _, a := range args {
+		if a == "--dangerously-skip-permissions" || a == "--permission-mode" || a == "--permission-prompt-tool" || a == "--allow-dangerously-skip-permissions" {
+			t.Errorf("%s: the check's only gate is the default permission mode, which refuses a tool not allowed", a)
+		}
+	}
 	if contains(args, "--strict-mcp-config") {
 		t.Error("--strict-mcp-config hides the login's connectors")
 	}
@@ -485,6 +490,19 @@ func TestCalendarConnectorTools(t *testing.T) {
 	}
 	if !calendarNoStrictMCP {
 		t.Error("strict MCP hides the login's connectors")
+	}
+	cfg := calendarConfig(t)
+	j, err := calendarJob(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(j.Allow, ",") != strings.Join(calendarReadTools, ",") || !j.NoStrictMCP {
+		t.Errorf("job allows %v, strict MCP off %v", j.Allow, j.NoStrictMCP)
+	}
+	for _, w := range calendarWriteTools {
+		if !contains(j.Deny, w) {
+			t.Errorf("the job does not deny %s", w)
+		}
 	}
 	if strings.Join(calendarBuiltins, ",") != "ToolSearch,CronList" {
 		t.Errorf("built-in tools %v", calendarBuiltins)
