@@ -198,6 +198,11 @@ type DialogEscalation struct {
 	Escalated  int       // the latest episode escalated
 	N          int       // dialog escalations so far, numbering their keys
 	Last       time.Time // when the last was posted
+	// Prompt is the permission dialog showing, as the last observation
+	// read it whole, or nil; Answered the latest episode the owner's
+	// choice was sent to, or would have been (#43).
+	Prompt   *PermissionPrompt
+	Answered int
 }
 
 // Open says whether the dialog now showing has been escalated.

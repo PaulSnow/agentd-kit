@@ -1,0 +1,25 @@
+
+ ▐▛███▛█   Claude Code v2.1.330
+▝▜██████▀  Opus 5.5 · Claude Ultra
+ ▝▝   ▝▝   ~/scratch/proj · /rc
+
+
+❯ Run exactly: git push origin HEAD:refs/heads/scratch-test   (one Bash call)
+
+  Pushing HEAD to scratch-test branch on origin
+  ⎿  $ git push origin HEAD:refs/heads/scratch-test
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Bash command
+ Push HEAD to scratch-test branch on origin
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ git push origin HEAD:refs/heads/scratch-test
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Rule Bash(git push *) from shared project settings overrides auto mode.
+ /permissions to let auto mode decide
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+
+ Esc to cancel · Tab to amend
