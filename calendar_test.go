@@ -89,7 +89,9 @@ func argAfter(args []string, flag string) (string, bool) {
 
 // A check runs under the personal account's login whatever the jobs'
 // account, with Sonnet, without the calling session's key or marker, with
-// no built-in tools, the connector's read tools its only allowed tools
+// only ToolSearch and CronList of the built-in tools, without strict MCP
+// (which hides the login's connectors), the connector's read tools its
+// only allowed tools
 // and its write tools denied by name; the directive goes on standard
 // input as data, with now and the time zone.
 func TestCalendarJobIsReadOnlyUnderThePersonalLogin(t *testing.T) {
@@ -109,8 +111,14 @@ func TestCalendarJobIsReadOnlyUnderThePersonalLogin(t *testing.T) {
 	if m, _ := argAfter(args, "--model"); m != "sonnet" {
 		t.Errorf("model %q, want sonnet", m)
 	}
-	if tools, ok := argAfter(args, "--tools"); !ok || tools != "" {
-		t.Errorf("--tools %q: a check has no built-in tools", tools)
+	if tools, ok := argAfter(args, "--tools"); !ok || tools != "ToolSearch,CronList" {
+		t.Errorf("--tools %q: a check has only ToolSearch and CronList", tools)
+	}
+	if contains(args, "--strict-mcp-config") {
+		t.Error("--strict-mcp-config hides the login's connectors")
+	}
+	if m, _ := argAfter(args, "--mcp-config"); m != emptyMCP {
+		t.Errorf("--mcp-config %q, want no servers of its own", m)
 	}
 	if allow, _ := argAfter(args, "--allowedTools"); allow != strings.Join(testCalendarRead, ",") {
 		t.Errorf("--allowedTools %q, want the read tools alone", allow)
@@ -444,6 +452,42 @@ func TestCalendarCommand(t *testing.T) {
 	}
 	if n != 2 {
 		t.Fatalf("%d calendar events logged", n)
+	}
+}
+
+// The connector's tools are the scratch call's: the Google Calendar
+// connector's alone, its read and write tools disjoint, and every tool
+// that changes the calendar or answers an invitation among the denied.
+func TestCalendarConnectorTools(t *testing.T) {
+	const prefix = "mcp__claude_ai_Google_Calendar__"
+	if len(calendarReadTools) == 0 || len(calendarWriteTools) == 0 {
+		t.Fatal("the connector's tools are not known")
+	}
+	for _, r := range calendarReadTools {
+		if !strings.HasPrefix(r, prefix) || contains(calendarWriteTools, r) {
+			t.Errorf("read tool %q", r)
+		}
+		for _, verb := range []string{"create", "update", "delete", "respond", "move", "patch", "insert"} {
+			if strings.Contains(strings.TrimPrefix(r, prefix), verb) {
+				t.Errorf("read tool %q looks like a write", r)
+			}
+		}
+	}
+	for _, w := range []string{"create_event", "update_event", "delete_event", "respond_to_event"} {
+		if !contains(calendarWriteTools, prefix+w) {
+			t.Errorf("%s is not denied", w)
+		}
+	}
+	for _, w := range calendarWriteTools {
+		if !strings.HasPrefix(w, prefix) {
+			t.Errorf("write tool %q", w)
+		}
+	}
+	if !calendarNoStrictMCP {
+		t.Error("strict MCP hides the login's connectors")
+	}
+	if strings.Join(calendarBuiltins, ",") != "ToolSearch,CronList" {
+		t.Errorf("built-in tools %v", calendarBuiltins)
 	}
 }
 
