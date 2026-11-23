@@ -68,6 +68,11 @@ func (srv *MCPServer) tools() []string {
 		return append(append([]string{}, opsTools...), ToolAskExpert)
 	}
 	tools := toolsFor(srv.sess.Role)
+	// A working session may propose a terminal for the owner, on the ops
+	// console, when there is one (Wcace1380).
+	if srv.cfg.opsConsole() != "" && contains(tools, ToolRaiseDecision) && srv.sess.Role != RoleJudge {
+		tools = append(append([]string{}, tools...), ToolOpsTerminal)
+	}
 	if srv.sess.Repository != "" {
 		tools = append(append([]string{}, tools...), contextTools...)
 	}

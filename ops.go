@@ -160,6 +160,9 @@ const (
 	OpsClear     = "clear"
 	OpsEnd       = "end"
 	OpsRollback  = "rollback"
+	// OpsTerminal opens a terminal window on a host's desktop for the
+	// owner (Wcace1380): agentd terminal, once the owner said yes.
+	OpsTerminal = "terminal"
 )
 
 // The steps of a change: proposed by the agent's tool; started by the
@@ -192,9 +195,15 @@ type OpsChange struct {
 	Commit     string          `json:"commit,omitempty"`
 	Kept       string          `json:"kept,omitempty"` // a rollback's kept binary, agentd.SHA
 	Session    string          `json:"session,omitempty"`
-	Summary    string          `json:"summary"`
-	Why        string          `json:"why,omitempty"`
-	Thread     string          `json:"thread,omitempty"` // the instruction whose agent proposed it
+	// A terminal's host, target and the command it runs first, shown to
+	// the owner before the yes; By is who asked for it.
+	Host    string `json:"host,omitempty"`
+	Target  string `json:"target,omitempty"`
+	Command string `json:"command,omitempty"`
+	By      string `json:"by,omitempty"`
+	Summary string `json:"summary"`
+	Why     string `json:"why,omitempty"`
+	Thread  string `json:"thread,omitempty"` // the instruction whose agent proposed it
 	// Auto marks a restart of a supervisor that was down when it was
 	// proposed: it needs no yes, while the supervisor is still down.
 	Auto bool `json:"auto,omitempty"`

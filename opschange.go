@@ -26,6 +26,9 @@ type opsArgs struct {
 	Commit     string          `json:"commit"`
 	Binary     string          `json:"binary"`
 	Session    string          `json:"session"`
+	Host       string          `json:"host"`
+	Target     string          `json:"target"`
+	Command    string          `json:"command"`
 	Why        string          `json:"why"`
 }
 
@@ -92,6 +95,8 @@ func (o *opsEnv) propose(op string, a opsArgs) (OpsChange, error) {
 		}
 		c.Summary = fmt.Sprintf("Roll agentd back to %s: keep the installed binary, swap %s in, check every supervisor's config with it and restart them all.", c.Kept, c.Kept)
 		return c, nil
+	case OpsTerminal:
+		return proposeTerminal(o.cfg, c, a.Host, a.Target, a.Command)
 	}
 	return c, fmt.Errorf("no change %q", op)
 }
@@ -320,6 +325,8 @@ func (o *opsEnv) execute(ctx context.Context, r OpsRecord) (outcome string, self
 			return "", false, err
 		}
 		return fmt.Sprintf("ended %s on %s; its files are kept", r.Session, r.Supervisor), false, nil
+	case OpsTerminal:
+		return o.executeTerminal(r)
 	}
 	return "", false, fmt.Errorf("no change %q", r.Op)
 }

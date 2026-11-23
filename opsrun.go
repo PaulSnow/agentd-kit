@@ -44,6 +44,8 @@ type opsEnv struct {
 	wait, poll time.Duration
 	sleep      func(time.Duration)
 	now        func() time.Time
+	// terminal asks the hub for a terminal; nil asks it on its socket.
+	terminal func(socket, host string, e Errand, wait time.Duration) (ErrandDone, error)
 }
 
 // Restart waits: Ctrl-C lets a run wait StopWait for its jobs, so a

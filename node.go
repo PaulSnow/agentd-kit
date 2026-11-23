@@ -95,6 +95,9 @@ type NodeConfig struct {
 	Errands bool     `json:"errands,omitempty"`
 	Inbox   string   `json:"inbox,omitempty"`
 	Prompt  []string `json:"prompt,omitempty"`
+	// Terminal says whether, and into what, the node opens terminal
+	// windows on its desktop (Wcace1380); unset, it opens any.
+	Terminal *NodeTerminalConfig `json:"terminal,omitempty"`
 }
 
 // Hub and node defaults.
@@ -878,6 +881,8 @@ type Node struct {
 	open   func(path string) error
 	notify func(title, body string) error
 	prompt func(ctx context.Context, dir string, argv []string, timeout time.Duration) (int, string, error)
+	// term opens terminal windows (Wcace1380); nil launches for real.
+	term TerminalLauncher
 
 	known   bool          // acked is the hub's: no post since has failed
 	held    string        // the hash of the latest whole report the hub holds
@@ -1410,6 +1415,9 @@ func (c *Config) checkNodeConfig(path func(field, p string) string, errs *[]erro
 			a.TokenFile = path("node.accounts."+name+".token_file", a.TokenFile)
 		}
 		n.Accounts[name] = a
+	}
+	if err := n.Terminal.check(); err != nil {
+		*errs = append(*errs, err)
 	}
 	for _, o := range n.OpenState {
 		if !filepath.IsLocal(o) {

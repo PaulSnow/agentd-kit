@@ -30,14 +30,15 @@ const (
 	ToolOpsClear     = "ops_clear"
 	ToolOpsEnd       = "ops_end"
 	ToolOpsRollback  = "ops_rollback"
+	ToolOpsTerminal  = "open_terminal"
 )
 
 var opsTools = []string{ToolOpsStatus, ToolOpsAccounts, ToolOpsConfig, ToolOpsTail, ToolOpsEvents,
-	ToolOpsConfigSet, ToolOpsRestart, ToolOpsInstall, ToolOpsClear, ToolOpsEnd, ToolOpsRollback}
+	ToolOpsConfigSet, ToolOpsRestart, ToolOpsInstall, ToolOpsClear, ToolOpsEnd, ToolOpsRollback, ToolOpsTerminal}
 
 // opsChangeOf is the change each change tool proposes.
 var opsChangeOf = map[string]string{ToolOpsConfigSet: OpsConfigSet, ToolOpsRestart: OpsRestart, ToolOpsInstall: OpsInstall,
-	ToolOpsClear: OpsClear, ToolOpsEnd: OpsEnd, ToolOpsRollback: OpsRollback}
+	ToolOpsClear: OpsClear, ToolOpsEnd: OpsEnd, ToolOpsRollback: OpsRollback, ToolOpsTerminal: OpsTerminal}
 
 // RoleOps is the ops agent's server: the ops tools and ask_expert.
 const RoleOps = "ops"
@@ -55,7 +56,7 @@ const opsSystem = `You run agentd for its owner, on agentd's operations console,
 	`ops_config_set sets or deletes one JSON-pointer value in one supervisor's config file, keeping a timestamped backup, after the check agentd config makes, then restarts the supervisors that run that file; ` +
 	`ops_restart restarts a supervisor in its tmux session (Ctrl-C, Up, Enter); one that is down is restarted without the owner's yes; ` +
 	`ops_install builds a commit of the clone's install branch (ops.branch, main by default), keeps the running binary as agentd.SHA, swaps the new one in, checks every supervisor's config with it and restarts them all, putting the old one back on any failure; ` +
-	`ops_clear lifts a parked session's park (agentd clear); ops_end ends a session agentd started (agentd sessions end); ops_rollback swaps a kept binary back in and restarts every supervisor. ` +
+	`ops_clear lifts a parked session's park (agentd clear); ops_end ends a session agentd started (agentd sessions end); ops_rollback swaps a kept binary back in and restarts every supervisor; open_terminal opens a terminal window on a host's desktop for the owner to type in, never for you to run anything. ` +
 	`Go carries out a change only when the owner answers yes on its entry, and posts the outcome under it. ` +
 	`So never say a change was made, or will be: say you proposed it, name its entry (o:ID), and that it waits on the owner's yes. Report a change as done only when the facts show Go posted its outcome. ` +
 	`Propose only what the owner asked for or what the facts call for, one change per entry, with why. ` +

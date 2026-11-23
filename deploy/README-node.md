@@ -108,3 +108,41 @@ file to the build host's `~/agentd-inbox`. The unit needs the desktop
 session's environment (`DISPLAY`, `DBUS_SESSION_BUS_ADDRESS`) for
 `-open` and `-notify`; a desktop login imports it into the user's
 systemd manager.
+
+## PATH
+
+The unit sets `Environment=PATH=%h/.local/bin:%h/go/bin:/usr/local/bin:/usr/bin:/bin`.
+systemd's default PATH for a user service leaves out `~/.local/bin`,
+where `claude` lives, so without it `agentd prompt laptop` failed with
+`exec: claude: executable file not found in $PATH`. After copying the
+new unit:
+
+       systemctl --user daemon-reload
+       systemctl --user restart agentd-node
+
+## Terminals (Wcace1380)
+
+With `"errands": true`, the laptop's node also opens terminal windows on
+its desktop when asked. On the build host:
+
+       agentd terminal laptop buildbox
+       agentd terminal laptop local
+       agentd terminal laptop buildbox -- 'gh auth login'
+
+The first opens a window on the laptop logged into buildbox (`ssh -t
+buildbox`, run on the laptop); the second a shell on the laptop; the third
+runs the command in the buildbox shell first, then leaves it open. The
+command is never written to the hub's log. A window needs the desktop
+session's environment, which a user service does not get. Run, in the
+desktop session, once per login (an autostart entry does it):
+
+       systemctl --user import-environment DISPLAY WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS
+
+The node reads them from the user manager each time, so it needs no
+restart. Without them it answers `no graphical session` and names that
+command. To choose the emulator, or to refuse terminals or limit their
+targets, add a `terminal` block to `node.json`'s `node`:
+
+       "terminal": {"allow": true, "emulator": ["kitty"], "targets": ["buildbox", "local"]}
+
+`allow` defaults to true; `observe` does not stop terminals.

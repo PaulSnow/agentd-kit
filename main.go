@@ -126,6 +126,8 @@ func runCommand(name string, args []string) (handled bool, err error) {
 		return true, sendCmd(args, os.Stdout)
 	case "prompt":
 		return true, promptCmd(args, os.Stdout)
+	case "terminal":
+		return true, terminalCmd(args, os.Stdout)
 	case "releases":
 		return true, releasesCmd(args, os.Stdout)
 	}
@@ -202,6 +204,7 @@ const usageLines = `usage:
   agentd node [--config PATH] [--once]
   agentd send [-open] [-notify] [-wait D] [--config PATH] HOST FILE...
   agentd prompt [-dir D] [-model M] [-timeout D] [--config PATH] HOST TEXT...
+  agentd terminal [-wait D] [-from NAME] [--config PATH] HOST TARGET [-- COMMAND...]
   agentd nodes [--config PATH] [--log PATH]
   agentd version
 
