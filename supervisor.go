@@ -710,6 +710,9 @@ func (s *Supervisor) observe(name string, sess Session) (Evidence, error) {
 		if ev.DialogShape = dialogShape(screen); ev.Dialog == "" && ev.DialogShape {
 			ev.Dialog = "a question line with numbered options"
 		}
+		if ev.Dialog != "" && ev.DialogShape {
+			ev.Permission = permissionDialog(screen)
+		}
 		ev.Prompt = idlePrompt(screen)
 	}
 	if root := s.transcriptRoot(sess); root != "" {
@@ -822,10 +825,14 @@ func (s *Supervisor) logObserve(name string, t *Track, ev Evidence, state State,
 		DialogShape:     ev.Dialog != "" && ev.DialogShape,
 		Prompt:          ev.Prompt,
 		Command:         ev.Command,
+		Permission:      ev.Permission,
 		Head:            ev.Status.Head,
 	}
 	if s.confidentialMatch(ev.Status.Head) > 0 {
 		o.Head = "(withheld: matches a confidential pattern)"
+	}
+	if o.Permission != nil && s.confidentialMatch(o.Permission.texts()...) > 0 {
+		o.Permission = nil
 	}
 	if ev.Alive {
 		since := t.HashSince
@@ -1035,7 +1042,9 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 			s.escalateQuestions(name, ev.Status.Questions, t, now)
 		case ev.Dialog != "":
 			s.escalateDialog(name, ev.Dialog, ev.DialogShape, t, now)
-			s.declineDialog(name, t, ev, now)
+			if !s.answerDialog(name, t, ev, now) {
+				s.declineDialog(name, t, ev, now)
+			}
 		default:
 			s.escalate(name, fmt.Sprintf("tool-wait:%s:%d", name, t.HashSince.Unix()),
 				fmt.Sprintf("%s has shown the same screen since %s with a tool call as its last turn; it is probably waiting at a permission prompt. Attach and answer it.", name, t.HashSince.Format(time.RFC3339)), t, now)
@@ -1286,10 +1295,78 @@ func (s *Supervisor) escalateDialog(name, pattern string, shape bool, t *Track, 
 	}
 	n := dq.N + 1
 	msg := fmt.Sprintf("%s is stopped at a permission or confirmation dialog (the screen matches %q); agentd will not answer it. Attach and answer it.", name, pattern)
+	if d, ok := t.dialogDecision(); ok {
+		p := dq.Prompt
+		var keys []string
+		for _, o := range d.Options {
+			keys = append(keys, o.Key)
+		}
+		msg = fmt.Sprintf("%s wants to run %s", name, cutUTF8(p.Command, 300))
+		if p.Reason != "" {
+			msg += ": " + cutUTF8(p.Reason, 300)
+		}
+		msg += fmt.Sprintf(" (Claude Code's permission dialog: %s). agentd will not answer it itself. Answer it with agentd console reply --entry d:%s:%s --choice %s, or attach and answer it.",
+			cutUTF8(p.Tool, 60), name, d.ID, strings.Join(keys, "|"))
+	}
 	if after := s.cfg.Policies.Dialog.DeclineAfter.Duration; after > 0 && shape {
 		msg += fmt.Sprintf(" If it still shows at %s, agentd will decline it (Escape).", dq.Since.Add(after).Format(time.RFC3339))
 	}
 	s.post(name, ActEscalate, fmt.Sprintf("dialog:%s:%d", name, n), msg, t, now, settles{Dialog: n, Episode: dq.Episode})
+}
+
+// answerDialog sends the owner's choice to the permission dialog on
+// screen, once per episode, and says whether it tried (#43). It sends
+// keys only when the owner answered this episode's decision as it is
+// asked, the screen the pass read still has a dialog's shape and shows a
+// dialog asking the same, and the chosen option is found there by its
+// text: the keys move the cursor to it and confirm it. agentd never
+// chooses an option itself; without an owner answer nothing is sent.
+func (s *Supervisor) answerDialog(name string, t *Track, ev Evidence, now time.Time) bool {
+	dq := &t.Dialog
+	d, ok := t.dialogDecision()
+	if !ok || dq.Answered >= dq.Episode {
+		return false
+	}
+	a, ok := t.answerTo(d)
+	if !ok || a.Choice == "" {
+		return false
+	}
+	p := ev.Permission
+	if !ev.DialogShape || p == nil || !p.same(dq.Prompt) {
+		s.skipOnce(name, fmt.Sprintf("dialog-changed:%s:%s", name, d.ID), "the dialog on screen is not the one the owner answered; not sending the choice", t,
+			&SkipPayload{Action: ActDialog})
+		return false
+	}
+	label := ""
+	for _, o := range d.Options {
+		if o.Key == a.Choice {
+			label = o.Label
+		}
+	}
+	at := -1
+	for i, o := range p.Options {
+		if cutUTF8(o, maxOptionField) == label {
+			at = i
+		}
+	}
+	if at < 0 || p.Selected < 0 {
+		s.skipOnce(name, fmt.Sprintf("dialog-option:%s:%s", name, d.ID), fmt.Sprintf("the dialog shows no option %q; not sending the choice", cutUTF8(label, 60)), t,
+			&SkipPayload{Action: ActDialog})
+		return false
+	}
+	key, n := "Down", at-p.Selected
+	if n < 0 {
+		key, n = "Up", -n
+	}
+	var keys []string
+	for i := 0; i < n; i++ {
+		keys = append(keys, key)
+	}
+	keys = append(keys, "Enter")
+	s.typeInto(name, ActDialog, &ActPayload{Key: d.ID, Keys: keys, PaneHash: ev.PaneHash, Episode: dq.Episode}, t, ev.PaneHash, func() error {
+		return s.tmux.Keys(name, keys...)
+	})
+	return true
 }
 
 // declineDialog sends Escape, once per episode, to a dialog that has shown

@@ -148,6 +148,7 @@ const (
 	ActResume    = "resume"
 	ActTrust     = "trust"
 	ActDecline   = "decline" // Escape sent to a dialog shown past the policy's time
+	ActDialog    = "dialog"  // the owner's choice sent to a permission dialog (#43)
 	ActFetch     = "fetch"
 	ActPush      = "push"
 	ActOpen      = "open"
@@ -232,21 +233,24 @@ type ObservePayload struct {
 	Questions bool   `json:"questions"`
 	// StatusQuestions is the hash of STATUS.md's Questions section, as an
 	// answer names it, or "" when it asks nothing.
-	StatusQuestions string     `json:"status_questions,omitempty"`
-	Limited         bool       `json:"limited"`
-	Trust           bool       `json:"trust"`
-	Dialog          bool       `json:"dialog"`
-	DialogShape     bool       `json:"dialog_shape,omitempty"` // the dialog has a dialog's shape, which alone may be declined
-	Prompt          bool       `json:"prompt,omitempty"`       // the screen ends at the idle input prompt
-	Command         string     `json:"command"`
-	Head            string     `json:"head"`
-	PaneHash        string     `json:"pane_hash,omitempty"`
-	PaneSince       *time.Time `json:"pane_since,omitempty"`
-	TranscriptRole  string     `json:"transcript_role,omitempty"`
-	TranscriptStop  string     `json:"transcript_stop,omitempty"`
-	TranscriptAt    *time.Time `json:"transcript_at,omitempty"`
-	Restarts        *int       `json:"restarts,omitempty"`
-	UnchangedS      *int       `json:"unchanged_s,omitempty"`
+	StatusQuestions string `json:"status_questions,omitempty"`
+	Limited         bool   `json:"limited"`
+	Trust           bool   `json:"trust"`
+	Dialog          bool   `json:"dialog"`
+	DialogShape     bool   `json:"dialog_shape,omitempty"` // the dialog has a dialog's shape, which alone may be declined
+	Prompt          bool   `json:"prompt,omitempty"`       // the screen ends at the idle input prompt
+	// Permission is the permission dialog the screen shows, as read
+	// whole, or nil; left out when its words match a confidential pattern.
+	Permission     *PermissionPrompt `json:"permission,omitempty"`
+	Command        string            `json:"command"`
+	Head           string            `json:"head"`
+	PaneHash       string            `json:"pane_hash,omitempty"`
+	PaneSince      *time.Time        `json:"pane_since,omitempty"`
+	TranscriptRole string            `json:"transcript_role,omitempty"`
+	TranscriptStop string            `json:"transcript_stop,omitempty"`
+	TranscriptAt   *time.Time        `json:"transcript_at,omitempty"`
+	Restarts       *int              `json:"restarts,omitempty"`
+	UnchangedS     *int              `json:"unchanged_s,omitempty"`
 }
 
 // TransitionPayload is a change of state and the evidence for it.

@@ -390,6 +390,10 @@ func (st *LogState) apply(e Event) {
 			t.Dialog.Since = e.Time
 		}
 		t.Dialog.Showing = o.Dialog
+		t.Dialog.Prompt = nil
+		if o.Dialog {
+			t.Dialog.Prompt = o.Permission
+		}
 		t.StatusQuestions = o.StatusQuestions
 		if o.StatusQuestions != "" {
 			t.noteSeen(statusDecisionFor(o.StatusQuestions), e.Time)
@@ -536,7 +540,7 @@ func (st *LogState) apply(e Event) {
 				at = *e.Warning.IntentAt
 			}
 			switch a.Action {
-			case ActEscalate, ActUpdate, ActNudge, ActResume, ActTrust, ActRotate, ActDecline, ActMerge, ActRetest:
+			case ActEscalate, ActUpdate, ActNudge, ActResume, ActTrust, ActRotate, ActDecline, ActDialog, ActMerge, ActRetest:
 				t.applyAction(a, false, false, at)
 			}
 			// An answer cut short may not have reached the file: it is
@@ -672,6 +676,12 @@ func (t *Track) applyAction(a *ActPayload, taken, counted bool, at time.Time) {
 		t.Limited = false
 	case ActTrust:
 		t.TrustHash = a.PaneHash
+	case ActDialog:
+		// Once per episode, a would-be or cut-short one too: the keys
+		// sent twice could answer whatever the first left on screen.
+		if a.Episode > t.Dialog.Answered {
+			t.Dialog.Answered = a.Episode
+		}
 	case ActDecline:
 		// Once per episode, a would-be or cut-short one too: Escape twice
 		// could reach whatever the first left on screen.

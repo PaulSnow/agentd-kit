@@ -25,11 +25,12 @@ type Evidence struct {
 	PaneHash    string
 	Limited     bool
 	TrustPrompt bool
-	TrustMenu   *TrustMenu // the trust prompt's menu, when it shows a whole one
-	PanePath    string     // where the live pane runs, #{pane_current_path}
-	Dialog      string     // the dialog pattern the visible screen matches, or ""
-	DialogShape bool       // the visible screen has a dialog's shape, which alone may be declined
-	Prompt      bool       // the screen ends at Claude Code's input prompt, with no turn running
+	TrustMenu   *TrustMenu        // the trust prompt's menu, when it shows a whole one
+	PanePath    string            // where the live pane runs, #{pane_current_path}
+	Dialog      string            // the dialog pattern the visible screen matches, or ""
+	DialogShape bool              // the visible screen has a dialog's shape, which alone may be declined
+	Permission  *PermissionPrompt // the permission dialog the visible screen shows, read whole, or nil
+	Prompt      bool              // the screen ends at Claude Code's input prompt, with no turn running
 	Status      StatusEvidence
 	// StatusQuestions is the hash of STATUS.md's own Questions section;
 	// Status.Questions is what still waits on the owner once the answers
@@ -546,4 +547,144 @@ func lastTurn(path string) TranscriptEvidence {
 		return TranscriptEvidence{Found: true, Role: line.Type, StopReason: line.Message.StopReason, At: at}
 	}
 	return TranscriptEvidence{}
+}
+
+// PermissionPrompt is Claude Code's permission dialog as the screen shows
+// it (#43): the tool it is for ("Bash command"), the command or path, the
+// reason it asks (in auto mode the rule or block that sent it to the
+// owner; on an older screen the tool's own description) and its options'
+// text in order. Selected is the option under the cursor, read from the
+// screen and never logged.
+type PermissionPrompt struct {
+	Tool     string   `json:"tool"`
+	Command  string   `json:"command"`
+	Reason   string   `json:"reason,omitempty"`
+	Options  []string `json:"options"`
+	Selected int      `json:"-"`
+}
+
+// same says whether two prompts ask the same: tool, command, reason and
+// options, wherever the cursor is.
+func (p *PermissionPrompt) same(q *PermissionPrompt) bool {
+	if p == nil || q == nil {
+		return p == q
+	}
+	if p.Tool != q.Tool || p.Command != q.Command || p.Reason != q.Reason || len(p.Options) != len(q.Options) {
+		return false
+	}
+	for i := range p.Options {
+		if p.Options[i] != q.Options[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// toolName is what the dialog asks to use, as a question names it.
+func (p *PermissionPrompt) toolName() string {
+	if p.Tool == "" {
+		return "command"
+	}
+	return strings.ToLower(p.Tool[:1]) + p.Tool[1:]
+}
+
+// texts are the prompt's words, for screening.
+func (p *PermissionPrompt) texts() []string {
+	return append([]string{p.Tool, p.Command, p.Reason}, p.Options...)
+}
+
+var (
+	// dialogRule is the rule a dialog's frame starts at, drawn across the
+	// screen or as a box's top; dialogSeparator the dashed rules a
+	// command sits between on Claude Code's screen since auto mode.
+	dialogRule      = regexp.MustCompile(`^[╭┌]?[─━═]{3,}[╮┐]?$`)
+	dialogBottom    = regexp.MustCompile(`^[╰└]?[─━═]{3,}[╯┘]?$`)
+	dialogSeparator = regexp.MustCompile(`^[╌┄┈]{3,}$`)
+	dialogNumbered  = regexp.MustCompile(`^([❯›>]\s*)?(\d)\.\s+(\S.*)$`)
+)
+
+// permissionDialog reads the permission dialog the screen ends with, or
+// nil when it shows none whole: the last question line followed by options
+// numbered from 1, one under the cursor, and above the question, up to
+// the rule the dialog's frame starts at, the tool's title and its command.
+// The command is the text between the two dashed rules when the screen
+// has them (auto mode's screen, testdata/screens/automode-ask-dialog.txt)
+// and the reason the text after them; on a screen without them the line
+// below the title is the command and what follows it the reason.
+func permissionDialog(screen string) *PermissionPrompt {
+	lines := strings.Split(screen, "\n")
+	for i := range lines {
+		lines[i] = strings.Trim(lines[i], " \t│┃|")
+	}
+	q := -1
+	for i, line := range lines {
+		if !strings.HasSuffix(line, "?") || strings.HasPrefix(line, ">") || strings.HasPrefix(line, "⏺") || strings.HasPrefix(line, "●") {
+			continue
+		}
+		if i+1 < len(lines) {
+			if m := dialogNumbered.FindStringSubmatch(lines[i+1]); m != nil && m[2] == "1" {
+				q = i
+			}
+		}
+	}
+	if q < 0 {
+		return nil
+	}
+	p := &PermissionPrompt{Selected: -1}
+	for _, line := range lines[q+1:] {
+		m := dialogNumbered.FindStringSubmatch(line)
+		switch {
+		case m != nil && m[2] == fmt.Sprint(len(p.Options)+1):
+			if m[1] != "" {
+				p.Selected = len(p.Options)
+			}
+			p.Options = append(p.Options, m[3])
+			continue
+		case m == nil && line != "" && len(p.Options) > 0 && !dialogBottom.MatchString(line) && !strings.Contains(line, "Esc to cancel"):
+			// An option too long for the screen wraps onto the next line.
+			p.Options[len(p.Options)-1] += " " + line
+			continue
+		}
+		break
+	}
+	if len(p.Options) < 2 || p.Selected < 0 || len(p.Options) > 9 {
+		return nil
+	}
+	top := -1
+	for i := q - 1; i >= 0; i-- {
+		if dialogRule.MatchString(lines[i]) {
+			top = i
+			break
+		}
+	}
+	if top < 0 {
+		return nil
+	}
+	var body []string
+	var seps []int
+	for _, line := range lines[top+1 : q] {
+		switch {
+		case line == "", strings.HasPrefix(line, "/permissions"):
+			// Blank, or Claude Code's hint at its own settings.
+		case dialogSeparator.MatchString(line):
+			seps = append(seps, len(body))
+		default:
+			body = append(body, line)
+		}
+	}
+	if len(body) < 2 {
+		return nil
+	}
+	p.Tool = body[0]
+	if len(seps) >= 2 && seps[0] >= 1 && seps[1] > seps[0] {
+		p.Command = strings.Join(body[seps[0]:seps[1]], "\n")
+		p.Reason = strings.Join(body[seps[1]:], " ")
+	} else {
+		p.Command = body[1]
+		p.Reason = strings.Join(body[2:], " ")
+	}
+	if p.Command == "" {
+		return nil
+	}
+	return p
 }

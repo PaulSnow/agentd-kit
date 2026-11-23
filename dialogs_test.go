@@ -302,3 +302,158 @@ func TestDialogDeclineAfterValidated(t *testing.T) {
 		t.Fatalf("err = %v, want one naming decline_after", err)
 	}
 }
+
+// The permission dialog is read from the screen: auto mode's, with the
+// command between dashed rules and the reason after them, and the older
+// boxed one; a screen with no dialog reads as none (#43).
+func TestPermissionDialogParsed(t *testing.T) {
+	p := permissionDialog(screen(t, "automode-ask-dialog.txt", 0))
+	if p == nil || p.Tool != "Bash command" || p.Command != "git push origin HEAD:refs/heads/scratch-test" ||
+		p.Reason != "Rule Bash(git push *) from shared project settings overrides auto mode." ||
+		strings.Join(p.Options, "|") != "Yes|No" || p.Selected != 0 {
+		t.Fatalf("auto-mode dialog = %+v", p)
+	}
+	p = permissionDialog(screen(t, "subagent-dialog.txt", 3))
+	if p == nil || p.Command != "rm -rf scratch/review/*" || p.Reason != "Remove the review scratch files" ||
+		len(p.Options) != 2 || p.Options[1] != "No, and tell Claude what to do differently (esc)" {
+		t.Fatalf("boxed dialog = %+v", p)
+	}
+	for _, f := range []string{"automode-start.txt", "subagent-working.txt"} {
+		if p := permissionDialog(screen(t, f, 1)); p != nil {
+			t.Errorf("%s: read a dialog %+v from a screen without one", f, p)
+		}
+	}
+	if p := permissionDialog("> Do you want to proceed?\n❯ 1. Yes\n  2. No\n"); p != nil {
+		t.Errorf("read a dialog with no frame: %+v", p)
+	}
+	d := dialogDecisionFor(2, permissionDialog(screen(t, "subagent-dialog.txt", 0)))
+	if d.Type != DecisionChooseOne || !d.Blocking || len(d.Options) != 2 || d.Options[0].Key != "yes" ||
+		d.Options[1].Key != "no-and-tell-claude-what-to-do-di" || !strings.HasPrefix(d.ID, "dialog-2-") || !decisionID.MatchString(d.ID) {
+		t.Fatalf("decision = %+v", d)
+	}
+}
+
+// replyEntry answers an entry as agentd console reply --entry does.
+func (h *harness) replyEntry(entry, choice string) error {
+	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	src.now = h.clock.Now
+	repo := entryRepository(h.cfg, h.logState(), entry)
+	return src.respond(repo, entry, "", "", &AnswerPayload{Choice: choice}, nil)
+}
+
+// dialogEntry is the open dialog decision of name, as the console lists it.
+func dialogEntry(t *testing.T, h *harness, name string) Decision {
+	t.Helper()
+	for _, d := range h.sup.track(name).open() {
+		if strings.HasPrefix(d.ID, dialogDecision) {
+			return d
+		}
+	}
+	t.Fatalf("%s has no open dialog decision: %+v", name, h.sup.track(name).open())
+	return Decision{}
+}
+
+// A session at auto mode's permission dialog waits on the owner, never
+// idle; its escalation names the command and the reason; it has an open
+// d:SESSION:ID decision; and the owner's choice from the console is sent
+// to the dialog once, as keys that select that option by its text (#43).
+func TestAutoModeDialogAnsweredFromConsole(t *testing.T) {
+	for _, c := range []struct {
+		choice string
+		keys   string
+	}{{"yes", "Enter"}, {"no", "Down Enter"}} {
+		h := newHarness(t, false, "s1")
+		h.status("s1", working)
+		h.alive("s1", "starting")
+		h.ticks(1, 5*time.Minute)
+		h.tmux.panes["s1"] = screen(t, "automode-ask-dialog.txt", 0)
+		h.ticks(12, 5*time.Minute) // an hour
+		if h.state("s1") != BlockedOnOwner {
+			t.Fatalf("state = %s, want blocked-on-owner", h.state("s1"))
+		}
+		if h.count(KindAction, ActNudge, "s1") != 0 || len(keysSent(h, "s1")) != 0 || typed(h, "s1") != 0 {
+			t.Fatalf("nudged or typed into a dialog nobody answered: keys %v", keysSent(h, "s1"))
+		}
+		if len(h.runner.calls) != 1 {
+			t.Fatalf("escalations = %v, want one", h.runner.calls)
+		}
+		msg := h.runner.calls[0][4]
+		d := dialogEntry(t, h, "s1")
+		for _, want := range []string{"s1 wants to run git push origin HEAD:refs/heads/scratch-test", "Rule Bash(git push *) from shared project settings overrides auto mode.",
+			"agentd console reply --entry d:s1:" + d.ID + " --choice yes|no"} {
+			if !strings.Contains(msg, want) {
+				t.Fatalf("escalation %q lacks %q", msg, want)
+			}
+		}
+		if err := h.replyEntry("d:s1:"+d.ID, c.choice); err != nil {
+			t.Fatal(err)
+		}
+		h.ticks(4, 5*time.Minute) // the dialog still shows: the keys are not sent again
+		got := keysSent(h, "s1")
+		if len(got) != 1 || strings.Join(got[0], " ") != c.keys {
+			t.Fatalf("%s: keys = %v, want once %q", c.choice, got, c.keys)
+		}
+		if h.count(KindAction, ActDialog, "s1") != 1 {
+			t.Fatalf("dialog answers = %d, want 1", h.count(KindAction, ActDialog, "s1"))
+		}
+		if a, _ := readAnswers(t, h, "s1"); len(a.Answers) != 0 {
+			t.Fatalf("the dialog's answer went to answers.json: %+v", a)
+		}
+		sameAfterReplay(t, h, "after a dialog answer")
+		h.restart(false)
+		h.ticks(2, 5*time.Minute)
+		if got := keysSent(h, "s1"); len(got) != 1 {
+			t.Fatalf("keys = %v after a restart of agentd, want the one answer", got)
+		}
+	}
+}
+
+// The owner's answer is sent only to the dialog it answered: once the
+// screen shows another command, or no dialog, nothing is sent, and a
+// decision of a dialog gone cannot be answered.
+func TestDialogAnswerOnlyToTheSameDialog(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.status("s1", working)
+	h.alive("s1", screen(t, "automode-ask-dialog.txt", 0))
+	h.ticks(2, 5*time.Minute)
+	d := dialogEntry(t, h, "s1")
+	other := strings.ReplaceAll(screen(t, "automode-ask-dialog.txt", 0), "scratch-test", "main")
+	h.tmux.panes["s1"] = other
+	h.ticks(1, 5*time.Minute)
+	if err := h.replyEntry("d:s1:"+d.ID, "yes"); err == nil {
+		t.Fatal("answered the decision of a dialog no longer on screen")
+	}
+	// Answered, then the command on screen changes before the next pass.
+	h.tmux.panes["s1"] = screen(t, "automode-ask-dialog.txt", 0)
+	h.ticks(1, 5*time.Minute)
+	d = dialogEntry(t, h, "s1")
+	if err := h.replyEntry("d:s1:"+d.ID, "yes"); err != nil {
+		t.Fatal(err)
+	}
+	h.tmux.panes["s1"] = other
+	h.ticks(3, 5*time.Minute)
+	h.tmux.panes["s1"] = "busy"
+	h.ticks(1, 5*time.Minute)
+	if got := keysSent(h, "s1"); len(got) != 0 {
+		t.Fatalf("keys = %v sent to a dialog the owner did not answer", got)
+	}
+}
+
+// agentd never sends an accepting key without an owner answer: with the
+// decline policy on, the only key a permission dialog ever gets is Escape.
+func TestNoAcceptingKeyWithoutOwner(t *testing.T) {
+	h := newHarness(t, false, "s1")
+	h.cfg.Policies.Dialog.DeclineAfter = Duration{20 * time.Minute}
+	h.restart(false)
+	h.status("s1", working)
+	h.alive("s1", screen(t, "automode-ask-dialog.txt", 0))
+	h.ticks(30, 5*time.Minute)
+	for _, keys := range keysSent(h, "s1") {
+		if len(keys) != 1 || keys[0] != "Escape" {
+			t.Fatalf("keys %v sent with no owner answer", keys)
+		}
+	}
+	if h.count(KindAction, ActDialog, "s1") != 0 || h.count(KindAction, ActDecline, "s1") != 1 {
+		t.Fatalf("answers = %d, declines = %d", h.count(KindAction, ActDialog, "s1"), h.count(KindAction, ActDecline, "s1"))
+	}
+}

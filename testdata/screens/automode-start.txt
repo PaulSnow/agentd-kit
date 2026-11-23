@@ -1,0 +1,72 @@
+
+ ▐▛███▛█   Claude Code v2.1.330
+▝▜██████▀  Opus 5.5 · Claude Ultra
+ ▝▝   ▝▝   ~/scratch/proj · /rc
+
+  Updated: 7 features, 91 fixes, 32 other changes
+  code.claude.com/docs/en/changelog for details
+
+
+● Auto mode lets Claude handle permission prompts automatically — Claude checks each tool call for risky actions and prompt injection before
+  executing. Actions Claude identifies as safe are executed, while actions Claude identifies as risky are blocked and Claude may try a different
+  approach. Ideal for long-running tasks. Claude can make mistakes that allow harmful commands to run, it's recommended to only use in isolated
+  environments. Shift+Tab to change mode.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                                                       ◐ medium · /effort
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Try "refactor <filepath>"
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ~/scratch/proj
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents

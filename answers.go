@@ -69,6 +69,11 @@ const (
 // again.
 const statusDecision = "status-"
 
+// dialogDecision is the id prefix of the decision a permission dialog on
+// screen stands for (#43): the prefix, the dialog episode and the hash of
+// what it asks, so an answer is to that dialog only.
+const dialogDecision = "dialog-"
+
 // raisedID is the form of the ids agentd gives the decisions a session
 // raises through its tools, D1 on, ciRaisedID those agentd raises itself
 // on a repeated CI failure, C1 on, and directiveID that of the owner's
@@ -199,7 +204,7 @@ func checkDecisions(ds []Decision) error {
 	seen := map[string]bool{}
 	for _, d := range ds {
 		switch {
-		case !decisionID.MatchString(d.ID) || strings.HasPrefix(d.ID, statusDecision) || raisedID.MatchString(d.ID) || directiveID.MatchString(d.ID) || ciRaisedID.MatchString(d.ID):
+		case !decisionID.MatchString(d.ID) || strings.HasPrefix(d.ID, statusDecision) || strings.HasPrefix(d.ID, dialogDecision) || raisedID.MatchString(d.ID) || directiveID.MatchString(d.ID) || ciRaisedID.MatchString(d.ID):
 			return fmt.Errorf("decision id %q: use up to 32 letters, digits, - or _, not starting with %q, and not C, D or R and a number, which agentd gives", cutUTF8(d.ID, 40), statusDecision)
 		case seen[d.ID]:
 			return fmt.Errorf("decision %s is raised twice", d.ID)
@@ -533,6 +538,67 @@ func statusDecisionFor(hash string) Decision {
 	return Decision{ID: statusDecision + hash, Type: DecisionText, Question: "the Questions in STATUS.md", Blocking: true}
 }
 
+// dialogDecisionFor is the choose_one decision the permission dialog p of
+// dialog episode stands for: its options are the dialog's, by their text,
+// and its question holds the command and the reason (#43). The owner's
+// choice is sent to the dialog by Supervisor.answerDialog.
+func dialogDecisionFor(episode int, p *PermissionPrompt) Decision {
+	b, _ := json.Marshal(p)
+	d := Decision{
+		ID:       fmt.Sprintf("%s%d-%s", dialogDecision, episode, shortHash(HashPane(string(b)))[:8]),
+		Type:     DecisionChooseOne,
+		Question: fmt.Sprintf("Claude Code asks to run this %s: %s", p.toolName(), cutUTF8(p.Command, maxOptionField)),
+		Context:  cutUTF8(p.Reason, maxOptionField),
+		Why:      "the session is stopped at Claude Code's permission dialog until it is answered",
+		IfWrong:  "a yes lets the session run the command; a no refuses it, and the session goes on without it",
+		Blocking: true,
+	}
+	seen := map[string]bool{}
+	for i, o := range p.Options {
+		key := optionKey(o)
+		if key == "" || seen[key] {
+			key = fmt.Sprintf("option-%d", i+1)
+		}
+		seen[key] = true
+		d.Options = append(d.Options, DecisionOption{Key: key, Label: cutUTF8(o, maxOptionField)})
+	}
+	return d
+}
+
+// optionKey is a dialog option's text as a key: lower case, words joined
+// by -, at most 32 bytes.
+func optionKey(text string) string {
+	var b strings.Builder
+	dash := false
+	for _, r := range strings.ToLower(text) {
+		switch {
+		case r >= 'a' && r <= 'z' || r >= '0' && r <= '9':
+			if dash && b.Len() > 0 {
+				b.WriteByte('-')
+			}
+			b.WriteRune(r)
+			dash = false
+		case r == '\'' || r == '’':
+		default:
+			dash = true
+		}
+	}
+	key := b.String()
+	if len(key) > 32 {
+		key = strings.TrimRight(key[:32], "-")
+	}
+	return key
+}
+
+// dialogDecision is the decision for the permission dialog the session
+// shows, while one shows whole.
+func (t *Track) dialogDecision() (Decision, bool) {
+	if !t.Dialog.Showing || t.Dialog.Prompt == nil {
+		return Decision{}, false
+	}
+	return dialogDecisionFor(t.Dialog.Episode, t.Dialog.Prompt), true
+}
+
 // decisionHash identifies a decision as it was raised, every field of it,
 // so an answer is to that question only.
 func decisionHash(d Decision) string {
@@ -577,6 +643,9 @@ func (t *Track) decision(id string) (Decision, bool) {
 	if t.StatusQuestions != "" && id == statusDecision+t.StatusQuestions {
 		return statusDecisionFor(t.StatusQuestions), true
 	}
+	if d, ok := t.dialogDecision(); ok && d.ID == id {
+		return d, true
+	}
 	for _, d := range t.Decisions {
 		if d.ID == id {
 			return d, true
@@ -591,9 +660,14 @@ func (t *Track) decision(id string) (Decision, bool) {
 }
 
 // open is every decision the session has open: those of questions.json,
-// then those it raised through its tools.
+// then those it raised through its tools, then the permission dialog it
+// shows.
 func (t *Track) open() []Decision {
-	return append(t.Decisions[:len(t.Decisions):len(t.Decisions)], t.Raised...)
+	out := append(t.Decisions[:len(t.Decisions):len(t.Decisions)], t.Raised...)
+	if d, ok := t.dialogDecision(); ok {
+		out = append(out, d)
+	}
+	return out
 }
 
 // answer is the owner's answer to the open decision id, when it was given
@@ -629,7 +703,8 @@ func (t *Track) answersFor(undelivered bool) []AnswerPayload {
 		a, ok := t.answer(id)
 		// agentd's own CI decisions are agentd's to act on, not the
 		// session's to read.
-		if !ok || undelivered && a.Delivered || ciRaisedID.MatchString(id) {
+		// Nor is a dialog's: its answer is keys sent to the dialog.
+		if !ok || undelivered && a.Delivered || ciRaisedID.MatchString(id) || strings.HasPrefix(id, dialogDecision) {
 			continue
 		}
 		p := a.AnswerPayload
@@ -660,7 +735,8 @@ func (t *Track) openQuestions(status, statusHash string) string {
 		parts = append(parts, status)
 	}
 	for _, d := range t.open() {
-		if d.Blocking && t.waits(d) {
+		// A dialog's decision is in the dialog's escalation.
+		if d.Blocking && t.waits(d) && !strings.HasPrefix(d.ID, dialogDecision) {
 			parts = append(parts, fmt.Sprintf("%s (%s): %s Recommended: %s", d.ID, d.Type, d.Question, d.Recommendation))
 		}
 	}
