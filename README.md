@@ -251,6 +251,27 @@ Issues carry their own context:
 
 Every call is a `query` event with its size. `agentd context stats REPO [--since 24h]` reports how many questions state answered alone (no history call by the same agent within five minutes), the history calls by reason, and the curators' and the expert's tokens. `agentd context card REPO [TOPIC]` prints a card.
 
+## Calendar check (#101)
+
+A session, a console thread's agent, the ops agent or the owner can look something up in the owner's personal calendar, read-only. The **directive** is free text, such as `what do I have tomorrow afternoon`, `is Thursday 2pm free` or `when is my next dentist appointment`. The **reply** is JSON:
+
+```json
+{"text": "Thursday 2pm is taken.",
+ "events": [{"title": "…", "start": "2026-11-19T14:00:00-06:00", "end": "2026-11-19T15:00:00-06:00",
+             "all_day": false, "location": "", "calendar": "Personal", "free_busy": "busy"}],
+ "answered": true}
+```
+
+`text` answers the directive in at most 150 words. `events` lists the events that answer it, at most 100. Each has `start` and `end` in RFC 3339, or as `YYYY-MM-DD` with `all_day` true, and `free_busy` one of `busy`, `free`, `tentative` or `unknown`. `answered` is false, with `text` saying why, when the calendar could not be read or the directive was not a question about it. Go reads the reply strictly: a field the schema lacks, an empty text, an unreadable time or an end before its start is an error, not an answer.
+
+- **CLI:** `agentd calendar [--config PATH] [--log PATH] [--json] PROMPT...` prints the text and one line per event, or, with `--json`, the reply.
+- **MCP tool:** `calendar_check(prompt)` is offered to every session with a repository, to a console thread's agent (`agentd mcp --repository`) and to the ops agent (`agentd mcp --ops`), only while the check is on. The headless agents are allowed it then too. The owner's and the ops consoles reach the check through their agents. The tool's description says the answer is for the caller alone and must never go into an issue, request, commit, comment or anything else it publishes. A session of a repository marked `"public": true` is refused the tool, and nothing is called.
+- **Config:** `jobs.calendar`: `enabled` (off by default), `account` (default `personal`), `model` (default `sonnet`) and `timeout` (default `2m`). Validation refuses an account that is not in `accounts` or is marked `"shared": true`.
+
+It is one job, run as the other jobs are: stripped setup, its own timeout, and `ANTHROPIC_API_KEY`, `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT` removed. It runs under `jobs.calendar.account`'s config directory and token, whatever account the caller runs on, so the claude.ai Google Calendar connector is that login's own. It has no built-in tools. Its `--allowedTools` are the connector's read tools alone, and the connector's write tools (create, change, delete an event, answer an invitation) are in `--disallowedTools` by name, so it can only read. Its system prompt treats the directive as data and resolves relative dates against the `now` and time zone Go gives it. A check refuses to run while the connector's read tools are not known.
+
+The answer is the owner's private data. Its text and every event field are screened against the confidential patterns, and a reply that matches is withheld whole: its text names the pattern and it lists no events. The event log holds one `calendar` event per check: the caller, the account, how long it took in milliseconds and the outcome (`ok`, `withheld`, `failed` or `refused`). It never holds the directive, the reply, an error's words or any event detail, and no `query` event is written for the tool.
+
 ## Scheduled jobs
 
 `jobs.scheduled` lists commands `agentd` runs on a schedule (#51), so agent work that ran from an outside cron, under one fixed login and unseen, is supervised like the rest:

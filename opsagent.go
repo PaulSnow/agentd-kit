@@ -174,9 +174,9 @@ func (x opsInput) fit(max int) ([]byte, error) {
 
 // opsAllowed is the ops agent's --allowedTools: its server's tools, and
 // Read under the clone.
-func opsAllowed(clone string) string {
+func opsAllowed(cfg *Config, clone string) string {
 	var out []string
-	for _, t := range append(append([]string{}, opsTools...), ToolAskExpert) {
+	for _, t := range append(append(append([]string{}, opsTools...), ToolAskExpert), calendarAllowed(cfg)...) {
 		out = append(out, "mcp__agentd__"+t)
 	}
 	return strings.Join(out, ",") + "," + strings.TrimPrefix(agentAllowed(clone), strings.Join(agentTools, ",")+",")
@@ -243,7 +243,7 @@ func (s *Supervisor) startOpsThread(in *Instruction, clone string) {
 			var raw json.RawMessage
 			var usage JobUsage
 			var ran []TurnPayload
-			raw, usage, ran, err = job.RunAgent(w.runCtx, opsSystem, opsSchema(), input, clone, mcp, opsAllowed(clone))
+			raw, usage, ran, err = job.RunAgent(w.runCtx, opsSystem, opsSchema(), input, clone, mcp, opsAllowed(w.cfg, clone))
 			p.Usage, p.Activity = &usage, ran
 			if err == nil {
 				err = w.checkOpsAnswer(raw, p)

@@ -608,7 +608,7 @@ func (srv *MCPServer) handle(req rpcRequest) (any, *rpcError) {
 	case "tools/list":
 		var tools []MCPTool
 		for _, name := range srv.tools() {
-			for _, t := range append(append(toolList(), contextToolList()...), opsToolList()...) {
+			for _, t := range append(append(append(toolList(), contextToolList()...), opsToolList()...), calendarToolList()...) {
 				if t.Name == name {
 					tools = append(tools, t)
 				}
@@ -642,6 +642,9 @@ func (srv *MCPServer) handle(req rpcRequest) (any, *rpcError) {
 // call checks and records one tool call. It returns the reply, compact
 // JSON, and whether the call was refused.
 func (srv *MCPServer) call(tool string, args json.RawMessage) (string, bool) {
+	if tool == ToolCalendar {
+		return srv.calendarCall(args)
+	}
 	if contains(contextTools, tool) {
 		return srv.contextCall(tool, args)
 	}
