@@ -29,6 +29,7 @@ const (
 	DigestWork     = "work"     // a work item's question, or its claim of done
 	DigestRequest  = "request"  // a request the loop waits on the owner for
 	DigestOps      = "ops"      // a change proposed on the ops console
+	DigestJanitor  = "janitor"  // a janitor's proposal
 )
 
 // digestDefaultKinds are the kinds a default deadline may be set on: the
@@ -125,6 +126,8 @@ func digestKind(n repoNeed) string {
 		return DigestWork
 	case strings.HasPrefix(e, entryOps):
 		return DigestOps
+	case strings.HasPrefix(e, entryJanitor):
+		return DigestJanitor
 	case strings.HasPrefix(e, entryDecision):
 		return DigestDecision
 	}
@@ -237,6 +240,10 @@ func needSince(st *LogState, repo string, n repoNeed) time.Time {
 		}
 	case strings.HasPrefix(e, entryOps):
 		if r := st.Ops[strings.TrimPrefix(e, entryOps)]; r != nil {
+			return r.Proposed
+		}
+	case strings.HasPrefix(e, entryJanitor):
+		if r := st.Janitor[strings.TrimPrefix(e, entryJanitor)]; r != nil {
 			return r.Proposed
 		}
 	case strings.HasPrefix(e, entryLoop):

@@ -459,6 +459,12 @@ func (s *Supervisor) routeInstructions(now time.Time) {
 		if !in.Route || !in.Delivered.IsZero() || !in.Replied.IsZero() || in.Failed != "" || in.Session != "" && s.takesInstructions(in.Session) && !s.stranded(in) {
 			continue
 		}
+		if s.routeJanitor(in) {
+			if s.halt != nil {
+				return
+			}
+			continue
+		}
 		// A response on a work item's entry is the item's (#66), and one
 		// on its design's the design's (#68).
 		if s.routeWork(in) || s.routeDesign(in) {

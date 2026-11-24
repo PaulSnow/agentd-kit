@@ -1472,6 +1472,12 @@ func (s *Supervisor) issueForWork(id, repo string, w *ThreadWork) {
 // touches it, so one inside a longer name is not named; the public forge
 // is told neither.
 func (s *Supervisor) namedInTitle(repo, title string) string {
+	return nameIn(s.privateNames(repo), title)
+}
+
+// privateNames are the sessions and other repositories a text for repo's
+// forge may not name, sorted.
+func (s *Supervisor) privateNames(repo string) []string {
 	var names []string
 	for n := range s.cfg.Sessions {
 		names = append(names, n)
@@ -1485,8 +1491,13 @@ func (s *Supervisor) namedInTitle(repo, title string) string {
 		}
 	}
 	sort.Strings(names)
+	return names
+}
+
+// nameIn is the first of names that text holds as a whole word, or "".
+func nameIn(names []string, text string) string {
 	for _, n := range names {
-		if n != "" && regexp.MustCompile(`(?i)(^|[^\w-])`+regexp.QuoteMeta(n)+`($|[^\w-])`).MatchString(title) {
+		if n != "" && regexp.MustCompile(`(?i)(^|[^\w-])`+regexp.QuoteMeta(n)+`($|[^\w-])`).MatchString(text) {
 			return n
 		}
 	}

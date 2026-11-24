@@ -1288,6 +1288,12 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 				v.Entries = append(v.Entries, uiEntry{uiMessageView: uiMessageView{uiMessage: uiMessage{At: de.At, Kind: "decision", From: "designer",
 					Entry: entryDesign + de.ID}, Src: src.Name}, Decision: &de.uiDecisionEntry, Open: de.open})
 			}
+			// The janitor's proposals, each an approve or reject (#111).
+			for _, je := range src.janitorEntries(cfg, repo, secret) {
+				je := je
+				v.Entries = append(v.Entries, uiEntry{uiMessageView: uiMessageView{uiMessage: uiMessage{At: je.At, Kind: "decision", From: "janitor",
+					Entry: entryJanitor + je.ID}, Src: src.Name}, Decision: &je.uiDecisionEntry, Open: je.open})
+			}
 			// What the owner can do with a message whose route failed (#65).
 			for _, ne := range src.nextEntries(cfg, repo, secret, now) {
 				ne := ne

@@ -516,6 +516,8 @@ func (g *fakeGit) Messages(string, string) (string, error) {
 // fails, as a forge whose reply could not be read would.
 type fakeForge struct {
 	mu             sync.Mutex
+	closed         []string // each issue or request closed
+	rebased        []string // each request rebased
 	comments       []string // ref, a space, then the body of each comment posted
 	commentErr     error
 	issues         []string // the title, a newline, then the body of each issue opened
@@ -583,6 +585,20 @@ func (f *fakeForge) OpenIssue(repo Repository, title, body string) (int, error) 
 		return 0, f.issueErr
 	}
 	return 100 + len(f.issues), nil
+}
+
+func (f *fakeForge) Close(repo Repository, ref string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closed = append(f.closed, ref)
+	return nil
+}
+
+func (f *fakeForge) Rebase(repo Repository, ref string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rebased = append(f.rebased, ref)
+	return nil
 }
 
 func (f *fakeForge) Retest(repo Repository, ref string) error {

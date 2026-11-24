@@ -72,6 +72,10 @@ type LogState struct {
 	// Loops are the steps agentd took in each request's loop, by ciKey
 	// (#53).
 	Loops map[string]LoopRecord
+	// Janitor are the janitor's proposals by id, and JanitorRuns its runs
+	// by repository (#111).
+	Janitor     map[string]*JanitorRecord
+	JanitorRuns map[string]*JanitorState
 	// Commented are the thread outcomes agentd posted on issues, by key
 	// (#60), so none is posted twice.
 	Commented map[string]time.Time
@@ -223,6 +227,10 @@ func (st *LogState) apply(e Event) {
 	}
 	if e.Kind == KindCalendar {
 		return // a check that ran (#101): nothing the run acts on
+	}
+	if e.Kind == KindJanitor {
+		st.applyJanitor(e)
+		return
 	}
 	if e.Kind == KindRoute {
 		st.applyRoute(e)

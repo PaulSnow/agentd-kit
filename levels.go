@@ -586,6 +586,7 @@ func repoNeeds(cfg *Config, st *LogState, repo string, decisions []UIDecision, n
 			out = append(out, repoNeed{LevelDecision: ld, Issue: number(it.Issue)})
 		}
 	}
+	out = append(out, janitorNeeds(st, repo)...)
 	seen := map[string]bool{}
 	for _, d := range decisions {
 		if d.Repository == repo {

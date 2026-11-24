@@ -82,6 +82,9 @@ type JobsConfig struct {
 	// on Model when set (#69).
 	Sentences SentencesConfig `json:"sentences"`
 
+	// Janitor is the daily cleanup proposals (#111, janitor.go).
+	Janitor JanitorConfig `json:"janitor"`
+
 	// Calendar is the calendar check's call (#101, calendar.go).
 	Calendar CalendarConfig `json:"calendar"`
 }
