@@ -89,7 +89,7 @@ func TestThreadAgentAnswers(t *testing.T) {
 	}
 	// A follow-up to the agent's answer: a new agent, given the thread.
 	claudeAnswers(t, dir, 2, agentOut("The docs wait on the squeak.", ""))
-	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	src := newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
 	if err := src.respond("widgets", entryInstruction+in.ID, "", "And the docs?", nil, nil); err != nil {
 		t.Fatal(err)
 	}

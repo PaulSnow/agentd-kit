@@ -609,8 +609,8 @@ func TestIssueForWorkScreensNames(t *testing.T) {
 	h.cfg.Repositories["widgets"] = r
 	h.cfg.Repositories["gadgets"] = Repository{Forge: "github", Project: "example-org/gadgets"}
 	h.restart(false)
-	h.sup.st.Runtime["night-owl"] = RuntimePayload{ID: "night-owl", Repository: "widgets"}
-	for i, title := range []string{"Ask S about it", "Port the GADGETS styles", "Hand it to night-owl."} {
+	h.sup.st.Runtime["owl-1"] = RuntimePayload{ID: "owl-1", Repository: "widgets"}
+	for i, title := range []string{"Ask S about it", "Port the GADGETS styles", "Hand it to owl-1."} {
 		w := ThreadWork{Title: title}
 		h.sup.issueForWork(fmt.Sprintf("r%d", i), "widgets", &w)
 		if w.Issue != 0 {

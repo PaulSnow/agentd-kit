@@ -33,7 +33,7 @@ func TestModelReachesTheCommandPerKind(t *testing.T) {
 	started := func(kind, repo string) Session {
 		r := h.cfg.Repositories[repo]
 		r.Sessions = &SessionsPolicy{Root: h.dir}
-		return runtimeSession("x", RuntimePayload{Repository: repo, Kind: kind, Branch: "night/1-x"}, r)
+		return runtimeSession("x", RuntimePayload{Repository: repo, Kind: kind, Branch: "owner/1-x"}, r)
 	}
 	sess := func(role, repo string) Session {
 		s := h.cfg.Sessions["a"]

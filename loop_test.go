@@ -1127,7 +1127,7 @@ func (h *harness) deferredCard() repoNeed {
 // answerCard answers !1's deferred card through the page, with choice
 // or, when choice is "", in the owner's own words.
 func (h *harness) answerCard(entry, choice, text string) error {
-	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	src := newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
 	src.now = h.clock.Now
 	return src.respond("widgets", entry, "", text, &AnswerPayload{Choice: choice}, nil)
 }
@@ -1543,7 +1543,7 @@ func (h *harness) deferredEntries(id string) []string {
 
 // answerAsks answers the decision at entry with choice and the owner's
 // words through the page, and the thread agent then asks for work on
-// ref for it, as it did for each answer on the night of #76. With
+// ref for it, as it did for each answer on the run of #76. With
 // replay, the agent's answer is written to the log, as the build before
 // the fix wrote it, rather than emitted.
 func (h *harness) answerAsks(entry, choice, words, ref string, replay bool) {
@@ -1761,10 +1761,10 @@ func TestLoopBatchAnswersOneFixRound(t *testing.T) {
 	}
 }
 
-// Tonight's log, as on !1295: three fix answers on one delivered request,
+// The run's log, as on !1295: three fix answers on one delivered request,
 // each taken by the thread agent for work, read back after a restart,
 // give one fix round and no item.
-func TestLoopReplayedTonightOneFixRound(t *testing.T) {
+func TestLoopReplayedOneFixRound(t *testing.T) {
 	h, api := loopHarness(t)
 	deferMany(t, h, "Add a widget catalogue", "Log every spin", "Count the squeaks")
 	for _, e := range h.deferredEntries(widgetsCase) {
