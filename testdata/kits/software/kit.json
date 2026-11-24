@@ -1,0 +1,10 @@
+{
+  "name": "software",
+  "about": "Software development as agentic-kit's KIT.md runs it: a phase is planned, the plan reviewed, the code written and then critiqued.",
+  "roles": [
+    {"name": "phase-planner", "about": "Plans a phase from its briefs, policies and the root invariants.", "brief": ".claude/agents/phase-planner.md"},
+    {"name": "plan-reviewer", "about": "Inspects a plan independently and reports advisory findings.", "brief": ".claude/agents/plan-reviewer.md"},
+    {"name": "phase-coder", "about": "Implements the planned work and runs focused checks.", "brief": ".claude/agents/phase-coder.md"},
+    {"name": "code-critic", "about": "Inspects the implementation against the approved plan and reports advisory findings.", "brief": ".claude/agents/code-critic.md"}
+  ]
+}

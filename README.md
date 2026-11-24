@@ -202,6 +202,10 @@ A repository may add rules of its own in `.agentd/policy.json` on its target bra
 
 `agentd policy show REPO` prints the effective policy as compact JSON: each key (`section.key`) with its value and its source, `owner`, `default` or `repository .agentd/policy.json on <target> at <tip>`, and each file last read, its target, tip, refused keys and whether it was withheld. Which keys a file applied is worked out again against the configuration as it is now.
 
+### Kits (#103)
+
+A repository may name the kit it is developed under: `repositories.NAME.kit` is the path to the kit's repository, or to its manifest, `kit.json` at that repository's root (relative to the configuration, or `~/`). A kit says how a kind of development is run; in phase 1 its manifest holds the kit's `name`, an optional `about`, and its `roles`, each a `name`, an optional `about` and an optional `brief`, the file that briefs the role, relative to the manifest. The manifest is read strictly, an unknown key refused, and checked: the name is not empty, there is at least one role, role names are non-empty, unique and letters, digits, `_` and `-`, and each brief is a file inside the kit. Every fault is reported, naming its field (`roles[1].name: empty`, `roles."coder": duplicate`), under `repositories.NAME.kit`, so a configuration whose kit does not hold together is refused at load. With no `kit`, nothing changes. Nothing uses a loaded kit yet, and kit roles are not the reviewer and judge session roles. The software kit's manifest is in `testdata/kits/software/kit.json`.
+
 ## Triage
 
 With `jobs.triage` set, `agentd run` triages new items with an agent job (#3, section 5): one small `claude -p` call per batch of up to `jobs.batch` (default 20) unseen items, in a worker, never inside the pass. Each item gets #7's triage: its `kind` (`question`, `report` or `discussion`), `needs_owner` (`now`, `today` or `none`), `urgency` (`now`, `today` or `later`), a one-line `summary` and a `suggested` next step (`reply`, `file_issue`, `answer_in_thread` or `none`). `agentd items` and the owner's UI show them, and sort what is new by urgency, then as before.

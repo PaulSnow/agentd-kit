@@ -311,8 +311,13 @@ type Repository struct {
 	CloneOn []string `json:"clone_on"`
 	// Deploy is where the repository's releases must run (#67).
 	Deploy *DeployConfig `json:"deploy,omitempty"`
+	// Kit, when set, names the kit the repository is developed under
+	// (kit.go, #103): the kit's repository, or its kit.json. LoadConfig
+	// reads and checks it; nothing else uses it yet.
+	Kit string `json:"kit,omitempty"`
 
 	defaulted []string // the policy keys checkPolicy filled in
+	kit       *Kit     // the loaded Kit
 }
 
 // Session is one tmux session running Claude Code. Workdir holds BRIEF.md
@@ -641,6 +646,21 @@ func (c *Config) finish(base string) error {
 	for name, repo := range c.Repositories {
 		repo.defaulted = nil
 		c.checkPolicy(name, &repo, &errs)
+		c.Repositories[name] = repo
+	}
+	for _, name := range sortedKeys(c.Repositories) {
+		repo := c.Repositories[name]
+		repo.kit = nil
+		if repo.Kit == "" {
+			continue
+		}
+		field := "repositories." + name + ".kit"
+		repo.Kit = path(field, repo.Kit)
+		k, err := loadKit(repo.Kit)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", field, err))
+		}
+		repo.kit = k
 		c.Repositories[name] = repo
 	}
 	c.checkSessionsPolicies(path, &errs)
