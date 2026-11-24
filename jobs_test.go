@@ -17,16 +17,17 @@ import (
 // arguments, standard input and environment as args.n, in.n and env.n in
 // the returned directory, and prints out.n, or out when there is none,
 // after FAKE_CLAUDE_DELAY seconds when that is set. Calls that overlap
-// take their numbers one at a time.
+// take their numbers one at a time, under a lock the shell itself creates:
+// Ubuntu 26.04's mkdir lets two callers at once both succeed.
 func fakeClaude(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("FAKE_CLAUDE", dir)
 	shim(t, "claude", `d=$FAKE_CLAUDE
 [ -z "$FAKE_CLAUDE_DELAY" ] || sleep "$FAKE_CLAUDE_DELAY"
-until mkdir "$d/lock" 2>/dev/null; do sleep 0.01; done
+until (set -C; : > "$d/lock") 2>/dev/null; do sleep 0.01; done
 n=$(cat "$d/n" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$d/n"
-rmdir "$d/lock"
+rm "$d/lock"
 printf '%s\n' "$@" > "$d/args.$n"
 cat > "$d/in.$n"
 env > "$d/env.$n"
