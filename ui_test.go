@@ -100,8 +100,8 @@ func ownerPost(u *UI, path string, form url.Values) *httptest.ResponseRecorder {
 	return postTo(u, path, "http://"+pageAddr, u.token, form, "192.0.2.20:51000")
 }
 
-// uiFixture is two configs, as a night build and a second run run them,
-// each with its own log. The night config's widgets has a working
+// uiFixture is two configs, the run's and a second one, each run
+// with its own log. The run config's widgets has a working
 // session, one blocked on a decision, one done, one whose dialog cleared,
 // one whose Questions say "None open.", one asking a text question in
 // STATUS.md, and a new item; its console has a feed post, an instruction
@@ -109,14 +109,14 @@ func ownerPost(u *UI, path string, form url.Values) *httptest.ResponseRecorder {
 // with an outside request, a usage-limited session in widgets, and a
 // session of gadgets with a yes/no decision.
 type uiFixture struct {
-	night, coord       *Config
-	nightBuf, coordBuf *bytes.Buffer
-	nightSrc, coordSrc *uiSource
+	run, coord       *Config
+	runBuf, coordBuf *bytes.Buffer
+	runSrc, coordSrc *uiSource
 }
 
 func newUIFixture(t *testing.T) *uiFixture {
 	t.Helper()
-	f := &uiFixture{nightBuf: &bytes.Buffer{}, coordBuf: &bytes.Buffer{}}
+	f := &uiFixture{runBuf: &bytes.Buffer{}, coordBuf: &bytes.Buffer{}}
 	repos := func() map[string]Repository {
 		return map[string]Repository{
 			"widgets": {Forge: "gitlab", Project: "example-org/widgets", Console: "widgets-console"},
@@ -134,11 +134,11 @@ func newUIFixture(t *testing.T) *uiFixture {
 		}
 		return d
 	}
-	night := DefaultConfig()
-	night.ConfidentialPatterns = []string{"(?i)embargoed"}
-	night.Policies.Budget.RunTokens = 5_000_000
-	night.Repositories = repos()
-	night.Sessions = map[string]Session{
+	run := DefaultConfig()
+	run.ConfidentialPatterns = []string{"(?i)embargoed"}
+	run.Policies.Budget.RunTokens = 5_000_000
+	run.Repositories = repos()
+	run.Sessions = map[string]Session{
 		"w17":       {Workdir: workdir("w17", "# Widgets blue\n\nItem: #17, **painting**.\n\n- [x] primer\n- [ ] paint\n\n## Questions\n\nNone.\n"), Repository: "widgets"},
 		"s-blocked": {Workdir: workdir("s-blocked", ""), Repository: "widgets"},
 		"done1":     {Workdir: workdir("done1", "# Done\n\n## Questions\n\nNone.\n\nDONE\n"), Repository: "widgets"},
@@ -156,7 +156,7 @@ func newUIFixture(t *testing.T) *uiFixture {
 		"lim1": {Workdir: workdir("lim1", ""), Repository: "widgets"},
 		"g1":   {Workdir: workdir("g1", ""), Repository: "gadgets"},
 	}
-	f.night, f.coord = &night, &coord
+	f.run, f.coord = &run, &coord
 	at := func(d time.Duration) time.Time { return pageAt.Add(-d) }
 	ev := func(t0 time.Time, session, kind, mode string) Event {
 		return Event{V: EventVersion, Time: t0, Session: session, Kind: kind, Mode: mode}
@@ -222,7 +222,7 @@ func newUIFixture(t *testing.T) *uiFixture {
 			StatusQuestions: hash("Which colour should the **logo** be?")}),
 		feed, instruction, imported, item, turn, usage, read0, read1, read2,
 	} {
-		if err := NewLogWriter(f.nightBuf).Append(e); err != nil {
+		if err := NewLogWriter(f.runBuf).Append(e); err != nil {
 			t.Fatalf("%+v: %v", e, err)
 		}
 	}
@@ -247,7 +247,7 @@ func newUIFixture(t *testing.T) *uiFixture {
 			t.Fatalf("%+v: %v", e, err)
 		}
 	}
-	f.nightSrc = newUISource("night", f.night, NewLogWriter(f.nightBuf), ModeLive, "host-a")
+	f.runSrc = newUISource("run", f.run, NewLogWriter(f.runBuf), ModeLive, "host-a")
 	f.coordSrc = newUISource("coord", f.coord, NewLogWriter(f.coordBuf), ModeLive, "host-a")
 	return f
 }
@@ -256,7 +256,7 @@ func newUIFixture(t *testing.T) *uiFixture {
 func fixtureUI(t *testing.T) (*UI, *uiFixture) {
 	t.Helper()
 	f := newUIFixture(t)
-	u, _ := testUI(t, UIConfig{}, f.nightSrc, f.coordSrc)
+	u, _ := testUI(t, UIConfig{}, f.runSrc, f.coordSrc)
 	return u, f
 }
 
@@ -287,7 +287,7 @@ func TestUIMergesLogs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(v.Runs) != 2 || v.Runs[0].Src != "night" || v.Runs[1].Src != "coord" || v.Runs[0].Spend != 450_000 || v.Runs[0].Cap != 5_000_000 {
+	if len(v.Runs) != 2 || v.Runs[0].Src != "run" || v.Runs[1].Src != "coord" || v.Runs[0].Spend != 450_000 || v.Runs[0].Cap != 5_000_000 {
 		t.Fatalf("runs %+v", v.Runs)
 	}
 	var widgets, gadgets *uiRepo
@@ -309,20 +309,20 @@ func TestUIMergesLogs(t *testing.T) {
 		}
 		return strings.Join(out, ",")
 	}
-	if got := names(widgets.Working); got != "coord/lim1,night/quiet1,night/s-blocked,night/txt1,night/w17,night/w18" {
+	if got := names(widgets.Working); got != "coord/lim1,run/quiet1,run/s-blocked,run/txt1,run/w17,run/w18" {
 		t.Fatalf("widgets working: %s", got)
 	}
-	if names(widgets.Finished) != "night/done1" || names(gadgets.Working) != "coord/g1" {
+	if names(widgets.Finished) != "run/done1" || names(gadgets.Working) != "coord/g1" {
 		t.Fatalf("widgets %+v, gadgets %+v", widgets, gadgets)
 	}
 	if len(widgets.Requests) != 1 || !widgets.Requests[0].Outside || widgets.Requests[0].Author != "contributor-c" || !widgets.Requests[0].Unresolved {
 		t.Fatalf("widgets requests %+v", widgets.Requests)
 	}
-	if len(widgets.Items) != 1 || widgets.Items[0].Src != "night" || widgets.Items[0].Items[0].ID != "gitlab/example-org/widgets#19" {
+	if len(widgets.Items) != 1 || widgets.Items[0].Src != "run" || widgets.Items[0].Items[0].ID != "gitlab/example-org/widgets#19" {
 		t.Fatalf("widgets items %+v", widgets.Items)
 	}
 	body := owner(t, u, "/status")
-	for _, want := range []string{`href="/session/night/w17"`, `href="/session/coord/g1"`, `href="/console/widgets"`, "1 finished", "context 120k", "spent 450k of 5.0M"} {
+	for _, want := range []string{`href="/session/run/w17"`, `href="/session/coord/g1"`, `href="/console/widgets"`, "1 finished", "context 120k", "spent 450k of 5.0M"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("index lacks %q", want)
 		}
@@ -336,7 +336,7 @@ func TestUIMergesLogs(t *testing.T) {
 func TestUINeedsFromCurrentState(t *testing.T) {
 	u, _ := fixtureUI(t)
 	got := strings.Join(needKeys(t, u), ",")
-	if want := "night/s-blocked/decision:Q1,night/txt1/decision:" + statusDecision + shortHash(HashPane("Which colour should the **logo** be?")) +
+	if want := "run/s-blocked/decision:Q1,run/txt1/decision:" + statusDecision + shortHash(HashPane("Which colour should the **logo** be?")) +
 		",coord/lim1/usage-limited,coord/g1/decision:Q1"; got != want {
 		t.Fatalf("needs %s\nwant  %s", got, want)
 	}
@@ -366,16 +366,16 @@ func TestUIAnswersByButtonAndBox(t *testing.T) {
 	if n := strings.Count(body, `<textarea name="text"`); n != 2 {
 		t.Fatalf("%d text boxes, want the text question's and the console box", n)
 	}
-	if w := ownerPost(u, "/answer", url.Values{"src": {"night"}, "session": {"s-blocked"}, "id": {"Q1"}, "choice": {"b"}, "back": {"/status"}}); w.Code != http.StatusSeeOther {
+	if w := ownerPost(u, "/answer", url.Values{"src": {"run"}, "session": {"s-blocked"}, "id": {"Q1"}, "choice": {"b"}, "back": {"/status"}}); w.Code != http.StatusSeeOther {
 		t.Fatalf("choice: %d %s", w.Code, w.Body.String())
 	}
 	if w := ownerPost(u, "/answer", url.Values{"src": {"coord"}, "session": {"g1"}, "id": {"Q1"}, "answer": {"yes"}, "back": {"/console/gadgets"}}); w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/console/gadgets" {
 		t.Fatalf("yes: %d %s", w.Code, w.Header().Get("Location"))
 	}
-	if !strings.Contains(f.nightBuf.String(), `"choice":"b"`) || strings.Contains(f.nightBuf.String(), `"answer":true`) || !strings.Contains(f.coordBuf.String(), `"answer":true`) {
+	if !strings.Contains(f.runBuf.String(), `"choice":"b"`) || strings.Contains(f.runBuf.String(), `"answer":true`) || !strings.Contains(f.coordBuf.String(), `"answer":true`) {
 		t.Fatal("an answer went to the wrong log")
 	}
-	text := url.Values{"src": {"night"}, "session": {"txt1"}, "id": {statusDecision + shortHash(HashPane("Which colour should the **logo** be?"))}, "text": {"Green"}}
+	text := url.Values{"src": {"run"}, "session": {"txt1"}, "id": {statusDecision + shortHash(HashPane("Which colour should the **logo** be?"))}, "text": {"Green"}}
 	if w := ownerPost(u, "/answer", text); w.Code != http.StatusSeeOther {
 		t.Fatalf("text: %d %s", w.Code, w.Body.String())
 	}
@@ -385,10 +385,10 @@ func TestUIAnswersByButtonAndBox(t *testing.T) {
 	// A dialog after the answer is the owner's again.
 	dialog := Event{V: EventVersion, Time: pageAt, Session: "s-blocked", Kind: KindTransition, Mode: ModeLive,
 		Transition: &TransitionPayload{From: string(Idle), To: string(BlockedOnOwner), Reason: "screen shows a permission or confirmation dialog"}}
-	if err := NewLogWriter(f.nightBuf).Append(dialog); err != nil {
+	if err := NewLogWriter(f.runBuf).Append(dialog); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(needKeys(t, u), ","); got != "coord/lim1/usage-limited,night/s-blocked/blocked" {
+	if got := strings.Join(needKeys(t, u), ","); got != "coord/lim1/usage-limited,run/s-blocked/blocked" {
 		t.Fatalf("needs after a dialog: %s", got)
 	}
 	// One source's decision is not answered through another.
@@ -446,9 +446,9 @@ func TestUIConsoleReply(t *testing.T) {
 		t.Fatalf("the reply is not shown:\n%s", body)
 	}
 	for _, bad := range []url.Values{
-		{"src": {"night"}, "repository": {"widgets"}, "text": {"  "}},
-		{"src": {"night"}, "repository": {"elsewhere"}, "text": {"x"}},
-		{"src": {"night"}, "repository": {"widgets"}, "text": {strings.Repeat("x", maxReply+1)}},
+		{"src": {"run"}, "repository": {"widgets"}, "text": {"  "}},
+		{"src": {"run"}, "repository": {"elsewhere"}, "text": {"x"}},
+		{"src": {"run"}, "repository": {"widgets"}, "text": {strings.Repeat("x", maxReply+1)}},
 	} {
 		if w := ownerPost(u, "/reply", bad); w.Code != http.StatusBadRequest {
 			t.Errorf("%v: %d", bad, w.Code)
@@ -463,7 +463,7 @@ func TestUIConsoleReply(t *testing.T) {
 // its events, newest first.
 func TestUISessionView(t *testing.T) {
 	u, _ := fixtureUI(t)
-	body := owner(t, u, "/session/night/w17")
+	body := owner(t, u, "/session/run/w17")
 	for _, want := range []string{"Primed the widgets; <strong>paint</strong> next.", "<h3>Widgets blue</h3>", "<li>[x] primer</li>", "→ working · transcript moved", "context 120000, spend 450000"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("session lacks %q", want)
@@ -472,7 +472,7 @@ func TestUISessionView(t *testing.T) {
 	if strings.Index(body, "context 120000") > strings.Index(body, "transcript moved") {
 		t.Fatal("events are not newest first")
 	}
-	for _, target := range []string{"/session/night/nobody", "/session/elsewhere/w17", "/session/coord/w17", "/session/night"} {
+	for _, target := range []string{"/session/run/nobody", "/session/elsewhere/w17", "/session/coord/w17", "/session/run"} {
 		if w := get(u, "GET", target, pageAddr, "192.0.2.20:51000"); w.Code != http.StatusNotFound {
 			t.Errorf("%s: %d", target, w.Code)
 		}
@@ -482,8 +482,8 @@ func TestUISessionView(t *testing.T) {
 // A STATUS.md that matches a confidential pattern is withheld whole.
 func TestUISessionStatusWithheld(t *testing.T) {
 	u, f := fixtureUI(t)
-	writeFile(t, filepath.Join(f.night.Sessions["w17"].Workdir, "STATUS.md"), "# Plan\n\nThe embargoed launch.\n")
-	body := owner(t, u, "/session/night/w17")
+	writeFile(t, filepath.Join(f.run.Sessions["w17"].Workdir, "STATUS.md"), "# Plan\n\nThe embargoed launch.\n")
+	body := owner(t, u, "/session/run/w17")
 	if strings.Contains(body, "launch") || !strings.Contains(body, "STATUS.md was withheld") {
 		t.Fatalf("STATUS.md not withheld:\n%s", body)
 	}
@@ -494,14 +494,14 @@ func TestUISessionStatusWithheld(t *testing.T) {
 func TestUIServesOnlyTheOwner(t *testing.T) {
 	u, _ := fixtureUI(t)
 	owner(t, u, "/status")
-	for _, target := range []string{"/status", "/console/widgets", "/session/night/w17", "/ui.css"} {
+	for _, target := range []string{"/status", "/console/widgets", "/session/run/w17", "/ui.css"} {
 		for _, remote := range []string{"192.0.2.30:51000", "192.0.2.99:51000"} {
 			if w := get(u, "GET", target, pageAddr, remote); w.Code != http.StatusForbidden || strings.Contains(w.Body.String(), "widgets") {
 				t.Errorf("%s from %s: %d\n%s", target, remote, w.Code, w.Body.String())
 			}
 		}
 	}
-	reply := url.Values{"src": {"night"}, "repository": {"widgets"}, "text": {"x"}}
+	reply := url.Values{"src": {"run"}, "repository": {"widgets"}, "text": {"x"}}
 	if w := postTo(u, "/reply", "http://"+pageAddr, u.token, reply, "192.0.2.30:51000"); w.Code != http.StatusForbidden {
 		t.Fatalf("a guest's reply: %d", w.Code)
 	}
@@ -510,7 +510,7 @@ func TestUIServesOnlyTheOwner(t *testing.T) {
 // A request with another Host, or from the UI's own address or this
 // machine's loopback, is refused before whois is asked.
 func TestUIRefusesOtherHostsAndItself(t *testing.T) {
-	u, whois := testUI(t, UIConfig{}, newUIFixture(t).nightSrc)
+	u, whois := testUI(t, UIConfig{}, newUIFixture(t).runSrc)
 	for _, c := range []struct{ host, remote string }{
 		{"rebound.example:8770", "192.0.2.20:51000"},
 		{"", "192.0.2.20:51000"},
@@ -534,7 +534,7 @@ func TestUIRefusesOtherHostsAndItself(t *testing.T) {
 // The Host check ignores case; whois failing for the owner's address is a
 // refusal; and one whois answer serves an address for whoisTTL.
 func TestUIHostCaseAndWhois(t *testing.T) {
-	u, whois := testUI(t, UIConfig{Hosts: []string{"Page.Example:8770"}}, newUIFixture(t).nightSrc)
+	u, whois := testUI(t, UIConfig{Hosts: []string{"Page.Example:8770"}}, newUIFixture(t).runSrc)
 	if w := get(u, "GET", "/status", "page.example:8770", "192.0.2.20:51000"); w.Code != http.StatusOK {
 		t.Fatalf("lower-case host: %d", w.Code)
 	}
@@ -606,7 +606,7 @@ func TestUIMethodsAndAssets(t *testing.T) {
 // text, never as markup.
 func TestUIEscapesEverything(t *testing.T) {
 	u, _ := fixtureUI(t)
-	for _, target := range []string{"/status", "/console/widgets", "/session/night/w17"} {
+	for _, target := range []string{"/status", "/console/widgets", "/session/run/w17"} {
 		body := owner(t, u, target)
 		for _, bad := range []string{"<script>y()", "<b>", "<iframe"} {
 			if strings.Contains(body, bad) {
@@ -628,7 +628,7 @@ func TestUIEscapesEverything(t *testing.T) {
 func TestUIMarksSeen(t *testing.T) {
 	u, f := fixtureUI(t)
 	origin := "http://" + pageAddr
-	ids := func() url.Values { return url.Values{"src": {"night"}, "id": {"gitlab/example-org/widgets#19"}} }
+	ids := func() url.Values { return url.Values{"src": {"run"}, "id": {"gitlab/example-org/widgets#19"}} }
 	for _, c := range []struct {
 		name, origin, token, remote string
 	}{
@@ -643,10 +643,10 @@ func TestUIMarksSeen(t *testing.T) {
 			t.Errorf("%s: %d", c.name, w.Code)
 		}
 	}
-	if strings.Contains(f.nightBuf.String(), `"kind":"seen"`) {
+	if strings.Contains(f.runBuf.String(), `"kind":"seen"`) {
 		t.Fatal("a refused POST marked items seen")
 	}
-	for _, bad := range []url.Values{{"src": {"night"}}, {"id": {"gitlab/example-org/widgets#19"}}, {"src": {"coord"}, "id": {"gitlab/example-org/widgets#19"}}} {
+	for _, bad := range []url.Values{{"src": {"run"}}, {"id": {"gitlab/example-org/widgets#19"}}, {"src": {"coord"}, "id": {"gitlab/example-org/widgets#19"}}} {
 		if w := ownerPost(u, "/seen", bad); w.Code != http.StatusBadRequest {
 			t.Errorf("%v: %d", bad, w.Code)
 		}
@@ -659,7 +659,7 @@ func TestUIMarksSeen(t *testing.T) {
 			t.Errorf("back %q: %d to %q", back, w.Code, w.Header().Get("Location"))
 		}
 	}
-	if !strings.Contains(f.nightBuf.String(), `"from":"192.0.2.20:51000"`) {
+	if !strings.Contains(f.runBuf.String(), `"from":"192.0.2.20:51000"`) {
 		t.Fatal("the mark does not say where it came from")
 	}
 	if v, _ := u.indexView(pageAt); len(v.Repos[0].Items)+len(v.Repos[1].Items) != 0 {
@@ -671,22 +671,22 @@ func TestUIMarksSeen(t *testing.T) {
 // appended since the last.
 func TestUISourceFollowsTheLog(t *testing.T) {
 	f := newUIFixture(t)
-	u, _ := testUI(t, UIConfig{}, f.nightSrc)
+	u, _ := testUI(t, UIConfig{}, f.runSrc)
 	owner(t, u, "/status")
-	n := f.nightSrc.st.Events
+	n := f.runSrc.st.Events
 	e := Event{V: EventVersion, Time: pageAt, Session: "w18", Kind: KindTransition, Mode: ModeLive, Transition: &TransitionPayload{From: "working", To: string(Failed), Reason: "exited 1"}}
-	if err := NewLogWriter(f.nightBuf).Append(e); err != nil {
+	if err := NewLogWriter(f.runBuf).Append(e); err != nil {
 		t.Fatal(err)
 	}
-	if body := owner(t, u, "/status"); f.nightSrc.st.Events != n+1 || !strings.Contains(body, "exited 1") {
-		t.Fatalf("after one more line: %d events applied, want %d", f.nightSrc.st.Events, n+1)
+	if body := owner(t, u, "/status"); f.runSrc.st.Events != n+1 || !strings.Contains(body, "exited 1") {
+		t.Fatalf("after one more line: %d events applied, want %d", f.runSrc.st.Events, n+1)
 	}
 }
 
 // The UI refuses to start without one IP address to listen on, an owner,
 // a whois command and a log.
 func TestUIConfigIsChecked(t *testing.T) {
-	src := newUIFixture(t).nightSrc
+	src := newUIFixture(t).runSrc
 	for _, c := range []struct {
 		cfg     UIConfig
 		sources []*uiSource
@@ -714,7 +714,7 @@ func TestUIConfigLogs(t *testing.T) {
 		return p
 	}
 	minimal("coord.json", "")
-	main := minimal("night.json", `, "ui": {"address": "`+pageAddr+`", "whois": ["w"], "owner": "o", "logs": ["coord.json"], "shadow": true}`)
+	main := minimal("run.json", `, "ui": {"address": "`+pageAddr+`", "whois": ["w"], "owner": "o", "logs": ["coord.json"], "shadow": true}`)
 	cfg, err := LoadConfig(main)
 	if err != nil {
 		t.Fatal(err)
@@ -733,7 +733,7 @@ func TestUIConfigLogs(t *testing.T) {
 	for _, s := range sources {
 		got = append(got, s.Name+":"+s.st.Mode)
 	}
-	if strings.Join(got, ",") != "night:live,night-shadow:shadow,coord:live,coord-shadow:shadow" {
+	if strings.Join(got, ",") != "run:live,run-shadow:shadow,coord:live,coord-shadow:shadow" {
 		t.Fatalf("sources %v", got)
 	}
 	old := minimal("old.json", `, "page": {"address": "`+pageAddr+`"}`)
@@ -770,39 +770,39 @@ func TestParseWhois(t *testing.T) {
 // line adds nothing at all.
 func TestConsoleImport(t *testing.T) {
 	f := newUIFixture(t)
-	log := NewLogWriter(f.nightBuf)
+	log := NewLogWriter(f.runBuf)
 	events, _, _ := log.Tail(0)
 	lines := `{"at": "2026-10-20T09:00:00Z", "from": "owner-a", "text": "Second line"}
 {"at": "2026-10-19T09:00:00Z", "from": "bot", "text": "First line"}
 
 {"at": "2026-10-21T09:00:00Z", "from": "owner-a", "text": "The embargoed plan"}
 `
-	added, skipped, err := ImportConsole(f.night, log, events, pageAt, "widgets", strings.NewReader(lines))
+	added, skipped, err := ImportConsole(f.run, log, events, pageAt, "widgets", strings.NewReader(lines))
 	if err != nil || added != 3 || skipped != 0 {
 		t.Fatalf("import: %d added, %d skipped, %v", added, skipped, err)
 	}
-	if strings.Contains(f.nightBuf.String(), "embargoed") {
+	if strings.Contains(f.runBuf.String(), "embargoed") {
 		t.Fatal("a confidential line was imported")
 	}
 	events, _, _ = log.Tail(0)
-	if added, skipped, err = ImportConsole(f.night, log, events, pageAt, "widgets", strings.NewReader(lines)); err != nil || added != 0 || skipped != 3 {
+	if added, skipped, err = ImportConsole(f.run, log, events, pageAt, "widgets", strings.NewReader(lines)); err != nil || added != 0 || skipped != 3 {
 		t.Fatalf("again: %d added, %d skipped, %v", added, skipped, err)
 	}
-	size := f.nightBuf.Len()
+	size := f.runBuf.Len()
 	for _, bad := range []string{
 		`{"at": "2026-10-22T09:00:00Z", "text": "New"}` + "\nnot json\n",
 		`{"at": "2026-10-22T09:00:00Z", "text": "New", "repository": "elsewhere"}`,
 		`{"text": "no time"}`,
 		`{"at": "2026-10-22T09:00:00Z", "text": "New", "from": 3}`,
 	} {
-		if _, _, err := ImportConsole(f.night, log, events, pageAt, "widgets", strings.NewReader(bad)); err == nil {
+		if _, _, err := ImportConsole(f.run, log, events, pageAt, "widgets", strings.NewReader(bad)); err == nil {
 			t.Errorf("%q imported", bad)
 		}
 	}
-	if f.nightBuf.Len() != size {
+	if f.runBuf.Len() != size {
 		t.Fatal("a refused import appended lines")
 	}
-	u, _ := testUI(t, UIConfig{}, newUISource("night", f.night, log, ModeLive, "host-a"))
+	u, _ := testUI(t, UIConfig{}, newUISource("run", f.run, log, ModeLive, "host-a"))
 	body := owner(t, u, "/console/widgets")
 	first, second, old := strings.Index(body, "First line"), strings.Index(body, "Second line"), strings.Index(body, "Old console line")
 	if old < 0 || second > old || first > second || first < 0 || !strings.Contains(body, withheldMessage) {
@@ -814,14 +814,14 @@ func TestConsoleImport(t *testing.T) {
 		many.WriteString(`{"at": "2026-09-01T09:00:00Z", "text": "old ` + strconv.Itoa(i) + `"}` + "\n")
 	}
 	events, _, _ = log.Tail(0)
-	if _, _, err := ImportConsole(f.night, log, events, pageAt, "widgets", strings.NewReader(many.String())); err != nil {
+	if _, _, err := ImportConsole(f.run, log, events, pageAt, "widgets", strings.NewReader(many.String())); err != nil {
 		t.Fatal(err)
 	}
 	if body := owner(t, u, "/console/widgets"); !strings.Contains(body, "w17 delivered !4") || !strings.Contains(body, "Ship it on Friday") {
 		t.Fatalf("new messages pushed out:\n%s", body)
 	}
 	// The fold ignores imported lines: the feed is as it was.
-	st := NewLogState(f.night, ModeLive)
+	st := NewLogState(f.run, ModeLive)
 	events, _, _ = log.Tail(0)
 	if st.Fold(events); len(st.Feed.Fed) != 1 {
 		t.Fatalf("feed fold: %v", st.Feed.Fed)
@@ -832,7 +832,7 @@ func TestConsoleImport(t *testing.T) {
 // go test -run TestUIGolden -update to rewrite them after a change.
 func TestUIGolden(t *testing.T) {
 	u, _ := fixtureUI(t)
-	for name, target := range map[string]string{"index": "/status", "console": "/console/widgets", "session": "/session/night/w17"} {
+	for name, target := range map[string]string{"index": "/status", "console": "/console/widgets", "session": "/session/run/w17"} {
 		body := owner(t, u, target)
 		path := filepath.Join("testdata", "ui", name+".html")
 		if *updateGolden {
@@ -890,7 +890,7 @@ func TestUIAccountsJSON(t *testing.T) {
 // wrapping too, and light and dark colours from one token set.
 func TestUIFitsAPhone(t *testing.T) {
 	u, _ := fixtureUI(t)
-	for _, target := range []string{"/status", "/console/widgets", "/session/night/w17"} {
+	for _, target := range []string{"/status", "/console/widgets", "/session/run/w17"} {
 		if body := owner(t, u, target); !strings.Contains(body, `<meta name="viewport" content="width=device-width, initial-scale=1">`) {
 			t.Errorf("%s has no viewport meta", target)
 		}
@@ -923,9 +923,9 @@ func TestUIFitsAPhone(t *testing.T) {
 // listed once.
 func TestUIShadowEcho(t *testing.T) {
 	f := newUIFixture(t)
-	shadow := newUISource("night-shadow", f.night, NewLogWriter(f.nightBuf), ModeShadow, "host-a")
+	shadow := newUISource("run-shadow", f.run, NewLogWriter(f.runBuf), ModeShadow, "host-a")
 	shadow.echo = true
-	u, _ := testUI(t, UIConfig{}, f.nightSrc, shadow)
+	u, _ := testUI(t, UIConfig{}, f.runSrc, shadow)
 	if body := owner(t, u, "/console/widgets"); strings.Count(body, "Ship it on Friday") != 1 || strings.Count(body, "Old console line") != 1 {
 		t.Fatalf("console repeats the owner's lines:\n%s", body)
 	}
@@ -939,7 +939,7 @@ func TestUIShadowEcho(t *testing.T) {
 // Questions are read again.
 func TestUISessionStatusNotRegular(t *testing.T) {
 	u, f := fixtureUI(t)
-	wd := f.night.Sessions["w17"].Workdir
+	wd := f.run.Sessions["w17"].Workdir
 	status := filepath.Join(wd, "STATUS.md")
 	if err := os.Remove(status); err != nil {
 		t.Fatal(err)
@@ -947,7 +947,7 @@ func TestUISessionStatusNotRegular(t *testing.T) {
 	if err := syscall.Mkfifo(status, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if body := owner(t, u, "/session/night/w17"); !strings.Contains(body, "STATUS.md could not be read.") {
+	if body := owner(t, u, "/session/run/w17"); !strings.Contains(body, "STATUS.md could not be read.") {
 		t.Fatalf("a FIFO:\n%s", body)
 	}
 	if err := os.Remove(status); err != nil {
@@ -958,7 +958,7 @@ func TestUISessionStatusNotRegular(t *testing.T) {
 	if err := os.Symlink(secret, status); err != nil {
 		t.Fatal(err)
 	}
-	if body := owner(t, u, "/session/night/w17"); strings.Contains(body, "Not the session") || !strings.Contains(body, "STATUS.md could not be read.") {
+	if body := owner(t, u, "/session/run/w17"); strings.Contains(body, "Not the session") || !strings.Contains(body, "STATUS.md could not be read.") {
 		t.Fatalf("a link:\n%s", body)
 	}
 }
@@ -967,7 +967,7 @@ func TestUISessionStatusNotRegular(t *testing.T) {
 // holds no request, and the decision is shown as changed.
 func TestUIQuestionsNotRegular(t *testing.T) {
 	u, f := fixtureUI(t)
-	status := filepath.Join(f.night.Sessions["txt1"].Workdir, "STATUS.md")
+	status := filepath.Join(f.run.Sessions["txt1"].Workdir, "STATUS.md")
 	if err := os.Remove(status); err != nil {
 		t.Fatal(err)
 	}

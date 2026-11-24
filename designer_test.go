@@ -74,7 +74,7 @@ func (h *harness) askDesigned(dir, text string) *WorkItem {
 // respondDesign is the owner's answer on an item's design entry, through
 // the page.
 func (h *harness) respondDesign(id, choice, text string) error {
-	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	src := newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
 	src.now = h.clock.Now
 	var a *AnswerPayload
 	if choice != "" {
@@ -117,7 +117,7 @@ func TestDesignerBriefPostsAsDecisionAndStartsOnGo(t *testing.T) {
 	}
 
 	// The design is an open entry of widgets' console, the brief shown.
-	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	src := newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
 	v, err := (&UI{sources: []*uiSource{src}}).consoleView("widgets", h.clock.Now())
 	if err != nil {
 		t.Fatal(err)
@@ -313,7 +313,7 @@ func TestDesignAutoProceedsWhenContained(t *testing.T) {
 		t.Fatalf("notices = %q", ns)
 	}
 	// The design is still posted, answered by agentd's go.
-	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	src := newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
 	src.catchUp()
 	des := src.designEntries(h.sup.cfg, "widgets", func(...string) bool { return false })
 	if len(des) != 1 || des[0].open || des[0].Answer == nil || des[0].Answer.Choice != DesignGo {
@@ -362,7 +362,7 @@ func TestDesignerFailuresThenDecline(t *testing.T) {
 	if len(fails) != designTries || fails[1].Sub(fails[0]) < designRetry {
 		t.Fatalf("failures at %v", fails)
 	}
-	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	src := newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
 	src.catchUp()
 	des := src.designEntries(h.sup.cfg, "widgets", func(...string) bool { return false })
 	if len(des) != 1 || !des[0].open || !strings.Contains(des[0].Decision.Context, "The designer failed") || !strings.Contains(des[0].Decision.Context, "Paint the shed red.") {
@@ -538,7 +538,7 @@ func TestDesignWithheldAsksOwnerAtOnce(t *testing.T) {
 		t.Fatalf("waiting = %q", in.Waiting)
 	}
 
-	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	src := newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
 	src.catchUp()
 	des := src.designEntries(h.sup.cfg, "widgets", confidentialMatcher(h.sup.cfg))
 	if len(des) != 1 || !des[0].open || des[0].Withheld != "" {
@@ -671,7 +671,7 @@ func TestDesignWithheldAfterGoodRound(t *testing.T) {
 	if it.State != WorkDesigned || !it.DesignWithheld || !it.Approved.IsZero() {
 		t.Fatalf("after a withheld round 2: %+v", it)
 	}
-	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	src := newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
 	src.catchUp()
 	des := src.designEntries(h.sup.cfg, "widgets", func(...string) bool { return false })
 	if len(des) != 1 || !des[0].open || !des[0].At.Equal(it.Progress) {

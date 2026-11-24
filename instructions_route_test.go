@@ -192,13 +192,13 @@ func TestShadowInstructionOnlyRecords(t *testing.T) {
 func TestConsoleShowsTurnLive(t *testing.T) {
 	h := turnsHarness(t)
 	h.ticks(3, time.Minute)
-	u, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
+	u, _ := testUI(t, UIConfig{}, newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
 	u.now = h.clock.Now
-	page := owner(t, u, "/session/night/b")
+	page := owner(t, u, "/session/run/b")
 	if !strings.Contains(page, `<input type="hidden" name="session" value="b">`) {
 		t.Fatalf("no message box on b's page:\n%s", page)
 	}
-	if w := ownerPost(u, "/reply", url.Values{"src": {"night"}, "repository": {"widgets"}, "session": {"b"}, "text": {"Rebase on main."}, "back": {"/console/widgets"}}); w.Code != http.StatusSeeOther {
+	if w := ownerPost(u, "/reply", url.Values{"src": {"run"}, "repository": {"widgets"}, "session": {"b"}, "text": {"Rebase on main."}, "back": {"/console/widgets"}}); w.Code != http.StatusSeeOther {
 		t.Fatalf("message: %d %s", w.Code, w.Body.String())
 	}
 	h.ticks(1, time.Minute)

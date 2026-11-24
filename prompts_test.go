@@ -31,7 +31,7 @@ func promptsFixture(t *testing.T) (*harness, *UI) {
 	r := strings.NewReplacer("{workdir}", sess.Workdir, "{cwd}", sess.Cwd, "{at}", h.clock.Now().Format(time.RFC3339Nano))
 	h.transcriptOf("a", "t1", r.Replace(string(b)))
 	h.ticks(2, time.Minute)
-	u, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
+	u, _ := testUI(t, UIConfig{}, newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
 	u.now = h.clock.Now
 	return h, u
 }
@@ -42,13 +42,13 @@ func promptsFixture(t *testing.T) (*harness, *UI) {
 func TestPromptLinesLinkTheirPages(t *testing.T) {
 	_, u := promptsFixture(t)
 	lines := []string{
-		`<a href="/session/night/a/prompt/t1.1">Restarted (rotation): brief, progress →</a>`,
-		`<a href="/session/night/a/prompt/t1.3">Answers delivered →</a>`,
-		`<a href="/session/night/a/prompt/t1.5">Your message delivered →</a>`,
-		`<a href="/session/night/a/prompt/t1.7">Context compacted →</a>`,
-		`Paint the widgets blue. <a href="/session/night/a/prompt/t1.8">full prompt →</a>`,
+		`<a href="/session/run/a/prompt/t1.1">Restarted (rotation): brief, progress →</a>`,
+		`<a href="/session/run/a/prompt/t1.3">Answers delivered →</a>`,
+		`<a href="/session/run/a/prompt/t1.5">Your message delivered →</a>`,
+		`<a href="/session/run/a/prompt/t1.7">Context compacted →</a>`,
+		`Paint the widgets blue. <a href="/session/run/a/prompt/t1.8">full prompt →</a>`,
 	}
-	for _, target := range []string{"/console/widgets", "/session/night/a"} {
+	for _, target := range []string{"/console/widgets", "/session/run/a"} {
 		page := owner(t, u, target)
 		for _, want := range lines {
 			if !strings.Contains(page, want) {
@@ -68,7 +68,7 @@ func TestPromptLinesLinkTheirPages(t *testing.T) {
 // pretty.
 func TestPromptPageShowsTheWholePromptAndItsFiles(t *testing.T) {
 	h, u := promptsFixture(t)
-	page := owner(t, u, "/session/night/a/prompt/t1.1")
+	page := owner(t, u, "/session/run/a/prompt/t1.1")
 	for _, want := range []string{"Restarted (rotation): brief, progress", "You were restarted by the supervisor with a fresh context.",
 		"What the supervisor recorded", `&#34;why&#34;: &#34;rotation&#34;,`, `&#34;last_merge&#34;: &#34;abc1234&#34;`,
 		"<h3>brief</h3>", "<h3>Paint the widgets</h3>", "<strong>primer</strong>", "<h3>progress</h3>", "<li>[ ] second coat</li>"} {
@@ -76,29 +76,29 @@ func TestPromptPageShowsTheWholePromptAndItsFiles(t *testing.T) {
 			t.Errorf("restart page lacks %q:\n%s", want, page)
 		}
 	}
-	page = owner(t, u, "/session/night/a/prompt/t1.3")
+	page = owner(t, u, "/session/run/a/prompt/t1.3")
 	if !strings.Contains(page, "<h3>answers</h3>") || !strings.Contains(page, "&#34;choice&#34;: &#34;blue&#34;") || !strings.Contains(page, "The owner answered your questions.") {
 		t.Errorf("answers page:\n%s", page)
 	}
-	page = owner(t, u, "/session/night/a/prompt/t1.5")
+	page = owner(t, u, "/session/run/a/prompt/t1.5")
 	if !strings.Contains(page, "<h3>instructions</h3>") || !strings.Contains(page, "Start the second coat after lunch.") {
 		t.Errorf("instructions page:\n%s", page)
 	}
-	page = owner(t, u, "/session/night/a/prompt/t1.7")
+	page = owner(t, u, "/session/run/a/prompt/t1.7")
 	if !strings.Contains(page, "Context compacted") || !strings.Contains(page, "so a cut prompt would lose it.") || strings.Contains(page, "<h3>brief</h3>") {
 		t.Errorf("compaction page:\n%s", page)
 	}
-	page = owner(t, u, "/session/night/a/prompt/t1.8")
+	page = owner(t, u, "/session/run/a/prompt/t1.8")
 	if !strings.Contains(page, "report what it says, in full, with the exit code.") || strings.Contains(page, `id="files"`) {
 		t.Errorf("typed prompt's page:\n%s", page)
 	}
 	// As they are now: the progress file changed since the restart.
 	writeFile(t, filepath.Join(h.cfg.Sessions["a"].Workdir, "STATUS.md"), "# Progress\n\n- [x] second coat\n")
-	if page := owner(t, u, "/session/night/a/prompt/t1.1"); !strings.Contains(page, "<li>[x] second coat</li>") {
+	if page := owner(t, u, "/session/run/a/prompt/t1.1"); !strings.Contains(page, "<li>[x] second coat</li>") {
 		t.Errorf("progress not read now:\n%s", page)
 	}
-	for _, target := range []string{"/session/night/a/prompt/t1", "/session/night/a/prompt/..%2Ft1.1", "/session/night/a/prompt/t1.01",
-		"/session/night/a/prompt/t1.0", "/session/night/nobody/prompt/t1.1", "/session/elsewhere/a/prompt/t1.1", "/session/night/a/other/t1.1"} {
+	for _, target := range []string{"/session/run/a/prompt/t1", "/session/run/a/prompt/..%2Ft1.1", "/session/run/a/prompt/t1.01",
+		"/session/run/a/prompt/t1.0", "/session/run/nobody/prompt/t1.1", "/session/elsewhere/a/prompt/t1.1", "/session/run/a/other/t1.1"} {
 		if w := get(u, "GET", target, pageAddr, "192.0.2.20:51000"); w.Code != http.StatusNotFound {
 			t.Errorf("%s: %d", target, w.Code)
 		}
@@ -121,16 +121,16 @@ func TestPromptPageScreensAndReadsOnlyTheWorkdir(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.cfg.ConfidentialPatterns = []string{"(?i)embargoed", "(?i)second coat starts"}
-	u2, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
+	u2, _ := testUI(t, UIConfig{}, newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
 	u2.now = h.clock.Now
-	page := owner(t, u2, "/session/night/a/prompt/t1.1")
+	page := owner(t, u2, "/session/run/a/prompt/t1.1")
 	if strings.Contains(page, "embargoed") || strings.Contains(page, "Elsewhere") || !strings.Contains(page, "withheld because it matched") || !strings.Contains(page, "is a link") {
 		t.Errorf("restart page:\n%s", page)
 	}
 	h.cfg.ConfidentialPatterns = []string{"(?i)host-a and report"}
-	u3, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
+	u3, _ := testUI(t, UIConfig{}, newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
 	u3.now = h.clock.Now
-	if page := owner(t, u3, "/session/night/a/prompt/t1.8"); strings.Contains(page, "Paint the widgets") || !strings.Contains(page, "The prompt was withheld") {
+	if page := owner(t, u3, "/session/run/a/prompt/t1.8"); strings.Contains(page, "Paint the widgets") || !strings.Contains(page, "The prompt was withheld") {
 		t.Errorf("a confidential prompt is shown:\n%s", page)
 	}
 	for _, c := range []struct{ path, want string }{
@@ -210,7 +210,7 @@ func TestPromptPageSaysWhatALineIs(t *testing.T) {
 		{"t1.99", "", "Line 99 of transcript t1 is missing."},
 		{"t9.1", "", "Transcript t9 is missing."},
 	} {
-		page := owner(t, u, "/session/night/a/prompt/"+c.id)
+		page := owner(t, u, "/session/run/a/prompt/"+c.id)
 		if !strings.Contains(page, c.what) || !strings.Contains(page, c.text) {
 			t.Errorf("%s lacks %q or %q:\n%s", c.id, c.what, c.text, page)
 		}
@@ -221,13 +221,13 @@ func TestPromptPageSaysWhatALineIs(t *testing.T) {
 	// Screened whole, as read and as shown: a match anywhere withholds all
 	// of it, one only the decoded text has too.
 	h.cfg.ConfidentialPatterns = []string{"(?i)two findings", "(?m)^CHECK PASS"}
-	u2, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
+	u2, _ := testUI(t, UIConfig{}, newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
 	u2.now = h.clock.Now
-	page := owner(t, u2, "/session/night/a/prompt/t1.10")
+	page := owner(t, u2, "/session/run/a/prompt/t1.10")
 	if strings.Contains(page, "primer branch") || !strings.Contains(page, "background-task notice") || !strings.Contains(page, "withheld because it matched") {
 		t.Errorf("a confidential line is shown:\n%s", page)
 	}
-	if page := owner(t, u2, "/session/night/a/prompt/t1.12"); strings.Contains(page, "CHECK PASS") || !strings.Contains(page, "withheld because it matched") {
+	if page := owner(t, u2, "/session/run/a/prompt/t1.12"); strings.Contains(page, "CHECK PASS") || !strings.Contains(page, "withheld because it matched") {
 		t.Errorf("a line confidential only as shown is shown:\n%s", page)
 	}
 }
@@ -247,14 +247,14 @@ func TestPre56PromptsJudgedByTodaysRule(t *testing.T) {
 		pairs = append(pairs, fmt.Sprintf("{id:t0.%d}", n), turnMessageID("a", "t0", n))
 	}
 	h.buf.WriteString(strings.NewReplacer(pairs...).Replace(string(b)))
-	u, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
+	u, _ := testUI(t, UIConfig{}, newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
 	u.now = h.clock.Now
-	for _, target := range []string{"/console/widgets", "/session/night/a"} {
+	for _, target := range []string{"/console/widgets", "/session/run/a"} {
 		page := owner(t, u, target)
 		for _, want := range []string{
-			`<a href="/session/night/a/prompt/t0.5">Restarted (rotation): brief, progress →</a>`,
-			`<a href="/session/night/a/prompt/t0.12">Context compacted →</a>`,
-			`Continue with the second coat as the brief says. <a href="/session/night/a/prompt/t0.14">full prompt →</a>`,
+			`<a href="/session/run/a/prompt/t0.5">Restarted (rotation): brief, progress →</a>`,
+			`<a href="/session/run/a/prompt/t0.12">Context compacted →</a>`,
+			`Continue with the second coat as the brief says. <a href="/session/run/a/prompt/t0.14">full prompt →</a>`,
 		} {
 			if !strings.Contains(page, want) {
 				t.Errorf("%s lacks %q", target, want)

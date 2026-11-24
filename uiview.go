@@ -320,7 +320,6 @@ type uiRun struct {
 	Spend      int64
 	SpendKnown bool
 	Cap        int64
-	StopAt     *time.Time
 	Digest     string
 }
 
@@ -665,7 +664,7 @@ func (src *uiSource) addIndex(v *uiIndex, get func(string) *uiRepo, now time.Tim
 	}
 	live := src.st.Mode == ModeLive
 	run := uiRun{Src: src.Name, Mode: src.st.Mode, Started: src.st.Started, Stopped: src.st.Stopped,
-		Cap: cfg.Policies.Budget.RunTokens, StopAt: cfg.Policies.Budget.StopAt, Digest: rep.OwnerDigest}
+		Cap: cfg.Policies.Budget.RunTokens, Digest: rep.OwnerDigest}
 	for _, t := range src.st.Tracks {
 		if sp, ok := t.spend(live); ok {
 			run.Spend, run.SpendKnown = run.Spend+sp+t.SpendBase, true

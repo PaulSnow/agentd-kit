@@ -74,7 +74,7 @@ or asleep shows "laptop: last seen <time>".
 
 3. Install agentd and the unit, then start it:
 
-       go install github.com/PaulSnow/agentd-kit@<the umbrella's commit>
+       go install github.com/PaulSnow/agentd-kit@main
        mv ~/go/bin/agentd-kit ~/go/bin/agentd
        mkdir -p ~/.config/systemd/user
        cp deploy/systemd/agentd-node.service ~/.config/systemd/user/

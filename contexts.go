@@ -708,15 +708,11 @@ func (s *Supervisor) rotationPending(name string, sess Session, t *Track, ev Evi
 		!s.failed(t, "rotate:"+name+":"+cp.SHA) && !t.Skipped["account:"+name]
 }
 
-// overBudget says why the session must stop, or "": the stop time has come,
-// or the session's spend or the run's (every session's) has reached its
+// overBudget says why the session must stop, or "": the session's spend or the run's (every session's) has reached its
 // cap, or its repository's policy caps (each of its sessions, and all of
 // them) were reached. Live mode counts only transcripts it launched.
 func (s *Supervisor) overBudget(name string, t *Track, now time.Time) string {
 	b := s.cfg.Policies.Budget
-	if b.StopAt != nil && !now.Before(*b.StopAt) {
-		return "stop time " + b.StopAt.Format(time.RFC3339) + " reached"
-	}
 	repo := s.cfg.Sessions[name].Repository
 	rb := BudgetRules{}
 	if repo != "" {

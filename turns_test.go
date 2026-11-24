@@ -170,7 +170,7 @@ func TestTurnsRulesChecked(t *testing.T) {
 // session, and turns, however many, push out none of the other messages.
 func TestTurnShownInConsole(t *testing.T) {
 	u, f := fixtureUI(t)
-	log := NewLogWriter(f.nightBuf)
+	log := NewLogWriter(f.runBuf)
 	for i := 0; i <= uiKeptMessages; i++ {
 		if err := log.Append(Event{V: EventVersion, Time: pageAt.Add(-time.Minute), Kind: KindMessage, Mode: ModeShared,
 			Message: &MessagePayload{ID: fmt.Sprintf("T%d", i), Console: "widgets-console", Kind: MessageReply, From: "w17", Text: fmt.Sprintf("Painted coat %d", i)}}); err != nil {
@@ -180,7 +180,7 @@ func TestTurnShownInConsole(t *testing.T) {
 	body := owner(t, u, "/console/widgets")
 	i := strings.Index(body, "Painted coat 200")
 	li := strings.LastIndex(body[:max(i, 0)], `<li class="entry msg msg-reply"`)
-	if i < 0 || li < 0 || !strings.Contains(body[li:i], `<a href="/session/night/w17">w17</a> <span class="badge">reply</span>`) {
+	if i < 0 || li < 0 || !strings.Contains(body[li:i], `<a href="/session/run/w17">w17</a> <span class="badge">reply</span>`) {
 		t.Fatalf("the turn is not shown with its kind and session:\n%s", body)
 	}
 	// One box, newest last (#59), its latest entries on the page and

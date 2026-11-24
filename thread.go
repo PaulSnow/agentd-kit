@@ -107,7 +107,7 @@ const threadSystem = `You answer the owner of a software project on agentd's con
 	`When the thread settles a decision about an issue or a request, or reports the outcome of work on one, set outcome: Go posts it there as an agent's comment. ` +
 	`Label what you report: say which entry, issue or session each point is about. ` +
 	`Never state that something does not exist, is not planned or is not happening: you see only your sources. Say what you checked and how fresh each was, ` +
-	`as "the cards as of 07:41, the issue list as of 07:52, night-60's STATUS.md as of 07:52". ` +
+	`as "the cards as of 07:41, the issue list as of 07:52, agentd-kit-owner-60's STATUS.md as of 07:52". ` +
 	`The running sessions' brief, now and status_at, the finished sessions' status, and the issues, are live facts, not cards; a card is what state returns, as of its updated time. ` +
 	`A session's STATUS.md outranks a card: a card marked stale is older than the STATUS.md it covers. When they disagree, trust the live facts, ` +
 	`and call history on the card's topic with why "missing-from-state" so its curator learns what it lacks. ` +

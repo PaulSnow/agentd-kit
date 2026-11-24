@@ -335,7 +335,7 @@ func TestPermissionDialogParsed(t *testing.T) {
 
 // replyEntry answers an entry as agentd console reply --entry does.
 func (h *harness) replyEntry(entry, choice string) error {
-	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	src := newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
 	src.now = h.clock.Now
 	repo := entryRepository(h.cfg, h.logState(), entry)
 	return src.respond(repo, entry, "", "", &AnswerPayload{Choice: choice}, nil)

@@ -80,8 +80,8 @@ func TestUsageFromTranscriptWithDuplicatesAndSubagents(t *testing.T) {
 }
 
 func TestParseProgress(t *testing.T) {
-	p := ParseProgress("# Night\n\nSome text | with a bar\n\n| Sub-issue | Branch | State | Merge |\n|---|---|---|---|\n" +
-		"| A #9 inventory | night/9 | merged, check PASS | 77b8023 |\n| L #21 contexts | night/21 | review round 1 | |\n" +
+	p := ParseProgress("# Run\n\nSome text | with a bar\n\n| Sub-issue | Branch | State | Merge |\n|---|---|---|---|\n" +
+		"| A #9 inventory | owner/9 | merged, check PASS | 77b8023 |\n| L #21 contexts | owner/21 | review round 1 | |\n" +
 		"| K #20 poll | | waiting | |\n| G #15 placement | | deferred by the owner | |\n| E #13 jobs | | waiting | |\n\n## Log\n")
 	if p.Item != "L #21 contexts" || p.State != "review round 1" || strings.Join(p.Next, ",") != "K #20 poll,E #13 jobs" {
 		t.Fatalf("progress = %+v", p)
@@ -261,17 +261,18 @@ func TestBudgetStopsSession(t *testing.T) {
 	}
 }
 
-func TestStopTimeAndRunBudget(t *testing.T) {
-	h, _ := contextHarness(t, false)
-	at := h.clock.Now().Add(10 * time.Minute)
-	h.cfg.Policies.Budget.StopAt = &at
-	h.ticks(5, time.Minute)
-	if n := h.count(KindAction, ActStop, "s"); n != 0 {
-		t.Fatalf("stopped before the stop time: %d", n)
+// policies.budget.stop_at is refused at load, naming what still caps
+// spend (#115): a cutoff stopped every session, and the run works around
+// the clock.
+func TestStopAtRefusedAndRunBudget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.json")
+	writeFile(t, path, `{"policies": {"budget": {"run_tokens": 100, "stop_at": "2026-10-31T09:00:00-05:00"}}}`)
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "stop_at was removed in #115") || !strings.Contains(err.Error(), "run_tokens") {
+		t.Fatalf("stop_at: %v", err)
 	}
-	h.ticks(10, time.Minute)
-	if n := h.count(KindAction, ActStop, "s"); n != 1 || !strings.Contains(h.sup.Tracks()["s"].Stopped, "stop time") {
-		t.Fatalf("stops = %d, why %q", n, h.sup.Tracks()["s"].Stopped)
+	writeFile(t, path, `{"policies": {"budget": {"run_tokens": 100}}}`)
+	if _, err := LoadConfig(path); err != nil && strings.Contains(err.Error(), "stop_at") {
+		t.Fatalf("a budget without stop_at: %v", err)
 	}
 
 	h2 := newHarness(t, false, "a", "b")
