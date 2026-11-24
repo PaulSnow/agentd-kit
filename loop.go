@@ -27,9 +27,13 @@ import (
 
 // Loop steps.
 const (
-	LoopReview  = "review"  // a reviewer was started on the head
-	LoopJudge   = "judge"   // a judge was started on a round
-	LoopFix     = "fix"     // the work session was relaunched with a round's findings
+	LoopReview = "review" // a reviewer was started on the head
+	LoopJudge  = "judge"  // a judge was started on a round
+	LoopFix    = "fix"    // the work session was relaunched with a round's findings
+	// LoopBuild: a builder, a work session on the source branch of a
+	// request no session delivered or continues, was started to fix a
+	// round's findings; it continues the request from then on (#113).
+	LoopBuild   = "build"
 	LoopApprove = "approve" // a request no session delivered converged at the head
 	LoopFailed  = "failed"  // a judgment session failed its step
 	LoopRetry   = "retry"   // the owner's word to take a failed step again
@@ -88,7 +92,7 @@ const (
 
 func validLoopStep(step string) bool {
 	switch step {
-	case LoopReview, LoopJudge, LoopFix, LoopApprove, LoopFailed, LoopRetry, LoopSkip, LoopStop, LoopWait, LoopPlace:
+	case LoopReview, LoopJudge, LoopFix, LoopBuild, LoopApprove, LoopFailed, LoopRetry, LoopSkip, LoopStop, LoopWait, LoopPlace:
 		return true
 	}
 	return false
@@ -168,7 +172,7 @@ func (st *LogState) applyLoop(e Event) {
 		r.ReviewRound, r.ReviewHead = p.Round, p.Head
 	case LoopJudge:
 		r.JudgeRound = p.Round
-	case LoopFix:
+	case LoopFix, LoopBuild:
 		r.FixRound, r.FixHead = p.Round, p.Head
 	case LoopApprove:
 		if st.Approvals == nil {
@@ -522,10 +526,14 @@ func placeOf(cfg *Config, st *LogState, q loopRequest, now time.Time) loopPlace 
 	}
 	if fix {
 		switch {
-		case q.worker() == "" && r.Head == L.ReviewHead:
-			return owner("round %d adopted findings; waiting for the author to push; the new head is reviewed", last.N)
+		case q.worker() == "" && (r.Head == L.ReviewHead || !r.HeadSince.After(fixDueAt(c, st, last))):
+			// No session fixes it, and nothing was pushed since the
+			// findings were adopted or answered fix: a head pushed
+			// before them does not address them, and is not reviewed
+			// again (#113).
+			return builderPlace(cfg, st, q, L, r, last, now)
 		case q.worker() == "":
-			// The author pushed: the new head is reviewed.
+			// The author pushed since: the new head is reviewed.
 		case L.FixRound < last.N && (L.ReviewRound > last.N || fixHold(st, q) != "" && L.ReviewHead != "" && r.Head != L.ReviewHead):
 			// The work session cannot be relaunched, but it pushed to
 			// the request since the round was reviewed, as a session
@@ -814,6 +822,65 @@ func adopts(r *RoundRecord) bool {
 	return false
 }
 
+// fixDueAt is when round last was found to need fixing: the latest of
+// its judgment, when it adopted a finding, and the owner's fix answers
+// on its deferred findings. A head first recorded at or before it is
+// not the fix (#113).
+func fixDueAt(c *Case, st *LogState, last *RoundRecord) time.Time {
+	var at time.Time
+	if adopts(last) {
+		at = last.JudgedAt
+	}
+	for _, d := range c.deferred(st, last) {
+		if d.Answer == FindingFix && d.At.After(at) {
+			at = d.At
+		}
+	}
+	return at
+}
+
+// builderOf is the source branch a builder of q, a request no session
+// delivered or continues, is started on, or why none is (#113): the
+// repository's review.builder is on, its author is one of merge.authors,
+// as agentd builds on no other author's branch, and its source branch is
+// known and plain.
+func builderOf(cfg *Config, st *LogState, q loopRequest, r CIRecord) (branch, why string) {
+	pol := effectiveFor(cfg, st, q.Repository, r.Target)
+	if i := st.Index[q.Repository][q.Ref]; i != nil {
+		branch = i.Branch
+	}
+	switch {
+	case pol.Review.Builder == BuilderOff:
+		return "", fmt.Sprintf("%s's policy (review.builder off) starts no builder for a request no session continues", q.Repository)
+	case !contains(pol.Merge.Authors, r.Author):
+		return "", fmt.Sprintf("its author %s is not one of merge.authors, and agentd builds on no other author's branch", r.Author)
+	case branch == "" || !plainBranch(branch) || branch == r.Target:
+		return "", "its source branch is not known"
+	}
+	return branch, ""
+}
+
+// builderPlace is where q, a request no session delivered or continues
+// whose round last needs fixing at a head not pushed since, stands: a
+// builder is due on its source branch, or, where none may start, it
+// waits on its author to push (#113).
+func builderPlace(cfg *Config, st *LogState, q loopRequest, L LoopRecord, r CIRecord, last *RoundRecord, now time.Time) loopPlace {
+	wait := func(why string) loopPlace {
+		return loopPlace{Phase: PlaceOwner, Reason: fmt.Sprintf("round %d adopted findings; waiting for the author to push; the new head is reviewed: %s", last.N, why)}
+	}
+	branch, why := builderOf(cfg, st, q, r)
+	switch {
+	case why != "":
+		return wait(why)
+	case L.FixRound >= last.N:
+		return wait(fmt.Sprintf("the builder started on %s for round %d no longer runs", branch, last.N))
+	case st.Mode == ModeShadow:
+		return loopPlace{Phase: PlaceFixing, Reason: fmt.Sprintf("round %d has findings to fix; shadow mode starts no builder", last.N)}
+	}
+	return waitingFor(cfg, st, q.Repository, now, loopPlace{Phase: PlaceFixing, Reason: fmt.Sprintf("round %d has findings to fix; a builder is due on %s", last.N, branch),
+		Do: LoopBuild, Session: runtimeName(q.Repository, branch, KindWork), Round: last.N, Head: r.Head})
+}
+
 // LoopView is a request's place in the loop, as agentd status shows it.
 type LoopView struct {
 	Repository string `json:"repository"`
@@ -860,10 +927,13 @@ func (s *Supervisor) runLoops(now time.Time) {
 		switch p.Do {
 		case "end":
 			s.endJudgment(q.Repository, p.Session)
-		case LoopReview, LoopJudge:
+		case LoopReview, LoopJudge, LoopBuild:
 			kind := KindReviewer
-			if p.Do == LoopJudge {
+			switch p.Do {
+			case LoopJudge:
 				kind = KindJudge
+			case LoopBuild:
+				kind = KindWork
 			}
 			if s.shadow {
 				s.emit("", Event{Kind: KindLoop, Loop: &lp})
@@ -884,8 +954,16 @@ func (s *Supervisor) runLoops(now time.Time) {
 					return
 				}
 			}
-			if why := s.startJudgment(q, kind, p.Session); why != "" {
-				s.skipOnce(requestsTrack(q.Repository), key, fmt.Sprintf("not starting the %s of %s in %s: %s", kind, q.Ref, q.Repository, why), s.track(requestsTrack(q.Repository)), nil)
+			start := s.startJudgment
+			if p.Do == LoopBuild {
+				start = s.startBuilder
+			}
+			if why := start(q, kind, p.Session); why != "" {
+				what := kind
+				if p.Do == LoopBuild {
+					what = "builder"
+				}
+				s.skipOnce(requestsTrack(q.Repository), key, fmt.Sprintf("not starting the %s of %s in %s: %s", what, q.Ref, q.Repository, why), s.track(requestsTrack(q.Repository)), nil)
 				continue
 			}
 			s.emit("", Event{Kind: KindLoop, Loop: &lp})
@@ -915,9 +993,13 @@ func placeKey(st *LogState, q loopRequest, p loopPlace) string {
 	L := st.Loops[key]
 	phase := p.Phase
 	if phase == PlaceWaitPlace {
-		phase = PlaceReviewing
-		if p.Do == LoopJudge {
+		switch p.Do {
+		case LoopJudge:
 			phase = PlaceJudging
+		case LoopBuild:
+			phase = PlaceFixing
+		default:
+			phase = PlaceReviewing
 		}
 	}
 	rounds, disposed := 0, false
@@ -1065,9 +1147,10 @@ func (s *Supervisor) noteFollowUp(q loopRequest, d deferral, n int) {
 // askAuthor asks the author of q, a request no session delivered or
 // continues, on q, once a round, to fix each finding of its latest round
 // the owner answered fix on, with the decision's question and the owner's
-// words, and push, while its head is the one reviewed, where
-// delivery.allow has comment; elsewhere, or when the text may not go to
-// the forge, it tells the owner on the repository's console, once (#76).
+// words, and push, while nothing was pushed since the round needed fixing
+// and no builder fixes it, where delivery.allow has comment; elsewhere, or
+// when the text may not go to the forge, it tells the owner on the
+// repository's console, once (#76).
 func (s *Supervisor) askAuthor(q loopRequest) {
 	c := s.st.Cases[q.Case]
 	if q.worker() != "" || c == nil || len(c.Rounds) == 0 {
@@ -1075,7 +1158,13 @@ func (s *Supervisor) askAuthor(q loopRequest) {
 	}
 	r := &c.Rounds[len(c.Rounds)-1]
 	ci, L := s.st.CI[ciKey(q.Repository, q.Ref)], s.st.Loops[ciKey(q.Repository, q.Ref)]
-	if ci.Head == "" || ci.Head != L.ReviewHead {
+	// Asked while nothing was pushed since the round needed fixing: a
+	// head pushed before is no fix (#113).
+	if ci.Head == "" || ci.Head != L.ReviewHead && ci.HeadSince.After(fixDueAt(c, s.st, r)) {
+		return
+	}
+	// A builder fixes it, so its author is not asked (#113).
+	if _, why := builderOf(s.cfg, s.st, q, ci); why == "" && L.FixRound < r.N {
 		return
 	}
 	var asks []string
@@ -1203,6 +1292,19 @@ func (s *Supervisor) startJudgment(q loopRequest, kind, name string) string {
 		p.Request = q.Ref
 	}
 	return s.startRuntime(q.Repository, name, p)
+}
+
+// startBuilder records the start of the builder of q, a work session on
+// its source branch serving the request, under the name the loop knows
+// it by, and says why not when it could not (#113). Its facts carry the
+// request's rounds, as a continuer's fix round's do, and its delivery
+// pushes to the request.
+func (s *Supervisor) startBuilder(q loopRequest, _ string, name string) string {
+	branch, why := builderOf(s.cfg, s.st, q, s.st.CI[ciKey(q.Repository, q.Ref)])
+	if why != "" {
+		return why
+	}
+	return s.startRuntime(q.Repository, name, RuntimePayload{Kind: KindWork, Branch: branch, Request: q.Ref})
 }
 
 // startRuntime records agentd's start of a session of repo, placed as the

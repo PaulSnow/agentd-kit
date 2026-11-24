@@ -227,6 +227,8 @@ func (st *LogState) noteSteps(e Event) {
 			s.Text = fmt.Sprintf("A judge took up round %d of %s.", p.Round, name)
 		case LoopFix:
 			s.Text = fmt.Sprintf("Its session was sent back to fix what round %d of %s found.", p.Round, name)
+		case LoopBuild:
+			s.Text = fmt.Sprintf("agentd started a builder on %s's branch to fix what round %d found.", name, p.Round)
 		case LoopApprove:
 			s.Text = fmt.Sprintf("The loop approved %s.", name)
 		case LoopPlace:
@@ -234,8 +236,11 @@ func (st *LogState) noteSteps(e Event) {
 			// loop's sentence says where it stands.
 		case LoopWait:
 			what := "reviewer"
-			if p.Waits == LoopJudge {
+			switch p.Waits {
+			case LoopJudge:
 				what = "judge"
+			case LoopBuild:
+				what = "builder"
 			}
 			s.Text = fmt.Sprintf("The %s of round %d of %s waits for a place under sessions.max.", what, p.Round, name)
 		case LoopFailed:

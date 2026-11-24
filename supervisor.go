@@ -1647,7 +1647,9 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 		again = ":" + fix.Transcript
 	}
 	for _, r := range reqs {
-		if fixing && r.Ref == fix.Ref && !r.Merged && head != fix.Head {
+		// A builder's commits go to the request it was started for (#113).
+		builds := sess.Runtime && sess.Kind == KindWork && sess.Request != "" && r.Ref == sess.Request && !r.Merged && head != r.Head
+		if fixing && r.Ref == fix.Ref && !r.Merged && head != fix.Head || builds {
 			r := r
 			refresh = &r
 			continue
@@ -1721,7 +1723,11 @@ func (s *Supervisor) deliver(name string, sess Session, d Deliver, ev Evidence, 
 		return
 	}
 	if refresh != nil {
-		s.skipOnce(name, fkey+":ci-fix:"+head, fmt.Sprintf("pushed the CI fix %s to %s", shortHash(head), refresh.Ref), t,
+		what := "the CI fix"
+		if !fixing {
+			what = "the builder's fix"
+		}
+		s.skipOnce(name, fkey+":ci-fix:"+head, fmt.Sprintf("pushed %s %s to %s", what, shortHash(head), refresh.Ref), t,
 			&SkipPayload{Delivered: key, Outcome: refresh.Ref, URL: refresh.URL, Branch: branch, Head: head, Repository: d.Repository, Worktree: d.Worktree, Target: d.Target})
 		return
 	}

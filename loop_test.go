@@ -1917,3 +1917,242 @@ func TestLoopStalledPlaceIsOneCard(t *testing.T) {
 		t.Fatalf("stall cards = %q; place %+v", got, h.place("!2"))
 	}
 }
+
+// builderBranch records !2's source branch, fix-squeak, as the forge
+// lists it, so a builder may start on it (#113).
+func builderBranch(h *harness) string {
+	h.sup.emit("", Event{Kind: KindIndex, Index: &IndexPayload{Repository: "widgets", Ref: "!2", Title: "Fix the squeak", State: "open", Branch: "fix-squeak"}})
+	return runtimeName("widgets", "fix-squeak", KindWork)
+}
+
+// builderOff sets widgets' review.builder off.
+func builderOff(h *harness, api *fakeForgeAPI) {
+	w := h.cfg.Repositories["widgets"]
+	w.Policy.Review.Builder = BuilderOff
+	h.cfg.Repositories["widgets"] = w
+	h.restart(false)
+	h.sup.api = api
+}
+
+// asksOf is the comments posted on ref.
+func (h *harness) asksOf(ref string) []string {
+	var asks []string
+	for _, c := range h.forge.comments {
+		if strings.HasPrefix(c, ref+" ") {
+			asks = append(asks, c)
+		}
+	}
+	return asks
+}
+
+// requestOf is request ref as the loop reads it.
+func (h *harness) requestOf(ref string) loopRequest {
+	for _, q := range openLoopRequests(h.sup.cfg, h.sup.st, h.clock.Now()) {
+		if q.Ref == ref {
+			return q
+		}
+	}
+	return loopRequest{}
+}
+
+// An outside request whose round adopted findings, which no session
+// continues, gets a builder on its source branch under the repository's
+// policy: it serves the request, its facts carry the round, it becomes
+// the request's continuer, its author is not asked, and its delivery's
+// head is reviewed (#113).
+func TestLoopOutsideBuilderStarts(t *testing.T) {
+	h, api := loopHarness(t)
+	h.allow(api, ActComment)
+	outsideOpen(api)
+	builder := builderBranch(h)
+	adoptOutside(t, h, api)
+	h.ticks(3, 5*time.Minute)
+	p, ok := h.sup.st.Runtime[builder]
+	if !ok || p.Kind != KindWork || p.Branch != "fix-squeak" || p.Request != "!2" || p.By != "agentd" {
+		t.Fatalf("builder = %+v, %v; steps %v; place %+v", p, ok, h.loopSteps("!2"), h.place("!2"))
+	}
+	if got := strings.Join(h.loopSteps("!2"), ","); got != "review,judge,build" {
+		t.Fatalf("steps = %s", got)
+	}
+	if c := h.requestOf("!2").Continuer; c != builder {
+		t.Fatalf("continuer = %q, want %s", c, builder)
+	}
+	if cmd := h.lastLaunch(builder); !strings.Contains(cmd, "Spin is untested") {
+		t.Fatalf("builder facts lack the finding: %s", cmd)
+	}
+	sess := withRuntime(h.sup.cfg, h.sup.st.Runtime).Sessions[builder]
+	if b, err := os.ReadFile(filepath.Join(sess.Workdir, "BRIEF.md")); err != nil || !strings.Contains(string(b), FixRoundPointer) || !strings.Contains(string(b), `"request": "!2"`) && !strings.Contains(string(b), `"request":"!2"`) {
+		t.Fatalf("builder brief: %s, %v", b, err)
+	}
+	if asks := h.asksOf("!2"); len(asks) != 0 {
+		t.Fatalf("the author was asked: %q", asks)
+	}
+	if p := h.place("!2"); p.Phase != PlaceFixing {
+		t.Fatalf("place = %+v", p)
+	}
+	// The builder's delivery pushes its commit to !2, opening no other
+	// request, and moves the head: it is reviewed.
+	h.git.mu.Lock()
+	if h.git.branches == nil {
+		h.git.branches = map[string]string{}
+	}
+	h.git.branches[sess.Cwd] = "fix-squeak"
+	h.git.mu.Unlock()
+	h.forge.mu.Lock()
+	for len(h.forge.opens) < 2 {
+		// !2, open on its source branch, as the forge finds it.
+		h.forge.opens = append(h.forge.opens, MergeRequest{Source: "fix-squeak", Target: "main"})
+	}
+	h.forge.opens[1] = MergeRequest{Source: "fix-squeak", Target: "main"}
+	opens := len(h.forge.opens)
+	h.forge.mu.Unlock()
+	if err := os.WriteFile(filepath.Join(sess.Workdir, "MR.md"), []byte("Fix the squeak\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h.statusOf(builder, "# Fixed\n\nDONE\n")
+	h.ticks(2, 5*time.Minute)
+	pushed := false
+	for _, e := range h.events() {
+		pushed = pushed || e.Kind == KindSkip && e.Session == builder && strings.Contains(e.Skip.Reason, "pushed the builder's fix") && e.Skip.Outcome == "!2"
+	}
+	if h.forge.mu.Lock(); !pushed || len(h.forge.opens) != opens || !contains(h.forge.pushes, "fix-squeak") {
+		t.Fatalf("builder delivery: pushed to !2 %v, opens %d (was %d), pushes %v", pushed, len(h.forge.opens), opens, h.forge.pushes)
+	}
+	h.forge.mu.Unlock()
+	outsideMR(api, outsideMRState{head: "5eed0102", pipeline: 61, status: "success"})
+	h.ticks(6, 5*time.Minute)
+	// Its delivery makes !2 the builder's: its worker and its
+	// reviewer's name follow, its case and its loop stay.
+	q := h.requestOf("!2")
+	if q.worker() != builder || q.Case != "gitlab/example-org/widgets!2" {
+		t.Fatalf("after delivery: %+v", q)
+	}
+	reviewer := q.judgment(KindReviewer)
+	if _, ok := h.sup.st.Runtime[reviewer]; !ok || !strings.Contains(h.lastLaunch(reviewer), `"head":"5eed0102"`) {
+		t.Fatalf("no review of the builder's head: steps %v, place %+v", h.loopSteps("!2"), h.place("!2"))
+	}
+	if got := strings.Join(h.loopSteps("!2"), ","); got != "review,judge,build,review" {
+		t.Fatalf("steps = %s", got)
+	}
+	// A replay of the log agrees with the live loop.
+	live, L := h.place("!2"), h.sup.st.Loops[ciKey("widgets", "!2")]
+	h.restart(false)
+	h.sup.api = api
+	if got := h.place("!2"); got != live || h.sup.st.Loops[ciKey("widgets", "!2")].FixRound != L.FixRound || h.requestOf("!2").worker() != builder {
+		t.Fatalf("replayed place %+v, loop %+v; live %+v, %+v", got, h.sup.st.Loops[ciKey("widgets", "!2")], live, L)
+	}
+}
+
+// With review.builder off, nothing is started: the request says plainly
+// that it waits on its author, and the author is asked (#113).
+func TestLoopOutsideBuilderOff(t *testing.T) {
+	h, api := loopHarness(t)
+	h.allow(api, ActComment)
+	builderOff(h, api)
+	outsideOpen(api)
+	builder := builderBranch(h)
+	deferOne(t, h, "!2")
+	h.answerAsks(h.deferredEntries("gitlab/example-org/widgets!2")[0], FindingFix, "please add the catalogue here", "!2", false)
+	h.ticks(4, 5*time.Minute)
+	if _, ok := h.sup.st.Runtime[builder]; ok || h.countSteps("!2", LoopBuild) != 0 {
+		t.Fatalf("a builder started: steps %v", h.loopSteps("!2"))
+	}
+	if p := h.place("!2"); p.Phase != PlaceOwner || !strings.Contains(p.Reason, "waiting for the author to push") || !strings.Contains(p.Reason, "review.builder off") {
+		t.Fatalf("place = %+v", p)
+	}
+	if asks := h.asksOf("!2"); len(asks) != 1 || !strings.Contains(asks[0], "please add the catalogue here") {
+		t.Fatalf("asks = %q", asks)
+	}
+}
+
+// The !1300 sequence (#113): round 1 is reviewed at one head, the head
+// moves before the owner answers fix, and the owner answers. The moved
+// head predates the answer, so it is not reviewed again as round 2: with
+// the builder off the request waits on its author, and with it on a
+// builder starts. A head pushed after the answer is reviewed.
+func TestLoopOutsideHeadBeforeAnswerNotReviewed(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		h, api := loopHarness(t)
+		if !on {
+			builderOff(h, api)
+		}
+		outsideOpen(api)
+		builder := builderBranch(h)
+		deferOne(t, h, "!2")
+		// Pushed six days before the owner's answers.
+		outsideMR(api, outsideMRState{head: "5eed0102", pipeline: 61, status: "success"})
+		h.ticks(2, 5*time.Minute)
+		h.clock.advance(6 * 24 * time.Hour)
+		h.answerAsks(h.deferredEntries("gitlab/example-org/widgets!2")[0], FindingFix, "please add the catalogue here", "!2", false)
+		h.ticks(4, 5*time.Minute)
+		if n := h.countSteps("!2", LoopReview); n != 1 {
+			t.Fatalf("builder %v: reviews = %d; steps %v; place %+v", on, n, h.loopSteps("!2"), h.place("!2"))
+		}
+		_, started := h.sup.st.Runtime[builder]
+		switch p := h.place("!2"); {
+		case !on && (started || p.Phase != PlaceOwner || !strings.Contains(p.Reason, "waiting for the author to push")):
+			t.Fatalf("builder off: started %v, place %+v", started, p)
+		case on && (!started || p.Phase != PlaceFixing):
+			t.Fatalf("builder on: started %v, place %+v, steps %v", started, p, h.loopSteps("!2"))
+		}
+		// A push after the answers is the fix, and is reviewed.
+		outsideMR(api, outsideMRState{head: "5eed0103", pipeline: 62, status: "success"})
+		if on {
+			h.statusOf(builder, "# Fixed\n\nDONE\n")
+		}
+		h.ticks(6, 5*time.Minute)
+		reviewer := judgmentName("!2", KindReviewer)
+		if _, ok := h.sup.st.Runtime[reviewer]; !ok || !strings.Contains(h.lastLaunch(reviewer), `"head":"5eed0103"`) || h.countSteps("!2", LoopReview) != 2 {
+			t.Fatalf("builder %v: no review of the pushed head: steps %v, place %+v", on, h.loopSteps("!2"), h.place("!2"))
+		}
+	}
+}
+
+// The watcher's first record of a head is kept across its later records,
+// and a new head, but not a record with none, starts it again.
+func TestCIHeadSinceFold(t *testing.T) {
+	st := &LogState{}
+	t0 := time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)
+	rec := func(at time.Duration, head string) CIRecord {
+		st.applyCI(Event{Time: t0.Add(at), CI: &CIPayload{Repository: "widgets", Ref: "!2", Head: head}})
+		return st.CI[ciKey("widgets", "!2")]
+	}
+	if r := rec(0, "aaa"); !r.HeadSince.Equal(t0) {
+		t.Fatalf("first = %v", r.HeadSince)
+	}
+	if r := rec(time.Hour, "aaa"); !r.HeadSince.Equal(t0) {
+		t.Fatalf("same head = %v", r.HeadSince)
+	}
+	if r := rec(2*time.Hour, ""); !r.HeadSince.Equal(t0) {
+		t.Fatalf("no head = %v", r.HeadSince)
+	}
+	if r := rec(3*time.Hour, "aaa"); !r.HeadSince.Equal(t0) {
+		t.Fatalf("same head after none = %v", r.HeadSince)
+	}
+	if r := rec(4*time.Hour, "bbb"); !r.HeadSince.Equal(t0.Add(4 * time.Hour)) {
+		t.Fatalf("new head = %v", r.HeadSince)
+	}
+}
+
+// review.builder is on by default; a repository's file may turn it off,
+// never on, and a value other than on or off is refused (#113).
+func TestBuilderPolicy(t *testing.T) {
+	h, _ := loopHarness(t)
+	w := h.sup.cfg.Repositories["widgets"]
+	if w.Policy.Review.Builder != BuilderOn {
+		t.Fatalf("default = %q", w.Policy.Review.Builder)
+	}
+	eff := w.Policy
+	if !narrowKey(&eff, "review.builder", json.RawMessage(`"off"`)) || eff.Review.Builder != BuilderOff {
+		t.Fatalf("off not taken: %q", eff.Review.Builder)
+	}
+	if narrowKey(&eff, "review.builder", json.RawMessage(`"on"`)) || narrowKey(&eff, "review.builder", json.RawMessage(`"maybe"`)) {
+		t.Fatal("a wider or unknown value was taken")
+	}
+	var errs []error
+	w.Policy.Review.Builder = "sometimes"
+	h.cfg.checkPolicy("widgets", &w, &errs)
+	if len(errs) == 0 {
+		t.Fatal("an unknown builder value was accepted")
+	}
+}

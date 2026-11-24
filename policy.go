@@ -123,7 +123,17 @@ type ReviewRules struct {
 	Rounds        RoundsRules `json:"rounds"`
 	Others        string      `json:"others"`
 	OthersMaxAge  Duration    `json:"others_max_age"`
+	// Builder, on or off: whether a work session is started on the
+	// source branch of a request no session delivered or continues, to
+	// fix the findings of a round that needs fixing (#113).
+	Builder string `json:"builder"`
 }
+
+// ReviewRules.Builder values; on is the default.
+const (
+	BuilderOn  = "on"
+	BuilderOff = "off"
+)
 
 // RoundsRules caps a case's review rounds; 0 leaves policies.rounds.max.
 type RoundsRules struct {
@@ -276,6 +286,14 @@ func (c *Config) checkPolicy(name string, repo *Repository, errs *[]error) {
 	if p.Review.OthersMaxAge.Duration == 0 {
 		p.Review.OthersMaxAge = Duration{DefaultOthersMaxAge}
 		def("review.others_max_age")
+	}
+	switch p.Review.Builder {
+	case "":
+		p.Review.Builder = BuilderOn
+		def("review.builder")
+	case BuilderOn, BuilderOff:
+	default:
+		bad("review.builder %q is not on or off", p.Review.Builder)
 	}
 	s := &p.Sessions
 	if s.Max < 0 || s.Budget.SessionTokens < 0 || s.Budget.RunTokens < 0 || s.YieldAfter.Duration < 0 {
@@ -558,6 +576,13 @@ func narrowKey(eff *RepoPolicy, key string, raw json.RawMessage) bool {
 			return false
 		}
 		eff.Review.OthersMaxAge = d
+		return true
+	case "review.builder":
+		var o string
+		if strictJSON(raw, &o) != nil || o != BuilderOff && o != eff.Review.Builder {
+			return false
+		}
+		eff.Review.Builder = o
 		return true
 	case "design.auto":
 		if strictJSON(raw, &b) != nil || b && !eff.Design.Auto {
