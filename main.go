@@ -100,6 +100,8 @@ func runCommand(name string, args []string) (handled bool, err error) {
 		return true, accountsCmd(args, os.Stdout)
 	case "items":
 		return true, itemsCmd(args, os.Stdout)
+	case "janitor":
+		return true, janitorCmd(args, os.Stdout)
 	case "calendar":
 		return true, calendarCmd(args, os.Stdout)
 	case "triage":
@@ -194,6 +196,7 @@ const usageLines = `usage:
   agentd triage [--config PATH] --items FILE
   agentd step [--config PATH] [--log PATH] --spec FILE [--force]
   agentd steps [--config PATH] [--log PATH] [--json]
+  agentd janitor [--config PATH] [--log PATH] [--ask] REPO
   agentd calendar [--config PATH] [--log PATH] [--json] PROMPT...
   agentd status-check [--config PATH] --transcript FILE [--window 5m] [--input] [--call]
   agentd cases [--config PATH] [--log PATH] [--shadow] [--json]
@@ -266,6 +269,9 @@ each pipeline's token and cost totals and its steps' latest runs.
 status-check builds the status graph's input from the window at the end
 of a transcript and prints its size; with --call it makes the one call
 and prints the checked record and its cost. It logs nothing.
+janitor prints the records the daily janitor would be given on REPO;
+with --ask it makes the one call and prints the checked answer. It logs
+and proposes nothing (#111).
 mcp --repository serves the context tools alone (state, find, history,
 ask_expert) on a repository, for an agent that works no case; mcp --ops
 serves the ops tools and ask_expert, for the ops console's agent (#63). context

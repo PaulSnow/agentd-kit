@@ -110,6 +110,10 @@ type Forge interface {
 	Comment(repo Repository, ref, body string) error
 	// OpenIssue opens an issue and returns its number (#69).
 	OpenIssue(repo Repository, title, body string) (int, error)
+	// Close closes an issue or request, and Rebase rebases a request
+	// (#111).
+	Close(repo Repository, ref string) error
+	Rebase(repo Repository, ref string) error
 }
 
 // AllowedForge wraps a Forge with the per-repository allow-list. Every write

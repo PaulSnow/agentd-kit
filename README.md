@@ -251,6 +251,29 @@ Issues carry their own context:
 
 Every call is a `query` event with its size. `agentd context stats REPO [--since 24h]` reports how many questions state answered alone (no history call by the same agent within five minutes), the history calls by reason, and the curators' and the expert's tokens. `agentd context card REPO [TOPIC]` prints a card.
 
+## Janitor (#111)
+
+Once a day per repository, after `jobs.janitor.at` (local time, default `06:30`), the janitor proposes cleanup for the owner to approve. It is one call to a model with no tools. Go gathers the records it is given: the open requests with their CI and their place in the loop, the open issues a request was closed for, the sessions that finished in the last three days with the end of their STATUS.md, and what waits on the owner. Requests and issues the policy reserves or excludes are left out, as is any record that matches a confidential pattern. The oldest records that fit in `max_input` bytes are sent.
+
+A proposal is an `action` on a `target` record, with a reason and the records it cites:
+
+| Action | What an approval does | `delivery.allow` needs |
+|---|---|---|
+| `close_request`, `close_issue` | closes it on the forge | `close` |
+| `rebase_request` | has GitLab rebase it, or GitHub update its branch from its base | `rebase` |
+| `file_follow_up` | opens the issue shown | `issue` |
+| `end_session` | ends a finished session, keeping its files | |
+| `ask_owner` | records the owner's words | |
+
+- **Refused by Go:** a proposal that cites no record it was given or not its target, an action the repository does not allow, a target being worked, an issue no request is known to have merged for, a session not finished, a question that waits on the owner already, a follow-up that names a session or another repository, and words that match a confidential pattern. The run's event says what was refused and why.
+- **Approval:** each proposal is an entry (`j:ID`) on the repository's console, its page and the digest, with `approve` and `reject`; `agentd console reply --entry j:ID --choice approve` answers one. Nothing is done without it. Before a close or a rebase Go reads the target on the forge, and leaves one alone that is not open or changed since the proposal. The start is logged first, so a proposal that a stop cut short is reported and never done again.
+- **Not repeated:** a rejected proposal is not made again until a record it cites changes; a record getting older is no change. An open proposal whose records changed is withdrawn.
+- **Summary:** each run posts one info entry on the repository's console: how the repository looks, and the proposals.
+- **Config:** `jobs.janitor`: `enabled` (off by default), `at`, `repositories` (every one on a forge when empty), `model` (default `sonnet`: haiku missed unfinished work in trials), `timeout` (`5m`), `budget_tokens` (100,000 per repository in 24 hours, in the ledger's units), `max_proposals` (10) and `max_input` (48 KiB). A call the budget does not hold is not made, and the console says so. A failed call is tried again after an hour, at most three times a day.
+- **Shadow:** a shadow run asks and logs its proposals, and posts and does nothing. It lists no issues or requests, so it sees only the sessions and what waits on the owner.
+
+A run waits for the first listing after `agentd` starts. The records need `poll.index`, and what merged is known only where CI is watched. `agentd janitor REPO` prints the records a run would be given; with `--ask` it makes the call and prints the checked answer, logging and proposing nothing.
+
 ## Calendar check (#101)
 
 A session, a console thread's agent, the ops agent or the owner can look something up in the owner's personal calendar, read-only. The **directive** is free text, such as `what do I have tomorrow afternoon`, `is Thursday 2pm free` or `when is my next dentist appointment`. The **reply** is JSON:

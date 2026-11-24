@@ -542,6 +542,7 @@ func (s *Supervisor) Pass() error {
 		s.checkStatuses(s.clock.Now())
 		s.noteFacts(s.clock.Now())
 		s.curateCards(s.clock.Now())
+		s.driveJanitor(s.clock.Now())
 	}
 	return s.halt
 }

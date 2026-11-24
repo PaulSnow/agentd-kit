@@ -84,6 +84,7 @@ type Event struct {
 	Model       *ModelPayload       `json:"model,omitempty"`
 	Terminal    *TerminalPayload    `json:"terminal,omitempty"`
 	Calendar    *CalendarPayload    `json:"calendar,omitempty"`
+	Janitor     *JanitorPayload     `json:"janitor,omitempty"`
 }
 
 // Event kinds.
@@ -449,7 +450,7 @@ func (e Event) check() error {
 		KindSkip: e.Skip != nil, KindCrash: e.Crash != nil, KindClear: e.Clear != nil, KindError: e.Error != nil, KindWarning: e.Warning != nil,
 		KindItem: e.Item != nil, KindSeen: e.Seen != nil, KindCursor: e.Cursor != nil, KindUsage: e.Usage != nil,
 		KindCheckpoint: e.Checkpoint != nil, KindPoll: e.Poll != nil, KindTriage: e.Triage != nil, KindDecision: e.Decision != nil,
-		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, KindApproval: e.Approval != nil, KindAccount: e.Account != nil, KindMessage: e.Message != nil, KindInbox: e.Inbox != nil, KindJob: e.Job != nil, KindStep: e.Step != nil, KindLoop: e.Loop != nil, KindNode: e.Node != nil, KindLaptop: e.Laptop != nil, KindRoute: e.Route != nil, KindStatus: e.Status != nil, KindCard: e.Card != nil, KindThread: e.Thread != nil, KindQuery: e.Query != nil, KindAttachment: e.Attachment != nil, KindFact: e.Fact != nil, KindOps: e.Ops != nil, KindRelease: e.Release != nil, KindFleet: e.Fleet != nil, KindWorkItem: e.Work != nil, KindIndex: e.Index != nil, KindSentence: e.Sentence != nil, KindTerminal: e.Terminal != nil, KindConfig: e.Config != nil, KindModel: e.Model != nil, KindCalendar: e.Calendar != nil, "act": e.Act != nil,
+		KindAnswer: e.Answer != nil, KindDeadline: e.Deadline != nil, KindCase: e.Case != nil, KindTurn: e.Turn != nil, KindCoordinator: e.Coordinator != nil, KindCI: e.CI != nil, KindFeed: e.Feed != nil, KindInstruction: e.Instruction != nil, KindSession: e.Runtime != nil, KindPolicy: e.Policy != nil, KindApproval: e.Approval != nil, KindAccount: e.Account != nil, KindMessage: e.Message != nil, KindInbox: e.Inbox != nil, KindJob: e.Job != nil, KindStep: e.Step != nil, KindLoop: e.Loop != nil, KindNode: e.Node != nil, KindLaptop: e.Laptop != nil, KindRoute: e.Route != nil, KindStatus: e.Status != nil, KindCard: e.Card != nil, KindThread: e.Thread != nil, KindQuery: e.Query != nil, KindAttachment: e.Attachment != nil, KindFact: e.Fact != nil, KindOps: e.Ops != nil, KindRelease: e.Release != nil, KindFleet: e.Fleet != nil, KindWorkItem: e.Work != nil, KindIndex: e.Index != nil, KindSentence: e.Sentence != nil, KindTerminal: e.Terminal != nil, KindConfig: e.Config != nil, KindModel: e.Model != nil, KindCalendar: e.Calendar != nil, KindJanitor: e.Janitor != nil, "act": e.Act != nil,
 	}
 	want := e.Kind
 	switch e.Kind {
@@ -518,6 +519,10 @@ func (e Event) check() error {
 		return errors.New("a model event is the owner's, for one session")
 	case e.Kind == KindCalendar && (e.Session != "" || e.Mode != ModeShared || e.Calendar.check() != nil):
 		return errors.New("a calendar event is a shared fact, for no one session, and names its caller and outcome")
+	case e.Kind == KindJanitor && (e.Session != "" || e.Mode != ModeLive && e.Mode != ModeShadow):
+		return errors.New("a janitor event is a run's, for no one session")
+	case e.Kind == KindJanitor && e.Janitor.check() != nil:
+		return e.Janitor.check()
 	case e.Kind == KindQuery && (e.Mode != ModeShared || e.Query.Repository == "" || e.Query.Tool == ""):
 		return errors.New("a query event is a shared fact and names its repository and tool")
 	case e.Kind == KindAccount && (e.Session != "" || e.Mode != ModeShared || e.Account.Account == ""):

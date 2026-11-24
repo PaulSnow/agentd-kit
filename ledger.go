@@ -54,6 +54,7 @@ const (
 	SpendThread  = "thread"
 	SpendExpert  = "ask_expert"
 	SpendTriage  = "triage"
+	SpendJanitor = "janitor"
 )
 
 // LedgerReading is one account reading as the ledger keeps it; a failed
@@ -135,7 +136,7 @@ func (st *LogState) applyLedger(e Event) {
 	}
 	// A live run reads back what it wrote: a reading or a job's spend is
 	// held once. A usage event's spend is so far, which holds it once.
-	if e.Account != nil || e.Triage != nil || e.Card != nil || e.Query != nil || e.Status != nil || e.Route != nil {
+	if e.Account != nil || e.Triage != nil || e.Card != nil || e.Query != nil || e.Status != nil || e.Route != nil || e.Janitor != nil {
 		b, _ := json.Marshal(e)
 		k := shortHash(HashPane(string(b)))
 		if _, ok := l.applied[k]; ok {
@@ -184,6 +185,8 @@ func (st *LogState) applyLedger(e Event) {
 		job(SpendTriage, "", e.Triage.Usage)
 	case e.Card != nil:
 		job(SpendCurator, e.Card.Repository, e.Card.Usage)
+	case e.Janitor != nil:
+		job(SpendJanitor, e.Janitor.Repository, e.Janitor.Usage)
 	case e.Query != nil:
 		job(SpendExpert, e.Query.Repository, e.Query.Usage)
 	case e.Status != nil:
