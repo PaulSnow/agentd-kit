@@ -524,7 +524,11 @@ func (s *Supervisor) loopCarries(in *Instruction) (why string, limit int) {
 	case d.Answer == FindingFix && q.worker() != "":
 		why = fmt.Sprintf("the fix round of %s on %s carries it", q.Ref, q.worker())
 	case d.Answer == FindingFix:
-		why = fmt.Sprintf("no session delivered or continues %s, so agentd waits for its author to push, and reviews the new head", q.Ref)
+		if _, no := builderOf(s.cfg, s.st, q, s.st.CI[ciKey(q.Repository, q.Ref)]); no != "" {
+			why = fmt.Sprintf("no session delivered or continues %s, and %s, so agentd waits on its author to push, and reviews the new head", q.Ref, no)
+		} else {
+			why = fmt.Sprintf("no session delivered or continues %s, so agentd starts a builder on its branch, whose fix round carries it", q.Ref)
+		}
 	case d.Answer == FindingMerge:
 		why = fmt.Sprintf("the loop converges on %s", q.Ref)
 	case s.forge.allowed(repo, ActIssue) == nil:

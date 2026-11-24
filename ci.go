@@ -110,6 +110,13 @@ type CIRecord struct {
 	// changes the record.
 	FailedAt  time.Time
 	FailedFor string
+	// HeadSince is when the watcher first recorded the request's head,
+	// kept across records of the same head, so a head pushed before a
+	// round's findings were adopted or answered fix is told from one
+	// pushed after (#113). SinceHead is the head HeadSince is of, so a
+	// record with no head, as after a forge error, keeps it.
+	HeadSince time.Time
+	SinceHead string
 }
 
 // CIFixRecord is one fix session started for a request's failure, or
@@ -164,7 +171,10 @@ func (st *LogState) applyCI(e Event) {
 	}
 	key := ciKey(e.CI.Repository, e.CI.Ref)
 	old := st.CI[key]
-	r := CIRecord{CIPayload: *e.CI, Session: e.Session, At: e.Time, FailedAt: old.FailedAt, FailedFor: old.FailedFor}
+	r := CIRecord{CIPayload: *e.CI, Session: e.Session, At: e.Time, FailedAt: old.FailedAt, FailedFor: old.FailedFor, HeadSince: old.HeadSince, SinceHead: old.SinceHead}
+	if r.Head != "" && r.Head != r.SinceHead {
+		r.HeadSince, r.SinceHead = e.Time, r.Head
+	}
 	if f := r.Head + " " + r.Run + " " + r.Cause; r.State == CIFailed && r.FailedFor != f {
 		r.FailedAt, r.FailedFor = e.Time, f
 	}

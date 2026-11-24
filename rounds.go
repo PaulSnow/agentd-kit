@@ -255,6 +255,7 @@ type deferral struct {
 	Entry    string
 	Answer   string
 	Words    string
+	At       time.Time // when the owner answered
 }
 
 // deferred is round r's deferrals, read from the log's folds alone, so a
@@ -281,7 +282,7 @@ func (c *Case) deferred(st *LogState, r *RoundRecord) []deferral {
 			x.Entry = decisionEntry(x.Decision.Session, x.Decision.ID)
 			if t := st.Tracks[x.Decision.Session]; t != nil {
 				if a, ok := t.answerTo(x.Decision.Decision); ok && contains(findingKeys, a.Choice) {
-					x.Answer, x.Words = a.Choice, a.Note
+					x.Answer, x.Words, x.At = a.Choice, a.Note, a.At
 				}
 			}
 		}
