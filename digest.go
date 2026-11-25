@@ -128,6 +128,8 @@ func digestKind(n repoNeed) string {
 		return DigestOps
 	case strings.HasPrefix(e, entryJanitor):
 		return DigestJanitor
+	case strings.HasPrefix(e, entryAccount):
+		return DigestDecision
 	case strings.HasPrefix(e, entryDecision):
 		return DigestDecision
 	}
@@ -186,6 +188,10 @@ func BuildDigest(cfg *Config, st *LogState, decisions []UIDecision, now time.Tim
 			continue
 		}
 		add("", repoNeed{LevelDecision: LevelDecision{Entry: entryOps + id, Asked: oneLine(r.Summary, 400)}})
+	}
+	// Each account that cannot log in waits on the owner's token (#102).
+	for _, n := range accountNeeds(cfg, st) {
+		add("", n)
 	}
 	sortDigest(out)
 	return out
@@ -246,6 +252,9 @@ func needSince(st *LogState, repo string, n repoNeed) time.Time {
 		if r := st.Janitor[strings.TrimPrefix(e, entryJanitor)]; r != nil {
 			return r.Proposed
 		}
+	case strings.HasPrefix(e, entryAccount):
+		name, _, _ := strings.Cut(strings.TrimPrefix(e, entryAccount), ":")
+		return st.Accounts[name].FaultAt
 	case strings.HasPrefix(e, entryLoop):
 		return st.Loops[ciKey(repo, strings.TrimPrefix(e, entryLoop))].PlaceSince
 	}

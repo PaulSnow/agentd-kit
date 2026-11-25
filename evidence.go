@@ -17,13 +17,17 @@ import (
 // Evidence is everything observed about a session in one pass. State
 // transitions come from these fields and nothing else.
 type Evidence struct {
-	Alive       bool // the session exists and its pane is running
-	PaneDead    bool // the session exists but its command exited, kept by remain-on-exit
-	Exit        int  // the dead pane's exit status, or -1 when unknown
-	DeadScreen  string
-	Command     string // what the live pane runs, #{pane_current_command}
-	PaneHash    string
-	Limited     bool
+	Alive      bool // the session exists and its pane is running
+	PaneDead   bool // the session exists but its command exited, kept by remain-on-exit
+	Exit       int  // the dead pane's exit status, or -1 when unknown
+	DeadScreen string
+	Command    string // what the live pane runs, #{pane_current_command}
+	PaneHash   string
+	Limited    bool
+	// LoggedOut: the end of the screen shows a login prompt (#102), in
+	// LoginLine.
+	LoggedOut   bool
+	LoginLine   string
 	TrustPrompt bool
 	TrustMenu   *TrustMenu        // the trust prompt's menu, when it shows a whole one
 	PanePath    string            // where the live pane runs, #{pane_current_path}

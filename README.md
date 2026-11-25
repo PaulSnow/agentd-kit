@@ -73,6 +73,24 @@ A session's Questions section has one open escalation at a time. It opens when Q
 
 `agentd sessions model NAME MODEL` gives one configured or started session its own model, ahead of `policies.models` and its repository's policy; a model its repository's `sessions.models` leaves out is refused with the list, and the list still narrows one set before it. `--clear` takes it off. Each launch (a restart, rotation, CI fix or fix round) records its model in its action (`model`, `""` for the command's own default). A live session whose launch recorded another model than the one it would launch on now, from this command or from a reload, or one with its own model whose launch recorded none, is relaunched on it through the rotation, at its next checkpoint, with or without the context policy, and its rotation says why `model`: not a crash or a restart. With `--now` it is relaunched at the next pass, checkpoint or not. Neither happens while it waits on the owner. `agentd status` shows each session's model as its latest launch ran it, with `(wanted M, relaunch pending)` when it is to be relaunched; the web console's session rows and session page and the ops view's rows show the same.
 
+### Unattended logins (#102)
+
+Every account agentd uses needs a token_file. An interactive login (`/login`, kept in a `config_dir`) expires, and once it reaches its time limit it cannot be renewed unattended: every session and job on it then fails to authenticate. A long-lived token does not. To give account NAME one:
+
+1. Run once, in a terminal: `claude setup-token` (with `CLAUDE_CONFIG_DIR=<config_dir>` in front when the account has a `config_dir`).
+2. Save the token it prints: `install -m 600 /dev/null ~/.config/agentd-kit/NAME.token && $EDITOR ~/.config/agentd-kit/NAME.token`.
+3. Add `"token_file": "~/.config/agentd-kit/NAME.token"` to `accounts.NAME` in the config, and reload it (`agentd config reload`).
+
+How agentd reacts to a failed login. A job's call that exits non-zero is reported by the result Claude wrote on standard output when there is one: its subtype, `terminal_reason` and text, with the end of standard error after it, not just `exit status 1`. A result whose text says the login failed (failed to authenticate, not logged in, invalid API key, an expired OAuth token, `/login`, `setup-token`), or a session whose screen ends on a login prompt (`policies.login.pattern`, default `(?i)not logged in|please run /login|failed to authenticate|select login method`, matched against the screen's last six lines that are not blank; the session's state is then `logged-out`), is a fault of the account, not of the job or session:
+
+- The account is marked once with an `account` event (`fault`, `fault_source` job:NAME or session:NAME, and `token_stamp`, the token file's size, mtime and inode, never its contents), however many calls fail.
+- The owner is asked once per fault, on the ops console (else `policies.escalate.default_console` when it is one of `consoles`, else the first console), entry `a:NAME:UNIX`, with the commands above: *I saved a token: try again* clears it, *Leave it off* keeps it parked and asks nothing more.
+- No job, scheduled job (its slot is a `skip` with a `reason`), session start, restart, rotation, CI fix or fix round runs on the account, and none is retried or counted toward a restart backoff, until the fault clears. Placement passes over it. A repository's job (thread agent, designer, sentences, status check, janitor) moves meanwhile to the first account of its policy's `sessions.fallback`, then `sessions.accounts`, that can log in; a job of no repository (triage, the cards curator, the home and ops agents) waits. There is no other fallback.
+- The fault clears by itself, with an `account` event whose `cleared` is `token-changed` or `config`, when the token file changes or the account gains one in a reloaded config; the next failure marks it again. The default login, with no account, is marked as `default` and cleared only by the owner's answer.
+- The console's home shows the account's chip and meter line as *cannot log in*, with the message and since when, and `agentd status` ends with an `accounts:` block giving each account's state.
+
+**No rollback past #102's events.** A binary from before #102 refuses an `account` event with `fault` or `cleared`, an observation with `logged_out`, or a job `skip` with `reason`.
+
 **No rollback past #100's events.** A binary from before #100 refuses a log with a `config` or `model` event, a `start` with `config_path` and `config_hash`, or an action with `model`, as the reader refuses every field it does not know. #100's first `start` writes them: keep the earlier binary for the logs it wrote, and go forward, not back.
 
 ## States and evidence

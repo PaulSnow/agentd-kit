@@ -805,6 +805,10 @@ func (s *Supervisor) driveJanitor(now time.Time) {
 		if !s.janitorListed(repo) {
 			continue
 		}
+		job, ok := s.gateJob(job, repo, "janitor")
+		if !ok {
+			continue // its account cannot log in (#102)
+		}
 		st := s.st.JanitorRuns[repo]
 		if st != nil && (st.Day == day || st.FailDay == day && now.Sub(st.Last) < janitorRetry) || s.work.busy("janitor:"+repo) {
 			continue

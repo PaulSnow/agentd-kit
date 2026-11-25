@@ -245,11 +245,15 @@ func (l *AccountLedger) prune(now time.Time) {
 // AccountReport is one account's token use (#64). A figure that is not
 // known is absent, never zero.
 type AccountReport struct {
-	Account       string     `json:"account"`
-	At            time.Time  `json:"at"` // when the report was made
-	ReadAt        *time.Time `json:"read_at,omitempty"`
-	Stale         bool       `json:"stale,omitempty"`
-	Error         string     `json:"error,omitempty"`
+	Account string     `json:"account"`
+	At      time.Time  `json:"at"` // when the report was made
+	ReadAt  *time.Time `json:"read_at,omitempty"`
+	Stale   bool       `json:"stale,omitempty"`
+	Error   string     `json:"error,omitempty"`
+	// Fault says the account cannot log in (#102), screened, and FaultAt
+	// since when.
+	Fault         string     `json:"fault,omitempty"`
+	FaultAt       *time.Time `json:"fault_at,omitempty"`
 	FiveHour      *float64   `json:"five_hour,omitempty"`
 	FiveHourReset *time.Time `json:"five_hour_reset,omitempty"`
 	Weekly        *float64   `json:"weekly,omitempty"`
@@ -358,6 +362,13 @@ func accountReport(cfg *Config, st *LogState, l *AccountLedger, account string, 
 		rep.Stale = r.At.IsZero() || now.Sub(r.At) > stale
 		if r.ErrorAt.After(r.At) && !confidentialMatcher(cfg)(r.Error) {
 			rep.Error = r.Error
+		}
+		if r.faulted() {
+			at := r.FaultAt
+			rep.FaultAt, rep.Fault = &at, withheldSecret
+			if !confidentialMatcher(cfg)(r.AccountPayload.Fault, r.FaultSource) {
+				rep.Fault = oneLine(r.AccountPayload.Fault, 300)
+			}
 		}
 	}
 	// The week: from the latest reset a week back, else the last week. A

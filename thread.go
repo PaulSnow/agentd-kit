@@ -552,6 +552,12 @@ func (s *Supervisor) startThread(in *Instruction, repo, cwd string) {
 	if s.work.busy(key) {
 		return
 	}
+	// While its account cannot log in, and repo's sessions.fallback has
+	// none that can, the message waits (#102).
+	job, ok := s.gateJob(threadJob(s.cfg), repo, "thread")
+	if !ok {
+		return
+	}
 	if s.emit("", Event{Kind: KindRoute, Route: &RoutePayload{Instruction: in.ID, Step: RouteAgent}}); s.halt != nil {
 		return
 	}
@@ -564,7 +570,6 @@ func (s *Supervisor) startThread(in *Instruction, repo, cwd string) {
 	if len(opened) > 0 {
 		x.HandBack = &threadHandBack{Opened: opened, Asked: in.Asked, AskedFor: in.AskedFor, NotOpened: in.NotOpened}
 	}
-	job := threadJob(s.cfg)
 	// Who it may hand work to: a running session, or a finished one whose
 	// tmux session runs (#65).
 	running, finished := map[string]bool{}, map[string]bool{}

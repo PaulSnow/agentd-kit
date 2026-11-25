@@ -485,6 +485,8 @@ func entryRepository(cfg *Config, st *LogState, entry string) string {
 		if r := st.Janitor[entry[2:]]; r != nil {
 			return r.Repository
 		}
+	case strings.HasPrefix(entry, entryAccount):
+		return cfg.accountConsole()
 	case strings.HasPrefix(entry, entryDecision), strings.HasPrefix(entry, entryNeed):
 		session, _, _ := strings.Cut(entry[2:], ":")
 		if s, ok := cfg.Sessions[session]; ok {

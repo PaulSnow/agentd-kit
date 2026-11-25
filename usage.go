@@ -104,6 +104,16 @@ type AccountPayload struct {
 	ModelWeekly      *float64   `json:"model_weekly,omitempty"`
 	ModelWeeklyReset *time.Time `json:"model_weekly_reset,omitempty"`
 	Error            string     `json:"error,omitempty"`
+	// Fault, when set, says the account cannot log in (#102): what the
+	// failure said, screened and with no token in it. FaultSource is
+	// where it was met, job:NAME or session:NAME, and TokenStamp the
+	// account's token_file as it was then, its size, mtime and inode,
+	// never its contents. Such an event carries no reading.
+	Fault       string `json:"fault,omitempty"`
+	FaultSource string `json:"fault_source,omitempty"`
+	TokenStamp  string `json:"token_stamp,omitempty"`
+	// Cleared ends the account's fault: token-changed, owner or config.
+	Cleared string `json:"cleared,omitempty"`
 }
 
 // AccountRecord is an account's latest reading as the fold keeps it: the
@@ -117,7 +127,13 @@ type AccountRecord struct {
 	// after a good reading, or the first ever; zero while they read
 	// (#80).
 	FailingSince time.Time
+	// FaultAt is when the account was found unable to log in, zero while
+	// it can; Fault, FaultSource and TokenStamp are then the fault's.
+	FaultAt time.Time
 }
+
+// faulted says whether the account cannot log in, as the log last said.
+func (r AccountRecord) faulted() bool { return !r.FaultAt.IsZero() }
 
 // usageReadingDown is how long an account's readings fail before the
 // owner is shown one card for it and placement goes on without a
@@ -137,6 +153,21 @@ func (st *LogState) applyAccount(e Event) {
 	}
 	p := *e.Account
 	r := st.Accounts[p.Account]
+	switch {
+	case p.Cleared != "":
+		r.FaultAt, r.Fault, r.FaultSource, r.TokenStamp = time.Time{}, "", "", ""
+		r.Account = p.Account
+		st.Accounts[p.Account] = r
+		return
+	case p.Fault != "":
+		// The first fault stands until it is cleared.
+		if !r.faulted() {
+			r.FaultAt, r.Fault, r.FaultSource, r.TokenStamp = e.Time, p.Fault, p.FaultSource, p.TokenStamp
+		}
+		r.Account = p.Account
+		st.Accounts[p.Account] = r
+		return
+	}
 	if p.Error != "" {
 		r.Account, r.Error, r.ErrorAt = p.Account, p.Error, e.Time
 		if r.FailingSince.IsZero() {
@@ -145,7 +176,10 @@ func (st *LogState) applyAccount(e Event) {
 		st.Accounts[p.Account] = r
 		return
 	}
-	st.Accounts[p.Account] = AccountRecord{AccountPayload: p, At: e.Time}
+	// A reading keeps the account's fault: a usage reading does not log in.
+	n := AccountRecord{AccountPayload: p, At: e.Time, FaultAt: r.FaultAt}
+	n.Fault, n.FaultSource, n.TokenStamp = r.Fault, r.FaultSource, r.TokenStamp
+	st.Accounts[p.Account] = n
 }
 
 // usageHigh is the higher of a reading's utilizations, and whether it has
@@ -576,10 +610,23 @@ func placeAccount(cfg *Config, st *LogState, repo string, now time.Time, tried f
 // every account was read and is at or over the limit.
 func pickAccount(cfg *Config, st *LogState, fallback []string, now time.Time, tried func(string) bool) (account, why string, full bool, blind string) {
 	u := cfg.Usage
+	var states []string
+	// An account that cannot log in is passed over (#102).
+	var usable []string
+	for _, a := range fallback {
+		if r := st.Accounts[a]; r.faulted() {
+			states = append(states, fmt.Sprintf("%s: cannot log in since %s", a, r.FaultAt.UTC().Format(time.RFC3339)))
+			continue
+		}
+		usable = append(usable, a)
+	}
+	if len(usable) == 0 {
+		return "", strings.Join(states, "; "), false, ""
+	}
+	fallback = usable
 	if !u.Enabled {
 		return fallback[0], "", false, ""
 	}
-	var states []string
 	var blindWhy string
 	var reset *time.Time
 	full = true

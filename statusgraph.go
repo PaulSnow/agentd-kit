@@ -738,7 +738,10 @@ func (s *Supervisor) statusCheck(name string, sess Session, t *Track, now time.T
 		}
 	}
 	in.Facts, p.Facts = f, f
-	job := jobFromConfig(s.cfg)
+	job, ok := s.jobFor(sess.Repository, "status")
+	if !ok {
+		return nil, nil // its account cannot log in (#102)
+	}
 	job.MaxInput = s.cfg.Jobs.Status.maxInput()
 	p.Model = job.Model
 	input, err := in.fit(job.MaxInput)

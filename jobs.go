@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -156,6 +157,9 @@ type Job struct {
 	MCP         string
 	NoStrictMCP bool
 	Allow       []string
+	// onAuth, when set, is told of each call that failed because its
+	// account cannot log in (#102): the supervisor marks the account.
+	onAuth func(*AuthError)
 }
 
 // turns is the model turns an agent run of j may take.
@@ -205,6 +209,44 @@ type jobResult struct {
 	StructuredOutput json.RawMessage `json:"structured_output"`
 	Usage            JobUsage        `json:"usage"`
 	TotalCostUSD     float64         `json:"total_cost_usd"`
+	TerminalReason   string          `json:"terminal_reason"`
+}
+
+// authRe recognises, in a call's result text, that its login could not
+// authenticate: an expired or missing login, not a fault of the job (#102).
+var authRe = regexp.MustCompile(`(?i)failed to authenticate|not logged in|invalid api key|oauth token (has )?expired|please run /login|setup-token`)
+
+// authFailure says whether a call's result says its login failed.
+func authFailure(r jobResult) bool {
+	return r.IsError && authRe.MatchString(r.Result)
+}
+
+// AuthError is a call that failed because its account cannot log in: a
+// fault of the account, which every call on it would meet, not of the job
+// (#102). Account is "" for the default login.
+type AuthError struct {
+	Account, Message string
+}
+
+func (e *AuthError) Error() string {
+	return fmt.Sprintf("account %s cannot log in: %s", acctName(e.Account), e.Message)
+}
+
+// resultError is the error a call's result reports: its subtype, its
+// terminal_reason and its text, with stderr's tail when there is one.
+func (j Job) resultError(r jobResult, stderr string) error {
+	msg := r.Subtype
+	if r.TerminalReason != "" {
+		msg += " (" + r.TerminalReason + ")"
+	}
+	msg += ": " + oneLine(r.Result, 300)
+	if stderr = strings.TrimSpace(stderr); stderr != "" {
+		msg += "; stderr: " + oneLine(stderr, 300)
+	}
+	if authFailure(r) {
+		return &AuthError{Account: j.AccountName, Message: msg}
+	}
+	return fmt.Errorf("%s: %s", j.Command, msg)
 }
 
 // Run makes the call: system is the job's instructions, schema the JSON
@@ -216,6 +258,15 @@ type jobResult struct {
 // A token file is read by the shell, as for a session, so agentd never
 // holds the token.
 func (j Job) Run(ctx context.Context, system string, schema, input []byte) (json.RawMessage, JobUsage, error) {
+	raw, u, err := j.run(ctx, system, schema, input)
+	var auth *AuthError
+	if j.onAuth != nil && errors.As(err, &auth) {
+		j.onAuth(auth)
+	}
+	return raw, u, err
+}
+
+func (j Job) run(ctx context.Context, system string, schema, input []byte) (json.RawMessage, JobUsage, error) {
 	if len(input) > j.MaxInput {
 		return nil, JobUsage{}, fmt.Errorf("job input is %d bytes, over the %d allowed", len(input), j.MaxInput)
 	}
@@ -263,6 +314,13 @@ func (j Job) Run(ctx context.Context, system string, schema, input []byte) (json
 		case stdout.over:
 			return nil, JobUsage{}, fmt.Errorf("%s wrote more than %d bytes and was stopped", j.Command, JobOutputMax)
 		}
+		// The CLI writes its result, the real reason, on standard output
+		// even when it exits non-zero: an expired login is told there.
+		var r jobResult
+		if json.Unmarshal(out, &r) == nil && (r.Subtype != "" || r.Result != "") {
+			r.Usage.CostUSD, r.Usage.Account = r.TotalCostUSD, j.AccountName
+			return nil, r.Usage, fmt.Errorf("%w (%s: %v)", j.resultError(r, string(stderr.b)), j.Command, err)
+		}
 		return nil, JobUsage{}, fmt.Errorf("%s: %v: %s", j.Command, err, strings.TrimSpace(string(stderr.b)))
 	}
 	var r jobResult
@@ -271,7 +329,7 @@ func (j Job) Run(ctx context.Context, system string, schema, input []byte) (json
 	}
 	r.Usage.CostUSD, r.Usage.Account = r.TotalCostUSD, j.AccountName
 	if r.IsError {
-		return nil, r.Usage, fmt.Errorf("%s: %s: %s", j.Command, r.Subtype, oneLine(r.Result, 200))
+		return nil, r.Usage, j.resultError(r, "")
 	}
 	if len(r.StructuredOutput) == 0 || string(r.StructuredOutput) == "null" {
 		return nil, r.Usage, fmt.Errorf("%s: no structured output", j.Command)
@@ -517,7 +575,9 @@ func (j Job) Triage(ctx context.Context, items []ItemPayload) ([]TriageResult, [
 				return res, sent, total, nil
 			}
 		}
-		if attempt == 1 || ctx.Err() != nil {
+		// A login that failed fails again: it is the account's fault.
+		var auth *AuthError
+		if attempt == 1 || ctx.Err() != nil || errors.As(err, &auth) {
 			return nil, sent, total, err
 		}
 	}
@@ -574,7 +634,10 @@ func (s *Supervisor) triageItems(now time.Time) {
 	if len(items) > batch {
 		items = items[:batch]
 	}
-	job := jobFromConfig(s.cfg)
+	job, ok := s.jobFor("", "triage")
+	if !ok {
+		return // its account cannot log in: triage waits for it (#102)
+	}
 	s.spawnShared("triage", func(w *Supervisor) {
 		res, sent, usage, err := job.Triage(w.runCtx, items)
 		if w.runCtx.Err() != nil {

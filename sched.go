@@ -87,6 +87,8 @@ type JobPayload struct {
 	Name  string    `json:"name"`
 	Phase string    `json:"phase"`
 	Slot  time.Time `json:"slot"`
+	// Reason is why a slot was skipped, when not for a run still running.
+	Reason string `json:"reason,omitempty"`
 	// An end: the exit code (-1 when the command did not run or was
 	// killed), how long it ran, and why it failed, if it did.
 	Exit       *int   `json:"exit,omitempty"`
@@ -330,6 +332,10 @@ func (s *Supervisor) runJobs(now time.Time) {
 			s.emit("", Event{Kind: KindJob, Job: &JobPayload{Name: name, Phase: JobWould, Slot: slot}})
 		case s.work.inFlight[key]:
 			s.emit("", Event{Kind: KindJob, Job: &JobPayload{Name: name, Phase: JobSkip, Slot: slot}})
+		case j.Account != "" && s.st.accountFaulted(j.Account):
+			// Its account cannot log in (#102): the slot is not run, nor
+			// retried, and the owner is asked once, about the account.
+			s.emit("", Event{Kind: KindJob, Job: &JobPayload{Name: name, Phase: JobSkip, Slot: slot, Reason: "account " + j.Account + " cannot log in"}})
 		default:
 			if s.emit("", Event{Kind: KindJob, Job: &JobPayload{Name: name, Phase: JobStart, Slot: slot}}); s.halt != nil {
 				return
@@ -395,7 +401,9 @@ func (s *Supervisor) runStepJob(key, name string, slot time.Time, j ScheduledJob
 		if err != nil {
 			end.Error = oneLine(err.Error(), scheduledStderr)
 		} else {
-			p := runStep(w.runCtx, spec, spec.job(cfg), last, false)
+			jb := spec.job(cfg)
+			jb.onAuth = func(e *AuthError) { s.noteAuthFault(e.Account, "job:"+name, e.Message) }
+			p := runStep(w.runCtx, spec, jb, last, false)
 			if w.runCtx.Err() != nil && p.Outcome != StepOK && p.Outcome != StepSkipped {
 				end.Error, end.Stopped = "agentd stopped, and the step was killed", true
 			} else {

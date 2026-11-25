@@ -371,7 +371,7 @@ func (d *digestCounts) add(state string, delivered, asked, items int) {
 func (d digestCounts) digest() string {
 	total := 0
 	var parts []string
-	for _, st := range []State{Working, Starting, Idle, BlockedOnOwner, UsageLimited, Done, Failed, CrashLooping, Stale, Gone} {
+	for _, st := range []State{Working, Starting, Idle, BlockedOnOwner, UsageLimited, LoggedOut, Done, Failed, CrashLooping, Stale, Gone} {
 		if d.states[st] > 0 {
 			total += d.states[st]
 			parts = append(parts, fmt.Sprintf("%d %s", d.states[st], st))

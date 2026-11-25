@@ -724,7 +724,7 @@ func (st *LogState) sessionLive(name string) bool {
 		return false
 	}
 	switch t.State {
-	case Starting, Working, Idle, BlockedOnOwner, UsageLimited, Failed:
+	case Starting, Working, Idle, BlockedOnOwner, UsageLimited, LoggedOut, Failed:
 		return true
 	}
 	return false
@@ -945,7 +945,10 @@ type idleInput struct {
 // from its fields, body and latest comments, screened; it is logged for
 // the change on the forge it was written for, or why it failed.
 func (s *Supervisor) idleSentence(repo string, r Repository, i IndexIssue) {
-	job := jobFromConfig(s.cfg)
+	job, ok := s.jobFor(repo, "sentences")
+	if !ok {
+		return // its account cannot log in (#102)
+	}
 	if m := s.cfg.Jobs.Sentences.Model; m != "" {
 		job.Model = m
 	}

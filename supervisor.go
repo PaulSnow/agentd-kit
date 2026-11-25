@@ -114,6 +114,7 @@ type Supervisor struct {
 
 	st           *LogState
 	limitRe      *regexp.Regexp
+	loginRe      *regexp.Regexp
 	trustRe      *regexp.Regexp
 	dialogs      []*regexp.Regexp
 	confidential []*regexp.Regexp
@@ -154,6 +155,7 @@ func NewSupervisor(cfg *Config, log *Log, clock Clock, tmux Tmux, git Git, forge
 		runCtx:       context.Background(),
 		tailOff:      log.Size(),
 		limitRe:      regexp.MustCompile(cfg.Policies.UsageLimit.Pattern),
+		loginRe:      regexp.MustCompile(cfg.Policies.Login.Pattern),
 		trustRe:      regexp.MustCompile(`^(?:` + cfg.Policies.Trust.Pattern + `)$`),
 		dialogs:      dialogs,
 
@@ -510,6 +512,7 @@ func (s *Supervisor) Pass() error {
 	s.halt = nil
 	s.ownerRecords()
 	s.checkConfig()
+	s.accountFaults(s.clock.Now())
 	s.endSessions(s.clock.Now())
 	// Instructions are routed before the sessions' steps, so one is
 	// delivered in the pass that read it.
@@ -698,6 +701,8 @@ func (s *Supervisor) observe(name string, sess Session) (Evidence, error) {
 			return ev, err
 		}
 		ev.Limited = s.limitRe.MatchString(screen)
+		ev.LoginLine = loginLine(s.loginRe, screen)
+		ev.LoggedOut = ev.LoginLine != ""
 		ev.TrustPrompt = s.cfg.Policies.Trust.Enabled && questionLine(s.trustRe, screen)
 		if ev.TrustPrompt {
 			ev.TrustMenu = trustMenu(screen, s.trustRe, s.home)
@@ -821,6 +826,7 @@ func (s *Supervisor) logObserve(name string, t *Track, ev Evidence, state State,
 
 		StatusQuestions: ev.StatusQuestions,
 		Limited:         ev.Limited,
+		LoggedOut:       ev.LoggedOut,
 		Trust:           ev.TrustPrompt,
 		Dialog:          ev.Dialog != "",
 		DialogShape:     ev.Dialog != "" && ev.DialogShape,
@@ -877,6 +883,14 @@ func sameObservation(a, b ObservePayload) bool {
 
 func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, state State, now time.Time) State {
 	pol := s.cfg.Policies
+	// Its login failed (#102): the account is marked, and nothing is
+	// typed into the session or restarts it; the owner is asked once.
+	if state == LoggedOut {
+		if !s.shadow {
+			s.noteAuthFault(sess.Account, "session:"+name, ev.LoginLine)
+		}
+		return state
+	}
 	// A work session is rotated at the end of its round too, DONE once
 	// its branch is delivered (#48).
 	// Nor while the owner waits on its answer to a message (#56): rotate
@@ -934,6 +948,14 @@ func (s *Supervisor) actOn(name string, sess Session, t *Track, ev Evidence, sta
 	case Failed:
 		if !pol.Restart.Enabled {
 			s.skipOnce(name, "restart:"+name, "restart policy disabled", t, nil)
+			return state
+		}
+		// Its account cannot log in (#102): not restarted, and no restart
+		// is counted, until the account's fault clears; the owner is asked
+		// once, about the account.
+		if r := s.st.Accounts[acctName(sess.Account)]; r.faulted() {
+			s.skipOnce(name, fmt.Sprintf("account-fault:%s:%d", name, r.FaultAt.Unix()), "not restarting: account "+acctName(sess.Account)+" "+accountFaultText(r), t,
+				&SkipPayload{Account: sess.Account})
 			return state
 		}
 		n := t.restartsInWindow(now, pol.Restart.Window.Duration)
@@ -1901,6 +1923,9 @@ func ClearSession(cfg *Config, log *Log, now time.Time, session string) error {
 // another login. A token file that fails checkTokenFile now is refused.
 func (s *Supervisor) launchLine(sess Session, argv []string) (string, error) {
 	line := shellJoin(argv)
+	if r := s.st.Accounts[acctName(sess.Account)]; r.faulted() {
+		return "", fmt.Errorf("account %s %s", acctName(sess.Account), accountFaultText(r))
+	}
 	if sess.Account == "" {
 		return line, nil
 	}

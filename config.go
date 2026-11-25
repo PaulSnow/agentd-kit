@@ -91,6 +91,7 @@ type Policies struct {
 	Restart      RestartPolicy      `json:"restart"`
 	Nudge        NudgePolicy        `json:"nudge"`
 	UsageLimit   UsageLimitPolicy   `json:"usage_limit"`
+	Login        LoginPolicy        `json:"login"`
 	Trust        TrustPolicy        `json:"trust_prompt"`
 	Escalate     EscalatePolicy     `json:"escalate"`
 	Dialog       DialogPolicy       `json:"dialog"`
@@ -237,6 +238,17 @@ type InstructionsPolicy struct {
 type UsageLimitPolicy struct {
 	Pattern string `json:"pattern"`
 }
+
+// LoginPolicy recognises, by Pattern, a regular expression, a session
+// whose login failed: the end of its screen shows a login prompt or says
+// it is not logged in. Such a session's account cannot log in (#102): it
+// is neither typed into nor restarted until the account is fixed.
+type LoginPolicy struct {
+	Pattern string `json:"pattern"`
+}
+
+// DefaultLoginPattern is policies.login.pattern's default.
+const DefaultLoginPattern = `(?i)not logged in|please run /login|failed to authenticate|select login method`
 
 // confirmKeyRe is a key that only confirms the selected option: any other
 // could move the cursor, pick an option, or cancel and exit.
@@ -443,6 +455,7 @@ func DefaultConfig() Config {
 			CI: CIPolicy{Pointer: "A pipeline of the request you delivered failed on its own; the failing jobs and the end of the first one's log are under ci in the facts. " +
 				"Fix it on the same branch and commit, then make DONE the last line of STATUS.md again; agentd pushes the fix to the same request."},
 			UsageLimit:   UsageLimitPolicy{Pattern: `(?i)limit reached.{0,80}reset|out of extra usage`},
+			Login:        LoginPolicy{Pattern: DefaultLoginPattern},
 			Trust:        TrustPolicy{Enabled: true, Pattern: `(?i)(quick safety check: )?(do you )?trust (the files in )?this folder\??|(quick safety check: )?is this a project you created or one you trust\?( .*)?`, Keys: []string{"Enter"}},
 			Escalate:     EscalatePolicy{},
 			Dialog:       DialogPolicy{Patterns: []string{`Do you want to`, `❯\s*1\.`, `(?i)enter to confirm`}},
@@ -598,6 +611,9 @@ func (c *Config) finish(base string) error {
 	}
 	if _, err := regexp.Compile(c.Policies.UsageLimit.Pattern); err != nil {
 		errs = append(errs, fmt.Errorf("policies.usage_limit.pattern: %w", err))
+	}
+	if _, err := regexp.Compile(c.Policies.Login.Pattern); err != nil {
+		errs = append(errs, fmt.Errorf("policies.login.pattern: %w", err))
 	}
 	for i, p := range c.Policies.Dialog.Patterns {
 		if _, err := regexp.Compile(p); err != nil {

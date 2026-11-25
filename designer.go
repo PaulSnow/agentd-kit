@@ -491,7 +491,10 @@ func (s *Supervisor) runDesigner(it *WorkItem, in *Instruction, now time.Time) {
 	cwd := s.threadCwd(repo)
 	x := s.threadInputFor(in, repo, cwd)
 	x.Cards = s.threadCards(&x, s.keepText)
-	job := designerJob(s.cfg)
+	job, ok := s.gateJob(designerJob(s.cfg), repo, "designer")
+	if !ok {
+		return // its account cannot log in (#102)
+	}
 	mcp := mcpQueryConfig(s.cfg, repo, key)
 	known := s.st.knownIssues()
 	var dirs []string

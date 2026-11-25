@@ -172,10 +172,13 @@ func loadExampleConfig(t *testing.T) (string, *Config) {
 	for _, f := range []string{"agentd.json", "page.json"} {
 		writeFile(t, filepath.Join(home, ".config", "agentd-kit", f), "{}\n")
 	}
-	token := filepath.Join(home, ".config", "agentd-kit", "spare.token")
-	writeFile(t, token, "a token\n")
-	if err := os.Chmod(token, 0o600); err != nil {
-		t.Fatal(err)
+	// Every account agentd uses has a token file (#102).
+	for _, name := range []string{"spare", "work"} {
+		token := filepath.Join(home, ".config", "agentd-kit", name+".token")
+		writeFile(t, token, "a token\n")
+		if err := os.Chmod(token, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	cfg, err := LoadConfig("agentd.example.json")
 	if err != nil {

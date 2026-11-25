@@ -14,6 +14,7 @@ const (
 	Idle           State = "idle"
 	BlockedOnOwner State = "blocked-on-owner"
 	UsageLimited   State = "usage-limited"
+	LoggedOut      State = "logged-out" // its account cannot log in (#102)
 	Done           State = "done"
 	Failed         State = "failed"
 	CrashLooping   State = "crash-looping"
@@ -382,6 +383,8 @@ func Classify(t *Track, ev Evidence, pol Policies, now time.Time) (State, string
 		return BlockedOnOwner, "STATUS.md has open Questions"
 	case ev.TrustPrompt && startPhase:
 		return Starting, "screen shows the folder-trust prompt"
+	case ev.LoggedOut:
+		return LoggedOut, "screen shows a login prompt"
 	case ev.Limited:
 		return UsageLimited, "screen shows the usage-limit message"
 	case ev.Dialog != "":
