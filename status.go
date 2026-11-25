@@ -141,6 +141,9 @@ func summarizeState(cfg *Config, st *LogState, now time.Time) ([]SessionStatus, 
 	if loops := loopViews(cfg, st, now); len(loops) > 0 {
 		meta["loops"] = loops
 	}
+	if accts := accountLines(cfg, st); len(accts) > 0 {
+		meta["accounts"] = accts
+	}
 	tracks := copyMap(st.Tracks)
 	for _, n := range cfg.SessionNames() {
 		if tracks[n] == nil {
@@ -297,6 +300,47 @@ func PrintStatus(w io.Writer, rows []SessionStatus, meta map[string]any, now tim
 			r.Nudges, r.Escalations, delivered, model, why)
 	}
 	tw.Flush()
+	// Each account's state (#102): whether it can log in, and its usage.
+	if accts, ok := meta["accounts"].([]string); ok {
+		fmt.Fprintln(w, "accounts:")
+		for _, a := range accts {
+			fmt.Fprintln(w, "  "+a)
+		}
+	}
+}
+
+// accountLines are each account's state in a line: ok, over its limit,
+// or that it cannot log in, since when and why; the default login only
+// when it cannot.
+func accountLines(cfg *Config, st *LogState) []string {
+	names := map[string]bool{}
+	for n := range cfg.Accounts {
+		names[n] = true
+	}
+	for n, r := range st.Accounts {
+		if r.faulted() {
+			names[n] = true
+		}
+	}
+	secret := confidentialMatcher(cfg)
+	var out []string
+	for _, n := range sortedKeys(names) {
+		r := st.Accounts[n]
+		line := n + ": ok"
+		switch {
+		case r.faulted():
+			line = n + ": " + accountFaultText(r)
+			if secret(r.AccountPayload.Fault) {
+				line = n + ": cannot log in since " + r.FaultAt.UTC().Format(time.RFC3339) + " (" + withheldSecret + ")"
+			}
+		case cfg.Usage.Enabled && cfg.Usage.Limit > 0:
+			if high, ok := r.usageHigh(); ok && high >= cfg.Usage.Limit {
+				line = n + ": over limit (" + usageText(r.AccountPayload) + ")"
+			}
+		}
+		out = append(out, line)
+	}
+	return out
 }
 
 func ago(now, t time.Time) string {

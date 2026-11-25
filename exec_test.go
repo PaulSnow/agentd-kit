@@ -334,10 +334,10 @@ func TestExecTmuxTypesTextAfterDashes(t *testing.T) {
 // A post's author by default is the tmux session of the caller's own
 // pane, and none outside tmux.
 func TestTmuxSessionNameOfTheCallersPane(t *testing.T) {
-	shim(t, "tmux", `echo "$*" | sed 's/display-message -p -t %7 #S/night-1/'`)
+	shim(t, "tmux", `echo "$*" | sed 's/display-message -p -t %7 #S/run-1/'`)
 	t.Setenv("TMUX", "/tmp/tmux-sock,1,0")
 	t.Setenv("TMUX_PANE", "%7")
-	if got := tmuxSessionName(); got != "night-1" {
+	if got := tmuxSessionName(); got != "run-1" {
 		t.Fatalf("session name %q", got)
 	}
 	t.Setenv("TMUX", "")

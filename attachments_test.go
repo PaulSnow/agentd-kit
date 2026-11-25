@@ -102,7 +102,7 @@ func attachmentFixture(t *testing.T) (*UI, *uiFixture, string) {
 	u, f := fixtureUI(t)
 	dir := t.TempDir()
 	f.coord.EventLog = filepath.Join(dir, "events.jsonl")
-	f.night.EventLog = filepath.Join(dir, "events.jsonl")
+	f.run.EventLog = filepath.Join(dir, "events.jsonl")
 	return u, f, dir
 }
 
@@ -181,7 +181,7 @@ func TestUIAttachmentPasted(t *testing.T) {
 			t.Errorf("a guest: %d", w.Code)
 		}
 	}
-	for _, target := range []string{"/attachment/coord/Ynone", "/attachment/elsewhere/" + a.ID, "/attachment/night/" + a.ID, "/attachment/coord"} {
+	for _, target := range []string{"/attachment/coord/Ynone", "/attachment/elsewhere/" + a.ID, "/attachment/run/" + a.ID, "/attachment/coord"} {
 		if w := get(u, "GET", target, pageAddr, "192.0.2.20:51000"); w.Code != http.StatusNotFound {
 			t.Errorf("%s: %d", target, w.Code)
 		}

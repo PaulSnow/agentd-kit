@@ -236,6 +236,7 @@ type ObservePayload struct {
 	// answer names it, or "" when it asks nothing.
 	StatusQuestions string `json:"status_questions,omitempty"`
 	Limited         bool   `json:"limited"`
+	LoggedOut       bool   `json:"logged_out,omitempty"`
 	Trust           bool   `json:"trust"`
 	Dialog          bool   `json:"dialog"`
 	DialogShape     bool   `json:"dialog_shape,omitempty"` // the dialog has a dialog's shape, which alone may be declined

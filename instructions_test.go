@@ -42,7 +42,7 @@ func TestConsoleReplyKinds(t *testing.T) {
 			t.Errorf("%q was taken", bad)
 		}
 	}
-	if err := reply(h, "nowhere", "Stop for the night."); err == nil {
+	if err := reply(h, "nowhere", "Stop for now."); err == nil {
 		t.Error("a console that feeds no repository took an instruction")
 	}
 	if len(instructions(h)) != 0 {

@@ -257,7 +257,7 @@ func (s *Supervisor) useConfig(next *Config) {
 	s.base = next
 	s.st.cfg = next
 	s.forge = fresh.forge
-	s.checkpointRe, s.limitRe, s.trustRe = fresh.checkpointRe, fresh.limitRe, fresh.trustRe
+	s.checkpointRe, s.limitRe, s.loginRe, s.trustRe = fresh.checkpointRe, fresh.limitRe, fresh.loginRe, fresh.trustRe
 	s.dialogs, s.confidential = fresh.dialogs, fresh.confidential
 	to := next.Timeouts
 	if _, ok := s.tmux.(ExecTmux); ok {

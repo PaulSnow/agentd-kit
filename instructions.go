@@ -459,7 +459,7 @@ func (s *Supervisor) routeInstructions(now time.Time) {
 		if !in.Route || !in.Delivered.IsZero() || !in.Replied.IsZero() || in.Failed != "" || in.Session != "" && s.takesInstructions(in.Session) && !s.stranded(in) {
 			continue
 		}
-		if s.routeJanitor(in) {
+		if s.routeJanitor(in) || s.routeAccount(in) {
 			if s.halt != nil {
 				return
 			}

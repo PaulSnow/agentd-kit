@@ -48,6 +48,9 @@ type workState struct {
 	// ignored tells, once, the unknown fields of the external files the
 	// polls read.
 	ignored *ignoredFields
+	// authFaults are the auth failures jobs and sessions met, for the
+	// loop to mark their accounts (#102).
+	authFaults []authFault
 }
 
 // workerMsg is an event a worker appended, or the end of its job.

@@ -292,7 +292,7 @@ func (src *uiSource) needs(cfg *Config, rep Report, asked map[string]time.Time) 
 				// Questions, it is listed by them until they are
 				// answered, and then the answer is on its way.
 				kind = "blocked"
-			case t.State == UsageLimited, t.State == CrashLooping, t.State == Failed:
+			case t.State == UsageLimited, t.State == LoggedOut, t.State == CrashLooping, t.State == Failed:
 				kind = string(t.State)
 			}
 			if kind == "" {
@@ -320,7 +320,6 @@ type uiRun struct {
 	Spend      int64
 	SpendKnown bool
 	Cap        int64
-	StopAt     *time.Time
 	Digest     string
 }
 
@@ -384,6 +383,9 @@ type uiAccount struct {
 	Over  bool
 	Stale bool
 	Error string // the latest error since the numbers, screened
+	// Fault says the account cannot log in (#102), screened; FaultAt,
+	// the record's, since when.
+	Fault string
 	// Report is the account's token use (#64), when one was made.
 	Report *AccountReport
 }
@@ -665,7 +667,7 @@ func (src *uiSource) addIndex(v *uiIndex, get func(string) *uiRepo, now time.Tim
 	}
 	live := src.st.Mode == ModeLive
 	run := uiRun{Src: src.Name, Mode: src.st.Mode, Started: src.st.Started, Stopped: src.st.Stopped,
-		Cap: cfg.Policies.Budget.RunTokens, StopAt: cfg.Policies.Budget.StopAt, Digest: rep.OwnerDigest}
+		Cap: cfg.Policies.Budget.RunTokens, Digest: rep.OwnerDigest}
 	for _, t := range src.st.Tracks {
 		if sp, ok := t.spend(live); ok {
 			run.Spend, run.SpendKnown = run.Spend+sp+t.SpendBase, true
@@ -1294,6 +1296,12 @@ func (u *UI) consoleView(repo string, now time.Time) (*uiConsole, error) {
 				v.Entries = append(v.Entries, uiEntry{uiMessageView: uiMessageView{uiMessage: uiMessage{At: je.At, Kind: "decision", From: "janitor",
 					Entry: entryJanitor + je.ID}, Src: src.Name}, Decision: &je.uiDecisionEntry, Open: je.open})
 			}
+			// Each account that cannot log in, asking for its token (#102).
+			for _, ae := range src.accountEntries(cfg, repo, secret) {
+				ae := ae
+				v.Entries = append(v.Entries, uiEntry{uiMessageView: uiMessageView{uiMessage: uiMessage{At: ae.At, Kind: "decision", From: "agentd",
+					Entry: entryAccount + ae.ID}, Src: src.Name}, Decision: &ae.uiDecisionEntry, Open: ae.open})
+			}
 			// What the owner can do with a message whose route failed (#65).
 			for _, ne := range src.nextEntries(cfg, repo, secret, now) {
 				ne := ne
@@ -1817,6 +1825,12 @@ func (src *uiSource) addAccounts(v *uiIndex, cfg *Config, now time.Time) {
 		if r.ErrorAt.After(r.At) && !secret(r.Error) {
 			a.Error = r.Error
 		}
+		if r.faulted() {
+			a.Fault = withheldSecret
+			if !secret(r.AccountPayload.Fault, r.FaultSource) {
+				a.Fault = oneLine(r.AccountPayload.Fault, 300)
+			}
+		}
 		if high, ok := r.usageHigh(); ok && cfg.Usage.Limit > 0 && high >= cfg.Usage.Limit {
 			a.Over = true
 		}
@@ -1829,7 +1843,14 @@ func (src *uiSource) addAccounts(v *uiIndex, cfg *Config, now time.Time) {
 		case i == len(v.Accounts):
 			v.Accounts = append(v.Accounts, a)
 		case r.At.After(v.Accounts[i].At):
+			// A source that found the account cannot log in is believed
+			// over a newer reading, which does not log in (#102).
+			if a.Fault == "" && v.Accounts[i].Fault != "" {
+				a.Fault, a.FaultAt = v.Accounts[i].Fault, v.Accounts[i].FaultAt
+			}
 			v.Accounts[i] = a
+		case a.Fault != "" && v.Accounts[i].Fault == "":
+			v.Accounts[i].Fault, v.Accounts[i].FaultAt = a.Fault, a.FaultAt
 		}
 	}
 }

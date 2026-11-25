@@ -91,6 +91,7 @@ type Policies struct {
 	Restart      RestartPolicy      `json:"restart"`
 	Nudge        NudgePolicy        `json:"nudge"`
 	UsageLimit   UsageLimitPolicy   `json:"usage_limit"`
+	Login        LoginPolicy        `json:"login"`
 	Trust        TrustPolicy        `json:"trust_prompt"`
 	Escalate     EscalatePolicy     `json:"escalate"`
 	Dialog       DialogPolicy       `json:"dialog"`
@@ -192,13 +193,12 @@ type BriefPolicy struct {
 
 // BudgetPolicy stops a session whose spend (input-equivalent tokens, over
 // every transcript measured for it) reaches SessionTokens, every session
-// once the run's spend reaches RunTokens, and every session at StopAt. Zero
+// once the run's spend reaches RunTokens. Zero
 // is no cap. A stopped session is not restarted or typed into until the
 // owner clears it.
 type BudgetPolicy struct {
-	SessionTokens int64      `json:"session_tokens"`
-	RunTokens     int64      `json:"run_tokens"`
-	StopAt        *time.Time `json:"stop_at,omitempty"`
+	SessionTokens int64 `json:"session_tokens"`
+	RunTokens     int64 `json:"run_tokens"`
 }
 
 // NudgePolicy types a line into a session whose screen has not changed for
@@ -238,6 +238,17 @@ type InstructionsPolicy struct {
 type UsageLimitPolicy struct {
 	Pattern string `json:"pattern"`
 }
+
+// LoginPolicy recognises, by Pattern, a regular expression, a session
+// whose login failed: the end of its screen shows a login prompt or says
+// it is not logged in. Such a session's account cannot log in (#102): it
+// is neither typed into nor restarted until the account is fixed.
+type LoginPolicy struct {
+	Pattern string `json:"pattern"`
+}
+
+// DefaultLoginPattern is policies.login.pattern's default.
+const DefaultLoginPattern = `(?i)not logged in|please run /login|failed to authenticate|select login method`
 
 // confirmKeyRe is a key that only confirms the selected option: any other
 // could move the cursor, pick an option, or cancel and exit.
@@ -312,8 +323,13 @@ type Repository struct {
 	CloneOn []string `json:"clone_on"`
 	// Deploy is where the repository's releases must run (#67).
 	Deploy *DeployConfig `json:"deploy,omitempty"`
+	// Kit, when set, names the kit the repository is developed under
+	// (kit.go, #103): the kit's repository, or its kit.json. LoadConfig
+	// reads and checks it; nothing else uses it yet.
+	Kit string `json:"kit,omitempty"`
 
 	defaulted []string // the policy keys checkPolicy filled in
+	kit       *Kit     // the loaded Kit
 }
 
 // Session is one tmux session running Claude Code. Workdir holds BRIEF.md
@@ -439,6 +455,7 @@ func DefaultConfig() Config {
 			CI: CIPolicy{Pointer: "A pipeline of the request you delivered failed on its own; the failing jobs and the end of the first one's log are under ci in the facts. " +
 				"Fix it on the same branch and commit, then make DONE the last line of STATUS.md again; agentd pushes the fix to the same request."},
 			UsageLimit:   UsageLimitPolicy{Pattern: `(?i)limit reached.{0,80}reset|out of extra usage`},
+			Login:        LoginPolicy{Pattern: DefaultLoginPattern},
 			Trust:        TrustPolicy{Enabled: true, Pattern: `(?i)(quick safety check: )?(do you )?trust (the files in )?this folder\??|(quick safety check: )?is this a project you created or one you trust\?( .*)?`, Keys: []string{"Enter"}},
 			Escalate:     EscalatePolicy{},
 			Dialog:       DialogPolicy{Patterns: []string{`Do you want to`, `❯\s*1\.`, `(?i)enter to confirm`}},
@@ -595,6 +612,9 @@ func (c *Config) finish(base string) error {
 	if _, err := regexp.Compile(c.Policies.UsageLimit.Pattern); err != nil {
 		errs = append(errs, fmt.Errorf("policies.usage_limit.pattern: %w", err))
 	}
+	if _, err := regexp.Compile(c.Policies.Login.Pattern); err != nil {
+		errs = append(errs, fmt.Errorf("policies.login.pattern: %w", err))
+	}
 	for i, p := range c.Policies.Dialog.Patterns {
 		if _, err := regexp.Compile(p); err != nil {
 			errs = append(errs, fmt.Errorf("policies.dialog.patterns[%d]: %w", i, err))
@@ -642,6 +662,21 @@ func (c *Config) finish(base string) error {
 	for name, repo := range c.Repositories {
 		repo.defaulted = nil
 		c.checkPolicy(name, &repo, &errs)
+		c.Repositories[name] = repo
+	}
+	for _, name := range sortedKeys(c.Repositories) {
+		repo := c.Repositories[name]
+		repo.kit = nil
+		if repo.Kit == "" {
+			continue
+		}
+		field := "repositories." + name + ".kit"
+		repo.Kit = path(field, repo.Kit)
+		k, err := loadKit(repo.Kit)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", field, err))
+		}
+		repo.kit = k
 		c.Repositories[name] = repo
 	}
 	c.checkSessionsPolicies(path, &errs)
@@ -737,9 +772,9 @@ func (c *Config) finish(base string) error {
 	return errors.Join(errs...)
 }
 
-// removedKeys refuses the keys the coordinator's removal took away (#53),
-// each named with what replaced it, so an old configuration is never read
-// as if they were not there. A file that is no JSON object is left to the
+// removedKeys refuses the keys the coordinator's removal took away (#53)
+// and policies.budget.stop_at (#115), each named with what replaced it, so
+// an old configuration is never read as if they were not there. A file that is no JSON object is left to the
 // decoder to refuse.
 func removedKeys(b []byte) error {
 	var raw struct {
@@ -753,6 +788,12 @@ func removedKeys(b []byte) error {
 	var errs []error
 	if _, ok := raw.Policies["coordinator"]; ok {
 		errs = append(errs, fmt.Errorf("policies.coordinator %s; remove it", gone))
+	}
+	var budget map[string]json.RawMessage
+	if json.Unmarshal(raw.Policies["budget"], &budget) == nil {
+		if _, ok := budget["stop_at"]; ok {
+			errs = append(errs, errors.New("policies.budget.stop_at was removed in #115: the run works around the clock, and a cutoff stopped every session; session_tokens and run_tokens still cap spend; remove it"))
+		}
 	}
 	var models map[string]json.RawMessage
 	if json.Unmarshal(raw.Policies["models"], &models) == nil {

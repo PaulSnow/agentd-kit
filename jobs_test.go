@@ -16,7 +16,8 @@ import (
 // fakeClaude puts a fake claude CLI first on PATH. Each call n saves its
 // arguments, standard input and environment as args.n, in.n and env.n in
 // the returned directory, and prints out.n, or out when there is none,
-// after FAKE_CLAUDE_DELAY seconds when that is set. Calls that overlap
+// after FAKE_CLAUDE_DELAY seconds when that is set, then exits with the
+// status in the file exit, when there is one. Calls that overlap
 // take their numbers one at a time, under a lock the shell itself creates:
 // Ubuntu 26.04's mkdir lets two callers at once both succeed.
 func fakeClaude(t *testing.T) string {
@@ -31,7 +32,8 @@ rm "$d/lock"
 printf '%s\n' "$@" > "$d/args.$n"
 cat > "$d/in.$n"
 env > "$d/env.$n"
-if [ -f "$d/out.$n" ]; then cat "$d/out.$n"; else cat "$d/out"; fi`)
+if [ -f "$d/out.$n" ]; then cat "$d/out.$n"; else cat "$d/out"; fi
+[ ! -f "$d/exit" ] || exit "$(cat "$d/exit")"`)
 	return dir
 }
 

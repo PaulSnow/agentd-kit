@@ -180,7 +180,8 @@
   },
   "accounts": {
     "work": {
-      "config_dir": "~/.claude-work"
+      "config_dir": "~/.claude-work",
+      "token_file": "~/.config/agentd-kit/work.token"
     },
     "spare": {
       "config_dir": "~/.claude-spare",

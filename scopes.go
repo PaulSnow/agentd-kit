@@ -295,11 +295,15 @@ func (s *Supervisor) startHomeThread(in *Instruction, now time.Time) {
 		s.routeStep(in, RouteFail, "", false, fmt.Sprintf("its text matched confidential pattern %d, so it was never logged", in.Withheld))
 		return
 	}
+	// While its account cannot log in, the question waits (#102).
+	job, ok := s.gateJob(threadJob(s.cfg), "", "home")
+	if !ok {
+		return
+	}
 	if s.emit("", Event{Kind: KindRoute, Route: &RoutePayload{Instruction: in.ID, Step: RouteAgent}}); s.halt != nil {
 		return
 	}
 	x := s.homeThreadInput(in, now)
-	job := threadJob(s.cfg)
 	s.spawnShared(key, func(w *Supervisor) {
 		p := &AgentPayload{Model: job.Model}
 		input, err := json.Marshal(x)

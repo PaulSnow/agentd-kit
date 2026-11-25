@@ -238,6 +238,12 @@ func (src *uiSource) entryOf(cfg *Config, rep Report, repo, id string, now time.
 			d.Question = ""
 		}
 		return re, "", &d, nil
+	case strings.HasPrefix(id, entryAccount):
+		re, d, err := accountEntryDecision(cfg, src.st, repo, id)
+		if d != nil && secret(d.Question, d.Context) {
+			re.Question, d.Question, d.Context = "", "", ""
+		}
+		return re, "", d, err
 	case strings.HasPrefix(id, entryJanitor):
 		r := src.st.Janitor[strings.TrimPrefix(id, entryJanitor)]
 		if r == nil || r.Repository != repo && cfg.RepositoryConsole(r.Repository) != repo {
@@ -390,7 +396,7 @@ func (src *uiSource) respond(repo, id, to, text string, a *AnswerPayload, files 
 			// A change's yes or no is the instruction's alone (#63): Go
 			// carries the change out from it, and from nothing else.
 			switch {
-			case strings.HasPrefix(id, entryNext), strings.HasPrefix(id, entryWork), strings.HasPrefix(id, entryDesign), strings.HasPrefix(id, entryJanitor):
+			case strings.HasPrefix(id, entryNext), strings.HasPrefix(id, entryWork), strings.HasPrefix(id, entryDesign), strings.HasPrefix(id, entryJanitor), strings.HasPrefix(id, entryAccount):
 				// A next step (#65) or a work item's answer (#66) is Go's to
 				// carry out from the instruction, and only one it offers now.
 				if a.Binding() && !contains(decisionOptions(*dec), a.Choice) {

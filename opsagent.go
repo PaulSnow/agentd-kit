@@ -226,12 +226,15 @@ func (s *Supervisor) startOpsThread(in *Instruction, clone string) {
 	if s.work.busy(key) || s.ops == nil {
 		return
 	}
+	job, ok := s.gateJob(threadJob(s.cfg), "", "ops")
+	if !ok {
+		return // its account cannot log in (#102)
+	}
 	if s.emit("", Event{Kind: KindRoute, Route: &RoutePayload{Instruction: in.ID, Step: RouteAgent}}); s.halt != nil {
 		return
 	}
 	t := s.threadInputFor(in, "", clone)
 	x := opsInput{Thread: t.Thread, Re: t.Re, Earlier: t.Earlier, Message: t.Message, At: t.At, Clone: clone, Changes: s.st.opsChangeFacts()}
-	job := threadJob(s.cfg)
 	mcp := mcpOpsConfig(s.cfg, key)
 	env := s.ops
 	s.spawnShared(key, func(w *Supervisor) {

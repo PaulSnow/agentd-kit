@@ -509,7 +509,10 @@ func (s *Supervisor) curateCards(now time.Time) {
 	if err := cs.Follow(s.log); err != nil {
 		return
 	}
-	job := jobFromConfig(s.cfg)
+	job, ok := s.jobFor("", "cards")
+	if !ok {
+		return // its account cannot log in: the cards wait for it (#102)
+	}
 	job.MaxInput = cfg.maxInput() + 1024
 	run := func(j Job, input []byte) (json.RawMessage, JobUsage, error) {
 		return j.Run(s.runCtx, curatorSystem, curatorSchema(), input)
