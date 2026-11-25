@@ -101,7 +101,7 @@ func TestOwnerWorkStartsSession(t *testing.T) {
 	if err := PostMessage(h.sup.cfg, NewLogWriter(h.buf), h.tmux, h.clock.Now(), MessagePost{Console: "widgets", Kind: "info", From: name, Text: "Reading the deploy notes."}); err != nil {
 		t.Fatal(err)
 	}
-	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	src := newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
 	v, err := (&UI{sources: []*uiSource{src}}).consoleView("widgets", h.clock.Now())
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +139,7 @@ func TestOwnerWorkAtMaxNamesHolders(t *testing.T) {
 	if d == nil || !contains(decisionOptions(*d), nextEnd+w1) || contains(decisionOptions(*d), nextStart) {
 		t.Fatalf("next step = %+v", d)
 	}
-	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	src := newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
 	src.now = h.clock.Now
 	if err := src.respond("widgets", entryNext+in.ID, "", "", &AnswerPayload{Choice: nextStart}, nil); err == nil {
 		t.Fatal("a step not offered was taken")
@@ -182,7 +182,7 @@ func TestNextStepDropSendsNothing(t *testing.T) {
 		}
 	}
 	sessions, delivered := len(h.sup.st.Runtime), in.Delivered
-	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	src := newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
 	src.now = h.clock.Now
 	if err := src.respond("widgets", entryNext+in.ID, "", "", &AnswerPayload{Choice: nextDrop}, nil); err != nil {
 		t.Fatal(err)
@@ -320,7 +320,7 @@ func TestHandToDoneGoneOpensItem(t *testing.T) {
 	if d == nil || !contains(decisionOptions(*d), nextEnd+w1) || !contains(decisionOptions(*d), nextSend+"a") || contains(decisionOptions(*d), nextSend+w1) {
 		t.Fatalf("next step = %+v", d)
 	}
-	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	src := newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
 	src.now = h.clock.Now
 	v, err := (&UI{sources: []*uiSource{src}}).consoleView("widgets", h.clock.Now())
 	if err != nil {

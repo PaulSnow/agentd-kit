@@ -509,7 +509,7 @@ func TestNoneOpenLines(t *testing.T) {
 // still asks stays a question.
 func TestAnsweredQuestionsAreNotOpen(t *testing.T) {
 	for _, body := range []string{
-		"(answered at go; the target is the night branch)",
+		"(answered at go; the target is main)",
 		"none (Q1 answered at go)",
 		"Q1 answered at go.",
 		"Q1: answered at go",
@@ -518,8 +518,8 @@ func TestAnsweredQuestionsAreNotOpen(t *testing.T) {
 		"(Q1 answered at go)",
 		"Q1. Which red?\n> Answer: signal red",
 		"Q1. Which red?\n> Answer: signal red\n> on every wall\n\nQ2. Which wall?\n> Answer: the north one",
-		"(answered at go;\nthe target is the night branch)",
-		"(answered at go; the target is the night branch)\n\nWab12cd34 done: merged",
+		"(answered at go;\nthe target is main)",
+		"(answered at go; the target is main)\n\nWab12cd34 done: merged",
 	} {
 		if ev := ParseStatus("# T\n\n## Questions\n" + body + "\n\n## Next\nwork\n"); ev.Questions != "" {
 			t.Errorf("%q: questions %q", body, ev.Questions)
@@ -527,7 +527,7 @@ func TestAnsweredQuestionsAreNotOpen(t *testing.T) {
 	}
 	// The reported shape: a finished session's last line says its item is
 	// done, under Questions that hold only an answered note.
-	ev := ParseStatus("# Status\n\nNow: Wab12cd34 merged.\n\n## Questions\n\n(answered at go; the target is the night branch)\n\nWab12cd34 done: merged as abc1234\n")
+	ev := ParseStatus("# Status\n\nNow: Wab12cd34 merged.\n\n## Questions\n\n(answered at go; the target is main)\n\nWab12cd34 done: merged as abc1234\n")
 	if ev.Questions != "" || ev.Done {
 		t.Errorf("reported shape: questions %q, done %v", ev.Questions, ev.Done)
 	}

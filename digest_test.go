@@ -38,7 +38,7 @@ func TestDigestPageOldestFirst(t *testing.T) {
 			t.Fatalf("%s waited %s since %s", got[i], d.Waited, d.Since)
 		}
 	}
-	want := []string{"night/widgets/s-blocked/decision", "night/widgets/txt1/decision", "coord/gadgets/g1/decision"}
+	want := []string{"run/widgets/s-blocked/decision", "run/widgets/txt1/decision", "coord/gadgets/g1/decision"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("digest %v, want %v", got, want)
 	}
@@ -61,7 +61,7 @@ func TestDigestPageOldestFirst(t *testing.T) {
 // With nothing waiting the section says so.
 func TestDigestPageEmpty(t *testing.T) {
 	h := newHarness(t, false)
-	u, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
+	u, _ := testUI(t, UIConfig{}, newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
 	body := owner(t, u, "/status")
 	i := strings.Index(body, `id="digest"`)
 	if i < 0 || !strings.Contains(body[i:], "Nothing waits on you.") {
@@ -161,7 +161,7 @@ func TestDigestEntryAndCommand(t *testing.T) {
 	if es[0].DefaultAt == nil || es[0].Default != "no" || es[1].DefaultAt != nil {
 		t.Fatalf("defaults %+v", es)
 	}
-	u, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
+	u, _ := testUI(t, UIConfig{}, newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
 	if body := owner(t, u, "/status"); strings.Contains(body, "embargoed") || !strings.Contains(body, "default no at") {
 		t.Fatalf("page leaks or lacks the default")
 	}

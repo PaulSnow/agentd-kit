@@ -26,7 +26,7 @@ func busyTranscript(start time.Time, n int, prefix string) (string, []string, []
 		m["uuid"] = fmt.Sprintf("%s-%08d-aaaa-bbbb-cccc-%012d", prefix, len(b.String())%99999999, at.UnixNano()%1e12)
 		m["parentUuid"] = "00000000-1111-2222-3333-444444444444"
 		m["sessionId"] = "55555555-6666-7777-8888-999999999999"
-		m["cwd"], m["version"], m["gitBranch"], m["userType"] = "/work/widgets/wt", "2.1.0", "night/12-widgets", "external"
+		m["cwd"], m["version"], m["gitBranch"], m["userType"] = "/work/widgets/wt", "2.1.0", "owner/12-widgets", "external"
 		m["isSidechain"], m["timestamp"] = false, at.Format(time.RFC3339Nano)
 		j, _ := json.Marshal(m)
 		b.Write(j)
@@ -425,7 +425,7 @@ func TestConsoleShowsStatusGraph(t *testing.T) {
 	if n := claudeCalls(t, dir); n != 2 {
 		t.Fatalf("%d calls", n)
 	}
-	u, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
+	u, _ := testUI(t, UIConfig{}, newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
 	u.now = h.clock.Now
 	page := owner(t, u, "/console/widgets")
 	for _, want := range []string{`<span class="spark status-graph" role="img"`, `class="phase-code blocked"`, `class="gap"`, "check failed",

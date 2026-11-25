@@ -350,13 +350,13 @@ func TestConfigAlertOnConsole(t *testing.T) {
 	st := NewLogState(nil, ModeLive)
 	now := time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC)
 	st.apply(Event{V: EventVersion, Time: now, Kind: KindStart, Mode: ModeLive, Start: &StartPayload{ConfigPath: "/c.json", ConfigHash: "aaaaaaaaaaaa"}})
-	src := &uiSource{Name: "night", st: st}
+	src := &uiSource{Name: "run", st: st}
 	if _, ok := src.configAlert(); ok {
 		t.Fatal("an alert with no drift")
 	}
 	st.apply(Event{V: EventVersion, Time: now, Kind: KindConfig, Mode: ModeLive, Config: &ConfigPayload{Step: ConfigDrift, Path: "/c.json", Hash: "bbbbbbbbbbbb", Previous: "aaaaaaaaaaaa"}})
 	a, ok := src.configAlert()
-	if !ok || a.Src != "night" || !strings.Contains(a.Line, "file "+shortHash("bbbbbbbbbbbb")+" differs") {
+	if !ok || a.Src != "run" || !strings.Contains(a.Line, "file "+shortHash("bbbbbbbbbbbb")+" differs") {
 		t.Fatalf("alert = %+v, %v", a, ok)
 	}
 }

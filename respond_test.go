@@ -70,7 +70,7 @@ func respondFixture(t *testing.T) (*harness, *UI, []string) {
 			t.Fatalf("%s is %s", n, h.state(n))
 		}
 	}
-	u, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
+	u, _ := testUI(t, UIConfig{}, newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
 	u.now = h.clock.Now
 	return h, u, []string{decisionEntry("a", "Q1"), decisionEntry("b", "Q1"), decisionEntry("c", "Q1"), decisionEntry("a", "Q2"), post}
 }
@@ -84,7 +84,7 @@ func TestResponseBoundToItsEntry(t *testing.T) {
 	h, u, entries := respondFixture(t)
 	respond := func(form url.Values) {
 		t.Helper()
-		form.Set("src", "night")
+		form.Set("src", "run")
 		form.Set("repository", "widgets")
 		form.Set("back", "/console/widgets")
 		if w := ownerPost(u, "/respond", form); w.Code != http.StatusSeeOther {
@@ -96,7 +96,7 @@ func TestResponseBoundToItsEntry(t *testing.T) {
 	// An entry the console does not hold, and an answer to what is no
 	// decision, are refused, and record nothing.
 	for _, form := range []url.Values{{"entry": {"m:nothing"}, "text": {"yes"}}, {"entry": {entries[4]}, "answer": {"yes"}}} {
-		form.Set("src", "night")
+		form.Set("src", "run")
 		form.Set("repository", "widgets")
 		if w := ownerPost(u, "/respond", form); w.Code != http.StatusBadRequest {
 			t.Fatalf("%v: %d", form, w.Code)
@@ -157,7 +157,7 @@ func TestResponseBoundToItsEntry(t *testing.T) {
 func TestBoxThreadsResponsesUnderTheirEntries(t *testing.T) {
 	h, u, entries := respondFixture(t)
 	for _, form := range []url.Values{{"entry": {entries[2]}, "answer": {"yes"}}, {"entry": {entries[4]}, "quick": {"Explain"}, "text": {"why is it still wet?"}}} {
-		form.Set("src", "night")
+		form.Set("src", "run")
 		form.Set("repository", "widgets")
 		if w := ownerPost(u, "/respond", form); w.Code != http.StatusSeeOther {
 			t.Fatalf("respond %v: %d %s", form, w.Code, w.Body.String())
@@ -228,11 +228,11 @@ func TestBoxThreadsResponsesUnderTheirEntries(t *testing.T) {
 func TestResponseEdges(t *testing.T) {
 	h, u, entries := respondFixture(t)
 	h.cfg.ConfidentialPatterns = []string{`hunter2`}
-	u, _ = testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
+	u, _ = testUI(t, UIConfig{}, newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
 	u.now = h.clock.Now
 	post := func(form url.Values) int {
 		t.Helper()
-		form.Set("src", "night")
+		form.Set("src", "run")
 		form.Set("repository", "widgets")
 		return ownerPost(u, "/respond", form).Code
 	}

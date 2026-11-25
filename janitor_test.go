@@ -99,7 +99,7 @@ func TestJanitorApprovedCloseOnce(t *testing.T) {
 	if len(es) != 1 || es[0].Kind != DigestJanitor || es[0].Entry != entryJanitor+r.ID || es[0].Since.IsZero() {
 		t.Fatalf("digest = %+v", es)
 	}
-	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	src := newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
 	v, err := (&UI{sources: []*uiSource{src}}).consoleView("widgets", h.clock.Now())
 	if err != nil {
 		t.Fatal(err)

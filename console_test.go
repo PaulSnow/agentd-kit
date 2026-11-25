@@ -37,15 +37,15 @@ func messages(t *testing.T, buf *bytes.Buffer) []*MessagePayload {
 // unknown kind, or is empty or too long.
 func TestConsolePostShownInItsConsole(t *testing.T) {
 	u, f := fixtureUI(t)
-	log := NewLogWriter(f.nightBuf)
+	log := NewLogWriter(f.runBuf)
 	at := pageAt.Add(-time.Minute)
-	if err := PostMessage(f.night, log, nil, at, MessagePost{Console: "widgets-console", Kind: "delivered", From: "w17", Text: "Delivered **!4** for review"}); err != nil {
+	if err := PostMessage(f.run, log, nil, at, MessagePost{Console: "widgets-console", Kind: "delivered", From: "w17", Text: "Delivered **!4** for review"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := PostMessage(f.night, log, nil, at, MessagePost{Console: "widgets-console", From: "w17", Text: "Starting the paint"}); err != nil {
+	if err := PostMessage(f.run, log, nil, at, MessagePost{Console: "widgets-console", From: "w17", Text: "Starting the paint"}); err != nil {
 		t.Fatal(err)
 	}
-	ms := messages(t, f.nightBuf)
+	ms := messages(t, f.runBuf)
 	if len(ms) != 2 || ms[0].Kind != "delivered" || ms[0].From != "w17" || ms[0].Console != "widgets-console" || ms[1].Kind != "info" || ms[0].ID == "" || ms[0].ID == ms[1].ID {
 		t.Fatalf("messages = %+v", ms)
 	}
@@ -60,11 +60,11 @@ func TestConsolePostShownInItsConsole(t *testing.T) {
 		{Console: "widgets-console", Text: "  "},
 		{Console: "widgets-console", Text: strings.Repeat("x", MessageLimit+1)},
 	} {
-		if err := PostMessage(f.night, log, nil, at, bad); err == nil {
+		if err := PostMessage(f.run, log, nil, at, bad); err == nil {
 			t.Errorf("%+v was recorded", bad)
 		}
 	}
-	if n := len(messages(t, f.nightBuf)); n != 2 {
+	if n := len(messages(t, f.runBuf)); n != 2 {
 		t.Fatalf("a refused post was recorded: %d messages", n)
 	}
 }
@@ -73,22 +73,22 @@ func TestConsolePostShownInItsConsole(t *testing.T) {
 // text, and the console shows it withheld.
 func TestConsolePostWithheld(t *testing.T) {
 	u, f := fixtureUI(t)
-	if err := PostMessage(f.night, NewLogWriter(f.nightBuf), nil, pageAt.Add(-time.Minute), MessagePost{Console: "widgets-console", Text: "The embargoed launch moved"}); err != nil {
+	if err := PostMessage(f.run, NewLogWriter(f.runBuf), nil, pageAt.Add(-time.Minute), MessagePost{Console: "widgets-console", Text: "The embargoed launch moved"}); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(f.nightBuf.String(), "embargoed launch") {
+	if strings.Contains(f.runBuf.String(), "embargoed launch") {
 		t.Fatal("the confidential text was logged")
 	}
-	if ms := messages(t, f.nightBuf); len(ms) != 1 || ms[0].Withheld != 1 || ms[0].Text != "" {
+	if ms := messages(t, f.runBuf); len(ms) != 1 || ms[0].Withheld != 1 || ms[0].Text != "" {
 		t.Fatalf("messages = %+v", ms)
 	}
 	if body := owner(t, u, "/console/widgets"); !strings.Contains(body, "withheld: it matched a confidential pattern") {
 		t.Fatalf("the withheld post is not shown:\n%s", body)
 	}
-	if err := PostMessage(f.night, NewLogWriter(f.nightBuf), nil, pageAt, MessagePost{Console: "widgets-console", From: "embargoed-bot", Text: "Plain words"}); err != nil {
+	if err := PostMessage(f.run, NewLogWriter(f.runBuf), nil, pageAt, MessagePost{Console: "widgets-console", From: "embargoed-bot", Text: "Plain words"}); err != nil {
 		t.Fatal(err)
 	}
-	if ms := messages(t, f.nightBuf); len(ms) != 2 || ms[1].Withheld != 1 || ms[1].From != "" || strings.Contains(f.nightBuf.String(), "embargoed-bot") {
+	if ms := messages(t, f.runBuf); len(ms) != 2 || ms[1].Withheld != 1 || ms[1].From != "" || strings.Contains(f.runBuf.String(), "embargoed-bot") {
 		t.Fatalf("a confidential author was logged: %+v", ms)
 	}
 }
@@ -256,15 +256,15 @@ func TestExtraConsoleConfig(t *testing.T) {
 // instruction for no repository, which inbox reads.
 func TestExtraConsoleInUI(t *testing.T) {
 	u, f := fixtureUI(t)
-	f.night.Consoles = map[string]ConsoleConfig{"chat": {Title: "General chat"}}
-	if err := PostMessage(f.night, NewLogWriter(f.nightBuf), nil, pageAt.Add(-time.Minute), MessagePost{Console: "chat", Kind: "finished", From: "host-a", Text: "Backups are done"}); err != nil {
+	f.run.Consoles = map[string]ConsoleConfig{"chat": {Title: "General chat"}}
+	if err := PostMessage(f.run, NewLogWriter(f.runBuf), nil, pageAt.Add(-time.Minute), MessagePost{Console: "chat", Kind: "finished", From: "host-a", Text: "Backups are done"}); err != nil {
 		t.Fatal(err)
 	}
 	// An escalation of a session with no repository shows in the console
 	// it went to.
 	esc := Event{V: EventVersion, Time: pageAt.Add(-time.Minute), Session: "ops-1", Kind: KindAction, Mode: ModeLive,
 		Act: &ActPayload{Action: ActEscalate, Key: "k", Console: "chat", Message: "ops-1 needs a disk"}}
-	if err := NewLogWriter(f.nightBuf).Append(esc); err != nil {
+	if err := NewLogWriter(f.runBuf).Append(esc); err != nil {
 		t.Fatal(err)
 	}
 	body := owner(t, u, "/status")
@@ -275,15 +275,15 @@ func TestExtraConsoleInUI(t *testing.T) {
 	if !strings.Contains(body, "Backups are done") || !strings.Contains(body, "ops-1 needs a disk") || !strings.Contains(body, `name="repository" value="chat"`) {
 		t.Fatalf("the console lacks its post or its reply box:\n%s", body)
 	}
-	w := ownerPost(u, "/reply", url.Values{"src": {"night"}, "repository": {"chat"}, "text": {"Rotate the logs tonight"}, "back": {"/console/chat"}})
+	w := ownerPost(u, "/reply", url.Values{"src": {"run"}, "repository": {"chat"}, "text": {"Rotate the logs tonight"}, "back": {"/console/chat"}})
 	if w.Code != http.StatusSeeOther {
 		t.Fatalf("reply: %d %s", w.Code, w.Body.String())
 	}
 	if body := owner(t, u, "/console/chat"); !strings.Contains(body, "Rotate the logs tonight") {
 		t.Fatalf("the reply is not shown:\n%s", body)
 	}
-	events, _, _ := NewLogWriter(f.nightBuf).Tail(0)
-	st := NewLogState(f.night, ModeLive).Fold(events)
+	events, _, _ := NewLogWriter(f.runBuf).Tail(0)
+	st := NewLogState(f.run, ModeLive).Fold(events)
 	var got *Instruction
 	for _, in := range st.Instructions {
 		if in.Console == "chat" {
@@ -294,7 +294,7 @@ func TestExtraConsoleInUI(t *testing.T) {
 		t.Fatalf("instruction %+v", got)
 	}
 	var out bytes.Buffer
-	if _, err := ConsoleInbox(f.night, NewLogWriter(f.nightBuf), events, pageAt, "chat", "cli", &out); err != nil || !strings.Contains(out.String(), "Rotate the logs tonight") {
+	if _, err := ConsoleInbox(f.run, NewLogWriter(f.runBuf), events, pageAt, "chat", "cli", &out); err != nil || !strings.Contains(out.String(), "Rotate the logs tonight") {
 		t.Fatalf("inbox %q %v", out.String(), err)
 	}
 }
@@ -349,7 +349,7 @@ func TestFeedAndEscalationsWithoutACommand(t *testing.T) {
 	if n := h.count(KindAction, ActEscalate, "d"); n != 1 {
 		t.Fatalf("escalated %d times after a restart", n)
 	}
-	src := newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
+	src := newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a")
 	u, _ := testUI(t, UIConfig{}, src)
 	body := owner(t, u, "/console/widgets")
 	if !strings.Contains(body, "Should the widget squeak?") || !strings.Contains(body, "e delivered") {
@@ -361,16 +361,16 @@ func TestFeedAndEscalationsWithoutACommand(t *testing.T) {
 // seconds, from, kind and text.
 func TestConsoleImportOutsideLines(t *testing.T) {
 	_, f := fixtureUI(t)
-	f.night.Consoles = map[string]ConsoleConfig{"chat": {Title: "General chat"}}
+	f.run.Consoles = map[string]ConsoleConfig{"chat": {Title: "General chat"}}
 	in := `{"ts": 1761350400.25, "from": "owner-a", "kind": "decision", "text": "Use the blue paint"}
 {"ts": 1761350460, "from": "w17", "kind": "info", "text": "Painting now", "repository": "chat"}
 `
-	events, _, _ := NewLogWriter(f.nightBuf).Tail(0)
-	added, skipped, err := ImportConsole(f.night, NewLogWriter(f.nightBuf), events, pageAt, "widgets", strings.NewReader(in))
+	events, _, _ := NewLogWriter(f.runBuf).Tail(0)
+	added, skipped, err := ImportConsole(f.run, NewLogWriter(f.runBuf), events, pageAt, "widgets", strings.NewReader(in))
 	if err != nil || added != 2 || skipped != 0 {
 		t.Fatalf("import = %d, %d, %v", added, skipped, err)
 	}
-	events, _, _ = NewLogWriter(f.nightBuf).Tail(0)
+	events, _, _ = NewLogWriter(f.runBuf).Tail(0)
 	byText := map[string]*FeedPayload{}
 	for _, e := range events {
 		if e.Kind == KindFeed && e.Feed.Phase == FeedImported {
@@ -381,11 +381,11 @@ func TestConsoleImportOutsideLines(t *testing.T) {
 	if blue == nil || now == nil || !blue.At.Equal(time.Unix(1761350400, 250_000_000)) || blue.Kind != "decision" || blue.Repository != "widgets" || now.Repository != "chat" || now.From != "w17" {
 		t.Fatalf("imported = %+v, %+v", blue, now)
 	}
-	added, skipped, err = ImportConsole(f.night, NewLogWriter(f.nightBuf), events, pageAt, "widgets", strings.NewReader(in))
+	added, skipped, err = ImportConsole(f.run, NewLogWriter(f.runBuf), events, pageAt, "widgets", strings.NewReader(in))
 	if err != nil || added != 0 || skipped != 2 {
 		t.Fatalf("second import = %d, %d, %v", added, skipped, err)
 	}
-	if _, _, err := ImportConsole(f.night, NewLogWriter(f.nightBuf), events, pageAt, "widgets", strings.NewReader(`{"ts": 1761350400000, "text": "ms"}`)); err == nil || !strings.Contains(err.Error(), "Unix seconds") {
+	if _, _, err := ImportConsole(f.run, NewLogWriter(f.runBuf), events, pageAt, "widgets", strings.NewReader(`{"ts": 1761350400000, "text": "ms"}`)); err == nil || !strings.Contains(err.Error(), "Unix seconds") {
 		t.Fatalf("a ts in milliseconds: %v", err)
 	}
 }
@@ -399,12 +399,12 @@ func TestConsoleImportIgnoresUnusedFields(t *testing.T) {
 	in := `{"ts": 1761350400, "from": "owner-a", "kind": "info", "text": "Paint it blue", "to": "w17"}
 {"ts": 1761350460, "from": "owner-a", "kind": "info", "text": "Paint it green", "edited": 1761350470}
 `
-	events, _, _ := NewLogWriter(f.nightBuf).Tail(0)
-	added, skipped, err := ImportConsole(f.night, NewLogWriter(f.nightBuf), events, pageAt, "widgets", strings.NewReader(in))
+	events, _, _ := NewLogWriter(f.runBuf).Tail(0)
+	added, skipped, err := ImportConsole(f.run, NewLogWriter(f.runBuf), events, pageAt, "widgets", strings.NewReader(in))
 	if err != nil || added != 2 || skipped != 0 {
 		t.Fatalf("import = %d, %d, %v", added, skipped, err)
 	}
-	events, _, _ = NewLogWriter(f.nightBuf).Tail(0)
+	events, _, _ = NewLogWriter(f.runBuf).Tail(0)
 	to := map[string]string{}
 	for _, e := range events {
 		if e.Kind == KindFeed && e.Feed.Phase == FeedImported && strings.HasPrefix(e.Feed.Text, "Paint") {
@@ -415,13 +415,13 @@ func TestConsoleImportIgnoresUnusedFields(t *testing.T) {
 		t.Fatalf("imported to = %v", to)
 	}
 	// A to that matches a confidential pattern withholds the line.
-	if _, _, err := ImportConsole(f.night, NewLogWriter(f.nightBuf), events, pageAt, "widgets", strings.NewReader(`{"ts": 1761350520, "from": "owner-a", "text": "hello", "to": "embargoed-w1"}`)); err != nil {
+	if _, _, err := ImportConsole(f.run, NewLogWriter(f.runBuf), events, pageAt, "widgets", strings.NewReader(`{"ts": 1761350520, "from": "owner-a", "text": "hello", "to": "embargoed-w1"}`)); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(f.nightBuf.String(), "embargoed") {
+	if strings.Contains(f.runBuf.String(), "embargoed") {
 		t.Fatal("a confidential to was logged")
 	}
-	events, _, _ = NewLogWriter(f.nightBuf).Tail(0)
+	events, _, _ = NewLogWriter(f.runBuf).Tail(0)
 	if p := events[len(events)-1].Feed; p == nil || p.Withheld == 0 || p.To != "" || p.From != "" || p.Text != "" {
 		t.Fatalf("withheld line = %+v", p)
 	}
@@ -431,7 +431,7 @@ func TestConsoleImportIgnoresUnusedFields(t *testing.T) {
 		"no text":    `{"ts": 1761350400, "from": "owner-a", "edited": true}`,
 		"no time":    `{"from": "owner-a", "text": "hello", "to": "w17"}`,
 	} {
-		if _, _, err := ImportConsole(f.night, NewLogWriter(f.nightBuf), events, pageAt, "widgets", strings.NewReader(line)); err == nil || !strings.Contains(err.Error(), "line 1") {
+		if _, _, err := ImportConsole(f.run, NewLogWriter(f.runBuf), events, pageAt, "widgets", strings.NewReader(line)); err == nil || !strings.Contains(err.Error(), "line 1") {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
@@ -500,11 +500,11 @@ func TestConsoleShowsDefaultConsoleEscalationAndImportedKind(t *testing.T) {
 	u, f := fixtureUI(t)
 	esc := Event{V: EventVersion, Time: pageAt.Add(-time.Minute), Session: "ops-1", Kind: KindAction, Mode: ModeLive,
 		Act: &ActPayload{Action: ActEscalate, Key: "k", Console: "widgets-console", Message: "ops-1 needs a disk"}}
-	if err := NewLogWriter(f.nightBuf).Append(esc); err != nil {
+	if err := NewLogWriter(f.runBuf).Append(esc); err != nil {
 		t.Fatal(err)
 	}
-	events, _, _ := NewLogWriter(f.nightBuf).Tail(0)
-	if _, _, err := ImportConsole(f.night, NewLogWriter(f.nightBuf), events, pageAt, "widgets", strings.NewReader(`{"ts": 1761350400, "from": "w17", "kind": "decision", "text": "Use the blue paint"}`)); err != nil {
+	events, _, _ := NewLogWriter(f.runBuf).Tail(0)
+	if _, _, err := ImportConsole(f.run, NewLogWriter(f.runBuf), events, pageAt, "widgets", strings.NewReader(`{"ts": 1761350400, "from": "w17", "kind": "decision", "text": "Use the blue paint"}`)); err != nil {
 		t.Fatal(err)
 	}
 	body := owner(t, u, "/console/widgets")

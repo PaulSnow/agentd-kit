@@ -48,13 +48,13 @@ func TestOnlyRealPromptsAndWholeReplies(t *testing.T) {
 		}
 		t.Fatalf("turns posted = %q", kinds)
 	}
-	u, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
+	u, _ := testUI(t, UIConfig{}, newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
 	page := owner(t, u, "/console/widgets")
 	if strings.Contains(page, "task-notification") || strings.Contains(page, `<details class="more" data-key="m-e-`) || strings.Count(page, "every check passes.") != 60 ||
-		!strings.Contains(page, `<a href="/session/night/a/prompt/t1.7">Context compacted →</a>`) || strings.Contains(page, "being continued") {
+		!strings.Contains(page, `<a href="/session/run/a/prompt/t1.7">Context compacted →</a>`) || strings.Contains(page, "being continued") {
 		t.Fatalf("console:\n%s", page)
 	}
-	if !strings.Contains(owner(t, u, "/session/night/a"), `<details class="more" data-key="t-`) {
+	if !strings.Contains(owner(t, u, "/session/run/a"), `<details class="more" data-key="t-`) {
 		t.Fatal("the session page does not fold the long reply")
 	}
 }
@@ -73,8 +73,8 @@ func TestSessionPageActivity(t *testing.T) {
 	h.transcriptOf("a", "t1", promptLine("u1", "Build the widget.", at)+toolLines("u2", "c1", "go build ./...", 0, at)+
 		toolLines("u3", "c2", "go test ./...", 1, at)+toolLines("u4", "c3", "echo hunter2", 0, at)+string(running)+"\n")
 	h.ticks(2, time.Minute)
-	u, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
-	page := owner(t, u, "/session/night/a")
+	u, _ := testUI(t, UIConfig{}, newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
+	page := owner(t, u, "/session/run/a")
 	for _, want := range []string{"<code>Bash: go build ./...</code>", "<code>Bash: go test ./...</code> <span class=\"badge\">failed, exit 1</span>", "Running now: <code>Bash: ./bin/check</code>", withheldMessage} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("session page lacks %q:\n%s", want, page)
@@ -101,14 +101,14 @@ func TestConsoleChips(t *testing.T) {
 		strings.Replace(string(running), "./bin/check", "sleep 9", 1)+"\n")
 	h.status("b", "# b\n\nDONE\n")
 	h.ticks(2, time.Minute)
-	u, _ := testUI(t, UIConfig{}, newUISource("night", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
+	u, _ := testUI(t, UIConfig{}, newUISource("run", h.cfg, NewLogWriter(h.buf), ModeLive, "host-a"))
 	page := owner(t, u, "/console/widgets")
 	chips, box, composer := strings.Index(page, `id="chips"`), strings.Index(page, `id="box"`), strings.Index(page, `id="composer"`)
 	if chips < 0 || box < chips || composer < box || strings.Contains(page, `id="panels"`) {
 		t.Fatalf("not chips, box, composer (%d, %d, %d):\n%s", chips, box, composer, page)
 	}
 	line := page[chips:box]
-	for _, want := range []string{`data-session="a" data-to="a"`, `<span class="doing">Bash: ./bin/check</span>`, `href="/session/night/a"`, `data-session="b">`} {
+	for _, want := range []string{`data-session="a" data-to="a"`, `<span class="doing">Bash: ./bin/check</span>`, `href="/session/run/a"`, `data-session="b">`} {
 		if !strings.Contains(line, want) {
 			t.Fatalf("the chips lack %q:\n%s", want, line)
 		}

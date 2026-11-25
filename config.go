@@ -192,13 +192,12 @@ type BriefPolicy struct {
 
 // BudgetPolicy stops a session whose spend (input-equivalent tokens, over
 // every transcript measured for it) reaches SessionTokens, every session
-// once the run's spend reaches RunTokens, and every session at StopAt. Zero
+// once the run's spend reaches RunTokens. Zero
 // is no cap. A stopped session is not restarted or typed into until the
 // owner clears it.
 type BudgetPolicy struct {
-	SessionTokens int64      `json:"session_tokens"`
-	RunTokens     int64      `json:"run_tokens"`
-	StopAt        *time.Time `json:"stop_at,omitempty"`
+	SessionTokens int64 `json:"session_tokens"`
+	RunTokens     int64 `json:"run_tokens"`
 }
 
 // NudgePolicy types a line into a session whose screen has not changed for
@@ -312,8 +311,13 @@ type Repository struct {
 	CloneOn []string `json:"clone_on"`
 	// Deploy is where the repository's releases must run (#67).
 	Deploy *DeployConfig `json:"deploy,omitempty"`
+	// Kit, when set, names the kit the repository is developed under
+	// (kit.go, #103): the kit's repository, or its kit.json. LoadConfig
+	// reads and checks it; nothing else uses it yet.
+	Kit string `json:"kit,omitempty"`
 
 	defaulted []string // the policy keys checkPolicy filled in
+	kit       *Kit     // the loaded Kit
 }
 
 // Session is one tmux session running Claude Code. Workdir holds BRIEF.md
@@ -644,6 +648,21 @@ func (c *Config) finish(base string) error {
 		c.checkPolicy(name, &repo, &errs)
 		c.Repositories[name] = repo
 	}
+	for _, name := range sortedKeys(c.Repositories) {
+		repo := c.Repositories[name]
+		repo.kit = nil
+		if repo.Kit == "" {
+			continue
+		}
+		field := "repositories." + name + ".kit"
+		repo.Kit = path(field, repo.Kit)
+		k, err := loadKit(repo.Kit)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", field, err))
+		}
+		repo.kit = k
+		c.Repositories[name] = repo
+	}
 	c.checkSessionsPolicies(path, &errs)
 	c.checkNodeConfig(path, &errs)
 	for _, name := range sortedKeys(c.Repositories) {
@@ -737,9 +756,9 @@ func (c *Config) finish(base string) error {
 	return errors.Join(errs...)
 }
 
-// removedKeys refuses the keys the coordinator's removal took away (#53),
-// each named with what replaced it, so an old configuration is never read
-// as if they were not there. A file that is no JSON object is left to the
+// removedKeys refuses the keys the coordinator's removal took away (#53)
+// and policies.budget.stop_at (#115), each named with what replaced it, so
+// an old configuration is never read as if they were not there. A file that is no JSON object is left to the
 // decoder to refuse.
 func removedKeys(b []byte) error {
 	var raw struct {
@@ -753,6 +772,12 @@ func removedKeys(b []byte) error {
 	var errs []error
 	if _, ok := raw.Policies["coordinator"]; ok {
 		errs = append(errs, fmt.Errorf("policies.coordinator %s; remove it", gone))
+	}
+	var budget map[string]json.RawMessage
+	if json.Unmarshal(raw.Policies["budget"], &budget) == nil {
+		if _, ok := budget["stop_at"]; ok {
+			errs = append(errs, errors.New("policies.budget.stop_at was removed in #115: the run works around the clock, and a cutoff stopped every session; session_tokens and run_tokens still cap spend; remove it"))
+		}
 	}
 	var models map[string]json.RawMessage
 	if json.Unmarshal(raw.Policies["models"], &models) == nil {

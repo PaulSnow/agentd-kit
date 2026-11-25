@@ -174,7 +174,7 @@ func TestRestartPromptPathsAreQuoted(t *testing.T) {
 }
 
 // answered is a STATUS.md whose Questions are all marked answered (#81).
-const answered = "# Status\nMerged.\n\n## Questions\n\n(answered at go; the target is the night branch)\n\nWab12cd34 done: merged as abc1234\n"
+const answered = "# Status\nMerged.\n\n## Questions\n\n(answered at go; the target is main)\n\nWab12cd34 done: merged as abc1234\n"
 
 // A dead session whose Questions are all answered is not parked for the
 // owner: it is failed, as any session gone without DONE (#81).
